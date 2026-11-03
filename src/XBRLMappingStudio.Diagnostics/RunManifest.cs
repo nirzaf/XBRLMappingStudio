@@ -1,0 +1,162 @@
+using System.Security.Cryptography;
+using System.Text.Json.Serialization;
+
+namespace XBRLMappingStudio.Diagnostics;
+
+/// <summary>
+/// Terminal outcome of a job. Distinguishes confirmed states from ambiguous ones per
+/// section 9 (Job lifecycle and publication).
+/// </summary>
+public enum RunOutcome
+{
+    /// <summary>All required steps completed and output published.</summary>
+    Success,
+    /// <summary>Completed with permitted warnings only.</summary>
+    SuccessWithWarnings,
+    /// <summary>Blocking diagnostic prevented execution.</summary>
+    InvalidMapping,
+    /// <summary>Source data mismatch or read failure.</summary>
+    DataError,
+    /// <summary>Profile or configuration incomplete.</summary>
+    IncompleteConfiguration,
+    /// <summary>Credential or authorization failed.</summary>
+    AuthorizationFailure,
+    /// <summary>Cooperative cancellation observed.</summary>
+    Cancelled,
+    /// <summary>Worker crash, timeout or operational failure.</summary>
+    OperationalFailure,
+    /// <summary>Publication attempted but not confirmed. Requires reconciliation.</summary>
+    Unknown
+}
+
+/// <summary>
+/// Structured identity of a run per BASE04. Records inputs, versions, and digests so
+/// that an outcome can be replayed or reconciled after a fault.
+/// </summary>
+public sealed class RunManifest
+{
+    public required string RunId { get; init; }
+    public required string OperationId { get; init; }
+    public DateTimeOffset StartedUtc { get; init; }
+    public DateTimeOffset? CompletedUtc { get; set; }
+
+    public required string ProjectId { get; init; }
+    public int SemanticRevision { get; init; }
+    public required string ProfileDigest { get; init; }
+    public required string EngineVersion { get; init; }
+
+    /// <summary>Locale, fiscal calendar, and rule digests frozen at start per section 2.</summary>
+    public IReadOnlyDictionary<string, string> FrozenParameters { get; init; }
+        = new Dictionary<string, string>();
+
+    /// <summary>File hash (SHA-256) or DB snapshot identifier per source.</summary>
+    public IReadOnlyList<InputIdentity> Inputs { get; init; } = Array.Empty<InputIdentity>();
+
+    /// <summary>Digest of each artifact produced.</summary>
+    public IReadOnlyList<OutputIdentity> Outputs { get; set; } = Array.Empty<OutputIdentity>();
+
+    public RunOutcome Outcome { get; set; } = RunOutcome.Unknown;
+    public IReadOnlyList<Diagnostic> Diagnostics { get; set; } = Array.Empty<Diagnostic>();
+
+    public static string ComputeSha256(Stream stream)
+    {
+        using var sha = SHA256.Create();
+        var hash = sha.ComputeHash(stream);
+        return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    public static string ComputeSha256(string text)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        var hash = SHA256.HashData(bytes);
+        return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
+}
+
+public sealed record InputIdentity(
+    string SourceId,
+    string Kind,        // "file", "db-query", "snapshot"
+    string? Digest,     // file hash or snapshot id; null when non-replayable
+    bool IsReplayable,
+    string? OriginalPath);
+
+public sealed record OutputIdentity(
+    string Path,
+    string Digest,
+    long Bytes,
+    string Kind);       // "xbrl-json", "xlsx", "db-receipt"
+
+/// <summary>
+/// Mutable collector for diagnostics during a single operation.
+/// </summary>
+public sealed class DiagnosticBag
+{
+    private readonly List<Diagnostic> _items = new();
+
+    public IReadOnlyList<Diagnostic> Items => _items;
+
+    public bool HasBlockingErrors => _items.Any(d => d.IsBlocking);
+
+    public void Add(Diagnostic diagnostic) => _items.Add(diagnostic);
+
+    public void Info(string code, string subsystem, string stage, string message,
+        string? nodeId = null, SourceReference? source = null, string? operationId = null)
+        => _items.Add(new Diagnostic
+        {
+            Code = code,
+            Subsystem = subsystem,
+            Severity = DiagnosticSeverity.Information,
+            Stage = stage,
+            IsBlocking = false,
+            Message = message,
+            NodeId = nodeId,
+            Source = source,
+            OperationId = operationId
+        });
+
+    public void Warn(string code, string subsystem, string stage, string message,
+        string? nodeId = null, SourceReference? source = null, string? operationId = null,
+        IReadOnlyDictionary<string, string>? details = null)
+        => _items.Add(new Diagnostic
+        {
+            Code = code,
+            Subsystem = subsystem,
+            Severity = DiagnosticSeverity.Warning,
+            Stage = stage,
+            IsBlocking = false,
+            Message = message,
+            NodeId = nodeId,
+            Source = source,
+            OperationId = operationId,
+            Details = details
+        });
+
+    public void Error(string code, string subsystem, string stage, string message,
+        string? nodeId = null, string? portName = null, SourceReference? source = null,
+        string? operationId = null,
+        IReadOnlyDictionary<string, string>? details = null)
+        => _items.Add(new Diagnostic
+        {
+            Code = code,
+            Subsystem = subsystem,
+            Severity = DiagnosticSeverity.Error,
+            Stage = stage,
+            IsBlocking = true,
+            Message = message,
+            NodeId = nodeId,
+            PortName = portName,
+            Source = source,
+            OperationId = operationId,
+            Details = details
+        });
+
+    public IEnumerable<Diagnostic> OfCode(string code) => _items.Where(d => d.Code == code);
+}
+
+[JsonSerializable(typeof(RunManifest))]
+[JsonSerializable(typeof(Diagnostic))]
+[JsonSerializable(typeof(DiagnosticSeverity))]
+[JsonSerializable(typeof(RunOutcome))]
+public partial class DiagnosticsJsonContext : JsonSerializerContext
+{
+}
