@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.AI\XBRLMappingStudio.AI.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />

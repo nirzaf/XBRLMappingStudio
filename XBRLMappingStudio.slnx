@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/XBRLMappingStudio.Adapters/XBRLMappingStudio.Adapters.csproj" />
+    <Project Path="src/XBRLMappingStudio.AI/XBRLMappingStudio.AI.csproj" />
     <Project Path="src/XBRLMappingStudio.Application/XBRLMappingStudio.Application.csproj" />
     <Project Path="src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj" />
     <Project Path="src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj" />
@@ -11,9 +12,14 @@
     <Project Path="src/XBRLMappingStudio.XBRL/XBRLMappingStudio.XBRL.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/XBRLMappingStudio.Adapters.Tests/XBRLMappingStudio.Adapters.Tests.csproj" />
+    <Project Path="tests/XBRLMappingStudio.AI.Tests/XBRLMappingStudio.AI.Tests.csproj" />
+    <Project Path="tests/XBRLMappingStudio.Desktop.Tests/XBRLMappingStudio.Desktop.Tests.csproj" />
     <Project Path="tests/XBRLMappingStudio.Engine.Tests/XBRLMappingStudio.Engine.Tests.csproj" />
     <Project Path="tests/XBRLMappingStudio.Fixtures/XBRLMappingStudio.Fixtures.csproj" />
     <Project Path="tests/XBRLMappingStudio.Integration.Tests/XBRLMappingStudio.Integration.Tests.csproj" />
+    <Project Path="tests/XBRLMappingStudio.Ops.Tests/XBRLMappingStudio.Ops.Tests.csproj" />
     <Project Path="tests/XBRLMappingStudio.Project.Tests/XBRLMappingStudio.Project.Tests.csproj" />
+    <Project Path="tests/XBRLMappingStudio.XBRL.Tests/XBRLMappingStudio.XBRL.Tests.csproj" />
   </Folder>
 </Solution>

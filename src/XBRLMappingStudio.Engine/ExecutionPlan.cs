@@ -4,19 +4,33 @@ using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Engine;
 
-/// <summary>
-/// One step in a compiled plan. Steps run in topological order; each step processes
-/// a single row for the current node. Independent operations use deterministic
-/// tie-breaking by NodeId (per section 3).
-/// </summary>
+/// <summary>Row-phase plan step. Runs once per row for scalar transforms.</summary>
 public sealed record PlanStep(
     string NodeId,
     string NodeType,
     Action<int, EvaluationFrame, ExecutionContext, DiagnosticBag> Evaluator);
 
 /// <summary>
-/// Per-row slot storage during execution. Key format: nodeId.portName.
+/// Set-phase step (MAP05/06). Runs once after the row loop; receives a snapshot of
+/// every per-row frame and produces set-level outputs written into a shared
+/// <see cref="SetFrame"/> consumed by downstream aggregate-driven sinks.
 /// </summary>
+public sealed record SetStep(
+    string NodeId,
+    string NodeType,
+    Func<RowSnapshot, Dictionary<string, DataValue>, ExecutionContext, DiagnosticBag, IReadOnlyDictionary<string, DataValue>> Evaluator);
+
+/// <summary>Read-only view of every per-row frame captured during the row loop.</summary>
+public sealed class RowSnapshot
+{
+    private readonly IReadOnlyList<EvaluationFrame> _frames;
+    public RowSnapshot(IReadOnlyList<EvaluationFrame> frames) => _frames = frames;
+    public int Count => _frames.Count;
+    public DataValue Get(int row, string nodeId, string port) => _frames[row].Get(nodeId, port);
+    public EvaluationFrame Frame(int row) => _frames[row];
+}
+
+/// <summary>Per-row slot storage during execution.</summary>
 public sealed class EvaluationFrame
 {
     public required int RowIndex { get; init; }
@@ -36,28 +50,41 @@ public sealed class EvaluationFrame
     public IReadOnlyDictionary<string, DataValue> Slots => _slots;
 }
 
-/// <summary>
-/// Compiled deterministic execution plan (MAP03). Runs each step per row in a
-/// topological order. Cancellation between steps leaves no side effect: the
-/// result is discarded rather than partially published.
-/// </summary>
+/// <summary>Compiled deterministic execution plan with optional set-phase.</summary>
 public sealed class ExecutionPlan
 {
     public IReadOnlyList<PlanStep> Steps { get; }
+    public IReadOnlyList<SetStep> SetSteps { get; }
     public IReadOnlyList<string> SinkNodeIds { get; }
     public IReadOnlyList<string> IterationSourceNodeIds { get; }
 
+    /// <summary>For each sink, the input port names whose upstream source is a
+    /// set-phase producer. Sinks with a non-empty list fire once after the row loop
+    /// (scalar aggregate mode), iterating the collection when the set output is
+    /// multi-item (GroupBy mode).</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> SinkSetInputPorts { get; }
+
+    /// <summary>Reverse lookup: for each sink input port name, the (sourceNodeId,
+    /// sourcePortName) it reads from in the set frame.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, (string NodeId, string Port)>>
+        SinkSetInputSources { get; }
+
     internal ExecutionPlan(
         IReadOnlyList<PlanStep> steps,
+        IReadOnlyList<SetStep> setSteps,
         IReadOnlyList<string> sinks,
-        IReadOnlyList<string> iterationSources)
+        IReadOnlyList<string> iterationSources,
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? sinkSetInputPorts = null,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, (string, string)>>? sinkSetInputSources = null)
     {
         Steps = steps;
+        SetSteps = setSteps;
         SinkNodeIds = sinks;
         IterationSourceNodeIds = iterationSources;
+        SinkSetInputPorts = sinkSetInputPorts ?? new Dictionary<string, IReadOnlyList<string>>();
+        SinkSetInputSources = sinkSetInputSources ?? new Dictionary<string, IReadOnlyDictionary<string, (string, string)>>();
     }
 
-    /// <summary>Number of rows this plan iterates over, derived at execution time.</summary>
     public int DetermineRowCount(ExecutionContext context)
         => context.LoadedSources.Values.Select(r => r.Count).DefaultIfEmpty(0).Max();
 
@@ -85,9 +112,10 @@ public sealed class ExecutionPlan
                         throw new OperationCanceledException();
                 }
 
-                // Emit facts from sinks.
+                // Row-scoped sinks emit here. Set-driven sinks are deferred.
                 foreach (var sinkId in SinkNodeIds)
                 {
+                    if (SinkSetInputPorts.ContainsKey(sinkId)) continue;
                     if (frame.TryGet(sinkId, "fact", out var factSlot)
                         && factSlot.Raw is PendingFact pf)
                     {
@@ -98,6 +126,27 @@ public sealed class ExecutionPlan
                 }
 
                 frames.Add(frame);
+            }
+
+            // Set phase.
+            if (SetSteps.Count > 0)
+            {
+                var snapshot = new RowSnapshot(frames);
+                var setSlots = new Dictionary<string, DataValue>(StringComparer.Ordinal);
+                foreach (var step in SetSteps)
+                {
+                    context.CancellationToken.ThrowIfCancellationRequested();
+                    var outputs = step.Evaluator(snapshot, setSlots, context, context.Diagnostics);
+                    foreach (var (port, value) in outputs)
+                        setSlots[ProvenanceTracker.SlotKey(step.NodeId, port)] = value;
+                }
+
+                foreach (var sinkId in SinkNodeIds)
+                {
+                    if (!SinkSetInputPorts.TryGetValue(sinkId, out var ports) || ports.Count == 0)
+                        continue;
+                    EmitSetSink(sinkId, frames, setSlots, context, facts);
+                }
             }
 
             return new ExecutionResult(
@@ -131,6 +180,71 @@ public sealed class ExecutionPlan
                 Array.Empty<PendingFact>(),
                 context.Diagnostics.Items,
                 context.Provenance.Snapshot());
+        }
+    }
+
+    private void EmitSetSink(
+        string sinkId,
+        IReadOnlyList<EvaluationFrame> frames,
+        Dictionary<string, DataValue> setSlots,
+        ExecutionContext context,
+        List<PendingFact> facts)
+    {
+        var sources = SinkSetInputSources.TryGetValue(sinkId, out var s) ? s : null;
+        if (sources is null) return;
+
+        // Determine iteration count from any collection-shaped set output.
+        int iterationCount = 1;
+        foreach (var (portName, (srcNode, srcPort)) in sources)
+        {
+            var key = ProvenanceTracker.SlotKey(srcNode, srcPort);
+            if (setSlots.TryGetValue(key, out var v) && v.Raw is IReadOnlyList<DataValue> list)
+            {
+                if (list.Count > iterationCount) iterationCount = list.Count;
+            }
+        }
+
+        // Find the sink step.
+        var sinkStep = Steps.FirstOrDefault(st => st.NodeId == sinkId);
+        if (sinkStep is null) return;
+
+        // Scalar template from the first frame if present, else blank.
+        var template = frames.Count > 0 ? frames[0] : new EvaluationFrame { RowIndex = 0 };
+
+        for (int idx = 0; idx < iterationCount; idx++)
+        {
+            var frame = new EvaluationFrame { RowIndex = 10_000 + idx };
+            // Copy template scalar slots.
+            foreach (var slot in template.Slots)
+            {
+                var dot = slot.Key.IndexOf('.');
+                if (dot < 0) continue;
+                frame.Set(slot.Key.Substring(0, dot), slot.Key.Substring(dot + 1), slot.Value);
+            }
+            // Overlay set-port values (scalar or collection slice at idx) onto the frame
+            // under the SOURCE (node, port) so the row-phase sink evaluator, which reads
+            // inputs by upstream edge, observes them.
+            foreach (var (portName, (srcNode, srcPort)) in sources)
+            {
+                var key = ProvenanceTracker.SlotKey(srcNode, srcPort);
+                if (!setSlots.TryGetValue(key, out var v)) continue;
+                DataValue emitValue = v;
+                if (v.Raw is IReadOnlyList<DataValue> list)
+                    emitValue = idx < list.Count ? list[idx] : DataValue.Missing();
+                frame.Set(srcNode, srcPort, emitValue);
+                // Also record provenance from the source collection contributor at idx.
+                context.Provenance.MergeSources(
+                    ProvenanceTracker.SlotKey(sinkId, portName, 10_000 + idx),
+                    new[] { key });
+            }
+            sinkStep.Evaluator(10_000 + idx, frame, context, context.Diagnostics);
+
+            if (frame.TryGet(sinkId, "fact", out var factSlot) && factSlot.Raw is PendingFact pf)
+            {
+                var slotKey = ProvenanceTracker.SlotKey(sinkId, "fact", 10_000 + idx);
+                pf.Sources.AddRange(context.Provenance.GetContributors(slotKey));
+                facts.Add(pf);
+            }
         }
     }
 }

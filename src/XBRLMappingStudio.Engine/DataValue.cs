@@ -162,3 +162,14 @@ public sealed class UndefinedConversionException : Exception
 {
     public UndefinedConversionException(string message) : base(message) { }
 }
+
+/// <summary>
+/// Raised when a Compare node is dispatched with an unsupported operator string.
+/// </summary>
+public sealed class InvalidCompareOperatorException : Exception
+{
+    public string Operator { get; }
+    public InvalidCompareOperatorException(string op)
+        : base($"Invalid comparison operator '{op}'. Expected one of Eq/Ne/Lt/Le/Gt/Ge.")
+    { Operator = op; }
+}

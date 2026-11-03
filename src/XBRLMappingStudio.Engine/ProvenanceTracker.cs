@@ -79,8 +79,30 @@ public sealed class ExecutionContext
     /// </summary>
     public Dictionary<string, IReadOnlyList<DataRecord>> LoadedSources { get; } = new();
 
+    /// <summary>
+    /// Bounded exact-decimal domain (section 3): reject values outside the declared
+    /// significant-digit / fractional-scale range. Defaults are permissive; profiles
+    /// may tighten.
+    /// </summary>
+    public int MaxSignificantDigits { get; init; } = 28;
+
+    /// <summary>MAP05 resource budget: maximum items in a Collection port.</summary>
+    public int MaxCollectionItems { get; init; } = 100_000;
+
+    /// <summary>MAP06 resource budget: maximum many-to-many expansion rows before block.</summary>
+    public int MaxJoinExpansionRows { get; init; } = 200_000;
+
+    /// <summary>MAP08: label aggregates computed from preview runs as partial.</summary>
+    public List<SampledTotal> SampledTotals { get; } = new();
+
     public CancellationToken CancellationToken { get; init; }
 }
+
+/// <summary>
+/// Aggregate value produced by a preview run; labelled so the reviewer cannot
+/// mistake a partial total for a full-run figure.
+/// </summary>
+public sealed record SampledTotal(string NodeId, string Label, decimal Value, bool IsPartial);
 
 /// <summary>
 /// One row/record from a source, with per-cell source references for provenance.

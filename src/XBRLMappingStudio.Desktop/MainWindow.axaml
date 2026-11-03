@@ -4,12 +4,20 @@
         xmlns:controls="using:XBRLMappingStudio.Desktop.Controls"
         x:Class="XBRLMappingStudio.Desktop.MainWindow"
         x:DataType="vm:MainWindowViewModel"
-        Width="1200" Height="720"
+        Width="1280" Height="760"
         WindowStartupLocation="CenterScreen"
+        Name="Shell"
         Title="{Binding Title}">
   <Design.DataContext>
     <vm:MainWindowViewModel />
   </Design.DataContext>
+
+  <Window.KeyBindings>
+    <KeyBinding Gesture="Ctrl+Z" Command="{Binding UndoCommand}" />
+    <KeyBinding Gesture="Ctrl+Y" Command="{Binding RedoCommand}" />
+    <KeyBinding Gesture="Delete" Command="{Binding DeleteSelectedCommand}" />
+    <KeyBinding Gesture="Ctrl+K" Command="{Binding SearchTaxonomyCommand}" />
+  </Window.KeyBindings>
 
   <DockPanel>
     <Menu DockPanel.Dock="Top">
@@ -19,6 +27,11 @@
         <MenuItem Header="_Save" Command="{Binding SaveProjectCommand}" />
         <Separator />
         <MenuItem Header="_Exit" Command="{Binding ExitCommand}" />
+      </MenuItem>
+      <MenuItem Header="_Edit">
+        <MenuItem Header="_Undo" Command="{Binding UndoCommand}" InputGesture="Ctrl+Z" />
+        <MenuItem Header="_Redo" Command="{Binding RedoCommand}" InputGesture="Ctrl+Y" />
+        <MenuItem Header="Delete _Selected" Command="{Binding DeleteSelectedCommand}" InputGesture="Delete" />
       </MenuItem>
       <MenuItem Header="_Run">
         <MenuItem Header="_Validate" Command="{Binding ValidateCommand}" />
@@ -31,28 +44,58 @@
       <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
     </Border>
 
-    <Grid ColumnDefinitions="260,*,320">
+    <Grid ColumnDefinitions="280,*,340">
+      <!-- Left: source columns + taxonomy explorer (UI03/UI04) -->
       <Border Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
-        <StackPanel Spacing="6">
-          <TextBlock Text="Source" FontWeight="Bold" />
-          <ListBox ItemsSource="{Binding SourceColumns}" MaxHeight="240" />
-          <TextBlock Text="Taxonomy" FontWeight="Bold" Margin="0,10,0,0" />
-          <ListBox ItemsSource="{Binding ConceptIndex}" MaxHeight="240" />
-        </StackPanel>
+        <DockPanel>
+          <TextBlock DockPanel.Dock="Top" Text="Source" FontWeight="Bold" />
+          <ListBox DockPanel.Dock="Top" ItemsSource="{Binding SourceColumns}"
+                   MaxHeight="180"
+                   AutomationProperties.Name="Source columns" />
+
+          <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,10,0,0">
+            <TextBlock Text="Taxonomy explorer" FontWeight="Bold" />
+            <TextBox Text="{Binding SearchTerm}" Watermark="Search concepts…"
+                     AutomationProperties.Name="Concept search" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <ComboBox ItemsSource="{Binding SearchLanguages}" SelectedItem="{Binding SearchLanguage}"
+                        AutomationProperties.Name="Label language" />
+              <Button Content="Search" Command="{Binding SearchTaxonomyCommand}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Button Content="‹ Prev" Command="{Binding PreviousPageCommand}" />
+              <TextBlock Text="{Binding ResultPage}" VerticalAlignment="Center" />
+              <Button Content="Next ›" Command="{Binding NextPageCommand}" />
+            </StackPanel>
+          </StackPanel>
+
+          <ListBox ItemsSource="{Binding ConceptResults}"
+                   AutomationProperties.Name="Concept results">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:ConceptRow">
+                <TextBlock Text="{Binding Display}"
+                           AutomationProperties.Name="{Binding Display}" />
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </DockPanel>
       </Border>
 
+      <!-- Center: graph canvas + preview -->
       <Grid Grid.Column="1" RowDefinitions="*,220">
         <controls:GraphCanvas x:Name="Canvas"
                               Grid.Row="0"
-                              Nodes="{Binding Graph.Nodes}"
-                              Edges="{Binding Graph.Edges}" />
+                              Session="{Binding Session}"
+                              Nodes="{Binding Nodes}"
+                              Edges="{Binding Edges}"
+                              AutomationProperties.Name="Mapping graph" />
         <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
           <DockPanel>
             <TextBlock DockPanel.Dock="Top" Text="Preview facts" FontWeight="Bold" />
             <ScrollViewer>
               <ItemsControl ItemsSource="{Binding PreviewFacts}">
                 <ItemsControl.ItemTemplate>
-                  <DataTemplate>
+                  <DataTemplate x:DataType="vm:FactRow">
                     <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
@@ -62,19 +105,24 @@
         </Border>
       </Grid>
 
+      <!-- Right: properties + diagnostics (UI04) -->
       <Border Grid.Column="2" BorderBrush="#33000000" BorderThickness="1,0,0,0" Padding="8">
-        <StackPanel Spacing="6">
-          <TextBlock Text="Properties" FontWeight="Bold" />
-          <TextBlock Text="{Binding SelectedNodeDisplayName}" />
-          <TextBlock Text="Diagnostics" FontWeight="Bold" Margin="0,10,0,0" />
-          <ItemsControl ItemsSource="{Binding Diagnostics}">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate>
-                <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top" Spacing="6">
+            <TextBlock Text="Properties" FontWeight="Bold" />
+            <TextBlock Text="{Binding SelectedNodeDisplayName}" />
+            <TextBlock Text="Diagnostics" FontWeight="Bold" Margin="0,10,0,0" />
+          </StackPanel>
+          <ListBox x:Name="DiagnosticList" ItemsSource="{Binding Diagnostics}"
+                   AutomationProperties.Name="Diagnostics">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:DiagnosticRow">
+                <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0"
+                           AutomationProperties.Name="{Binding Display}" />
               </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-        </StackPanel>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </DockPanel>
       </Border>
     </Grid>
   </DockPanel>

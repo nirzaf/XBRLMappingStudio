@@ -82,6 +82,7 @@ public sealed class ProjectManager
 
         int currentSemanticRevision = project.SemanticRevision;
         int currentLayoutGeneration = project.LayoutGeneration;
+        bool semanticChanged;
 
         // Re-read the current generation from disk to detect concurrent edits.
         if (File.Exists(FullPath))
@@ -103,10 +104,12 @@ public sealed class ProjectManager
             if (!string.Equals(diskDigest, newDigest, StringComparison.Ordinal))
             {
                 currentSemanticRevision = diskProject.SemanticRevision + 1;
+                semanticChanged = true;
             }
             else
             {
                 currentSemanticRevision = diskProject.SemanticRevision;
+                semanticChanged = false; // layout-only save (BASE03)
             }
             currentLayoutGeneration = diskProject.LayoutGeneration + 1;
         }
@@ -114,6 +117,7 @@ public sealed class ProjectManager
         {
             currentLayoutGeneration = project.LayoutGeneration;
             currentSemanticRevision = project.SemanticRevision;
+            semanticChanged = true; // first materialization of the artifact
         }
 
         project.SemanticRevision = currentSemanticRevision;
@@ -178,7 +182,7 @@ public sealed class ProjectManager
             FullPath,
             currentSemanticRevision,
             currentLayoutGeneration,
-            SemanticChanged: true,
+            SemanticChanged: semanticChanged,
             SemanticDigest: newDigest);
     }
 

@@ -22,6 +22,12 @@ public sealed class PlanCompiler
     {
         var diag = new DiagnosticBag();
 
+        // MAP07: inline named visual functions against their pinned revision so that
+        // validation and compilation operate on the expanded graph.
+        graph = ExpandFunctions(graph, diag);
+        if (diag.HasBlockingErrors)
+            return CompilationResult.Failed(diag);
+
         // Validate first (MAP02 acceptance: cycle/dangling/type errors surface here).
         var validator = new GraphValidator(_catalog);
         var validationDiags = validator.Validate(graph);
@@ -34,10 +40,12 @@ public sealed class PlanCompiler
         // Topological order with deterministic tie-breaking by NodeId.
         var order = TopoSort(graph);
 
-        // Discover the iteration source. For G1, this is any ExcelField node.
+        // Discover the iteration source. ExcelField (row-phase) or CollectRows (set-phase)
+        // nodes each require a loaded binding and therefore drive row iteration.
         var iterationSources = order
             .Select(id => graph.Nodes[id])
-            .Where(n => n.NodeType == NodeTypeConstants.ExcelField)
+            .Where(n => n.NodeType == NodeTypeConstants.ExcelField
+                        || n.NodeType == NodeTypeConstants.CollectRows)
             .Select(n => n.NodeId)
             .ToList();
 
@@ -47,7 +55,7 @@ public sealed class PlanCompiler
                 DiagnosticCodes.MapUnboundRequiredInput,
                 DiagnosticSubsystem.Mapping,
                 DiagnosticStage.Compilation,
-                "No iteration source (ExcelField node) is present in the graph.");
+                "No iteration source (ExcelField or collectRows node) is present in the graph.");
             return CompilationResult.Failed(diag);
         }
 
@@ -58,14 +66,210 @@ public sealed class PlanCompiler
             .Select(n => n.NodeId)
             .ToList();
 
-        // Row count determined lazily at execution time from the binding; assume
-        // a compile-time hint of 0 and let ExecutionPlan read it from context.
-        var steps = order
-            .Select(nodeId => new PlanStep(nodeId, graph.Nodes[nodeId].NodeType,
-                BuildEvaluator(graph, nodeId, profile, diag)))
+        // Set-phase producers: Collect/Sum/Count/First/Lookup run once after the row loop.
+        var setProducers = new HashSet<string>(StringComparer.Ordinal);
+        var rowSteps = new List<PlanStep>();
+        var setSteps = new List<SetStep>();
+        foreach (var nodeId in order)
+        {
+            var node = graph.Nodes[nodeId];
+            if (IsSetPhase(node.NodeType))
+            {
+                setSteps.Add(new SetStep(nodeId, node.NodeType, BuildSetEvaluator(graph, nodeId, profile)));
+                setProducers.Add(nodeId);
+            }
+            else
+            {
+                rowSteps.Add(new PlanStep(nodeId, node.NodeType,
+                    BuildEvaluator(graph, nodeId, profile, diag)));
+            }
+        }
+
+        // Detect which sink input ports come from set-phase producers.
+        var sinkSetInputPorts = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        var sinkSetInputSources = new Dictionary<string, IReadOnlyDictionary<string, (string, string)>>(StringComparer.Ordinal);
+        foreach (var sinkId in sinks)
+        {
+            var sinkNode = graph.Nodes[sinkId];
+            var sources = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
+            foreach (var port in sinkNode.InputPorts)
+            {
+                var edge = graph.IncomingEdge(sinkId, port.Name);
+                if (edge is null) continue;
+                if (setProducers.Contains(edge.SourceNodeId))
+                    sources[port.Name] = (edge.SourceNodeId, edge.SourcePortName);
+            }
+            if (sources.Count > 0)
+            {
+                sinkSetInputPorts[sinkId] = sources.Keys.ToList();
+                sinkSetInputSources[sinkId] = sources;
+            }
+        }
+
+        return CompilationResult.Ok(
+            new ExecutionPlan(rowSteps, setSteps, sinks, iterationSources,
+                sinkSetInputPorts, sinkSetInputSources),
+            graph);
+    }
+
+    /// <summary>Node types that produce set-level outputs after the row loop.</summary>
+    private static bool IsSetPhase(string nodeType) => nodeType switch
+    {
+        NodeTypeConstants.Collect => true,
+        NodeTypeConstants.Sum => true,
+        NodeTypeConstants.Count => true,
+        NodeTypeConstants.First => true,
+        NodeTypeConstants.CollectRows => true,
+        NodeTypeConstants.GroupBy => true,
+        NodeTypeConstants.Join => true,
+        _ => false
+    };
+
+    private const string FnInputMarker = "functionInput";
+    private const string FnOutputMarker = "functionOutput";
+
+    /// <summary>
+    /// MAP07: replace every <c>functionCall</c> node with a copy of the referenced
+    /// function's internal subgraph, keyed by its pinned revision. The function is a
+    /// single-input / single-output scalar chain delimited by <see cref="FnInputMarker"/>
+    /// and <see cref="FnOutputMarker"/> marker nodes, which are spliced out. A call that
+    /// references an unknown <c>functionId@revision</c> blocks compilation with MAP020.
+    /// </summary>
+    private static MappingGraph ExpandFunctions(MappingGraph graph, DiagnosticBag diag)
+    {
+        var calls = graph.Nodes.Values
+            .Where(n => n.NodeType == NodeTypeConstants.FunctionCall)
+            .ToList();
+        if (calls.Count == 0) return graph;
+
+        var byRevision = new Dictionary<(string, int), FunctionDefinition>();
+        foreach (var f in graph.Source.Functions)
+            byRevision[(f.FunctionId, f.Revision)] = f;
+
+        var newNodes = graph.Nodes.Values
+            .Where(n => n.NodeType != NodeTypeConstants.FunctionCall)
+            .Select(n => n.ShallowCopy())
+            .ToList();
+        var newEdges = graph.Edges.Values.ToList();
+
+        foreach (var call in calls)
+        {
+            var functionId = GetString(call, "functionId");
+            var revStr = GetString(call, "revision") ?? "1";
+            if (!int.TryParse(revStr, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var revision))
+                revision = 1;
+
+            if (functionId is null || !byRevision.TryGetValue((functionId, revision), out var fn))
+            {
+                diag.Error(DiagnosticCodes.MapFunctionRevisionMissing, DiagnosticSubsystem.Mapping,
+                    DiagnosticStage.Compilation,
+                    $"Function '{functionId}@{revision}' referenced by '{call.DisplayName}' is not defined "
+                    + "at that pinned revision.",
+                    nodeId: call.NodeId);
+                continue;
+            }
+
+            var prefix = call.NodeId + "::";
+            var inputMarker = fn.Nodes.FirstOrDefault(n => n.NodeType == FnInputMarker);
+            var outputMarker = fn.Nodes.FirstOrDefault(n => n.NodeType == FnOutputMarker);
+
+            // Copy internal (non-marker) nodes with a prefixed id.
+            foreach (var inner in fn.Nodes.Where(n => n.NodeType != FnInputMarker && n.NodeType != FnOutputMarker))
+            {
+                var copy = inner.ShallowCopy();
+                copy = copy with { NodeId = prefix + inner.NodeId };
+                newNodes.Add(copy);
+            }
+
+            // Internal-to-internal edges.
+            foreach (var e in fn.Edges)
+            {
+                if (e.SourceNodeId == inputMarker?.NodeId || e.TargetNodeId == outputMarker?.NodeId)
+                    continue;
+                if (e.SourceNodeId == outputMarker?.NodeId || e.TargetNodeId == inputMarker?.NodeId)
+                    continue;
+                newEdges.Add(new MappingEdge
+                {
+                    EdgeId = prefix + e.EdgeId,
+                    SourceNodeId = prefix + e.SourceNodeId,
+                    SourcePortName = e.SourcePortName,
+                    TargetNodeId = prefix + e.TargetNodeId,
+                    TargetPortName = e.TargetPortName
+                });
+            }
+
+            // External source feeding the call's input, if any.
+            var extIn = newEdges.FirstOrDefault(e =>
+                e.TargetNodeId == call.NodeId && e.TargetPortName == "input");
+
+            // Rewire edges leaving the input marker to originate from the external source.
+            if (inputMarker is not null)
+            {
+                foreach (var e in fn.Edges.Where(e => e.SourceNodeId == inputMarker.NodeId))
+                {
+                    if (extIn is null) continue; // unbound input -> inner target stays dangling (validated later)
+                    newEdges.Add(new MappingEdge
+                    {
+                        EdgeId = prefix + "in-" + e.EdgeId,
+                        SourceNodeId = extIn.SourceNodeId,
+                        SourcePortName = extIn.SourcePortName,
+                        TargetNodeId = prefix + e.TargetNodeId,
+                        TargetPortName = e.TargetPortName
+                    });
+                }
+            }
+
+            // Determine the inner node feeding the output marker.
+            var outEdge = outputMarker is null ? null
+                : fn.Edges.FirstOrDefault(e => e.TargetNodeId == outputMarker.NodeId);
+            (string, string)? resultSrc = outEdge is null
+                ? null
+                : (prefix + outEdge.SourceNodeId, outEdge.SourcePortName);
+
+            // Redirect the call's outgoing edges to originate from the inlined result.
+            foreach (var e in newEdges.Where(x => x.SourceNodeId == call.NodeId).ToList())
+            {
+                if (resultSrc is null) { newEdges.Remove(e); continue; }
+                var idx = newEdges.IndexOf(e);
+                newEdges[idx] = new MappingEdge
+                {
+                    EdgeId = e.EdgeId,
+                    SourceNodeId = resultSrc.Value.Item1,
+                    SourcePortName = resultSrc.Value.Item2,
+                    TargetNodeId = e.TargetNodeId,
+                    TargetPortName = e.TargetPortName
+                };
+            }
+
+            // Remove the incoming edge into the call and the call's input consumption.
+            if (extIn is not null) newEdges.Remove(extIn);
+        }
+
+        // Drop edges that still reference removed call nodes.
+        var callIds = new HashSet<string>(calls.Select(c => c.NodeId), StringComparer.Ordinal);
+        newEdges = newEdges
+            .Where(e => !callIds.Contains(e.SourceNodeId) && !callIds.Contains(e.TargetNodeId))
             .ToList();
 
-        return CompilationResult.Ok(new ExecutionPlan(steps, sinks, iterationSources), graph);
+        var expanded = new MappingProject
+        {
+            SchemaVersion = graph.Source.SchemaVersion,
+            ProjectId = graph.Source.ProjectId,
+            Name = graph.Source.Name,
+            ProfileId = graph.Source.ProfileId,
+            ProfileDigest = graph.Source.ProfileDigest,
+            FunctionCatalogVersion = graph.Source.FunctionCatalogVersion,
+            SemanticRevision = graph.Source.SemanticRevision,
+            LayoutGeneration = graph.Source.LayoutGeneration,
+            Metadata = graph.Source.Metadata,
+            Nodes = newNodes,
+            Edges = newEdges,
+            Bindings = graph.Source.Bindings,
+            Functions = graph.Source.Functions,
+            Approvals = graph.Source.Approvals
+        };
+        return new MappingGraph(expanded);
     }
 
     private static List<string> TopoSort(MappingGraph graph)
@@ -98,6 +302,299 @@ public sealed class PlanCompiler
         }
 
         return order;
+    }
+
+    /// <summary>
+    /// Build the per-node evaluator. Reads inputs from the frame and writes outputs
+    /// back to the frame. Records provenance for any input that carries a source.
+    /// </summary>
+    /// <summary>
+    /// Set-phase evaluator factory (MAP05). Aggregate steps read a specific
+    /// upstream (node, port) across every row captured in the row loop.
+    /// </summary>
+    private Func<RowSnapshot, Dictionary<string, DataValue>, ExecutionContext, DiagnosticBag, IReadOnlyDictionary<string, DataValue>>
+        BuildSetEvaluator(MappingGraph graph, string nodeId, FilingProfile profile)
+    {
+        var node = graph.Nodes[nodeId];
+        return (snapshot, setSlots, ctx, diag) =>
+        {
+            var outputs = new Dictionary<string, DataValue>(StringComparer.Ordinal);
+
+            // Resolve a set-phase input port as a flat list: an upstream set producer's
+            // collection output (via setSlots), a single scalar set output treated as a
+            // one-item stream, or (for row-shaped inputs) the value across the snapshot.
+            IReadOnlyList<DataValue> ReadSetInput(string port)
+            {
+                var e = graph.IncomingEdge(nodeId, port);
+                if (e is null) return Array.Empty<DataValue>();
+                var key = ProvenanceTracker.SlotKey(e.SourceNodeId, e.SourcePortName);
+                if (setSlots.TryGetValue(key, out var v))
+                {
+                    if (v.Raw is IReadOnlyList<DataValue> list) return list;
+                    return new[] { v };
+                }
+                return ResolveCollection(snapshot, e);
+            }
+
+            switch (node.NodeType)
+            {
+                case NodeTypeConstants.Collect:
+                {
+                    var edge = graph.IncomingEdge(nodeId, "input");
+                    var list = new List<DataValue>();
+                    if (edge is not null)
+                    {
+                        for (int r = 0; r < snapshot.Count; r++)
+                        {
+                            var v = snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName);
+                            if (v.IsMissing) continue;
+                            list.Add(v);
+                            if (list.Count > ctx.MaxCollectionItems)
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"Collect exceeded MaxCollectionItems={ctx.MaxCollectionItems}.",
+                                    nodeId: nodeId);
+                                break;
+                            }
+                        }
+                    }
+                    outputs["items"] = DataValue.Collection(list);
+                    break;
+                }
+
+                case NodeTypeConstants.Sum:
+                {
+                    var items = ReadSetInput("items");
+                    decimal total = 0m;
+                    foreach (var it in items)
+                    {
+                        if (it.IsMissing || it.IsNil) continue;
+                        try { total += it.AsDecimal(); }
+                        catch (OverflowException)
+                        { throw new NumericOverflowException($"Sum overflow on node '{node.DisplayName}'."); }
+                    }
+                    outputs["value"] = DataValue.DecimalValue(total);
+                    if (ctx.IsPreview)
+                        ctx.SampledTotals.Add(new SampledTotal(nodeId, "sum", total, IsPartial: true));
+                    break;
+                }
+
+                case NodeTypeConstants.Count:
+                {
+                    var items = ReadSetInput("items");
+                    long c = 0;
+                    foreach (var it in items) if (!it.IsMissing && !it.IsNil) c++;
+                    outputs["value"] = DataValue.IntegerValue(c);
+                    break;
+                }
+
+                case NodeTypeConstants.First:
+                {
+                    var items = ReadSetInput("items");
+                    outputs["value"] = items.FirstOrDefault(v => !v.IsMissing && !v.IsNil)
+                        ?? DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+
+                case NodeTypeConstants.CollectRows:
+                {
+                    var bindingId = GetString(node, "binding");
+                    var fieldsCsv = GetString(node, "fields");
+                    var retain = string.IsNullOrEmpty(fieldsCsv)
+                        ? null
+                        : fieldsCsv!.Split(',', StringSplitOptions.TrimEntries);
+                    var rows = new List<DataValue>();
+                    if (bindingId is null || !ctx.LoadedSources.TryGetValue(bindingId, out var records))
+                    {
+                        diag.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Adapter,
+                            DiagnosticStage.Execution,
+                            $"collectRows binding '{bindingId}' is not loaded in execution context.",
+                            nodeId: nodeId);
+                    }
+                    else
+                    {
+                        int limit = ctx.IsPreview ? Math.Min(records.Count, ctx.PreviewRowLimit) : records.Count;
+                        for (int r = 0; r < limit; r++)
+                        {
+                            var dict = new Dictionary<string, DataValue>(StringComparer.Ordinal);
+                            foreach (var f in records[r].Fields)
+                                if (retain is null || retain.Contains(f.Key, StringComparer.Ordinal))
+                                    dict[f.Key] = f.Value;
+                            rows.Add(DataValue.Record(dict));
+                            if (rows.Count > ctx.MaxCollectionItems)
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"collectRows exceeded MaxCollectionItems={ctx.MaxCollectionItems}.",
+                                    nodeId: nodeId);
+                                rows.RemoveAt(rows.Count - 1);
+                                break;
+                            }
+                        }
+                    }
+                    outputs["items"] = DataValue.Collection(rows);
+                    break;
+                }
+
+                case NodeTypeConstants.GroupBy:
+                {
+                    var items = ReadSetInput("items");
+                    var keyFields = (GetString(node, "keys") ?? "")
+                        .Split(',', StringSplitOptions.TrimEntries);
+                    var sumField = GetString(node, "sumField") ?? "";
+                    var order = new List<string>();
+                    var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
+                    foreach (var rec in items)
+                    {
+                        if (!TryRecordFields(rec, out var fields)) continue;
+                        var bk = string.Join("|", keyFields.Select(kf => GetField(fields, kf).AsString()));
+                        if (!totals.ContainsKey(bk)) { order.Add(bk); totals[bk] = 0m; }
+                        var v = GetField(fields, sumField);
+                        if (v.IsMissing || v.IsNil) continue;
+                        try { totals[bk] += v.AsDecimal(); }
+                        catch (OverflowException)
+                        { throw new NumericOverflowException($"GroupBy sum overflow on node '{node.DisplayName}'."); }
+                    }
+                    var valueList = new List<DataValue>();
+                    var keyList = new List<DataValue>();
+                    foreach (var bk in order)
+                    {
+                        valueList.Add(DataValue.DecimalValue(totals[bk]));
+                        keyList.Add(DataValue.StringValue(bk));
+                        if (ctx.IsPreview)
+                            ctx.SampledTotals.Add(new SampledTotal(nodeId, $"group:{bk}", totals[bk], IsPartial: true));
+                    }
+                    outputs["values"] = DataValue.Collection(valueList);
+                    outputs["keys"] = DataValue.Collection(keyList);
+                    break;
+                }
+
+                case NodeTypeConstants.Join:
+                {
+                    var left = ReadSetInput("left");
+                    var right = ReadSetInput("right");
+                    var leftKey = GetString(node, "leftKey") ?? "";
+                    var rightKey = GetString(node, "rightKey") ?? "";
+                    var cardinality = GetString(node, "cardinality") ?? "Inner";
+                    var dupPolicy = GetString(node, "duplicateKey") ?? "All";
+                    if (cardinality is not ("Inner" or "Left" or "Right" or "Full"))
+                    {
+                        diag.Error(DiagnosticCodes.MapCardinalityMismatch, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            $"Unknown join cardinality '{cardinality}'.", nodeId: nodeId);
+                        cardinality = "Inner";
+                    }
+
+                    // Build right-hand index keyed by rightKey, honouring the duplicate policy.
+                    var index = new Dictionary<string, List<Dictionary<string, DataValue>>>(StringComparer.Ordinal);
+                    var rightOrder = new List<string>();
+                    foreach (var rec in right)
+                    {
+                        if (!TryRecordFields(rec, out var fields)) continue;
+                        var rk = GetField(fields, rightKey).AsString();
+                        if (!index.TryGetValue(rk, out var bucket))
+                        {
+                            bucket = new List<Dictionary<string, DataValue>>();
+                            index[rk] = bucket;
+                            rightOrder.Add(rk);
+                        }
+                        if (bucket.Count > 0 && dupPolicy is "Fail" or "First")
+                        {
+                            if (dupPolicy == "Fail")
+                            {
+                                diag.Error(DiagnosticCodes.MapDuplicateJoinKey, DiagnosticSubsystem.Mapping,
+                                    DiagnosticStage.Execution,
+                                    $"Duplicate right key '{rk}' with duplicateKey=Fail.", nodeId: nodeId);
+                                outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                                return outputs;
+                            }
+                            continue; // First: keep only the first per key
+                        }
+                        bucket.Add(fields);
+                    }
+
+                    var joined = new List<DataValue>();
+                    var matchedRights = new HashSet<string>(StringComparer.Ordinal);
+                    void AddRow(Dictionary<string, DataValue>? l, Dictionary<string, DataValue>? r)
+                    {
+                        var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
+                        if (l is not null) foreach (var kv in l) merged[kv.Key] = kv.Value;
+                        if (r is not null) foreach (var kv in r) merged[kv.Key] = kv.Value;
+                        joined.Add(DataValue.Record(merged));
+                        if (joined.Count > ctx.MaxJoinExpansionRows)
+                        {
+                            joined.RemoveAt(joined.Count - 1);
+                            diag.Error(DiagnosticCodes.MapJoinExpansionExceeded, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                $"Join expansion exceeded MaxJoinExpansionRows={ctx.MaxJoinExpansionRows}. "
+                                + "Publication is blocked before output.", nodeId: nodeId);
+                        }
+                    }
+
+                    foreach (var rec in left)
+                    {
+                        if (!TryRecordFields(rec, out var fields)) continue;
+                        var lk = GetField(fields, leftKey).AsString();
+                        var hasMatch = index.TryGetValue(lk, out var bucket) && bucket.Count > 0;
+                        if (hasMatch)
+                        {
+                            foreach (var rrow in bucket!) { AddRow(fields, rrow); matchedRights.Add(lk); }
+                        }
+                        else if (cardinality is "Left" or "Full")
+                        {
+                            AddRow(fields, null);
+                        }
+                    }
+
+                    if (cardinality is "Right" or "Full")
+                    {
+                        foreach (var rk in rightOrder)
+                        {
+                            var bucket = index[rk];
+                            if (matchedRights.Contains(rk)) continue;
+                            foreach (var rrow in bucket) AddRow(null, rrow);
+                        }
+                    }
+
+                    outputs["rows"] = DataValue.Collection(joined);
+                    break;
+                }
+
+                default:
+                    diag.Error(DiagnosticCodes.MapUnknownNodeType, DiagnosticSubsystem.Mapping,
+                        DiagnosticStage.Execution,
+                        $"Unknown set-phase node type '{node.NodeType}'.", nodeId: nodeId);
+                    outputs["value"] = DataValue.Missing();
+                    break;
+            }
+            return outputs;
+        };
+    }
+
+    /// <summary>Unwrap a Record-shaped DataValue into its field dictionary.</summary>
+    private static bool TryRecordFields(DataValue rec, out Dictionary<string, DataValue> fields)
+    {
+        if (rec.Raw is IReadOnlyDictionary<string, DataValue> dict)
+        {
+            fields = dict.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+            return true;
+        }
+        fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
+        return false;
+    }
+
+    private static DataValue GetField(IReadOnlyDictionary<string, DataValue> fields, string name)
+        => fields.TryGetValue(name, out var v) ? v : DataValue.Missing(PortShape.String);
+
+    private static IReadOnlyList<DataValue> ResolveCollection(
+        RowSnapshot snapshot, MappingEdge? edge)
+    {
+        if (edge is null) return Array.Empty<DataValue>();
+        var list = new List<DataValue>(snapshot.Count);
+        for (int r = 0; r < snapshot.Count; r++)
+            list.Add(snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName));
+        return list;
     }
 
     /// <summary>
@@ -306,6 +803,211 @@ public sealed class PlanCompiler
                 break;
             }
 
+            case NodeTypeConstants.Round:
+            {
+                var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.Decimal));
+                if (input.IsMissing || input.IsNil)
+                {
+                    outputs["value"] = input.IsNil
+                        ? DataValue.ExplicitNil(PortShape.Decimal)
+                        : DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+                var digitsStr = GetString(node, "digits") ?? "0";
+                if (!int.TryParse(digitsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits)
+                    || digits < 0 || digits > 30)
+                {
+                    diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                        DiagnosticStage.Execution,
+                        $"Round digits '{digitsStr}' is outside the supported range 0..30.",
+                        nodeId: node.NodeId, source: input.Source);
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+                var modeStr = GetString(node, "mode") ?? "HalfEven";
+                decimal rounded;
+                try
+                {
+                    rounded = modeStr switch
+                    {
+                        "HalfUp" => RoundHalfUp(input.AsDecimal(), digits),
+                        "HalfEven" => decimal.Round(input.AsDecimal(), digits, MidpointRounding.ToEven),
+                        "Truncate" => TruncateToDigits(input.AsDecimal(), digits),
+                        _ => decimal.MinValue // sentinel -> invalid mode
+                    };
+                    if (rounded == decimal.MinValue)
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            $"Unknown rounding mode '{modeStr}'.",
+                            nodeId: node.NodeId, source: input.Source);
+                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                        break;
+                    }
+                }
+                catch (OverflowException)
+                {
+                    throw new NumericOverflowException(
+                        $"Round overflowed decimal range on node '{node.DisplayName}'.");
+                }
+                outputs["value"] = DataValue.DecimalValue(rounded, input.Source);
+                break;
+            }
+
+            case NodeTypeConstants.Ratio:
+            {
+                var n = inputs.GetValueOrDefault("numerator", DataValue.Missing(PortShape.Decimal));
+                var d = inputs.GetValueOrDefault("denominator", DataValue.Missing(PortShape.Decimal));
+                if (n.IsMissing || d.IsMissing || n.IsNil || d.IsNil)
+                {
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+                var dv = d.AsDecimal();
+                if (dv == 0m)
+                {
+                    var policy = GetString(node, "divideByZero") ?? "Diagnostic";
+                    switch (policy)
+                    {
+                        case "Missing":
+                            outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                            break;
+                        case "NaN":
+                            // CLR decimal cannot represent NaN; we emit a Missing sentinel and
+                            // record an informational diagnostic rather than a numeric NaN.
+                            diag.Warn(DiagnosticCodes.MapDivideByZero, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                "Divide-by-zero resolved as Missing (CLR decimal has no NaN).",
+                                nodeId: node.NodeId, source: d.Source);
+                            outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                            break;
+                        default:
+                            diag.Error(DiagnosticCodes.MapDivideByZero, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                "Ratio denominator is zero.",
+                                nodeId: node.NodeId, source: d.Source);
+                            outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                            break;
+                    }
+                    break;
+                }
+                try
+                {
+                    var result = n.AsDecimal() / dv;
+                    outputs["value"] = DataValue.DecimalValue(result, n.Source ?? d.Source);
+                }
+                catch (OverflowException)
+                {
+                    throw new NumericOverflowException(
+                        $"Ratio division overflowed decimal range on node '{node.DisplayName}'.");
+                }
+                break;
+            }
+
+            case NodeTypeConstants.Filter:
+            {
+                var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.Decimal));
+                var pred = inputs.GetValueOrDefault("predicate", DataValue.Missing(PortShape.Boolean));
+                if (pred.IsMissing || pred.IsNil || !pred.AsBoolean())
+                {
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+                outputs["value"] = input;
+                break;
+            }
+
+            case NodeTypeConstants.Compare:
+            {
+                var a = inputs.GetValueOrDefault("a", DataValue.Missing(PortShape.Decimal));
+                var b = inputs.GetValueOrDefault("b", DataValue.Missing(PortShape.Decimal));
+                if (a.IsMissing || b.IsMissing || a.IsNil || b.IsNil)
+                {
+                    outputs["value"] = DataValue.Missing(PortShape.Boolean);
+                    break;
+                }
+                var op = GetString(node, "op") ?? "Eq";
+                var av = a.AsDecimal();
+                var bv = b.AsDecimal();
+                bool? cmp = op switch
+                {
+                    "Eq" => av == bv,
+                    "Ne" => av != bv,
+                    "Lt" => av < bv,
+                    "Le" => av <= bv,
+                    "Gt" => av > bv,
+                    "Ge" => av >= bv,
+                    _ => (bool?)null
+                };
+                if (cmp is null)
+                {
+                    diag.Error(DiagnosticCodes.MapInvalidComparisonOp, DiagnosticSubsystem.Mapping,
+                        DiagnosticStage.Execution,
+                        $"Invalid comparison operator '{op}'.", nodeId: node.NodeId);
+                    outputs["value"] = DataValue.Missing(PortShape.Boolean);
+                    break;
+                }
+                outputs["value"] = DataValue.BoolValue(cmp.Value);
+                break;
+            }
+
+            case NodeTypeConstants.Lookup:
+            {
+                var key = inputs.GetValueOrDefault("key", DataValue.Missing(PortShape.String));
+                var table = GetString(node, "table");
+                var policy = GetString(node, "missingKey") ?? "Diagnostic";
+                var keyStr = key.AsString();
+                outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                bool found = false;
+                decimal foundVal = 0m;
+                if (table is not null
+                    && ctx.Parameters.TryGetValue("lookup:" + table, out var rawTable))
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(rawTable);
+                        if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                            && doc.RootElement.TryGetProperty(keyStr, out var el)
+                            && el.ValueKind == System.Text.Json.JsonValueKind.Number
+                            && el.TryGetDecimal(out var dv))
+                        {
+                            found = true;
+                            foundVal = dv;
+                        }
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        diag.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Adapter,
+                            DiagnosticStage.Execution,
+                            $"Lookup table '{table}' is not a valid JSON object.",
+                            nodeId: node.NodeId, source: key.Source);
+                    }
+                }
+                if (found)
+                {
+                    outputs["value"] = DataValue.DecimalValue(foundVal, key.Source);
+                    break;
+                }
+                switch (policy)
+                {
+                    case "Missing":
+                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                        break;
+                    case "Default":
+                        var defStr = GetString(node, "defaultValue");
+                        if (decimal.TryParse(defStr, NumberStyles.Number, CultureInfo.InvariantCulture, out var def))
+                            outputs["value"] = DataValue.DecimalValue(def);
+                        break;
+                    default:
+                        diag.Error(DiagnosticCodes.MapLookupKeyMissing, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            $"Lookup key '{keyStr}' was not found in table '{table}'.",
+                            nodeId: node.NodeId, source: key.Source);
+                        break;
+                }
+                break;
+            }
+
             case NodeTypeConstants.BuildInstantDate:
             {
                 var input = inputs.GetValueOrDefault("dateText", DataValue.Missing(PortShape.String));
@@ -359,9 +1061,12 @@ public sealed class PlanCompiler
                 // Silent skip: when the value input is Missing (e.g., blank cell or a row
                 // excluded by a filter upstream), we do not emit a fact and we do not
                 // raise a diagnostic. This allows one mapping to iterate a mixed table
-                // while producing only the intended facts.
-                var valueProbe = inputs.GetValueOrDefault("value", DataValue.Missing(PortShape.Decimal));
-                if (valueProbe.IsMissing)
+                // while producing only the intended facts. A set-driven fact (e.g. fed by
+                // GroupBy) carries its per-item value on the collection-shaped `values` port.
+                var valueIn = inputs.GetValueOrDefault("value", DataValue.Missing(PortShape.Decimal));
+                if (valueIn.IsMissing)
+                    valueIn = inputs.GetValueOrDefault("values", DataValue.Missing(PortShape.Decimal));
+                if (valueIn.IsMissing)
                 {
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
@@ -412,7 +1117,6 @@ public sealed class PlanCompiler
                 }
 
                 var entity = inputs.GetValueOrDefault("entity", DataValue.Missing(PortShape.String)).AsString();
-                var valueIn = inputs.GetValueOrDefault("value", DataValue.Missing(PortShape.Decimal));
                 var periodIn = inputs.GetValueOrDefault("period", DataValue.Missing(PortShape.Instant));
                 var instantIn = inputs.GetValueOrDefault("instantDate", DataValue.Missing(PortShape.Instant));
 
@@ -517,6 +1221,28 @@ public sealed class PlanCompiler
     {
         if (!node.Parameters.TryGetValue(key, out var v) || v is null) return null;
         return v is System.Text.Json.JsonElement je ? je.GetString() : v.ToString();
+    }
+
+    /// <summary>Half-up rounding at the given digit count (0.5 magnitude away from zero).</summary>
+    private static decimal RoundHalfUp(decimal value, int digits)
+    {
+        var factor = Pow10(digits);
+        var scaled = value * factor;
+        // Decimal.Round with AwayFromZero is the standard banker-inverted mode.
+        return decimal.Round(scaled, 0, MidpointRounding.AwayFromZero) / factor;
+    }
+
+    private static decimal TruncateToDigits(decimal value, int digits)
+    {
+        var factor = Pow10(digits);
+        return decimal.Truncate(value * factor) / factor;
+    }
+
+    private static decimal Pow10(int n)
+    {
+        decimal r = 1m;
+        for (int i = 0; i < n; i++) r *= 10m;
+        return r;
     }
 
     private static bool TryParseDecimalInvariant(string text, ExecutionContext ctx, DiagnosticBag diag,

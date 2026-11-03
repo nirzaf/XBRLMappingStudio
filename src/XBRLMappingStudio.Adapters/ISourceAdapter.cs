@@ -18,6 +18,15 @@ public sealed record AdapterCapabilities(
 {
     public static AdapterCapabilities ReadOnly =>
         new(true, true, true, false, false, true);
+
+    public static AdapterCapabilities WriteOnly =>
+        new(false, false, false, true, true, true);
+
+    public static AdapterCapabilities ReadWrite =>
+        new(true, true, true, true, true, true);
+
+    /// <summary>True when the adapter can serve as a target sink.</summary>
+    public bool AllowsWriteTarget => SupportsStagedWrite || SupportsPublication;
 }
 
 public enum AdapterDirection

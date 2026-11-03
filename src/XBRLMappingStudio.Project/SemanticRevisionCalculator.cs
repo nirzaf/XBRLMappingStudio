@@ -70,6 +70,31 @@ public static class SemanticRevisionCalculator
         }
         sb.Append(']');
 
+        // MAP07: reusable function definitions participate in the semantic digest so
+        // editing a function yields a new revision while layout-only edits do not.
+        sb.Append("|functions=[");
+        var functions = project.Functions.OrderBy(f => f.FunctionId, StringComparer.Ordinal)
+            .ThenBy(f => f.Revision).ToList();
+        foreach (var f in functions)
+        {
+            sb.Append(f.FunctionId).Append('@').Append(f.Revision).Append(':').Append(f.Name).Append(":{");
+            foreach (var n in f.Nodes.OrderBy(n => n.NodeId, StringComparer.Ordinal))
+            {
+                sb.Append(n.NodeId).Append('/').Append(n.NodeType).Append('/');
+                AppendSortedDict(sb, n.Parameters);
+                sb.Append(',');
+            }
+            sb.Append("}:edges={");
+            foreach (var e in f.Edges.OrderBy(e => e.SourceNodeId, StringComparer.Ordinal)
+                       .ThenBy(e => e.TargetNodeId, StringComparer.Ordinal))
+            {
+                sb.Append(e.SourceNodeId).Append('.').Append(e.SourcePortName)
+                  .Append("->").Append(e.TargetNodeId).Append('.').Append(e.TargetPortName).Append(';');
+            }
+            sb.Append("};");
+        }
+        sb.Append(']');
+
         var bytes = Encoding.UTF8.GetBytes(sb.ToString());
         var hash = SHA256.HashData(bytes);
         return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();

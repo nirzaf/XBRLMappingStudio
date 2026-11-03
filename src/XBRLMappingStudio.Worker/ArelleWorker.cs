@@ -229,7 +229,7 @@ public sealed class ArelleWorker : IWorkerClient
         var resp = await SendAsync(req, cancellationToken);
         if (resp.Status != WorkerStatus.Success)
             throw new InvalidOperationException($"Worker handshake failed: {resp.Error}");
-        return resp.Result!.Value.Deserialize<WorkerHandshake>(WorkerJson.Options);
+        return resp.Result!.Value.Deserialize<WorkerHandshake>(WorkerJson.Options)!;
     }
 
     public async Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)

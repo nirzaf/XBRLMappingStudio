@@ -55,11 +55,15 @@ public static class OimSerializer
                 ["identifier"] = f.EntityIdentifier
             },
             ["period"] = PeriodToJson(f.Period),
-            ["dimensions"] = new JsonObject()
+            ["dimensions"] = DimensionsToJson(f.Dimensions)
         };
 
-        if (f.Unit is not null)
-            node["unit"] = f.Unit.Measure;
+        if (f.CompoundUnit is not null)
+            node["unit"] = CompoundUnitToJson(f.CompoundUnit);
+        else if (f.Unit is not null)
+            node["unit"] = f.Unit.Power == 1
+                ? JsonValue.Create(f.Unit.Measure)
+                : (JsonNode)SimpleUnitWithPowerToJson(f.Unit);
         if (f.Decimals.HasValue)
             node["decimals"] = f.Decimals.Value;
         else
@@ -84,6 +88,37 @@ public static class OimSerializer
         },
         _ => throw new InvalidOperationException()
     };
+
+    private static JsonObject DimensionsToJson(IReadOnlyList<Dimension> dims)
+    {
+        var obj = new JsonObject();
+        foreach (var d in dims)
+            obj[d.Name] = d.MemberName;
+        return obj;
+    }
+
+    private static JsonObject CompoundUnitToJson(CompoundUnit cu)
+    {
+        var numerators = new JsonArray();
+        foreach (var m in cu.Numerators) numerators.Add(JsonValue.Create(m));
+        var divide = new JsonObject { ["numerators"] = numerators };
+        if (cu.DenominatorList.Count > 0)
+        {
+            var denominators = new JsonArray();
+            foreach (var m in cu.DenominatorList) denominators.Add(JsonValue.Create(m));
+            divide["denominators"] = denominators;
+        }
+        return new JsonObject { ["divide"] = divide };
+    }
+
+    private static JsonObject SimpleUnitWithPowerToJson(XbrlUnit u)
+    {
+        var multiply = new JsonArray
+        {
+            new JsonObject { ["item"] = u.Measure, ["power"] = u.Power }
+        };
+        return new JsonObject { ["multiply"] = multiply };
+    }
 
     /// <summary>
     /// Read facts back from an xBRL-JSON document. Used to verify round-trip and
@@ -124,7 +159,32 @@ public static class OimSerializer
             period = XbrlPeriod.OfDuration(s, e);
         }
 
-        var unit = obj["unit"] is JsonNode u ? new XbrlUnit(u.GetValue<string>()) : null;
+        XbrlUnit? unit = null;
+        CompoundUnit? compound = null;
+        if (obj["unit"] is JsonObject uo)
+        {
+            if (uo["divide"] is JsonObject div)
+            {
+                var nums = (div["numerators"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToList() ?? new();
+                var dens = (div["denominators"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToList() ?? new();
+                compound = new CompoundUnit(nums, dens);
+            }
+            else if (uo["multiply"] is JsonArray mult)
+            {
+                var first = mult.OfType<JsonObject>().FirstOrDefault();
+                if (first is not null)
+                    unit = new XbrlUnit(first["item"]!.GetValue<string>(), first["power"]?.GetValue<int>() ?? 1);
+            }
+        }
+        else if (obj["unit"] is JsonValue uv)
+            unit = new XbrlUnit(uv.GetValue<string>());
+
+        var dimensions = new List<Dimension>();
+        if (obj["dimensions"] is JsonObject dobj)
+            foreach (var (k, v) in dobj)
+                if (v is JsonValue dv && dv.GetValueKind() == JsonValueKind.String)
+                    dimensions.Add(new Dimension(k, dv.GetValue<string>()));
+
         decimal? value = null;
         bool isNil = obj["nil"]?.GetValue<bool>() ?? false;
         if (!isNil && obj["value"] is JsonNode vn && vn is not JsonValue jv)
@@ -149,6 +209,8 @@ public static class OimSerializer
             EntityIdentifier = identifier,
             Period = period,
             Unit = unit,
+            CompoundUnit = compound,
+            Dimensions = dimensions,
             Value = value,
             IsNil = isNil,
             Decimals = decimals,

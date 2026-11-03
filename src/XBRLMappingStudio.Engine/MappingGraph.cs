@@ -14,6 +14,10 @@ public sealed class MappingGraph
     public IReadOnlyDictionary<string, MappingEdge> Edges { get; }
     public IReadOnlyDictionary<string, SourceBinding> Bindings { get; }
 
+    /// <summary>Originating project, retained so function inlining (MAP07) can reach
+    /// the <see cref="MappingProject.Functions"/> definitions during compilation.</summary>
+    public MappingProject Source { get; }
+
     /// <summary>Edge lookup by target port: (targetNodeId, targetPortName) -> edge.</summary>
     private readonly Dictionary<(string, string), MappingEdge> _incomingByPort = new();
 
@@ -83,6 +87,7 @@ public sealed class MappingGraph
         Nodes = nodeMap;
         Edges = edgeMap;
         Bindings = project.Bindings.ToDictionary(b => b.BindingId, StringComparer.Ordinal);
+        Source = project;
         _semanticDigest = project.ComputeSemanticDigest();
     }
 }
@@ -218,6 +223,61 @@ public sealed class FunctionCatalog
             new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
             new Dictionary<string, ParameterRequirement>()),
 
+        // Transform: round with declared mode (MAP04 acceptance — tie rounding must be explicit).
+        new FunctionSignature(
+            NodeTypeConstants.Round,
+            "Round",
+            new[] { new PortDefinition("input", PortShape.Decimal, PortCardinality.Single, true) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["digits"] = new("digits", PortShape.Integer, false, "0", Description: "Decimal digits to retain."),
+                ["mode"] = new("mode", PortShape.String, true, Description: "HalfUp | HalfEven | Truncate")
+            }),
+
+        // Transform: ratio of two decimals with divide-by-zero policy (MAP04).
+        new FunctionSignature(
+            NodeTypeConstants.Ratio,
+            "Ratio",
+            new[]
+            {
+                new PortDefinition("numerator", PortShape.Decimal, PortCardinality.Single, true),
+                new PortDefinition("denominator", PortShape.Decimal, PortCardinality.Single, true)
+            },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["divideByZero"] = new("divideByZero", PortShape.String, false, "Diagnostic",
+                    Description: "Missing | NaN | Diagnostic")
+            }),
+
+        // Conditional: boolean gate that passes a value only when the condition holds.
+        new FunctionSignature(
+            NodeTypeConstants.Filter,
+            "Filter",
+            new[]
+            {
+                new PortDefinition("input", PortShape.Decimal, PortCardinality.Single, true),
+                new PortDefinition("predicate", PortShape.Boolean, PortCardinality.Single, true)
+            },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>()),
+
+        // Conditional: compare two decimals and emit a boolean.
+        new FunctionSignature(
+            NodeTypeConstants.Compare,
+            "Compare",
+            new[]
+            {
+                new PortDefinition("a", PortShape.Decimal, PortCardinality.Single, true),
+                new PortDefinition("b", PortShape.Decimal, PortCardinality.Single, true)
+            },
+            new[] { new PortDefinition("value", PortShape.Boolean, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["op"] = new("op", PortShape.String, true, Description: "Eq | Ne | Lt | Le | Gt | Ge")
+            }),
+
         // Transform: build an instant date from a DateOnly.
         new FunctionSignature(
             NodeTypeConstants.BuildInstantDate,
@@ -241,13 +301,16 @@ public sealed class FunctionCatalog
             new[] { new PortDefinition("value", PortShape.Instant, PortCardinality.Single, true) },
             new Dictionary<string, ParameterRequirement>()),
 
-        // Sink: fact construction. Emits one XBRL fact per input collection iteration.
+        // Sink: fact construction. Emits one XBRL fact per input iteration. Accepts a
+        // scalar `value` port (row-driven) or a `values` Collection port (set-driven,
+        // e.g. fed by GroupBy) which produces one fact per collection item.
         new FunctionSignature(
             NodeTypeConstants.FactConstruct,
             "XBRL Fact",
             new[]
             {
-                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true),
+                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, false),
+                new PortDefinition("values", PortShape.Decimal, PortCardinality.Collection, false),
                 new PortDefinition("entity", PortShape.String, PortCardinality.Single, true),
                 new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false),
                 new PortDefinition("instantDate", PortShape.Instant, PortCardinality.Single, false)
@@ -260,6 +323,113 @@ public sealed class FunctionCatalog
                 ["periodType"] = new("periodType", PortShape.String, true, Description: "'instant'|'duration'"),
                 ["decimals"] = new("decimals", PortShape.Integer, false, Description: "e.g. -3 for thousands"),
                 ["language"] = new("language", PortShape.String, false, Description: "BCP-47 tag")
+            }),
+
+        // MAP05 collection operators -------------------------------------------------
+
+        // Collect: reads a scalar upstream port across every row and emits a Collection.
+        new FunctionSignature(
+            NodeTypeConstants.Collect,
+            "Collect (rows -> collection)",
+            new[] { new PortDefinition("input", PortShape.Decimal, PortCardinality.Single, true) },
+            new[] { new PortDefinition("items", PortShape.Decimal, PortCardinality.Collection, true) },
+            new Dictionary<string, ParameterRequirement>()),
+
+        // Sum: reduce a Collection<Decimal> to a single Decimal.
+        new FunctionSignature(
+            NodeTypeConstants.Sum,
+            "Sum",
+            new[] { new PortDefinition("items", PortShape.Decimal, PortCardinality.Collection, true) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>()),
+
+        // Count: reduce a Collection to a single Integer.
+        new FunctionSignature(
+            NodeTypeConstants.Count,
+            "Count",
+            new[] { new PortDefinition("items", PortShape.Decimal, PortCardinality.Collection, true) },
+            new[] { new PortDefinition("value", PortShape.Integer, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>()),
+
+        // First: return the first Present item, or Missing.
+        new FunctionSignature(
+            NodeTypeConstants.First,
+            "First",
+            new[] { new PortDefinition("items", PortShape.Decimal, PortCardinality.Collection, true) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>()),
+
+        // MAP06 lookup ---------------------------------------------------------------
+
+        // Lookup: fetch a value by key from a project-pinned source snapshot.
+        new FunctionSignature(
+            NodeTypeConstants.Lookup,
+            "Lookup",
+            new[] { new PortDefinition("key", PortShape.String, PortCardinality.Single, true) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["table"] = new("table", PortShape.String, true, Description: "Named dictionary supplied via ExecutionContext.Parameters prefixed 'lookup:."),
+                ["missingKey"] = new("missingKey", PortShape.String, false, "Diagnostic", Description: "Missing | Diagnostic | Default"),
+                ["defaultValue"] = new("defaultValue", PortShape.Decimal, false, Description: "Value used when missingKey=Default.")
+            }),
+
+        // MAP05 record collection: reads a source binding into a Collection<Record>.
+        new FunctionSignature(
+            NodeTypeConstants.CollectRows,
+            "Collect Rows (binding -> records)",
+            Array.Empty<PortDefinition>(),
+            new[] { new PortDefinition("items", PortShape.Record, PortCardinality.Collection, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["binding"] = new("binding", PortShape.Identifier, true, Description: "SourceBinding id whose loaded rows become records."),
+                ["fields"] = new("fields", PortShape.String, false, Description: "Optional comma list of columns to retain.")
+            }),
+
+        // MAP05 group aggregation: buckets a Collection<Record> by key fields and sums a value field.
+        new FunctionSignature(
+            NodeTypeConstants.GroupBy,
+            "Group By",
+            new[] { new PortDefinition("items", PortShape.Record, PortCardinality.Collection, true) },
+            new[]
+            {
+                new PortDefinition("values", PortShape.Decimal, PortCardinality.Collection, true),
+                new PortDefinition("keys", PortShape.String, PortCardinality.Collection, true)
+            },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["keys"] = new("keys", PortShape.String, true, Description: "Comma list of record fields to group by."),
+                ["sumField"] = new("sumField", PortShape.String, true, Description: "Record field summed within each bucket.")
+            }),
+
+        // MAP06 join: equi-join two Collection<Record> inputs on declared key fields.
+        new FunctionSignature(
+            NodeTypeConstants.Join,
+            "Join",
+            new[]
+            {
+                new PortDefinition("left", PortShape.Record, PortCardinality.Collection, true),
+                new PortDefinition("right", PortShape.Record, PortCardinality.Collection, true)
+            },
+            new[] { new PortDefinition("rows", PortShape.Record, PortCardinality.Collection, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["leftKey"] = new("leftKey", PortShape.String, true),
+                ["rightKey"] = new("rightKey", PortShape.String, true),
+                ["cardinality"] = new("cardinality", PortShape.String, false, "Inner", Description: "Inner | Left | Right | Full"),
+                ["duplicateKey"] = new("duplicateKey", PortShape.String, false, "All", Description: "Fail | First | All")
+            }),
+
+        // MAP07 named visual function call. Inlined at compile time against a pinned revision.
+        new FunctionSignature(
+            NodeTypeConstants.FunctionCall,
+            "Function Call",
+            new[] { new PortDefinition("input", PortShape.Decimal, PortCardinality.Single, false) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new Dictionary<string, ParameterRequirement>
+            {
+                ["functionId"] = new("functionId", PortShape.Identifier, true),
+                ["revision"] = new("revision", PortShape.Integer, true, "1", Description: "Pinned FunctionDefinition revision.")
             })
     });
 }
@@ -276,10 +446,26 @@ public static class NodeTypeConstants
     public const string BuildInstantDate = "buildInstantDate";
     public const string BuildDurationDate = "buildDurationDate";
     public const string FactConstruct = "factConstruct";
+    public const string Round = "round";
+    public const string Ratio = "ratio";
+    public const string Filter = "filter";
+    public const string Compare = "compare";
+    public const string Collect = "collect";
+    public const string Sum = "sum";
+    public const string Count = "count";
+    public const string First = "first";
+    public const string Lookup = "lookup";
+    public const string CollectRows = "collectRows";
+    public const string GroupBy = "groupBy";
+    public const string Join = "join";
+    public const string FunctionCall = "functionCall";
 
     public static IEnumerable<string> All => new[]
     {
         ExcelField, Constant, RunParameter, ParseDecimal, Scale, ChangeSign, Coalesce,
-        BuildInstantDate, BuildDurationDate, FactConstruct
+        BuildInstantDate, BuildDurationDate, FactConstruct,
+        Round, Ratio, Filter, Compare,
+        Collect, Sum, Count, First, Lookup,
+        CollectRows, GroupBy, Join, FunctionCall
     };
 }

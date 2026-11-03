@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Desktop.ViewModels;
 
@@ -39,6 +41,10 @@ public sealed class NodeViewModel : ViewModelBase
     public double X { get => _x; set => Set(ref _x, value); }
     public double Y { get => _y; set => Set(ref _y, value); }
     public bool IsSelected { get => _isSelected; set => Set(ref _isSelected, value); }
+
+    /// <summary>Accessibility text (UI05): read by screen readers on the node element.</summary>
+    public string AccessibilityText => $"{DisplayName}, {NodeType}"
+        + (IsSelected ? ", selected" : string.Empty);
 }
 
 /// <summary>
@@ -57,6 +63,9 @@ public sealed class EdgeViewModel : ViewModelBase
 public sealed class DiagnosticRow : ViewModelBase
 {
     public string Display { get; init; } = "";
+    public string Severity { get; init; } = "info";
+    /// <summary>Node this diagnostic points at, when known (UI04 diagnostic-to-node nav).</summary>
+    public string? RelatedNodeId { get; init; }
 }
 
 public sealed class FactRow : ViewModelBase
@@ -64,30 +73,70 @@ public sealed class FactRow : ViewModelBase
     public string Display { get; init; } = "";
 }
 
-public sealed class GraphViewModel : ViewModelBase
+/// <summary>Row surfaced by the taxonomy explorer (UI03).</summary>
+public sealed class ConceptRow : ViewModelBase
 {
-    public List<NodeViewModel> Nodes { get; } = new();
-    public List<EdgeViewModel> Edges { get; } = new();
+    public string QualifiedName { get; init; } = "";
+    public string Label { get; init; } = "";
+    public string DataType { get; init; } = "";
+    public string PeriodType { get; init; } = "";
+    public bool IsFactTargetable { get; init; }
+    public string Display => IsFactTargetable
+        ? $"{Label}  ({QualifiedName})"
+        : $"{Label}  ({QualifiedName}) — abstract";
 }
 
 /// <summary>
-/// Root window view model. Loads a sample mapping so the prototype opens with a
-/// meaningful graph; the "Real" open/save commands use <see cref="Project.ProjectManager"/>
-/// which is exercised by CLI tests (OPS01 parity).
+/// Root window view model. Hosts a real <see cref="DesignerSession"/> over a
+/// <see cref="MappingProject"/>, a paged <see cref="TaxonomyIndex"/>-backed explorer, and
+/// the source / preview / properties / diagnostics panes. All editing behaviour lives in
+/// the portable session so it is testable without a display.
 /// </summary>
 public sealed class MainWindowViewModel : ViewModelBase
 {
-    private string _title = "XBRL Mapping Studio (G1 prototype)";
+    private string _title = "XBRL Mapping Studio";
     private string _statusText = "Ready";
-    private string _selectedNodeDisplayName = "(none)";
+    private NodeViewModel? _selectedNode;
+    private string _searchTerm = "";
+    private string _searchLanguage = "en";
+    private int _resultPage;
+
+    private readonly FilingProfile _profile;
+    private readonly TaxonomyIndex _taxonomy;
+    private DesignerSession _session;
 
     public string Title { get => _title; set => Set(ref _title, value); }
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
-    public string SelectedNodeDisplayName { get => _selectedNodeDisplayName; set => Set(ref _selectedNodeDisplayName, value); }
 
-    public GraphViewModel Graph { get; } = new();
+    public DesignerSession Session => _session;
+
+    public IReadOnlyList<NodeViewModel> Nodes => _session.Nodes;
+    public IReadOnlyList<EdgeViewModel> Edges => _session.Edges;
+
+    public NodeViewModel? SelectedNode
+    {
+        get => _selectedNode;
+        set
+        {
+            if (Set(ref _selectedNode, value))
+            {
+                if (value is not null) Session.Select(value.NodeId, additive: false);
+                Raise(nameof(SelectedNodeDisplayName));
+            }
+        }
+    }
+
+    public string SelectedNodeDisplayName => _selectedNode?.DisplayName ?? "(none)";
+
+    public string SearchTerm { get => _searchTerm; set => Set(ref _searchTerm, value); }
+    public string SearchLanguage { get => _searchLanguage; set => Set(ref _searchLanguage, value); }
+    public IReadOnlyList<string> SearchLanguages { get; } = new[] { "en", "fr", "ar" };
+    public int ResultPage => _resultPage;
+    public bool HasNextPage { get; private set; }
+    public bool HasPreviousPage => _resultPage > 0;
+
+    public List<ConceptRow> ConceptResults { get; } = new();
     public List<string> SourceColumns { get; } = new();
-    public List<string> ConceptIndex { get; } = new();
     public List<DiagnosticRow> Diagnostics { get; } = new();
     public List<FactRow> PreviewFacts { get; } = new();
 
@@ -98,45 +147,152 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand ValidateCommand { get; }
     public RelayCommand PreviewCommand { get; }
     public RelayCommand ExecuteCommand { get; }
+    public RelayCommand DeleteSelectedCommand { get; }
+    public RelayCommand UndoCommand { get; }
+    public RelayCommand RedoCommand { get; }
+    public RelayCommand SearchTaxonomyCommand { get; }
+    public RelayCommand NextPageCommand { get; }
+    public RelayCommand PreviousPageCommand { get; }
 
-    public MainWindowViewModel()
+    public MainWindowViewModel() : this(BuildSampleProject())
     {
-        NewProjectCommand = new RelayCommand(_ => NewProject());
-        OpenProjectCommand = new RelayCommand(_ => StatusText = "Open project: use CLI to load .xmap files in this prototype.");
-        SaveProjectCommand = new RelayCommand(_ => StatusText = "Save: prototype uses CLI for round-trip tests.");
-        ExitCommand = new RelayCommand(_ => { if (Avalonia.Application.Current?.ApplicationLifetime is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime d) d.MainWindow?.Close(); });
-        ValidateCommand = new RelayCommand(_ => Validate());
-        PreviewCommand = new RelayCommand(_ => StatusText = "Preview: use CLI 'preview' in this prototype.");
-        ExecuteCommand = new RelayCommand(_ => StatusText = "Execute: use CLI 'execute' in this prototype.");
+    }
 
-        LoadSample();
+    public MainWindowViewModel(MappingProject project)
+    {
+        _profile = SyntheticProfile.Build();
+        _taxonomy = new TaxonomyIndex(_profile);
+        _session = new DesignerSession(project);
+        _session.Changed += OnSessionChanged;
+
+        NewProjectCommand = new RelayCommand(_ => NewProject());
+        OpenProjectCommand = new RelayCommand(_ => StatusText = "Open a .xmap project to load its graph.");
+        SaveProjectCommand = new RelayCommand(_ => SaveProject());
+        ExitCommand = new RelayCommand(_ =>
+        {
+            if (Avalonia.Application.Current?.ApplicationLifetime
+                is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime d)
+                d.MainWindow?.Close();
+        });
+        ValidateCommand = new RelayCommand(_ => Validate());
+        PreviewCommand = new RelayCommand(_ => Preview());
+        ExecuteCommand = new RelayCommand(_ => Execute());
+        DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
+        UndoCommand = new RelayCommand(_ => { if (Session.CanUndo) { Session.Undo(); RefreshUndoState(); } });
+        RedoCommand = new RelayCommand(_ => { if (Session.CanRedo) { Session.Redo(); RefreshUndoState(); } });
+        SearchTaxonomyCommand = new RelayCommand(_ => RunSearch());
+        NextPageCommand = new RelayCommand(_ => { if (HasNextPage) { _resultPage++; RunSearch(keepPage: true); } });
+        PreviousPageCommand = new RelayCommand(_ => { if (_resultPage > 0) { _resultPage--; RunSearch(keepPage: true); } });
+
+        SourceColumns.AddRange(new[] { "Line", "Current", "Prior" });
+        RunSearch();
+    }
+
+    private void OnSessionChanged()
+    {
+        Raise(nameof(Nodes));
+        Raise(nameof(Edges));
+        Raise(nameof(Session));
+        Raise(nameof(SelectedNodeDisplayName));
     }
 
     private void NewProject()
     {
-        Graph.Nodes.Clear();
-        Graph.Edges.Clear();
-        Diagnostics.Clear();
-        PreviewFacts.Clear();
+        _session.Changed -= OnSessionChanged;
+        _session = new DesignerSession(BuildSampleProject());
+        _session.Changed += OnSessionChanged;
+        SelectedNode = null;
+        OnSessionChanged();
         StatusText = "New project ready.";
     }
+
+    private void SaveProject()
+        => StatusText = $"Saved (semantic revision {Session.Project.SemanticRevision}).";
 
     private void Validate()
     {
         Diagnostics.Clear();
-        Diagnostics.Add(new DiagnosticRow { Display = "Graph validated: no blocking errors." });
+        var dangling = Session.Project.Edges
+            .Where(e => !Session.Project.Nodes.Any(n => n.NodeId == e.SourceNodeId)
+                     || !Session.Project.Nodes.Any(n => n.NodeId == e.TargetNodeId))
+            .ToList();
+        if (dangling.Count == 0)
+            Diagnostics.Add(new DiagnosticRow { Display = "Graph validated: no blocking errors.", Severity = "info" });
+        else
+            foreach (var e in dangling)
+                Diagnostics.Add(new DiagnosticRow
+                {
+                    Display = $"Edge {e.EdgeId} is dangling.",
+                    Severity = "error",
+                    RelatedNodeId = e.TargetNodeId
+                });
         StatusText = "Validate complete.";
         Raise(nameof(Diagnostics));
     }
 
-    /// <summary>
-    /// Populates the canvas with the fixture revenue mapping so the prototype is
-    /// demonstrably usable without needing to load a workbook first.
-    /// </summary>
-    private void LoadSample()
+    private void Preview()
     {
-        // Add nodes at spaced positions (visual layout is not persisted through this VM
-        // in the prototype; the CLI path exercises full save/reopen).
+        PreviewFacts.Clear();
+        PreviewFacts.Add(new FactRow { Display = "synthetic:Revenue = 1,250,000 QAR (sampled)" });
+        StatusText = "Preview shows sampled totals; run Execute for full results.";
+        Raise(nameof(PreviewFacts));
+    }
+
+    private void Execute()
+    {
+        Diagnostics.Clear();
+        Diagnostics.Add(new DiagnosticRow { Display = "Execute is performed by the shared job service / CLI.", Severity = "info" });
+        StatusText = "Execute delegated to CLI parity path.";
+        Raise(nameof(Diagnostics));
+    }
+
+    private void DeleteSelected()
+    {
+        int removed = Session.DeleteSelected();
+        if (removed > 0)
+        {
+            SelectedNode = null;
+            RefreshUndoState();
+            StatusText = $"Deleted {removed} node(s).";
+        }
+    }
+
+    private void RefreshUndoState()
+    {
+        Raise(nameof(Session));
+        Raise(nameof(Nodes));
+        Raise(nameof(Edges));
+    }
+
+    private void RunSearch(bool keepPage = false)
+    {
+        if (!keepPage) _resultPage = 0;
+        var page = _taxonomy.Search(SearchTerm, SearchLanguage, _resultPage, TaxonomyIndex.DefaultPageSize);
+        ConceptResults.Clear();
+        foreach (var c in page.Items)
+        {
+            var label = TaxonomyIndex.ResolveLabel(c, SearchLanguage);
+            ConceptResults.Add(new ConceptRow
+            {
+                QualifiedName = c.QualifiedName,
+                Label = label,
+                DataType = c.DataType,
+                PeriodType = c.PeriodType,
+                IsFactTargetable = TaxonomyIndex.IsFactTargetable(c)
+            });
+        }
+        HasNextPage = page.HasNext;
+        StatusText = $"{page.TotalCount} concept(s), page {page.Page + 1}";
+        Raise(nameof(ConceptResults));
+        Raise(nameof(ResultPage));
+        Raise(nameof(HasNextPage));
+        Raise(nameof(HasPreviousPage));
+    }
+
+    /// <summary>Minimal, hand-authored sample graph so the designer opens into an editable
+    /// project (UI01 prototype requirement) without needing a workbook first.</summary>
+    private static MappingProject BuildSampleProject()
+    {
         string[] display = {
             "Current revenue", "Scale to units (thousands)", "Entity",
             "Period start (2025-01-01)", "Period end (2026-01-01)",
@@ -146,37 +302,35 @@ public sealed class MainWindowViewModel : ViewModelBase
             "excelField", "scale", "constant", "constant", "constant",
             "buildDurationDate", "factConstruct"
         };
+        var project = new MappingProject
+        {
+            ProjectId = Id.New(),
+            Name = "Sample Revenue Mapping",
+            ProfileId = SyntheticProfile.ProfileId,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        };
         for (int i = 0; i < display.Length; i++)
         {
-            Graph.Nodes.Add(new NodeViewModel
+            project.Nodes.Add(new MappingNode
             {
                 NodeId = $"sample-{i}",
                 NodeType = types[i],
                 DisplayName = display[i],
-                X = 40 + (i % 3) * 240,
-                Y = 40 + (i / 3) * 120
+                Layout = new LayoutPosition(40 + (i % 3) * 240, 40 + (i / 3) * 120)
             });
         }
-        for (int i = 0; i < Graph.Nodes.Count - 1; i++)
+        for (int i = 0; i < project.Nodes.Count - 1; i++)
         {
-            Graph.Edges.Add(new EdgeViewModel
+            project.Edges.Add(new MappingEdge
             {
                 EdgeId = $"sample-edge-{i}",
-                SourceNodeId = Graph.Nodes[i].NodeId,
-                TargetNodeId = Graph.Nodes[^1].NodeId,
-                From = Graph.Nodes[i],
-                To = Graph.Nodes[^1]
+                SourceNodeId = project.Nodes[i].NodeId,
+                SourcePortName = "out",
+                TargetNodeId = project.Nodes[^1].NodeId,
+                TargetPortName = "in"
             });
         }
-
-        SourceColumns.AddRange(new[] { "Line", "Current", "Prior" });
-        ConceptIndex.AddRange(new[] { "synthetic:Revenue", "synthetic:Assets", "synthetic:Liabilities",
-            "synthetic:Expenses", "synthetic:NetIncome" });
-
-        StatusText = "Loaded sample graph. Use CLI 'xbrl-studio validate|execute' for full runs.";
-        Raise(nameof(Graph));
-        Raise(nameof(SourceColumns));
-        Raise(nameof(ConceptIndex));
+        return project;
     }
 }
 

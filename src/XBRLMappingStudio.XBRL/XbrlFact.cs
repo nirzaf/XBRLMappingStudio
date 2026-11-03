@@ -65,10 +65,16 @@ public sealed class XbrlFact
     public required string EntityIdentifier { get; init; }
     public required XbrlPeriod Period { get; init; }
     public XbrlUnit? Unit { get; init; }
+    /// <summary>Compound (multiply/divide) unit for measures such as USD per share (XBR04).
+    /// Exactly one of <see cref="Unit"/> or <see cref="CompoundUnit"/> is set for a monetary fact.</summary>
+    public CompoundUnit? CompoundUnit { get; init; }
     public decimal? Value { get; init; }
     public bool IsNil { get; init; }
     public int? Decimals { get; init; }
     public string? Language { get; init; }
+
+    /// <summary>Explicit dimensional aspects carried by this fact (XBR04).</summary>
+    public IReadOnlyList<Dimension> Dimensions { get; init; } = Array.Empty<Dimension>();
 
     /// <summary>Set of source references contributing to this fact.</summary>
     public IReadOnlyList<SourceReference> ContributingSources { get; init; }
@@ -94,6 +100,32 @@ public sealed class XbrlFact
         }
         reason = "";
         return true;
+    }
+
+    /// <summary>
+    /// Order-independent semantic identity used for multiset equivalence across
+    /// xBRL-JSON and xBRL-XML round-trips (XBR05) and report-to-record import (XBR06).
+    /// Layout/provenance are deliberately excluded.
+    /// </summary>
+    public string SemanticKey()
+    {
+        var unit = CompoundUnit is not null
+            ? "cu:" + CompoundUnit.CanonicalKey
+            : Unit is not null ? "u:" + Unit.Measure + (Unit.Power != 1 ? $"^{Unit.Power}" : "") : "-";
+        var dims = string.Join(",", Dimensions
+            .OrderBy(d => d.Name, System.StringComparer.Ordinal)
+            .Select(d => $"{d.Name}={d.MemberName}"));
+        var val = IsNil ? "nil" : Value?.ToString(CultureInfo.InvariantCulture) ?? "(none)";
+        var dec = Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF";
+        return string.Join('|',
+            ConceptName,
+            $"{EntityScheme}:{EntityIdentifier}",
+            Period.ToIsoString(),
+            unit,
+            dims,
+            Language ?? "",
+            val,
+            dec);
     }
 }
 

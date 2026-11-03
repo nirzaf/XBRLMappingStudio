@@ -21,6 +21,13 @@ public static class DiagnosticCodes
     public const string MapExecutionCancelled = "MAP011";
     public const string MapMissingPeriodStart = "MAP012";
     public const string MapMissingPeriodEnd = "MAP013";
+    public const string MapCollectionBudgetExceeded = "MAP014";
+    public const string MapJoinExpansionExceeded = "MAP015";
+    public const string MapLookupKeyMissing = "MAP016";
+    public const string MapDuplicateJoinKey = "MAP017";
+    public const string MapInvalidRoundingMode = "MAP018";
+    public const string MapInvalidComparisonOp = "MAP019";
+    public const string MapFunctionRevisionMissing = "MAP020";
 
     // PRJ - Project schema and lifecycle
     public const string PrjSchemaVersionUnsupported = "PRJ001";
@@ -37,6 +44,13 @@ public static class DiagnosticCodes
     public const string IoUnsupportedEncoding = "IO005";
     public const string IoRowBudgetExceeded = "IO006";
     public const string IoColumnMissing = "IO007";
+    public const string IoUnsupportedOperation = "IO008";
+    public const string IoPathEscapesWorkspace = "IO009";
+    public const string IoArchiveBudgetExceeded = "IO010";
+    public const string IoUnsafeXmlConstruct = "IO011";
+    public const string IoDuplicateKey = "IO012";
+    public const string IoDepthExceeded = "IO013";
+    public const string IoNumberOutOfBudget = "IO014";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";
@@ -49,6 +63,10 @@ public static class DiagnosticCodes
     public const string XbrDecimalsOutOfRange = "XBR008";
     public const string XbrValidationFailed = "XBR009";
     public const string XbrValidationIncomplete = "XBR010";
+    public const string XbrUnsupportedConstruct = "XBR011";
+    public const string XbrDuplicateFact = "XBR012";
+    public const string XbrDimensionInvalid = "XBR013";
+    public const string XbrRequiredCheckMissing = "XBR014";
 
     // WKR - Worker process protocol
     public const string WkrHandshakeFailed = "WKR001";
@@ -60,4 +78,13 @@ public static class DiagnosticCodes
     public const string PubLockFailed = "PUB001";
     public const string PubPartialFailure = "PUB002";
     public const string PubDigestMismatch = "PUB003";
+    public const string PubStagingFailed = "PUB004";
+    public const string PubDestinationLocked = "PUB005";
+    public const string PubReceiptConflict = "PUB006";
+
+    // AI - Suggestion service
+    public const string AiProviderUnavailable = "AI001";
+    public const string AiInvalidDraft = "AI002";
+    public const string AiStaleRevision = "AI003";
+    public const string AiOutboundBlocked = "AI004";
 }

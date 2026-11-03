@@ -73,18 +73,22 @@ public sealed class GraphValidator
             var sig = _catalog.Find(node.NodeType);
             if (sig is null) continue;
 
-            foreach (var port in node.InputPorts.Where(p => p.IsRequired))
+            foreach (var port in node.InputPorts)
             {
                 var edge = graph.IncomingEdge(node.NodeId, port.Name);
                 if (edge is null)
                 {
-                    bag.Error(
-                        DiagnosticCodes.MapDanglingPort,
-                        DiagnosticSubsystem.Mapping,
-                        DiagnosticStage.Validation,
-                        $"Node '{node.DisplayName}' has unbound required input '{port.Name}'.",
-                        nodeId: node.NodeId,
-                        portName: port.Name);
+                    // Only required inputs can dangle; unconnected optional ports are legal.
+                    if (port.IsRequired)
+                    {
+                        bag.Error(
+                            DiagnosticCodes.MapDanglingPort,
+                            DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Validation,
+                            $"Node '{node.DisplayName}' has unbound required input '{port.Name}'.",
+                            nodeId: node.NodeId,
+                            portName: port.Name);
+                    }
                     continue;
                 }
 

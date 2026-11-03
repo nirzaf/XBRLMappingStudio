@@ -71,6 +71,12 @@ public sealed class RunManifest
         var hash = SHA256.HashData(bytes);
         return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
     }
+
+    public static string ComputeSha256(byte[] data)
+    {
+        var hash = SHA256.HashData(data);
+        return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
 }
 
 public sealed record InputIdentity(

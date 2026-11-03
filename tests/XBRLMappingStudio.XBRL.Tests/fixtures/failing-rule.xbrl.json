@@ -1,0 +1,15 @@
+{
+  "$schema": "https://xbrl.org/2021/json/xbrl-json-1.0.json",
+  "report": { "pii": "synthetic-oim-v1" },
+  "facts": {
+    "f1": {
+      "value": 5000000,
+      "concept": "synthetic:Assets",
+      "entity": { "scheme": "http://xbrl.org/entity/", "identifier": "ABC-Corp" },
+      "period": { "start": "2025-01-01", "end": "2026-01-01" },
+      "unit": "JPY",
+      "decimals": -3,
+      "dimensions": {}
+    }
+  }
+}

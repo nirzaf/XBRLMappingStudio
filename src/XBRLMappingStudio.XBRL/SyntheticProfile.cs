@@ -24,7 +24,15 @@ public static class SyntheticProfile
             Label: "Total Assets",
             DataType: "monetary",
             PeriodType: "instant",
-            IsAbstract: false),
+            IsAbstract: false)
+        {
+            SupportedLanguages = new[] { "en", "fr" },
+            LabelsByLanguage = new Dictionary<string, string>
+            {
+                ["en"] = "Total Assets",
+                ["fr"] = "Actif total"
+            }
+        },
 
         new ConceptMetadata(
             Qualified("Liabilities"), Namespace, "Liabilities",
@@ -38,7 +46,16 @@ public static class SyntheticProfile
             Label: "Revenue",
             DataType: "monetary",
             PeriodType: "duration",
-            IsAbstract: false),
+            IsAbstract: false)
+        {
+            SupportedLanguages = new[] { "en", "fr", "ar" },
+            LabelsByLanguage = new Dictionary<string, string>
+            {
+                ["en"] = "Revenue",
+                ["fr"] = "Produit",
+                ["ar"] = "إيرادات"
+            }
+        },
 
         new ConceptMetadata(
             Qualified("Expenses"), Namespace, "Expenses",
@@ -64,6 +81,24 @@ public static class SyntheticProfile
 
     public static IReadOnlySet<string> SupportedUnits { get; } =
         new HashSet<string>(StringComparer.Ordinal) { "EUR", "USD", "QAR" };
+
+    /// <summary>Default presentation role (xBRL standard summary role).</summary>
+    public const string PresentationRole =
+        "http://xbrl.info/xbrl/synthetic/role/presentation";
+
+    /// <summary>Financial-statement hierarchy used to build the presentation network (XBR03).
+    /// The instant and duration children both hang under the abstract FinancialStatements
+    /// concept so a concept appears across roles.</summary>
+    public static IReadOnlyList<PresentationLink> PresentationLinks { get; } = new[]
+    {
+        new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Revenue"), 1),
+        new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Expenses"), 2),
+        new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("NetIncome"), 3),
+        new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Assets"), 4),
+        new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Liabilities"), 5),
+        // A second role reuses Revenue, proving a concept may appear in multiple networks.
+        new PresentationLink(PresentationRole + "/income-statement", Qualified("NetIncome"), Qualified("Revenue"), 1),
+    };
 
     public static string Qualified(string local) => $"{Prefix}:{local}";
 

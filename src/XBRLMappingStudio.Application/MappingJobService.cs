@@ -1,6 +1,10 @@
 using System.Text.Json;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Csv;
 using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Json;
+using XBRLMappingStudio.Adapters.Xml;
+using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -229,14 +233,56 @@ public sealed class MappingJobService
                 Kind: "xbrl-json")
         };
 
-        return JobResult.FromManifest(manifest, facts, json);
+        return JobResult.FromManifest(manifest, facts, json, context.SampledTotals);
     }
 
     private static ISourceAdapter BuildAdapter(SourceConnection conn) => conn.Kind switch
     {
         "excel" => new ExcelAdapter(),
+        "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
+        "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
+        "xml" => new XmlAdapter(),
+        "xbrl-report" => new XbrlReportAdapter(),
         _ => throw new NotSupportedException($"Adapter kind '{conn.Kind}' is not supported in this build.")
     };
+
+    /// <summary>
+    /// Resolve the write-path adapter for a destination connection and enforce the IO01
+    /// direction gate: an adapter whose declared capabilities do not permit a staged
+    /// write or publication cannot be bound as a target. A read-only adapter (e.g. the
+    /// Excel or JSON/XML source readers) throws <see cref="AdapterException"/> with
+    /// <c>IO008</c> before any bytes are touched.
+    /// </summary>
+    public static ITargetAdapter BuildTargetAdapter(SourceConnection conn)
+    {
+        ITargetAdapter adapter = conn.Kind switch
+        {
+            "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
+            "excel" => new ExcelOutputAdapter(),
+            _ => throw new NotSupportedException($"No target adapter for kind '{conn.Kind}'.")
+        };
+        AssertDirection(AdapterDirection.Write, adapter.Capabilities, adapter.Kind);
+        return adapter;
+    }
+
+    /// <summary>
+    /// IO01 direction gate. A component resolved for one direction must not be bound for
+    /// the other when its declared capabilities forbid it. Read-only source adapters may
+    /// never serve as a write target; write-only sinks may never serve as a read source.
+    /// </summary>
+    public static void AssertDirection(AdapterDirection direction, AdapterCapabilities caps, string kind)
+    {
+        bool permitted = direction switch
+        {
+            AdapterDirection.Write => caps.AllowsWriteTarget,
+            AdapterDirection.Read => caps.SupportsReading,
+            _ => false
+        };
+        if (!permitted)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"Adapter '{kind}' cannot be bound for {direction} use with its declared capabilities.",
+                DiagnosticStage.Publication);
+    }
 
     private static async Task<IReadOnlyList<InputIdentity>> RecordInputIdentities(
         IReadOnlyDictionary<string, SourceConnection> connections,
@@ -275,12 +321,16 @@ public sealed record JobResult(
     RunManifest Manifest,
     IReadOnlyList<XbrlFact> Facts,
     string XbrlJson,
-    DiagnosticBag Diagnostics)
+    DiagnosticBag Diagnostics,
+    // MAP08: aggregates computed during a preview run, each flagged IsPartial so a
+    // reviewer cannot mistake a sampled total for a full-run figure.
+    IReadOnlyList<SampledTotal> SampledTotals)
 {
-    internal static JobResult FromManifest(RunManifest manifest, IReadOnlyList<XbrlFact> facts, string json)
+    internal static JobResult FromManifest(RunManifest manifest, IReadOnlyList<XbrlFact> facts, string json,
+        IReadOnlyList<SampledTotal>? sampledTotals = null)
     {
         var bag = new DiagnosticBag();
         foreach (var d in manifest.Diagnostics) bag.Add(d);
-        return new JobResult(manifest, facts, json, bag);
+        return new JobResult(manifest, facts, json, bag, sampledTotals ?? Array.Empty<SampledTotal>());
     }
 }
