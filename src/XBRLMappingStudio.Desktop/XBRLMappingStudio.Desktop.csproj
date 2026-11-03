@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <RootNamespace>XBRLMappingStudio.Desktop</RootNamespace>
+    <AssemblyName>XBRLMappingStudio.Desktop</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.1.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.1.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.0" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.1.0" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XBRLMappingStudio.Application\XBRLMappingStudio.Application.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Worker\XBRLMappingStudio.Worker.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
+  </ItemGroup>
+
+</Project>

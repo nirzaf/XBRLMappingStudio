@@ -4,6 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <RootNamespace>XBRLMappingStudio.Adapters</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
+  </ItemGroup>
 
 </Project>

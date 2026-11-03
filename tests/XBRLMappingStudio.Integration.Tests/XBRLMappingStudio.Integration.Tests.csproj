@@ -18,4 +18,15 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Application\XBRLMappingStudio.Application.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Worker\XBRLMappingStudio.Worker.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Fixtures\XBRLMappingStudio.Fixtures.csproj" />
+  </ItemGroup>
+
 </Project>

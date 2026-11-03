@@ -38,13 +38,13 @@ public sealed class DataValue : IEquatable<DataValue>
 
     private DataValue(PortShape shape, ValuePresence presence, object? raw,
         string? lexical = null,
-        XBRLMappingStudio.Diagnostics.SourceReference? source = null)
+        XBRLMappingStudio.Diagnostics.SourceReference? src = null)
     {
         Shape = shape;
         Presence = presence;
         Raw = raw;
         LexicalSource = lexical;
-        Source = source;
+        Source = src;
     }
 
     public static DataValue Missing(PortShape shape = PortShape.String)
@@ -87,6 +87,14 @@ public sealed class DataValue : IEquatable<DataValue>
 
     public static DataValue Collection(IReadOnlyList<DataValue> items)
         => new(PortShape.Record, ValuePresence.Present, items);
+
+    /// <summary>
+    /// Construct an opaque value with a caller-provided payload and shape. Used by
+    /// nodes that carry profile-specific structures such as period payloads.
+    /// </summary>
+    public static DataValue Opaque(PortShape shape, object payload,
+        XBRLMappingStudio.Diagnostics.SourceReference? src = null)
+        => new(shape, ValuePresence.Present, payload, src: src);
 
     public bool IsMissing => Presence == ValuePresence.Missing;
     public bool IsNil => Presence == ValuePresence.ExplicitNil;

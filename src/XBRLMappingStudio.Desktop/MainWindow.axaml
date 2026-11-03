@@ -1,0 +1,81 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:XBRLMappingStudio.Desktop.ViewModels"
+        xmlns:controls="using:XBRLMappingStudio.Desktop.Controls"
+        x:Class="XBRLMappingStudio.Desktop.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="1200" Height="720"
+        WindowStartupLocation="CenterScreen"
+        Title="{Binding Title}">
+  <Design.DataContext>
+    <vm:MainWindowViewModel />
+  </Design.DataContext>
+
+  <DockPanel>
+    <Menu DockPanel.Dock="Top">
+      <MenuItem Header="_File">
+        <MenuItem Header="_New" Command="{Binding NewProjectCommand}" />
+        <MenuItem Header="_Open..." Command="{Binding OpenProjectCommand}" />
+        <MenuItem Header="_Save" Command="{Binding SaveProjectCommand}" />
+        <Separator />
+        <MenuItem Header="_Exit" Command="{Binding ExitCommand}" />
+      </MenuItem>
+      <MenuItem Header="_Run">
+        <MenuItem Header="_Validate" Command="{Binding ValidateCommand}" />
+        <MenuItem Header="_Preview Sample" Command="{Binding PreviewCommand}" />
+        <MenuItem Header="E_xecute" Command="{Binding ExecuteCommand}" />
+      </MenuItem>
+    </Menu>
+
+    <Border Height="26" Background="#EFEFEF" DockPanel.Dock="Bottom" Padding="8,4">
+      <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
+    </Border>
+
+    <Grid ColumnDefinitions="260,*,320">
+      <Border Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Source" FontWeight="Bold" />
+          <ListBox ItemsSource="{Binding SourceColumns}" MaxHeight="240" />
+          <TextBlock Text="Taxonomy" FontWeight="Bold" Margin="0,10,0,0" />
+          <ListBox ItemsSource="{Binding ConceptIndex}" MaxHeight="240" />
+        </StackPanel>
+      </Border>
+
+      <Grid Grid.Column="1" RowDefinitions="*,220">
+        <controls:GraphCanvas x:Name="Canvas"
+                              Grid.Row="0"
+                              Nodes="{Binding Graph.Nodes}"
+                              Edges="{Binding Graph.Edges}" />
+        <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Text="Preview facts" FontWeight="Bold" />
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding PreviewFacts}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+      </Grid>
+
+      <Border Grid.Column="2" BorderBrush="#33000000" BorderThickness="1,0,0,0" Padding="8">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Properties" FontWeight="Bold" />
+          <TextBlock Text="{Binding SelectedNodeDisplayName}" />
+          <TextBlock Text="Diagnostics" FontWeight="Bold" Margin="0,10,0,0" />
+          <ItemsControl ItemsSource="{Binding Diagnostics}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </DockPanel>
+</Window>

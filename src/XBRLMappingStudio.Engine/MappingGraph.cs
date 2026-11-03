@@ -142,12 +142,14 @@ public sealed class FunctionCatalog
             NodeTypeConstants.ExcelField,
             "Excel Field",
             Array.Empty<PortDefinition>(),
-            new[] { new PortDefinition("value", PortShape.String, PortCardinality.Collection, true) },
+            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
             new Dictionary<string, ParameterRequirement>
             {
                 ["bindingId"] = new("bindingId", PortShape.Identifier, true, Description: "SourceBinding id"),
                 ["column"] = new("column", PortShape.String, true),
-                ["headerRow"] = new("headerRow", PortShape.Integer, false, "1")
+                ["headerRow"] = new("headerRow", PortShape.Integer, false, "1"),
+                ["rowFilterColumn"] = new("rowFilterColumn", PortShape.String, false, Description: "Optional: only accept rows where this column matches rowFilterValue."),
+                ["rowFilterValue"] = new("rowFilterValue", PortShape.String, false)
             }),
 
         new FunctionSignature(

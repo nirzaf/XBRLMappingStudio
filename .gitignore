@@ -1,0 +1,44 @@
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+!**/packages/build/
+
+# Test output
+[Tt]est[Rr]esult*/
+*.coverage.cobertura.xml
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# Python worker
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local workspace artifacts
+*.log
+*.tmp
+*.tmp.*
+*.xmap.lock
+*.xmap.bak

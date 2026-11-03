@@ -155,7 +155,7 @@ public sealed class ProjectManager
             // Atomic same-filesystem replace. On Linux, File.Replace uses rename(2).
             if (File.Exists(FullPath))
             {
-                File.Replace(tmpPath, FullPath, destinationBackupPath: null);
+                File.Replace(tmpPath, FullPath, destinationBackupFileName: null);
             }
             else
             {
@@ -178,7 +178,7 @@ public sealed class ProjectManager
             FullPath,
             currentSemanticRevision,
             currentLayoutGeneration,
-            semanticChanged: true,
+            SemanticChanged: true,
             SemanticDigest: newDigest);
     }
 

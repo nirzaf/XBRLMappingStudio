@@ -99,8 +99,18 @@ public static class SemanticRevisionCalculator
         null => "null",
         string s => s,
         bool b => b ? "1" : "0",
-        JsonElement je => je.GetRawText(),
+        JsonElement je => RenderJson(je),
         IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
         _ => value.ToString() ?? ""
+    };
+
+    private static string RenderJson(JsonElement je) => je.ValueKind switch
+    {
+        JsonValueKind.String => je.GetString() ?? "",
+        JsonValueKind.True => "1",
+        JsonValueKind.False => "0",
+        JsonValueKind.Null => "null",
+        JsonValueKind.Number => je.GetRawText(),
+        _ => je.GetRawText()
     };
 }

@@ -79,7 +79,7 @@ public sealed record MappingNode
     /// <summary>Layout position, excluded from semantic revision.</summary>
     public LayoutPosition? Layout { get; set; }
 
-    public MappingNode Clone() => this with
+    public MappingNode ShallowCopy() => this with
     {
         Parameters = new Dictionary<string, object?>(Parameters),
         InputPorts = InputPorts.ToList(),
@@ -190,7 +190,7 @@ public sealed class MappingProject
     /// <summary>Changes on every full-document save (including layout-only edits).</summary>
     public int LayoutGeneration { get; set; } = 1;
 
-    public ProjectMetadata Metadata { get; init; } = new()
+    public ProjectMetadata Metadata { get; set; } = new()
     {
         CreatedUtc = DateTimeOffset.UtcNow,
         LastModifiedUtc = DateTimeOffset.UtcNow

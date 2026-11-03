@@ -134,7 +134,8 @@ public sealed class DiagnosticBag
     public void Error(string code, string subsystem, string stage, string message,
         string? nodeId = null, string? portName = null, SourceReference? source = null,
         string? operationId = null,
-        IReadOnlyDictionary<string, string>? details = null)
+        IReadOnlyDictionary<string, string>? details = null,
+        string? edgeId = null)
         => _items.Add(new Diagnostic
         {
             Code = code,
@@ -145,6 +146,7 @@ public sealed class DiagnosticBag
             Message = message,
             NodeId = nodeId,
             PortName = portName,
+            EdgeId = edgeId,
             Source = source,
             OperationId = operationId,
             Details = details
