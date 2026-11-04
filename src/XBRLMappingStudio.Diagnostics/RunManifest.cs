@@ -31,7 +31,7 @@ public enum RunOutcome
 
 /// <summary>
 /// Structured identity of a run per BASE04. Records inputs, versions, and digests so
-/// that an outcome can be replayed or reconciled after a fault.
+/// that an outcome can be reconciled and, where supported, replayed after a fault.
 /// </summary>
 public sealed class RunManifest
 {
@@ -50,7 +50,7 @@ public sealed class RunManifest
     public IReadOnlyDictionary<string, string> FrozenParameters { get; init; }
         = new Dictionary<string, string>();
 
-    /// <summary>File hash (SHA-256) or DB snapshot identifier per source.</summary>
+    /// <summary>Source content fingerprint or immutable DB snapshot identifier per input.</summary>
     public IReadOnlyList<InputIdentity> Inputs { get; set; } = Array.Empty<InputIdentity>();
 
     /// <summary>Digest of each artifact produced.</summary>
@@ -91,11 +91,16 @@ public sealed class RunManifest
 
 public sealed record InputIdentity(
     string SourceId,
-    string Kind,        // "file", "db-query", "snapshot"
-    string? Digest,     // file hash or snapshot id; null when non-replayable
+    string Kind,        // "file", "sqlite-table", "sqlite-preview", "snapshot"
+    string? Digest,     // content fingerprint or immutable snapshot id; may exist without replay support
     bool IsReplayable,
     string? OriginalPath,
-    string? RowIdentityStrategy = null);
+    string? RowIdentityStrategy = null)
+{
+    /// <summary>Read consistency mechanism; distinct from content fingerprint and row identity.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SnapshotStrategy { get; init; }
+}
 
 public sealed record OutputIdentity(
     string Path,

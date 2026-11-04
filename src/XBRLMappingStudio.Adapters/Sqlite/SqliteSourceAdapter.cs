@@ -59,7 +59,11 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     {
         var table = GetTable(connection);
         await using var db = await OpenConnectionAsync(connection, cancellationToken);
-        var columns = (await ReadColumnsAsync(db, connection, table, cancellationToken))
+        // Keep schema verification and the complete row scan in one SQLite read
+        // transaction. In WAL mode, a writer may commit while this iterator is
+        // yielding, but this reader continues to observe the same database snapshot.
+        await using var transaction = db.BeginTransaction(deferred: true);
+        var columns = (await ReadColumnsAsync(db, connection, table, cancellationToken, transaction))
             .OrderBy(c => c.Ordinal)
             .ToArray();
         var actual = TabularSchema.FromSource(connection.SourceId, columns);
@@ -68,6 +72,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
                 $"SQLite table '{table}' changed after schema inspection; inspect and remap before reading.");
 
         await using var command = db.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = $"SELECT * FROM {Quote(table)}";
         await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken);
         if (reader.FieldCount != columns.Length
@@ -114,9 +119,11 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
         SqliteConnection db,
         SourceConnection connection,
         string table,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SqliteTransaction? transaction = null)
     {
         await using var command = db.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = $"PRAGMA table_info({Quote(table)})";
         var decimalOverrides = DecimalOverrides(connection);
         var columns = new List<ColumnSchema>();

@@ -106,6 +106,56 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task ReadFullKeepsOneWalSnapshotWhileConcurrentWriterCommits()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("snapshot.db");
+        await using (var setup = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await setup.OpenAsync();
+            await using var command = setup.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode=WAL;";
+            await command.ExecuteNonQueryAsync();
+            command.CommandText = "CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount TEXT); INSERT INTO ledger VALUES (1,'original-first'),(2,'original-second');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var connection = new SourceConnection("ledger-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "ledger" });
+        var adapter = new SqliteSourceAdapter();
+        var schema = await adapter.InspectSchemaAsync(connection, default);
+        await using var enumerator = adapter.ReadFullAsync(connection, schema, default).GetAsyncEnumerator();
+
+        Assert.True(await enumerator.MoveNextAsync());
+        Assert.Equal("original-first", enumerator.Current["amount"].AsString());
+
+        await using (var writer = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await writer.OpenAsync();
+            await using var transaction = writer.BeginTransaction();
+            await using var command = writer.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE ledger SET amount='changed-second' WHERE id=2; INSERT INTO ledger VALUES (3,'new-third');";
+            await command.ExecuteNonQueryAsync();
+            await transaction.CommitAsync();
+        }
+
+        var observed = new List<string> { enumerator.Current["amount"].AsString() };
+        while (await enumerator.MoveNextAsync())
+            observed.Add(enumerator.Current["amount"].AsString());
+        Assert.Equal(new[] { "original-first", "original-second" }, observed);
+
+        await using var verify = new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");
+        await verify.OpenAsync();
+        await using var verifyCommand = verify.CreateCommand();
+        verifyCommand.CommandText = "SELECT amount FROM ledger ORDER BY id";
+        await using var reader = await verifyCommand.ExecuteReaderAsync();
+        var current = new List<string>();
+        while (await reader.ReadAsync()) current.Add(reader.GetString(0));
+        Assert.Equal(new[] { "original-first", "changed-second", "new-third" }, current);
+    }
+
+    [Fact]
     public async Task SchemaFingerprintChangesWhenPrimaryKeyDefinitionChanges()
     {
         using var ws = new TempWorkspace();

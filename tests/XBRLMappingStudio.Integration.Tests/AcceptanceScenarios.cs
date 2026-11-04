@@ -169,9 +169,10 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
         var input = Assert.Single(result.Manifest.Inputs);
         Assert.Equal("sqlite-table", input.Kind);
-        Assert.True(input.IsReplayable);
+        Assert.False(input.IsReplayable);
         Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, input.RowIdentityStrategy);
         Assert.StartsWith("sha256:", input.Digest);
+        Assert.Equal("sqlite-read-transaction", input.SnapshotStrategy);
         Assert.Contains(result.Manifest.Diagnostics,
             diagnostic => diagnostic.Code == DiagnosticCodes.IoStableRowIdentityUnavailable
                 && diagnostic.Severity == DiagnosticSeverity.Warning);
@@ -209,12 +210,14 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
         var input = Assert.Single(result.Manifest.Inputs);
         Assert.Equal(SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy, input.RowIdentityStrategy);
+        Assert.False(input.IsReplayable);
+        Assert.Equal("sqlite-read-transaction", input.SnapshotStrategy);
         Assert.DoesNotContain(result.Manifest.Diagnostics,
             diagnostic => diagnostic.Code == DiagnosticCodes.IoStableRowIdentityUnavailable);
     }
 
     [Fact]
-    public async Task SqliteInputDigestIsOrderIndependentAndPreviewIsNotReplayable()
+    public async Task SqliteContentFingerprintIsOrderIndependentAndInputsAreNotReplayable()
     {
         async Task<(MappingProject Project, SourceConnection Connection, string Path)> CreateSource(string name, bool reverse)
         {
@@ -224,7 +227,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
             await using var command = db.CreateCommand();
             command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT);";
             await command.ExecuteNonQueryAsync();
-            var values = Enumerable.Range(0, 12);
+            var values = Enumerable.Range(0, 12).Append(5);
             if (reverse) values = values.Reverse();
             foreach (var i in values)
             {
@@ -257,9 +260,10 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(inputA.Digest, inputB.Digest);
         Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, inputA.RowIdentityStrategy);
         Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, inputB.RowIdentityStrategy);
-        Assert.Equal(Enumerable.Range(0, 12).Select(i => (decimal?)(i * 1000m)), fullA.Facts.Select(fact => fact.Value));
-        Assert.Equal(Enumerable.Range(0, 12).Reverse().Select(i => (decimal?)(i * 1000m)), fullB.Facts.Select(fact => fact.Value));
-        Assert.True(inputA.IsReplayable);
+        Assert.Equal(Enumerable.Range(0, 12).Append(5).Select(i => (decimal?)(i * 1000m)), fullA.Facts.Select(fact => fact.Value));
+        Assert.Equal(Enumerable.Range(0, 12).Append(5).Reverse().Select(i => (decimal?)(i * 1000m)), fullB.Facts.Select(fact => fact.Value));
+        Assert.False(inputA.IsReplayable);
+        Assert.Equal("sqlite-read-transaction", inputA.SnapshotStrategy);
         var preview = await Run(a, preview: true);
         var previewInput = Assert.Single(preview.Manifest.Inputs);
         Assert.Equal("sqlite-preview", previewInput.Kind);

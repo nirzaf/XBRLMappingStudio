@@ -197,8 +197,9 @@ public sealed class MappingJobService
                     {
                         Kind = preview ? "sqlite-preview" : "sqlite-table",
                         Digest = digest,
-                        IsReplayable = !preview,
-                        RowIdentityStrategy = identityStrategy
+                        IsReplayable = false,
+                        RowIdentityStrategy = identityStrategy,
+                        SnapshotStrategy = "sqlite-read-transaction"
                     }
                     : input).ToArray();
             }
