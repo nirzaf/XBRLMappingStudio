@@ -14,7 +14,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("source.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -49,7 +49,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("tables.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -65,7 +65,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("source.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -96,7 +96,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("target.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -122,7 +122,7 @@ public sealed class SqliteSourceAdapterTests
             new[] { Record("007", 123.4500m) }, new[] { "account" }, "op-1", "sha256:intent-changed-only"));
         Assert.Equal(DiagnosticCodes.PubReceiptConflict, changedIntentOnly.Code);
 
-        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
         await read.OpenAsync();
         await using var query = read.CreateCommand();
         query.CommandText = "SELECT amount FROM report WHERE account=$account";
@@ -164,7 +164,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("keys.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -177,7 +177,7 @@ public sealed class SqliteSourceAdapterTests
             new[] { Record("007", 1m) }, new[] { "account" }, "partial", "intent"));
         Assert.Equal(DiagnosticCodes.IoSchemaMismatch, partial.Code);
 
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -201,7 +201,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("numeric.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -219,7 +219,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("composite.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -242,7 +242,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("index-shapes.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -255,7 +255,7 @@ public sealed class SqliteSourceAdapterTests
             new[] { Record("a1", 1m) }, new[] { "account" }, "expression", "intent"));
         Assert.Equal(DiagnosticCodes.IoSchemaMismatch, expression.Code);
 
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -272,7 +272,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("shape.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -292,7 +292,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("rollback.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -304,7 +304,7 @@ public sealed class SqliteSourceAdapterTests
         await Assert.ThrowsAsync<SqliteException>(() => new SqliteTargetPublisher().PublishAsync(destination,
             new[] { Record("good", 1m), Record("bad", 2m) }, new[] { "account" }, "op-rollback", "sha256:intent"));
 
-        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
         await read.OpenAsync();
         await using var check = read.CreateCommand();
         check.CommandText = "SELECT COUNT(*) FROM report";
@@ -318,7 +318,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("non-unique.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
