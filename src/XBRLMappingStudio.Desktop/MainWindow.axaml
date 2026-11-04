@@ -60,6 +60,10 @@
           <TextBlock DockPanel.Dock="Top" Text="Source" FontWeight="Bold" />
           <Button DockPanel.Dock="Top" Content="Choose source file…" Command="{Binding ChooseSourceCommand}"
                   AutomationProperties.Name="Choose source file" />
+          <ComboBox DockPanel.Dock="Top" ItemsSource="{Binding SourceTables}"
+                    SelectedItem="{Binding SelectedSourceTable}"
+                    IsVisible="{Binding HasSourceTables}"
+                    AutomationProperties.Name="SQLite table" />
           <ListBox DockPanel.Dock="Top" ItemsSource="{Binding SourceColumns}"
                    SelectedItem="{Binding SelectedSourceColumn}"
                    MaxHeight="180"

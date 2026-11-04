@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.Application;
@@ -139,31 +140,79 @@ public sealed class DestinationLock : IDisposable
 }
 
 /// <summary>
-/// Persistent per-run journal at <c>~/.xbrlmappingstudio/journal/&lt;runId&gt;.json</c>
-/// (OPS02). Every publication phase is recorded before it happens; a host restart lost
-/// mid-replace leaves an unfinalized entry that <see cref="RecoverUnfinalized"/> can
-/// adjudicate against the on-disk destination digest before any retry is attempted.
+/// SQLite-backed per-run journal (OPS02). A supplied <c>rootOverride</c> selects the
+/// legacy JSON journal for compatibility and isolated tests. Every publication phase is
+/// recorded before it happens; a host restart lost mid-replace leaves an unfinalized
+/// entry that <see cref="RecoverUnfinalized"/> adjudicates before retry.
 /// </summary>
 public sealed class RunJournal
 {
-    public string Root { get; }
+    private readonly string? _legacyRoot;
+    private readonly LocalApplicationDatabase? _database;
+    public string Root => _database?.Path ?? _legacyRoot!;
 
-    public RunJournal(string? rootOverride = null)
-        => Root = rootOverride
-           ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".xbrlmappingstudio", "journal");
+    public RunJournal(string? rootOverride = null, string? databasePath = null)
+    {
+        if (rootOverride is not null)
+        {
+            _legacyRoot = rootOverride;
+            return;
+        }
+        _database = new LocalApplicationDatabase(databasePath);
+        if (databasePath is null) ImportLegacyJournal();
+    }
 
-    private string EntryPath(string runId) => Path.Combine(Root, runId + ".json");
+    private string EntryPath(string runId) => Path.Combine(_legacyRoot!, runId + ".json");
 
     public JournalEntry? Load(string runId)
-        => File.Exists(EntryPath(runId))
-            ? JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(EntryPath(runId)))
-            : null;
+    {
+        if (_database is null)
+            return File.Exists(EntryPath(runId)) ? JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(EntryPath(runId))) : null;
+        using var connection = _database.OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc FROM run_journal WHERE run_id=$id";
+        command.Parameters.AddWithValue("$id", runId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadEntry(reader) : null;
+    }
 
     public void Save(JournalEntry entry)
     {
-        Directory.CreateDirectory(Root);
+        if (_database is not null)
+        {
+            using var connection = _database.OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO run_journal(run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc)
+                VALUES($id,$destination,$state,$staged,$final,$lock,$updated)
+                ON CONFLICT(run_id) DO UPDATE SET destination_path=excluded.destination_path,state=excluded.state,
+                    staged_digest=excluded.staged_digest,final_digest=excluded.final_digest,
+                    lock_token=excluded.lock_token,updated_utc=excluded.updated_utc;
+                """;
+            Bind(command, entry);
+            command.ExecuteNonQuery();
+            using var receipt = connection.CreateCommand();
+            receipt.Transaction = transaction;
+            if (entry.State == JournalState.Finalized && entry.FinalDigest is not null)
+            {
+                receipt.CommandText = "INSERT INTO publication_receipts(run_id,final_digest,completed_utc) VALUES($id,$digest,$updated) ON CONFLICT(run_id) DO UPDATE SET final_digest=excluded.final_digest,completed_utc=excluded.completed_utc";
+                receipt.Parameters.AddWithValue("$id", entry.RunId);
+                receipt.Parameters.AddWithValue("$digest", entry.FinalDigest);
+                receipt.Parameters.AddWithValue("$updated", entry.UpdatedUtc.ToString("O"));
+                receipt.ExecuteNonQuery();
+            }
+            else
+            {
+                receipt.CommandText = "DELETE FROM publication_receipts WHERE run_id=$id";
+                receipt.Parameters.AddWithValue("$id", entry.RunId);
+                receipt.ExecuteNonQuery();
+            }
+            transaction.Commit();
+            return;
+        }
+        Directory.CreateDirectory(_legacyRoot!);
         // Write-then-rename keeps the journal itself crash-safe.
         var tmp = EntryPath(entry.RunId) + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(entry,
@@ -173,12 +222,68 @@ public sealed class RunJournal
 
     public IReadOnlyList<JournalEntry> AllEntries()
     {
-        if (!Directory.Exists(Root)) return Array.Empty<JournalEntry>();
-        return Directory.EnumerateFiles(Root, "*.json")
+        if (_database is not null)
+        {
+            using var connection = _database.OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc FROM run_journal ORDER BY run_id";
+            using var reader = command.ExecuteReader();
+            var entries = new List<JournalEntry>();
+            while (reader.Read()) entries.Add(ReadEntry(reader));
+            return entries;
+        }
+        if (!Directory.Exists(_legacyRoot)) return Array.Empty<JournalEntry>();
+        return Directory.EnumerateFiles(_legacyRoot!, "*.json")
             .OrderBy(p => p, StringComparer.Ordinal)
             .Select(p => JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(p)))
             .OfType<JournalEntry>()
             .ToList();
+    }
+
+    private void ImportLegacyJournal()
+    {
+        using (var connection = _database!.OpenConnection())
+        using (var check = connection.CreateCommand())
+        {
+            check.CommandText = "SELECT value FROM app_settings WHERE key='legacy_json_journal_imported'";
+            if (check.ExecuteScalar() is string) return;
+        }
+        var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".xbrlmappingstudio", "journal");
+        if (!Directory.Exists(legacy)) return;
+        var complete = true;
+        foreach (var file in Directory.EnumerateFiles(legacy, "*.json").OrderBy(x => x, StringComparer.Ordinal))
+        {
+            try
+            {
+                var entry = JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(file));
+                if (entry is not null && Load(entry.RunId) is null) Save(entry);
+            }
+            catch (Exception ex) when (ex is IOException or JsonException or SqliteException) { complete = false; }
+        }
+        if (complete)
+        {
+            using var connection = _database.OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO app_settings(key,value,updated_utc) VALUES('legacy_json_journal_imported','1',$time) ON CONFLICT(key) DO NOTHING";
+            command.Parameters.AddWithValue("$time", DateTimeOffset.UtcNow.ToString("O"));
+            command.ExecuteNonQuery();
+        }
+    }
+
+    private static JournalEntry ReadEntry(SqliteDataReader reader) => new(
+        reader.GetString(0), reader.GetString(1), (JournalState)reader.GetInt32(2),
+        reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4),
+        reader.IsDBNull(5) ? null : reader.GetString(5), DateTimeOffset.Parse(reader.GetString(6), System.Globalization.CultureInfo.InvariantCulture));
+
+    private static void Bind(SqliteCommand command, JournalEntry entry)
+    {
+        command.Parameters.AddWithValue("$id", entry.RunId);
+        command.Parameters.AddWithValue("$destination", entry.DestinationPath);
+        command.Parameters.AddWithValue("$state", (int)entry.State);
+        command.Parameters.AddWithValue("$staged", (object?)entry.StagedDigest ?? DBNull.Value);
+        command.Parameters.AddWithValue("$final", (object?)entry.FinalDigest ?? DBNull.Value);
+        command.Parameters.AddWithValue("$lock", (object?)entry.LockToken ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updated", entry.UpdatedUtc.ToString("O"));
     }
 
     /// <summary>

@@ -8,6 +8,7 @@ using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -129,12 +130,18 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _selectedSourceBindingId;
     private int? _expectedLayoutGeneration;
     private string? _selectedSourceColumn;
+    private string? _selectedSourceTable;
+    private string? _sqliteSourcePath;
+    private int _sourceLoadGeneration;
+    private bool _isSourceLoading;
+    private Task _sqliteTableLoadTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _selectedFactUnit = "USD";
     private string _selectedFactPeriodType = "duration";
     private string _selectedFactDecimals = "0";
     private readonly IProjectFileDialog? _fileDialog;
+    private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
 
     private readonly FilingProfile _profile;
     private readonly TaxonomyIndex _taxonomy;
@@ -142,11 +149,47 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public string Title { get => _title; set => Set(ref _title, value); }
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
-    public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (Set(ref _isBusy, value))
+            {
+                PreviewCommand?.NotifyCanExecuteChanged();
+                ExecuteCommand?.NotifyCanExecuteChanged();
+            }
+        }
+    }
+    public bool IsSourceLoading
+    {
+        get => _isSourceLoading;
+        private set
+        {
+            if (Set(ref _isSourceLoading, value))
+            {
+                PreviewCommand?.NotifyCanExecuteChanged();
+                ExecuteCommand?.NotifyCanExecuteChanged();
+            }
+        }
+    }
     public bool AllowSyntheticProfile { get => _allowSyntheticProfile; set => Set(ref _allowSyntheticProfile, value); }
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
     public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
+    public string? SelectedSourceTable
+    {
+        get => _selectedSourceTable;
+        set
+        {
+            if (Set(ref _selectedSourceTable, value) && value is not null && _sqliteSourcePath is not null)
+            {
+                var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+                IsSourceLoading = true;
+                _sqliteTableLoadTask = LoadSqliteTableAsync(value, generation);
+            }
+        }
+    }
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
     public SuggestionRow? SelectedSuggestion { get => _selectedSuggestion; set => Set(ref _selectedSuggestion, value); }
     public string SelectedFactUnit { get => _selectedFactUnit; set => Set(ref _selectedFactUnit, value); }
@@ -186,6 +229,8 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public List<ConceptRow> ConceptResults { get; } = new();
     public List<string> SourceColumns { get; } = new();
+    public List<string> SourceTables { get; } = new();
+    public bool HasSourceTables => SourceTables.Count > 0;
     public List<SuggestionRow> AiSuggestions { get; } = new();
     public List<DiagnosticRow> Diagnostics { get; } = new();
     public List<FactRow> PreviewFacts { get; } = new();
@@ -223,8 +268,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     public MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog)
+        : this(project, fileDialog, new SqliteSourceAdapter().InspectSchemaAsync)
+    {
+    }
+
+    internal MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog,
+        Func<SourceConnection, CancellationToken, Task<ISourceSchema>> sqliteSchemaLoader)
     {
         _fileDialog = fileDialog;
+        _sqliteSchemaLoader = sqliteSchemaLoader;
         _profile = SyntheticProfile.Build();
         _taxonomy = new TaxonomyIndex(_profile);
         _session = new DesignerSession(project);
@@ -240,8 +292,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                 d.MainWindow?.Close();
         });
         ValidateCommand = new RelayCommand(_ => Validate());
-        PreviewCommand = new RelayCommand(async _ => await PreviewAsync());
-        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync());
+        PreviewCommand = new RelayCommand(async _ => await PreviewAsync(), _ => !IsBusy && !IsSourceLoading);
+        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(), _ => !IsBusy && !IsSourceLoading);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
         UndoCommand = new RelayCommand(_ => { if (Session.CanUndo) { Session.Undo(); RefreshUndoState(); } });
         RedoCommand = new RelayCommand(_ => { if (Session.CanRedo) { Session.Redo(); RefreshUndoState(); } });
@@ -321,6 +373,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     public async Task LoadSourceAsync(string path)
     {
         if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
+        var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+        IsSourceLoading = true;
+        var sqliteTableLoadPending = false;
         try
         {
             var root = WorkspaceRoot();
@@ -333,13 +388,46 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ".csv" => "csv",
                 ".json" => safePath.EndsWith(".xbrl.json", StringComparison.OrdinalIgnoreCase) ? "xbrl-report" : "json",
                 ".xml" => "xml",
+                ".db" or ".sqlite" or ".sqlite3" => "sqlite",
                 _ => throw new InvalidOperationException("The selected file type is not supported.")
             };
             binding = binding with { Kind = kind, Locator = safePath, SchemaFingerprint = null };
+            _sqliteSourcePath = kind == "sqlite" ? safePath : null;
+            SourceTables.Clear();
+            SourceColumns.Clear();
+            _selectedSourceTable = null;
+            Raise(nameof(SelectedSourceTable));
+            Raise(nameof(SourceColumns));
+            Raise(nameof(SourceTables));
+            Raise(nameof(HasSourceTables));
+            var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
             var connection = new SourceConnection(binding.BindingId, kind, safePath,
-                binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal));
+                config);
+            if (kind == "sqlite")
+            {
+                SelectedSourceBindingId = binding.BindingId;
+                var sqlite = new SqliteSourceAdapter();
+                var tables = await sqlite.DiscoverTablesAsync(connection, CancellationToken.None);
+                if (generation != _sourceLoadGeneration) return;
+                SourceTables.AddRange(tables);
+                Raise(nameof(SourceTables));
+                Raise(nameof(HasSourceTables));
+                if (SourceTables.Count == 0) throw new InvalidOperationException("The SQLite database has no user tables.");
+                SelectedSourceTable = config.TryGetValue("table", out var configured) && SourceTables.Contains(configured)
+                    ? configured : SourceTables.Count == 1 ? SourceTables[0] : null;
+                if (SelectedSourceTable is null)
+                {
+                    Session.SetBinding(binding with { SchemaFingerprint = null });
+                    StatusText = "Choose a SQLite table to inspect its columns.";
+                    return;
+                }
+                sqliteTableLoadPending = true;
+                await _sqliteTableLoadTask;
+                return;
+            }
             var adapter = BuildSourceAdapter(connection);
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            if (generation != _sourceLoadGeneration) return;
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });
@@ -348,6 +436,40 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
         }
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
+        finally
+        {
+            if (!sqliteTableLoadPending && generation == _sourceLoadGeneration) IsSourceLoading = false;
+        }
+    }
+
+    private async Task LoadSqliteTableAsync(string table, int generation)
+    {
+        try
+        {
+            if (_sqliteSourcePath is null) return;
+            var binding = Session.Project.Bindings.FirstOrDefault(b => b.BindingId == SelectedSourceBindingId)
+                ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
+            if (binding is null) return;
+            var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
+            config["table"] = table;
+            var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
+            var schema = await _sqliteSchemaLoader(connection, CancellationToken.None);
+            if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
+            SourceColumns.Clear();
+            SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
+            binding = binding with { Kind = "sqlite", Locator = _sqliteSourcePath,
+                Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
+                SchemaFingerprint = schema.Fingerprint };
+            Session.SetBinding(binding);
+            SelectedSourceBindingId = binding.BindingId;
+            Raise(nameof(SourceColumns));
+            StatusText = $"Loaded {schema.Columns.Count} fields from {table}.";
+        }
+        catch (Exception ex) { StatusText = $"SQLite table load failed: {ex.Message}"; }
+        finally
+        {
+            if (generation == _sourceLoadGeneration) IsSourceLoading = false;
+        }
     }
 
     private void BindSelectedSourceColumn()
@@ -554,14 +676,22 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ClearSourceAndRunResults()
     {
+        Interlocked.Increment(ref _sourceLoadGeneration);
+        IsSourceLoading = false;
+        _sqliteSourcePath = null;
+        _selectedSourceTable = null;
         SelectedSourceBindingId = null;
         SelectedSourceColumn = null;
         SelectedSuggestion = null;
         SourceColumns.Clear();
+        SourceTables.Clear();
         AiSuggestions.Clear();
         PreviewFacts.Clear();
         Diagnostics.Clear();
         Raise(nameof(SourceColumns));
+        Raise(nameof(SourceTables));
+        Raise(nameof(HasSourceTables));
+        Raise(nameof(SelectedSourceTable));
         Raise(nameof(AiSuggestions));
         Raise(nameof(PreviewFacts));
         Raise(nameof(Diagnostics));
@@ -607,6 +737,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task PreviewAsync()
     {
+        if (IsSourceLoading) { StatusText = "Wait for source loading to finish before previewing."; return; }
         if (IsBusy) return;
         IsBusy = true;
         StatusText = "Running bounded preview…";
@@ -632,6 +763,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task ExecuteAsync()
     {
+        if (IsSourceLoading) { StatusText = "Wait for source loading to finish before executing."; return; }
         if (IsBusy) return;
         var gate = PublicationGate.Evaluate(Session.Project, _profile, AllowSyntheticProfile);
         if (gate.HasBlockingErrors)
@@ -664,7 +796,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 StatusText = $"Execution finished: {result.Manifest.Outcome}. No artifact was published.";
                 return;
             }
-            var receipt = new PublicationService(new RunJournal(root)).PublishAuthorized(
+            var receipt = new PublicationService(new RunJournal()).PublishAuthorized(
                 outputPath, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), root,
                 Session.Project, _profile, AllowSyntheticProfile, result);
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";
@@ -887,12 +1019,13 @@ public sealed class MainWindowViewModel : ViewModelBase
 public sealed class RelayCommand : System.Windows.Input.ICommand
 {
     private readonly Action<object?> _execute;
-    public RelayCommand(Action<object?> execute) => _execute = execute;
+    private readonly Predicate<object?>? _canExecute;
+    public RelayCommand(Action<object?> execute, Predicate<object?>? canExecute = null)
+        => (_execute, _canExecute) = (execute, canExecute);
 
-#pragma warning disable CS0067
     public event EventHandler? CanExecuteChanged;
-#pragma warning restore CS0067
 
-    public bool CanExecute(object? parameter) => true;
+    public bool CanExecute(object? parameter) => _canExecute?.Invoke(parameter) ?? true;
     public void Execute(object? parameter) => _execute(parameter);
+    public void NotifyCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

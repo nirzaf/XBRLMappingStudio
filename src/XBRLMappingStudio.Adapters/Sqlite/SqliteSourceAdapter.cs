@@ -15,6 +15,17 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     public string Kind => "sqlite";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
 
+    public async Task<IReadOnlyList<string>> DiscoverTablesAsync(SourceConnection connection, CancellationToken cancellationToken)
+    {
+        await using var db = await OpenConnectionAsync(connection, cancellationToken);
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7) <> 'sqlite_' ORDER BY name";
+        var tables = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) tables.Add(reader.GetString(0));
+        return tables;
+    }
+
     public async Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
         var table = GetTable(connection);
@@ -99,6 +110,9 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     }
 
     private static string GetTable(SourceConnection connection)
+        => GetConfiguredTable(connection);
+
+    internal static string GetConfiguredTable(SourceConnection connection)
     {
         if (connection.Configuration is null
             || !connection.Configuration.TryGetValue("table", out var table)

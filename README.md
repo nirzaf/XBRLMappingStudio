@@ -47,6 +47,8 @@ Core capabilities implemented here:
 - **Report re-import** — an XBRL instance can be read back as records and remapped.
 - **Adapters** — Excel (read/write), CSV, JSON, XML, and XBRL report input, each behind a
   capability-gated, direction-checked interface.
+- **SQLite input** — table discovery, schema inspection, bounded preview, and shared-engine
+  execution. Transactional upsert exists as an adapter API but is not a general publishing flow.
 - **AI-assisted mapping (offline-safe)** — deterministic local retrieval proposes concept
   candidates; an analyst accepts/edits/rejects them in a draft before anything becomes
   executable. Under the `Offline` data policy the service is structurally incapable of any
@@ -298,11 +300,15 @@ following IDs have implementation code and repository tests; qualification limit
 |---|---|
 | Foundation | `BASE02`–`BASE04`, `BASE01` (synthetic column) |
 | Mapping engine | `MAP01`–`MAP08` |
-| Adapters | `IO01`–`IO06` |
+| Adapters | `IO01`–`IO06`, `IO07`–`IO08` (SQLite source and target, partial) |
 | XBRL | `XBR01`–`XBR08` (synthetic profile; Arelle `validate-artifact` path) |
 | Desktop | `UI01` (development build), `UI02` (canvas prototype), `UI03`–`UI04`, `UI06` (headless workflow tests) |
 | AI baseline | `AI01`–`AI04`, `AI06` (offline baseline); `AI05` (single-suggestion apply/undo path) |
-| Operations | `OPS01`–`OPS04`, `OPS08` (partial) |
+| Operations | `OPS01`–`OPS05`, `OPS08` (`OPS05` partial) |
+
+SQLite source discovery/read and transactional target upsert have repository tests.
+The target publisher remains a callable adapter rather than an end-to-end desktop/CLI
+workflow, and mixed-destination receipt reconciliation remains incomplete (`IO07`–`IO08`, `OPS05`).
 
 Per-ID evidence lives in [`docs/decisions/BASE01-decision-record.md`](./docs/decisions/BASE01-decision-record.md).
 Items marked "synthetic" (e.g. the XBRL filing profile) are honestly scoped to the offline
@@ -323,13 +329,16 @@ not silently re-scoped. See [`docs/decisions/OPEN.md`](./docs/decisions/OPEN.md)
 
 - First filing **jurisdiction**, target **production taxonomy**, **model provider**, and
   **data-residency** agreement (`BASE01`).
-- Production database family (`IO07`–`IO09`) and PDF/OCR ingestion (`IO10`–`IO12`).
+- Production database family qualification (`IO07`–`IO09`) and PDF/OCR ingestion (`IO10`–`IO12`).
 - Real regulator profile + taxonomy upgrade simulation (`XBR09`).
 - Model-provider qualification and rollout (`AI07`–`AI08`).
 - Keyboard/screen-reader qualification (`UI05`), signed Windows installer (`UI07`) and
   real Windows performance benchmarks (`PERF01`–`PERF07`).
-- Signed release bundles and upgrade/backup/rollback (`OPS06`–`OPS07`), DB receipt lookup
-  (`OPS05`), and regulator-mandated extensions (`EXT01`–`EXT04`).
+- Signed release bundles and upgrade/backup/rollback (`OPS06`–`OPS07`), and
+  regulator-mandated extensions (`EXT01`–`EXT04`).
+
+See [`docs/sqlite-state.md`](docs/sqlite-state.md) for SQLite behavior and limits, and
+[`docs/implementation-status.md`](docs/implementation-status.md) for the guide-ID status matrix.
 
 ---
 

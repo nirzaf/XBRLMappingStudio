@@ -1,6 +1,7 @@
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
+using Microsoft.Data.Sqlite;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -41,6 +42,18 @@ public sealed class DesignerSessionTests
             TargetPortName = "in"
         });
         return p;
+    }
+
+    private static MappingProject ProjectWithSource()
+    {
+        var project = Project();
+        project.Bindings.Add(new SourceBinding
+        {
+            BindingId = "source",
+            Kind = "csv",
+            DisplayName = "Source"
+        });
+        return project;
     }
 
     [Fact]
@@ -273,7 +286,136 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StaleSqliteSchemaLoadCannotReplaceNewerSourceSelection()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-race", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "wide.sqlite");
+        var csv = System.IO.Path.Combine(dir, "current.csv");
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE wide (value TEXT);";
+            await command.ExecuteNonQueryAsync();
+        }
+        File.WriteAllText(csv, "currentField\nvalue\n");
+        var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSchema = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
+                XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
+            {
+                schemaEntered.TrySetResult();
+                await releaseSchema.Task.WaitAsync(cancellationToken);
+                return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
+                    .InspectSchemaAsync(connection, cancellationToken);
+            }
+            var viewModel = new MainWindowViewModel(ProjectWithSource(), null, LoadSchemaAsync);
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            var executeDisabledDuringLoad = false;
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(viewModel.IsSourceLoading) && viewModel.IsSourceLoading)
+                    executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
+            };
+            var staleLoad = viewModel.LoadSourceAsync(database);
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(staleLoad.IsCompleted);
+            await viewModel.LoadSourceAsync(csv);
+            releaseSchema.TrySetResult();
+            await staleLoad;
+            Assert.Contains("currentField", viewModel.SourceColumns);
+            Assert.DoesNotContain("value", viewModel.SourceColumns);
+            Assert.Equal("csv", viewModel.Session.Project.Bindings[0].Kind);
+            Assert.True(executeDisabledDuringLoad);
+            Assert.False(viewModel.IsSourceLoading);
+        }
+        finally
+        {
+            releaseSchema.TrySetResult();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SourceCannotBeLoadedBeforeProjectHasWorkspace()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-unsaved", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        File.WriteAllText(csv, "value\n1\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel(ProjectWithSource());
+            await viewModel.LoadSourceAsync(csv);
+
+            Assert.Equal("Save the project inside its workspace before adding a source.", viewModel.StatusText);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.Empty(viewModel.SourceColumns);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public async Task OpeningProjectInvalidatesPendingSourceSchemaLoad()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-open-race", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "wide.sqlite");
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE wide (value TEXT);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSchema = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
+                XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
+            {
+                schemaEntered.TrySetResult();
+                await releaseSchema.Task.WaitAsync(cancellationToken);
+                return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
+                    .InspectSchemaAsync(connection, cancellationToken);
+            }
+            var viewModel = new MainWindowViewModel(ProjectWithSource(), null, LoadSchemaAsync);
+            viewModel.SaveProjectTo(projectPath);
+            var originalKind = viewModel.Session.Project.Bindings[0].Kind;
+            var executeDisabledDuringLoad = false;
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(viewModel.IsSourceLoading) && viewModel.IsSourceLoading)
+                    executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
+            };
+            var staleLoad = viewModel.LoadSourceAsync(database);
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(staleLoad.IsCompleted);
+            viewModel.LoadProject(projectPath);
+            releaseSchema.TrySetResult();
+            await staleLoad;
+            Assert.Empty(viewModel.SourceTables);
+            Assert.Empty(viewModel.SourceColumns);
+            Assert.DoesNotContain("value", viewModel.SourceColumns);
+            Assert.Equal(originalKind, viewModel.Session.Project.Bindings[0].Kind);
+            Assert.Null(viewModel.Session.Project.Bindings[0].SchemaFingerprint);
+            Assert.True(executeDisabledDuringLoad);
+            Assert.False(viewModel.IsSourceLoading);
+        }
+        finally
+        {
+            releaseSchema.TrySetResult();
+            Directory.Delete(dir, recursive: true);
         }
     }
 }

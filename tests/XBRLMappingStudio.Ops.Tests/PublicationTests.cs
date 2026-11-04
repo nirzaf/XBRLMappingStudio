@@ -147,10 +147,10 @@ public class PublicationTests : IDisposable
     }
 
     [Fact]
-    public void Journal_RootDefaultsUnderUserProfile_WhenNotOverridden()
+    public void Journal_DefaultsToVersionedLocalApplicationDatabase()
     {
         var journal = new RunJournal();
-        Assert.Contains(".xbrlmappingstudio", journal.Root.Replace('\\', '/'));
-        Assert.EndsWith("journal", journal.Root.Replace('\\', '/'));
+        Assert.Contains("XBRLMappingStudio", journal.Root.Replace('\\', '/'));
+        Assert.EndsWith("state.db", journal.Root.Replace('\\', '/'));
     }
 }

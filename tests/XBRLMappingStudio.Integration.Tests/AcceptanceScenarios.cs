@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Application;
@@ -131,6 +132,95 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.All(manifest.Inputs, i => Assert.NotNull(i.Digest));
         Assert.NotEmpty(manifest.Outputs);
         Assert.All(manifest.Outputs, o => Assert.StartsWith("sha256:", o.Digest, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SharedExecutionServiceReadsConfiguredSqliteSource()
+    {
+        var database = Path.Combine(_dir, "financials.db");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT); INSERT INTO financials VALUES ('Revenue','1250','1100');";
+            await command.ExecuteNonQueryAsync();
+        }
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var original = project.Bindings[0];
+        project.Bindings[0] = original with
+        {
+            Kind = "sqlite",
+            Locator = database,
+            Configuration = new Dictionary<string, object?>
+            {
+                ["table"] = "financials", ["decimalColumns"] = "Current,Prior"
+            }
+        };
+        var connection = new SourceConnection(original.BindingId, "sqlite", database,
+            new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" });
+
+        var result = await NewService().RunAsync(project,
+            new Dictionary<string, SourceConnection> { [original.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
+        var input = Assert.Single(result.Manifest.Inputs);
+        Assert.Equal("sqlite-table", input.Kind);
+        Assert.True(input.IsReplayable);
+        Assert.StartsWith("sha256:", input.Digest);
+    }
+
+    [Fact]
+    public async Task SqliteInputDigestIsOrderIndependentAndPreviewIsNotReplayable()
+    {
+        async Task<(MappingProject Project, SourceConnection Connection, string Path)> CreateSource(string name, bool reverse)
+        {
+            var path = Path.Combine(_dir, name);
+            await using var db = new SqliteConnection($"Data Source={path}");
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT);";
+            await command.ExecuteNonQueryAsync();
+            var values = Enumerable.Range(0, 12);
+            if (reverse) values = values.Reverse();
+            foreach (var i in values)
+            {
+                command.CommandText = "INSERT INTO financials VALUES($line,$current,$prior)";
+                command.Parameters.Clear();
+                command.Parameters.AddWithValue("$line", "Revenue");
+                command.Parameters.AddWithValue("$current", i.ToString());
+                command.Parameters.AddWithValue("$prior", (i + 1).ToString());
+                await command.ExecuteNonQueryAsync();
+            }
+            var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+            var binding = project.Bindings[0];
+            project.Bindings[0] = binding with { Kind = "sqlite", Locator = path, Configuration = new Dictionary<string, object?> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" } };
+            return (project, new SourceConnection(binding.BindingId, "sqlite", path, new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" }), path);
+        }
+
+        var a = await CreateSource("a.db", reverse: false);
+        var b = await CreateSource("b.db", reverse: true);
+        var service = NewService();
+        async Task<JobResult> Run((MappingProject Project, SourceConnection Connection, string Path) source, bool preview)
+        {
+            return await service.RunAsync(source.Project,
+                new Dictionary<string, SourceConnection> { [source.Connection.SourceId] = source.Connection },
+                new Dictionary<string, string>(), preview, CancellationToken.None);
+        }
+        var fullA = await Run(a, preview: false);
+        var fullB = await Run(b, preview: false);
+        var inputA = Assert.Single(fullA.Manifest.Inputs);
+        var inputB = Assert.Single(fullB.Manifest.Inputs);
+        Assert.Equal(inputA.Digest, inputB.Digest);
+        Assert.Equal(Enumerable.Range(0, 12).Select(i => (decimal?)(i * 1000m)), fullA.Facts.Select(fact => fact.Value));
+        Assert.Equal(Enumerable.Range(0, 12).Reverse().Select(i => (decimal?)(i * 1000m)), fullB.Facts.Select(fact => fact.Value));
+        Assert.True(inputA.IsReplayable);
+        var preview = await Run(a, preview: true);
+        var previewInput = Assert.Single(preview.Manifest.Inputs);
+        Assert.Equal("sqlite-preview", previewInput.Kind);
+        Assert.False(previewInput.IsReplayable);
+        Assert.NotEqual(inputA.Digest, previewInput.Digest);
     }
 
     [Fact]
