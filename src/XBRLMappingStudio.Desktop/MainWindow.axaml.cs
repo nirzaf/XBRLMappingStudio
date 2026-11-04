@@ -49,7 +49,7 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
     };
     private static readonly FilePickerFileType SourceType = new("Supported source files")
     {
-        Patterns = new[] { "*.xlsx", "*.csv", "*.json", "*.xml" }
+        Patterns = new[] { "*.xlsx", "*.csv", "*.json", "*.xml", "*.db", "*.sqlite", "*.sqlite3" }
     };
 
     public async Task<string?> OpenProjectAsync()

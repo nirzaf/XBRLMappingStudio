@@ -47,6 +47,8 @@ Core capabilities implemented here:
 - **Report re-import** — an XBRL instance can be read back as records and remapped.
 - **Adapters** — Excel (read/write), CSV, JSON, XML, and XBRL report input, each behind a
   capability-gated, direction-checked interface.
+- **SQLite input** — table discovery, schema inspection, bounded preview, and shared-engine
+  execution. Transactional upsert exists as an adapter API but is not a general publishing flow.
 - **AI-assisted mapping (offline-safe)** — deterministic local retrieval proposes concept
   candidates; an analyst accepts/edits/rejects them in a draft before anything becomes
   executable. Under the `Offline` data policy the service is structurally incapable of any
@@ -323,13 +325,16 @@ not silently re-scoped. See [`docs/decisions/OPEN.md`](./docs/decisions/OPEN.md)
 
 - First filing **jurisdiction**, target **production taxonomy**, **model provider**, and
   **data-residency** agreement (`BASE01`).
-- Production database family (`IO07`–`IO09`) and PDF/OCR ingestion (`IO10`–`IO12`).
+- Production database family qualification (`IO07`–`IO09`) and PDF/OCR ingestion (`IO10`–`IO12`).
 - Real regulator profile + taxonomy upgrade simulation (`XBR09`).
 - Model-provider qualification and rollout (`AI07`–`AI08`).
 - Keyboard/screen-reader qualification (`UI05`), signed Windows installer (`UI07`) and
   real Windows performance benchmarks (`PERF01`–`PERF07`).
 - Signed release bundles and upgrade/backup/rollback (`OPS06`–`OPS07`), DB receipt lookup
   (`OPS05`), and regulator-mandated extensions (`EXT01`–`EXT04`).
+
+See [`docs/sqlite-state.md`](docs/sqlite-state.md) for SQLite behavior and limits, and
+[`docs/implementation-status.md`](docs/implementation-status.md) for the guide-ID status matrix.
 
 ---
 

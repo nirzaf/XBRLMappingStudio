@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Application;
@@ -131,6 +132,40 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.All(manifest.Inputs, i => Assert.NotNull(i.Digest));
         Assert.NotEmpty(manifest.Outputs);
         Assert.All(manifest.Outputs, o => Assert.StartsWith("sha256:", o.Digest, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SharedExecutionServiceReadsConfiguredSqliteSource()
+    {
+        var database = Path.Combine(_dir, "financials.db");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT); INSERT INTO financials VALUES ('Revenue','1250','1100');";
+            await command.ExecuteNonQueryAsync();
+        }
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var original = project.Bindings[0];
+        project.Bindings[0] = original with
+        {
+            Kind = "sqlite",
+            Locator = database,
+            Configuration = new Dictionary<string, object?>
+            {
+                ["table"] = "financials", ["decimalColumns"] = "Current,Prior"
+            }
+        };
+        var connection = new SourceConnection(original.BindingId, "sqlite", database,
+            new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" });
+
+        var result = await NewService().RunAsync(project,
+            new Dictionary<string, SourceConnection> { [original.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
+        Assert.Equal("file", Assert.Single(result.Manifest.Inputs).Kind);
     }
 
     [Fact]

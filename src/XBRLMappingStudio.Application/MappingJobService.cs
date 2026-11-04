@@ -5,6 +5,7 @@ using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -304,6 +305,7 @@ public sealed class MappingJobService
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
+        "sqlite" => new SqliteSourceAdapter(),
         _ => throw new NotSupportedException($"Adapter kind '{conn.Kind}' is not supported in this build.")
     };
 

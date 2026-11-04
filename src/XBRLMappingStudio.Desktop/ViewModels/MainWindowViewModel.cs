@@ -8,6 +8,7 @@ using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -129,6 +130,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _selectedSourceBindingId;
     private int? _expectedLayoutGeneration;
     private string? _selectedSourceColumn;
+    private string? _selectedSourceTable;
+    private string? _sqliteSourcePath;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _selectedFactUnit = "USD";
@@ -147,6 +150,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
     public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
+    public string? SelectedSourceTable
+    {
+        get => _selectedSourceTable;
+        set
+        {
+            if (Set(ref _selectedSourceTable, value) && value is not null && _sqliteSourcePath is not null)
+                _ = LoadSqliteTableAsync(value);
+        }
+    }
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
     public SuggestionRow? SelectedSuggestion { get => _selectedSuggestion; set => Set(ref _selectedSuggestion, value); }
     public string SelectedFactUnit { get => _selectedFactUnit; set => Set(ref _selectedFactUnit, value); }
@@ -186,6 +198,8 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public List<ConceptRow> ConceptResults { get; } = new();
     public List<string> SourceColumns { get; } = new();
+    public List<string> SourceTables { get; } = new();
+    public bool HasSourceTables => SourceTables.Count > 0;
     public List<SuggestionRow> AiSuggestions { get; } = new();
     public List<DiagnosticRow> Diagnostics { get; } = new();
     public List<FactRow> PreviewFacts { get; } = new();
@@ -333,11 +347,39 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ".csv" => "csv",
                 ".json" => safePath.EndsWith(".xbrl.json", StringComparison.OrdinalIgnoreCase) ? "xbrl-report" : "json",
                 ".xml" => "xml",
+                ".db" or ".sqlite" or ".sqlite3" => "sqlite",
                 _ => throw new InvalidOperationException("The selected file type is not supported.")
             };
             binding = binding with { Kind = kind, Locator = safePath, SchemaFingerprint = null };
+            _sqliteSourcePath = kind == "sqlite" ? safePath : null;
+            SourceTables.Clear();
+            SourceColumns.Clear();
+            _selectedSourceTable = null;
+            Raise(nameof(SelectedSourceTable));
+            Raise(nameof(SourceColumns));
+            Raise(nameof(SourceTables));
+            Raise(nameof(HasSourceTables));
+            var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
             var connection = new SourceConnection(binding.BindingId, kind, safePath,
-                binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal));
+                config);
+            if (kind == "sqlite")
+            {
+                SelectedSourceBindingId = binding.BindingId;
+                var sqlite = new SqliteSourceAdapter();
+                SourceTables.AddRange(await sqlite.DiscoverTablesAsync(connection, CancellationToken.None));
+                Raise(nameof(SourceTables));
+                Raise(nameof(HasSourceTables));
+                if (SourceTables.Count == 0) throw new InvalidOperationException("The SQLite database has no user tables.");
+                SelectedSourceTable = config.TryGetValue("table", out var configured) && SourceTables.Contains(configured)
+                    ? configured : SourceTables.Count == 1 ? SourceTables[0] : null;
+                if (SelectedSourceTable is null)
+                {
+                    Session.SetBinding(binding with { SchemaFingerprint = null });
+                    StatusText = "Choose a SQLite table to inspect its columns.";
+                    return;
+                }
+                return;
+            }
             var adapter = BuildSourceAdapter(connection);
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
             SourceColumns.Clear();
@@ -348,6 +390,31 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
         }
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
+    }
+
+    private async Task LoadSqliteTableAsync(string table)
+    {
+        if (_sqliteSourcePath is null) return;
+        try
+        {
+            var binding = Session.Project.Bindings.FirstOrDefault(b => b.BindingId == SelectedSourceBindingId)
+                ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
+            if (binding is null) return;
+            var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
+            config["table"] = table;
+            var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
+            var schema = await new SqliteSourceAdapter().InspectSchemaAsync(connection, CancellationToken.None);
+            SourceColumns.Clear();
+            SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
+            binding = binding with { Kind = "sqlite", Locator = _sqliteSourcePath,
+                Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
+                SchemaFingerprint = schema.Fingerprint };
+            Session.SetBinding(binding);
+            SelectedSourceBindingId = binding.BindingId;
+            Raise(nameof(SourceColumns));
+            StatusText = $"Loaded {schema.Columns.Count} fields from {table}.";
+        }
+        catch (Exception ex) { StatusText = $"SQLite table load failed: {ex.Message}"; }
     }
 
     private void BindSelectedSourceColumn()
@@ -533,6 +600,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(connection.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
+        "sqlite" => new SqliteSourceAdapter(),
         _ => throw new NotSupportedException($"Adapter '{connection.Kind}' is not supported for source browsing.")
     };
 
@@ -554,14 +622,20 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ClearSourceAndRunResults()
     {
+        _sqliteSourcePath = null;
+        _selectedSourceTable = null;
         SelectedSourceBindingId = null;
         SelectedSourceColumn = null;
         SelectedSuggestion = null;
         SourceColumns.Clear();
+        SourceTables.Clear();
         AiSuggestions.Clear();
         PreviewFacts.Clear();
         Diagnostics.Clear();
         Raise(nameof(SourceColumns));
+        Raise(nameof(SourceTables));
+        Raise(nameof(HasSourceTables));
+        Raise(nameof(SelectedSourceTable));
         Raise(nameof(AiSuggestions));
         Raise(nameof(PreviewFacts));
         Raise(nameof(Diagnostics));
