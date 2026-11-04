@@ -6,13 +6,33 @@ namespace XBRLMappingStudio.Application;
 
 /// <summary>
 /// Validates the versioned destination contract before any source data is opened.
-/// The current implementation accepts only the explicit transactional SQLite fact
-/// contract; other adapters must be added with their own validated write semantics.
+/// SQLite and explicit staged file-output contracts each define their own write semantics.
 /// </summary>
 public static class DestinationPlanValidator
 {
     public const string SupportedKind = "sqlite";
     public const string SupportedFormat = "xbrl-facts-v1";
+    public const string CsvKind = "csv";
+    public const string ExcelKind = "excel";
+    public const string JsonKind = "json";
+    public const string XmlKind = "xml";
+
+    private static readonly IReadOnlyDictionary<string, string> FileFormats =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [CsvKind] = "csv-records-v1",
+            [ExcelKind] = "xlsx-records-v1",
+            [JsonKind] = "json-records-v1",
+            [XmlKind] = "xml-records-v1"
+        };
+
+    public static IReadOnlyList<string> SupportedFileKinds { get; } = Array.AsReadOnly(
+        new[] { CsvKind, ExcelKind, JsonKind, XmlKind });
+
+    public static bool IsFileKind(string? kind) => kind is not null && FileFormats.ContainsKey(kind);
+
+    public static string? FileFormatFor(string kind)
+        => FileFormats.TryGetValue(kind, out var format) ? format : null;
 
     public static DiagnosticBag Validate(DestinationPlan? plan, string? operationId = null)
     {
@@ -25,35 +45,49 @@ public static class DestinationPlanValidator
             Unsupported($"Destination plan version {plan.Version} is unsupported; supported version is {DestinationPlan.CurrentVersion}.");
         }
 
-        if (!StringComparer.Ordinal.Equals(plan.Kind, SupportedKind))
-        {
-            Unsupported($"Destination kind '{plan.Kind}' is unsupported. Version 1 supports only '{SupportedKind}'.");
-        }
-
         if (string.IsNullOrWhiteSpace(plan.Locator))
             Invalid("Destination locator is required.");
-        if (string.IsNullOrWhiteSpace(plan.Table))
-            Invalid("SQLite destination table is required.");
-        if (plan.BusinessKey is null || plan.BusinessKey.Count == 0)
+        if (StringComparer.Ordinal.Equals(plan.Kind, SupportedKind))
         {
-            Invalid("At least one SQLite business-key column is required.");
+            if (string.IsNullOrWhiteSpace(plan.Table))
+                Invalid("SQLite destination table is required.");
+            if (plan.BusinessKey is null || plan.BusinessKey.Count == 0)
+            {
+                Invalid("At least one SQLite business-key column is required.");
+            }
+            else
+            {
+                if (plan.BusinessKey.Any(string.IsNullOrWhiteSpace))
+                    Invalid("SQLite business-key column names cannot be empty.");
+                if (plan.BusinessKey.Where(key => !string.IsNullOrWhiteSpace(key))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Count()
+                    != plan.BusinessKey.Count(key => !string.IsNullOrWhiteSpace(key)))
+                {
+                    Invalid("SQLite business-key column names must be unique, ignoring SQLite identifier case.");
+                }
+            }
+
+            if (!StringComparer.Ordinal.Equals(plan.Format, SupportedFormat))
+                Unsupported($"Destination format '{plan.Format}' is unsupported. SQLite requires '{SupportedFormat}'.");
+            if (!StringComparer.Ordinal.Equals(plan.WriteMode, "upsert"))
+                Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for SQLite; use 'upsert'.");
+        }
+        else if (FileFormats.TryGetValue(plan.Kind, out var expectedFileFormat))
+        {
+            if (!string.IsNullOrWhiteSpace(plan.Table))
+                Invalid("File destinations do not use a table name.");
+            if (plan.BusinessKey is { Count: > 0 })
+                Invalid("File destinations do not use a SQLite business key.");
+            if (!StringComparer.Ordinal.Equals(plan.Format, expectedFileFormat))
+                Unsupported($"Destination format '{plan.Format}' does not match the explicit '{plan.Kind}' contract '{expectedFileFormat}'.");
+            if (!StringComparer.Ordinal.Equals(plan.WriteMode, "replace"))
+                Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for file targets; use 'replace'.");
         }
         else
         {
-            if (plan.BusinessKey.Any(string.IsNullOrWhiteSpace))
-                Invalid("SQLite business-key column names cannot be empty.");
-            if (plan.BusinessKey.Where(key => !string.IsNullOrWhiteSpace(key))
-                .Distinct(StringComparer.OrdinalIgnoreCase).Count()
-                != plan.BusinessKey.Count(key => !string.IsNullOrWhiteSpace(key)))
-            {
-                Invalid("SQLite business-key column names must be unique, ignoring SQLite identifier case.");
-            }
+            Unsupported($"Destination kind '{plan.Kind}' is unsupported. Supported kinds are '{SupportedKind}', {string.Join(", ", FileFormats.Keys)}.");
         }
 
-        if (!StringComparer.Ordinal.Equals(plan.Format, SupportedFormat))
-            Unsupported($"Destination format '{plan.Format}' is unsupported. Version 1 requires '{SupportedFormat}'.");
-        if (!StringComparer.Ordinal.Equals(plan.WriteMode, "upsert"))
-            Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported. Version 1 requires 'upsert'.");
         if (!StringComparer.Ordinal.Equals(plan.Compatibility, "strict"))
             Unsupported($"Destination compatibility mode '{plan.Compatibility}' is unsupported. Version 1 requires 'strict'.");
 
@@ -72,6 +106,7 @@ public static class DestinationPlanValidator
     {
         var diagnostics = Validate(plan);
         if (diagnostics.HasBlockingErrors) return diagnostics;
+        if (!StringComparer.Ordinal.Equals(plan.Kind, SupportedKind)) return diagnostics;
 
         var missingColumns = XbrlFactRecordMapper.OutputColumns
             .Where(column => !schema.Columns.ContainsKey(column))

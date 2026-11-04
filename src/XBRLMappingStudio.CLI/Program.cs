@@ -52,6 +52,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
+    Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
@@ -351,7 +352,8 @@ static int ConfigureDestination(string[] args)
     string? locator = null;
     string? table = null;
     string? keyList = null;
-    string writeMode = "upsert";
+    string? format = null;
+    string? requestedWriteMode = null;
     for (int i = 1; i < args.Length; i++)
     {
         switch (args[i])
@@ -360,16 +362,30 @@ static int ConfigureDestination(string[] args)
             case "--path" when i + 1 < args.Length: locator = args[++i]; break;
             case "--table" when i + 1 < args.Length: table = args[++i]; break;
             case "--key" when i + 1 < args.Length: keyList = args[++i]; break;
-            case "--write-mode" when i + 1 < args.Length: writeMode = args[++i]; break;
+            case "--format" when i + 1 < args.Length: format = args[++i]; break;
+            case "--write-mode" when i + 1 < args.Length: requestedWriteMode = args[++i]; break;
             default:
                 Console.Error.WriteLine($"Unrecognized or incomplete option: {args[i]}");
                 return ExitCodesLocal.IncompleteProfile;
         }
     }
 
-    if (kind is null || locator is null || table is null || keyList is null)
+    if (kind is null || locator is null)
     {
-        Console.Error.WriteLine("configure-destination requires --kind, --path, --table and --key.");
+        Console.Error.WriteLine("configure-destination requires --kind and --path.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    var isSqlite = StringComparer.Ordinal.Equals(kind, DestinationPlanValidator.SupportedKind);
+    var isFileKind = DestinationPlanValidator.IsFileKind(kind);
+    if (isSqlite && (table is null || keyList is null))
+    {
+        Console.Error.WriteLine("SQLite destinations require --table and --key.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    if (isFileKind && (string.IsNullOrWhiteSpace(format) || table is not null || keyList is not null))
+    {
+        Console.Error.WriteLine("File destinations require --format and do not accept --table or --key.");
         return ExitCodesLocal.IncompleteProfile;
     }
 
@@ -378,10 +394,9 @@ static int ConfigureDestination(string[] args)
         var manager = new ProjectManager(projectPath);
         var project = manager.Load();
         var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
-        var fullDestination = Path.IsPathRooted(locator)
-            ? Path.GetFullPath(locator)
-            : PathGuard.EnsureWithin(projectDirectory, Path.Combine(projectDirectory, locator));
-        if (!File.Exists(fullDestination))
+        var fullDestination = PathGuard.EnsureWithin(projectDirectory,
+            Path.IsPathRooted(locator) ? locator : Path.Combine(projectDirectory, locator));
+        if (isSqlite && !File.Exists(fullDestination))
         {
             var missing = new DiagnosticBag();
             missing.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
@@ -389,6 +404,26 @@ static int ConfigureDestination(string[] args)
                 "SQLite destination database must already exist; configure-destination will not create it.");
             PrintDiagnostics(missing.Items);
             return ExitCodesLocal.DataError;
+        }
+        if (isFileKind)
+        {
+            if (Directory.Exists(fullDestination))
+            {
+                var invalid = new DiagnosticBag();
+                invalid.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
+                    DiagnosticStage.Validation, "A file destination path cannot name a directory.");
+                PrintDiagnostics(invalid.Items);
+                return ExitCodesLocal.DataError;
+            }
+            var destinationDirectory = Path.GetDirectoryName(fullDestination);
+            if (destinationDirectory is null || !Directory.Exists(destinationDirectory))
+            {
+                var missing = new DiagnosticBag();
+                missing.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
+                    DiagnosticStage.Validation, "The file destination directory must already exist.");
+                PrintDiagnostics(missing.Items);
+                return ExitCodesLocal.DataError;
+            }
         }
 
         var storedLocator = Path.IsPathRooted(locator)
@@ -398,11 +433,14 @@ static int ConfigureDestination(string[] args)
         {
             Kind = kind,
             Locator = storedLocator,
-            Table = table,
-            BusinessKey = keyList.Split(',', StringSplitOptions.None)
+            Table = table ?? string.Empty,
+            BusinessKey = keyList?.Split(',', StringSplitOptions.None)
                 .Select(key => key.Trim())
-                .ToList(),
-            WriteMode = writeMode
+                .ToList() ?? new List<string>(),
+            Format = format ?? (isSqlite
+                ? DestinationPlanValidator.SupportedFormat
+                : DestinationPlanValidator.FileFormatFor(kind) ?? string.Empty),
+            WriteMode = requestedWriteMode ?? (isSqlite ? "upsert" : "replace")
         };
         var diagnostics = DestinationPlanValidator.Validate(plan);
         if (diagnostics.HasBlockingErrors)
@@ -414,7 +452,7 @@ static int ConfigureDestination(string[] args)
         project.Destination = plan;
         var saved = manager.Save(project, expectedLayoutGeneration: project.LayoutGeneration);
         Console.Error.WriteLine(
-            $"Saved SQLite destination at semantic revision {saved.NewSemanticRevision}. "
+            $"Saved {(isSqlite ? "SQLite" : kind)} destination at semantic revision {saved.NewSemanticRevision}. "
             + "A reviewer must approve this destination-bound revision before a full publish.");
         return ExitCodesLocal.Success;
     }
@@ -557,7 +595,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     }
     if (publishDestination && output is not null)
     {
-        Console.Error.WriteLine("Choose either --output for xBRL-JSON or --publish-destination for SQLite; combined publication is not supported.");
+        Console.Error.WriteLine("Choose either --output for xBRL-JSON or --publish-destination for the saved destination plan; combined publication is not supported.");
         return ExitCodesLocal.InvalidMapping;
     }
 
@@ -590,6 +628,24 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             {
                 PrintDiagnostics(destinationDiagnostics.Items);
                 return ExitCodesLocal.InvalidMapping;
+            }
+            if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
+            {
+                var destinationPath = Path.GetFullPath(Path.IsPathRooted(p.Destination.Locator)
+                    ? p.Destination.Locator
+                    : Path.Combine(projectDirectory, p.Destination.Locator));
+                try { _ = GuardPath(destinationPath); }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Console.Error.WriteLine($"IO: {DiagnosticCodes.IoPathEscapesWorkspace}: {ex.Message}");
+                    return ExitCodesLocal.DataError;
+                }
+                var destinationDirectory = Path.GetDirectoryName(destinationPath);
+                if (Directory.Exists(destinationPath) || destinationDirectory is null || !Directory.Exists(destinationDirectory))
+                {
+                    Console.Error.WriteLine($"IO: {DiagnosticCodes.IoSchemaMismatch}: File destination must name a file in an existing directory.");
+                    return ExitCodesLocal.DataError;
+                }
             }
         }
 
@@ -683,17 +739,28 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             {
                 Console.Error.WriteLine(
                     $"Run {result.Manifest.RunId} finished as {result.Manifest.Outcome}; "
-                    + "SQLite destination left unchanged and no database receipt issued.");
+                    + "saved destination left unchanged and no destination receipt issued.");
             }
             else
             {
                 try
                 {
-                    var receipt = await service.PublishDestinationAsync(
-                        p, result, projectDirectory, allowSyntheticProfile, cts.Token);
-                    Console.Error.WriteLine(
-                        $"Published SQLite {receipt.OperationKey} ({receipt.WrittenRows} row(s)) "
-                        + $"table={p.Destination!.Table} intent={receipt.IntentFingerprint}.");
+                    if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
+                    {
+                        var outputIdentity = await service.PublishFileDestinationAsync(
+                            p, result, projectDirectory, allowSyntheticProfile, cts.Token);
+                        Console.Error.WriteLine(
+                            $"Published {outputIdentity.Kind} {outputIdentity.Path} "
+                            + $"({outputIdentity.Bytes} bytes, sha256 {outputIdentity.Digest}).");
+                    }
+                    else
+                    {
+                        var receipt = await service.PublishDestinationAsync(
+                            p, result, projectDirectory, allowSyntheticProfile, cts.Token);
+                        Console.Error.WriteLine(
+                            $"Published SQLite {receipt.OperationKey} ({receipt.WrittenRows} row(s)) "
+                            + $"table={p.Destination!.Table} intent={receipt.IntentFingerprint}.");
+                    }
                 }
                 catch (AdapterException ex)
                 {
@@ -721,7 +788,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                         Severity = DiagnosticSeverity.Error,
                         Stage = DiagnosticStage.Publication,
                         IsBlocking = true,
-                        Message = "SQLite publication did not return a durable receipt; reconcile the destination before retrying. " + ex.Message,
+                        Message = "Destination publication did not return a durable receipt; reconcile the destination before retrying. " + ex.Message,
                         OperationId = result.Manifest.OperationId
                     }, RunOutcome.Unknown);
                 }

@@ -10,9 +10,9 @@ using XBRLMappingStudio.XBRL;
 namespace XBRLMappingStudio.Application;
 
 /// <summary>
-/// Converts validated XBRL facts to the stable row shape accepted by the v1 SQLite
-/// destination contract. Decimal values remain CLR decimals so the target publisher
-/// writes their invariant lexical representation into a TEXT-affinity column.
+/// Converts validated XBRL facts to the stable row shape used by durable destinations.
+/// Decimal values remain CLR decimals so each writer can preserve their invariant
+/// lexical representation without narrowing financial values.
 /// </summary>
 public static class XbrlFactRecordMapper
 {

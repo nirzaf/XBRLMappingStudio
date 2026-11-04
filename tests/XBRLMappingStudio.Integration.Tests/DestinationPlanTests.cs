@@ -1,8 +1,13 @@
 using System.Collections;
+using System.Text.Json;
+using System.Xml.Linq;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Csv;
+using XBRLMappingStudio.Adapters.Excel;
 using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
@@ -23,6 +28,144 @@ public sealed class DestinationPlanTests
         var outcome = MappingJobService.ValidateProject(project, Synthetic);
 
         Assert.True(outcome.Success);
+    }
+
+    [Theory]
+    [InlineData("csv", "csv-records-v1")]
+    [InlineData("excel", "xlsx-records-v1")]
+    [InlineData("json", "json-records-v1")]
+    [InlineData("xml", "xml-records-v1")]
+    public void ValidateProject_AcceptsExplicitVersionedFileContracts(string kind, string format)
+    {
+        var project = TestFixtures.BuildRevenueMappingProject("unused.xlsx");
+        project.Destination = new DestinationPlan
+        {
+            Kind = kind,
+            Locator = $"out/report.{kind}",
+            Table = string.Empty,
+            BusinessKey = new List<string>(),
+            Format = format,
+            WriteMode = "replace"
+        };
+
+        var outcome = MappingJobService.ValidateProject(project, Synthetic);
+
+        Assert.True(outcome.Success, string.Join(Environment.NewLine, outcome.Diagnostics.Items.Select(item => item.Message)));
+    }
+
+    [Theory]
+    [InlineData("csv", "xlsx-records-v1", "replace")]
+    [InlineData("json", "json-records-v1", "upsert")]
+    public void ValidateProject_RejectsMismatchedFileContract(string kind, string format, string writeMode)
+    {
+        var project = TestFixtures.BuildRevenueMappingProject("unused.xlsx");
+        project.Destination = new DestinationPlan
+        {
+            Kind = kind,
+            Locator = "out/report.dat",
+            Table = string.Empty,
+            BusinessKey = new List<string>(),
+            Format = format,
+            WriteMode = writeMode
+        };
+
+        var outcome = MappingJobService.ValidateProject(project, Synthetic);
+
+        Assert.False(outcome.Success);
+        Assert.Contains(outcome.Diagnostics.Items, diagnostic => diagnostic.IsBlocking
+            && diagnostic.Code == DiagnosticCodes.IoUnsupportedOperation);
+    }
+
+    [Theory]
+    [InlineData("csv", "csv-records-v1", "report.csv", "csv")]
+    [InlineData("excel", "xlsx-records-v1", "report.xlsx", "xlsx")]
+    [InlineData("json", "json-records-v1", "report.json", "json")]
+    [InlineData("xml", "xml-records-v1", "report.xml", "xml")]
+    public async Task PublishFileDestination_UsesExplicitAdapterAndRecordsReconciledOutput(
+        string kind, string format, string fileName, string expectedOutputKind)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = kind,
+                Locator = fileName,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = format,
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var binding = project.Bindings.Single();
+            var config = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, config)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var output = await service.PublishFileDestinationAsync(project, result, dir,
+                allowSyntheticProfile: true, CancellationToken.None);
+
+            Assert.Equal(expectedOutputKind, output.Kind);
+            Assert.True(File.Exists(Path.Combine(dir, fileName)));
+            Assert.Contains(result.Manifest.Outputs, item => item.Path == output.Path && item.Digest == output.Digest);
+            if (kind == "json")
+            {
+                using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(output.Path));
+                var fact = Assert.Single(document.RootElement.EnumerateArray());
+                Assert.Equal("1250000", fact.GetProperty("value").GetRawText());
+                Assert.Equal(JsonValueKind.Null, fact.GetProperty("instant_date").ValueKind);
+            }
+            else if (kind == "xml")
+            {
+                var document = System.Xml.Linq.XDocument.Load(output.Path);
+                var fact = Assert.Single(document.Root!.Elements());
+                XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+                Assert.Equal("true", (string?)fact.Element("instant_date")?.Attribute(xsi + "nil"));
+                Assert.Equal("1250000", fact.Element("value")?.Value);
+            }
+            else if (kind == "excel")
+            {
+                var reader = new ExcelAdapter();
+                var connection = new SourceConnection("output", "excel", output.Path);
+                var schema = await reader.InspectSchemaAsync(connection, CancellationToken.None);
+                var rows = new List<DataRecord>();
+                await foreach (var row in reader.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
+                Assert.Single(rows);
+                Assert.Equal("1250000", rows[0]["value"].AsString());
+            }
+            else
+            {
+                var reader = new CsvAdapter();
+                var connection = new SourceConnection("output", "csv", output.Path);
+                var schema = await reader.InspectSchemaAsync(connection, CancellationToken.None);
+                var rows = new List<DataRecord>();
+                await foreach (var row in reader.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
+                Assert.Single(rows);
+                Assert.Equal("1250000", rows[0]["value"].AsString());
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -48,7 +191,7 @@ public sealed class DestinationPlanTests
     }
 
     [Theory]
-    [InlineData("json", "IO008")]
+    [InlineData("unknown", "IO008")]
     [InlineData("sqlite", "IO001")]
     public void ValidateProject_RejectsUnsupportedOrIncompleteDestination(string kind, string expectedCode)
     {
@@ -68,7 +211,7 @@ public sealed class DestinationPlanTests
     public async Task RunAsync_InvalidDestinationFailsBeforeInspectingSourceConnections()
     {
         var project = TestFixtures.BuildRevenueMappingProject("unused.xlsx");
-        project.Destination = ValidPlan() with { Kind = "json" };
+        project.Destination = ValidPlan() with { Kind = "unknown" };
         var worker = new UnexpectedWorker();
         var service = new MappingJobService(Synthetic, worker);
 

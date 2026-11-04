@@ -495,6 +495,226 @@ public sealed class MappingJobService
         return receipt;
     }
 
+    /// <summary>
+    /// Publish mapped XBRL fact rows through an explicitly selected staged file adapter.
+    /// This path accepts only the versioned CSV/XLSX/JSON/XML contracts and rechecks
+    /// approval, run identity and the xBRL-JSON evidence before replacing a file.
+    /// </summary>
+    public async Task<OutputIdentity> PublishFileDestinationAsync(
+        MappingProject project,
+        JobResult result,
+        string workspaceRoot,
+        bool allowSyntheticProfile,
+        CancellationToken cancellationToken = default)
+    {
+        var plan = project.Destination ?? throw new AdapterException(
+            DiagnosticCodes.IoUnsupportedOperation,
+            "The project has no configured destination.", DiagnosticStage.Publication);
+        var planDiagnostics = DestinationPlanValidator.Validate(plan, result.Manifest.OperationId);
+        if (planDiagnostics.HasBlockingErrors)
+        {
+            var first = planDiagnostics.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new AdapterException(first.Code,
+                string.Join(Environment.NewLine, planDiagnostics.Items.Select(diagnostic => diagnostic.Message)),
+                DiagnosticStage.Publication);
+        }
+        if (!DestinationPlanValidator.IsFileKind(plan.Kind))
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"Destination kind '{plan.Kind}' is not a file output contract.", DiagnosticStage.Publication);
+        if (!result.IsPublishable)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                "Only a successful full run can be written to a file destination; previews are never published.",
+                DiagnosticStage.Publication);
+
+        var manifest = result.Manifest;
+        var semanticDigest = project.ComputeSemanticDigest();
+        if (manifest.ProjectId != project.ProjectId
+            || manifest.SemanticRevision != project.SemanticRevision
+            || !StringComparer.Ordinal.Equals(manifest.ProjectSemanticDigest, semanticDigest)
+            || !StringComparer.Ordinal.Equals(manifest.ProfileDigest, _profile.Digest))
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "Run evidence no longer matches the project semantic revision and filing profile.",
+                manifest.RunId, plan.Locator);
+        }
+
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
+        if (gate.HasBlockingErrors)
+        {
+            var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new PublicationException(first.Code,
+                string.Join(Environment.NewLine, gate.Items.Select(diagnostic => diagnostic.Message)),
+                manifest.RunId, plan.Locator);
+        }
+
+        string expectedJson;
+        try
+        {
+            expectedJson = OimSerializer.Serialize(_profile, result.Facts);
+        }
+        catch (XbrlExportException ex)
+        {
+            throw new PublicationException(ex.Code, ex.Message, manifest.RunId, plan.Locator);
+        }
+        var jsonBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
+        var jsonDigest = RunManifest.ComputeSha256(jsonBytes);
+        if (!StringComparer.Ordinal.Equals(expectedJson, result.XbrlJson)
+            || !manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+                && output.Digest == jsonDigest
+                && output.Bytes == jsonBytes.Length))
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "The mapped facts do not match the report artifact recorded by the run.",
+                manifest.RunId, plan.Locator);
+        }
+
+        var root = Path.GetFullPath(workspaceRoot);
+        var destinationPath = PathGuard.EnsureWithin(root,
+            Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
+        var directory = Path.GetDirectoryName(destinationPath)!;
+        if (!Directory.Exists(directory))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "The file destination directory must already exist.", DiagnosticStage.Publication);
+
+        var records = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
+        var headers = XbrlFactRecordMapper.OutputColumns;
+        var connection = new SourceConnection("destination", plan.Kind, destinationPath,
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        var adapter = BuildTargetAdapter(connection);
+        var payload = adapter switch
+        {
+            CsvAdapter csv => csv.WriteRecords(headers, records),
+            ExcelOutputAdapter excel => excel.WriteWorkbook(headers,
+                records.Select(record => headers.Select(header => ToExcelCell(record.Fields[header])))),
+            JsonOutputAdapter json => json.Write(records),
+            XmlOutputAdapter xml => xml.Write(records),
+            _ => throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"No serializer is registered for file destination '{plan.Kind}'.", DiagnosticStage.Publication)
+        };
+
+        using var destinationLock = await DestinationLock.AcquireAsync(
+            destinationPath, TimeSpan.FromSeconds(30), cancellationToken);
+        var originalDigest = destinationLock.DestinationDigestAtAcquire;
+        var backupPath = destinationPath + $".xms-rollback-{manifest.RunId}";
+        if (File.Exists(backupPath))
+            throw new PublicationException(DiagnosticCodes.PubPartialFailure,
+                $"A recovery copy from an earlier publication attempt already exists: {backupPath}.",
+                manifest.RunId, destinationPath);
+        if (originalDigest is not null)
+        {
+            try
+            {
+                File.Copy(destinationPath, backupPath, overwrite: false);
+                if (!StringComparer.Ordinal.Equals(originalDigest, CurrentFileDigest(backupPath)))
+                    throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                        "The rollback copy does not match the destination bytes captured at lock acquisition.",
+                        manifest.RunId, destinationPath);
+            }
+            catch
+            {
+                TryDeleteFile(backupPath);
+                throw;
+            }
+        }
+        string? stagedPath = null;
+        string? stagedDigest = null;
+        var preserveBackup = false;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!StringComparer.Ordinal.Equals(originalDigest, CurrentFileDigest(destinationPath)))
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    "The destination changed while publication was being prepared.", manifest.RunId, destinationPath);
+
+            stagedPath = await adapter.StageArtifactAsync(connection, payload,
+                Path.GetExtension(destinationPath), cancellationToken);
+            stagedDigest = DestinationLock.DigestFile(stagedPath);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!StringComparer.Ordinal.Equals(originalDigest, CurrentFileDigest(destinationPath)))
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    "The destination changed while the staged artifact was being verified.", manifest.RunId, destinationPath);
+
+            var output = await adapter.PublishAsync(stagedPath, connection, cancellationToken);
+            var finalDigest = CurrentFileDigest(destinationPath);
+            if (finalDigest is null || !StringComparer.Ordinal.Equals(output.Digest, finalDigest))
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    "Published file bytes do not match the staged adapter receipt.", manifest.RunId, destinationPath);
+
+            manifest.Outputs = manifest.Outputs
+                .Where(existing => !StringComparer.OrdinalIgnoreCase.Equals(existing.Path, destinationPath))
+                .Append(output)
+                .ToArray();
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            return output;
+        }
+        catch (Exception publishError)
+        {
+            var currentDigest = CurrentFileDigest(destinationPath);
+            if (!StringComparer.Ordinal.Equals(originalDigest, currentDigest))
+            {
+                var stagedArtifactMoved = stagedPath is not null && !File.Exists(stagedPath);
+                if (!stagedArtifactMoved || stagedDigest is null
+                    || !StringComparer.Ordinal.Equals(stagedDigest, currentDigest))
+                {
+                    // Another writer changed the file while we held the advisory lock.
+                    // Keep the saved prior copy for explicit recovery; never erase a
+                    // third party's bytes to make the failed operation look clean.
+                    preserveBackup = File.Exists(backupPath);
+                }
+                else
+                {
+                    try
+                    {
+                        if (originalDigest is null)
+                        {
+                            if (File.Exists(destinationPath)) File.Delete(destinationPath);
+                        }
+                        else
+                            File.Move(backupPath, destinationPath, overwrite: true);
+                    }
+                    catch (Exception rollbackError)
+                    {
+                        preserveBackup = File.Exists(backupPath);
+                        var recovery = preserveBackup
+                            ? $"Recovery copy: {backupPath}. "
+                            : $"No previous file was present; reconcile the current destination at {destinationPath}. ";
+                        throw new PublicationException(DiagnosticCodes.PubPartialFailure,
+                            $"File publication failed and rollback could not restore the prior output. {recovery}Publication: {publishError.Message}; rollback: {rollbackError.Message}",
+                            manifest.RunId, destinationPath);
+                    }
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            if (stagedPath is not null) TryDeleteFile(stagedPath);
+            if (!preserveBackup) TryDeleteFile(backupPath);
+        }
+    }
+
+    private static string? CurrentFileDigest(string path)
+        => File.Exists(path) ? DestinationLock.DigestFile(path) : null;
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { /* keep the primary publication outcome */ }
+    }
+
+    private static object? ToExcelCell(DataValue value)
+        => value.Presence switch
+        {
+            ValuePresence.Missing or ValuePresence.ExplicitNil => null,
+            ValuePresence.Blank => string.Empty,
+            _ when value.Raw is decimal number => number.ToString(CultureInfo.InvariantCulture),
+            _ when value.Raw is DateOnly date => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            _ when value.Raw is DateTimeOffset instant => instant.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+            _ => value.Raw
+        };
+
     private static string ComputeDestinationOperationFingerprint(
         MappingProject project,
         JobResult result,

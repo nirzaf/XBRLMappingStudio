@@ -166,8 +166,7 @@ public sealed record ProjectMetadata
 }
 
 /// <summary>
-/// Versioned durable destination intent. Version 1 deliberately supports only the
-/// transactional SQLite fact-table contract; additional kinds require an explicit
+/// Versioned durable destination intent. Every destination kind requires an explicit
 /// contract rather than inferring behavior from a filename extension.
 /// </summary>
 public sealed record DestinationPlan
@@ -180,6 +179,7 @@ public sealed record DestinationPlan
     /// <summary>Path relative to the project directory, or an absolute host path.</summary>
     public required string Locator { get; init; }
 
+    /// <summary>SQLite table name; empty for file destinations.</summary>
     public required string Table { get; init; }
     public string Format { get; init; } = "xbrl-facts-v1";
     public List<string> BusinessKey { get; init; } = new();

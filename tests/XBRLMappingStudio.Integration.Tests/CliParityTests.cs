@@ -197,6 +197,53 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_ConfigureAndExecutePublishesExplicitJsonDestination()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "json-publish.xmap");
+        var manager = new ProjectManager(projectPath);
+        manager.Save(project);
+
+        var (configureExit, _, configureError) = await RunCliAsync(LocateCli(), "configure-destination", projectPath,
+            "--kind", "json", "--path", "target.json", "--format", "json-records-v1");
+        Assert.True(configureExit == 0, $"Destination configuration failed ({configureExit}).\n{configureError}");
+
+        project = manager.Load();
+        Assert.NotNull(project.Destination);
+        Assert.Equal("json", project.Destination.Kind);
+        Assert.Equal("json-records-v1", project.Destination.Format);
+        Assert.Equal("replace", project.Destination.WriteMode);
+        Assert.Empty(project.Destination.BusinessKey);
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        manager.Save(project, expectedLayoutGeneration: project.LayoutGeneration);
+
+        var manifestPath = Path.Combine(_dir, "json-publish-manifest.json");
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--publish-destination", "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.True(exit == 0, $"Expected JSON execution to succeed, got {exit}.\nstderr:\n{stderr}");
+        Assert.Contains("Published json", stderr, StringComparison.Ordinal);
+        var outputPath = Path.Combine(_dir, "target.json");
+        Assert.True(File.Exists(outputPath));
+        using (var report = JsonDocument.Parse(await File.ReadAllBytesAsync(outputPath)))
+        {
+            var fact = Assert.Single(report.RootElement.EnumerateArray());
+            Assert.Equal("1250000", fact.GetProperty("value").GetRawText());
+        }
+        using var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath));
+        Assert.Contains(manifest.RootElement.GetProperty("Outputs").EnumerateArray(), output =>
+            output.GetProperty("Kind").GetString() == "json"
+            && output.GetProperty("Digest").GetString()!.StartsWith("sha256:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Cli_InvalidSqliteTableReturnsDataErrorWithoutMutatingDatabase()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);

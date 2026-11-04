@@ -55,6 +55,42 @@ public sealed class CsvAdapterTests
     }
 
     [Fact]
+    public async Task WriteRecords_PreservesNumericLexemesAndExistingOutputOnReconcileFailure()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("records.csv");
+        await File.WriteAllTextAsync(path, "accepted prior output");
+        var before = await File.ReadAllBytesAsync(path);
+        var destination = new Adapters.SourceConnection("out", "csv", path);
+        var writer = new CsvAdapter(new CsvAdapter.Options(EmitBom: false, AllowFormulas: false));
+        var records = new[]
+        {
+            new DataRecord
+            {
+                RowId = "row-1",
+                Fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
+                {
+                    ["value"] = DataValue.DecimalValue(-12.50m),
+                    ["account"] = DataValue.StringValue("00123"),
+                    ["note"] = DataValue.StringValue("=SUM(1,2)")
+                }
+            }
+        };
+
+        var payload = writer.WriteRecords(new[] { "value", "account", "note" }, records);
+        var text = Encoding.UTF8.GetString(payload);
+        Assert.Contains("-12.50", text);
+        Assert.Contains("00123", text);
+        Assert.Contains("'=SUM(1,2)", text);
+        Assert.Contains("\"'=SUM(1,2)\"", text);
+
+        var staged = await writer.StageArtifactAsync(destination, payload, ".csv", default);
+        writer.ReconcileFailProbe = _ => true;
+        await Assert.ThrowsAsync<IOException>(() => writer.PublishAsync(staged, destination, default));
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
     public async Task Write_EmitsBom_WhenPolicyIsBom()
     {
         using var ws = new TempWorkspace();

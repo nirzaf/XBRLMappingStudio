@@ -49,6 +49,9 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
 
     private readonly Options _options;
 
+    /// <summary>Test seam that aborts before replacement after staged content is parsed.</summary>
+    public Func<string, bool>? ReconcileFailProbe { get; set; }
+
     public CsvAdapter(Options? options = null) => _options = options ?? new Options();
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
@@ -118,7 +121,11 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
     {
         var path = connection.Path ?? throw new InvalidOperationException(
             $"CSV connection '{connection.SourceId}' has no file path.");
-        var bytes = File.ReadAllBytes(path);
+        return DecodeText(File.ReadAllBytes(path));
+    }
+
+    private string DecodeText(byte[] bytes)
+    {
         var enc = _options.Encoding ?? new UTF8Encoding(false);
         // Strip a UTF-8 BOM regardless of declared encoding so headers parse cleanly.
         int offset = 0;
@@ -154,6 +161,9 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
             else if (ch == '\n') EndRecord();
             else field.Append(ch);
         }
+        if (inQuotes)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "CSV output ended inside a quoted field.");
         // Trailing field/record (handles empty trailing field and final line w/o newline).
         if (field.Length > 0 || record.Count > 0) EndRecord();
         return rows;
@@ -187,14 +197,72 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
         return sb.ToString();
     }
 
-    private string JoinRow(IEnumerable<string?> cells)
-        => string.Join(_options.Delimiter, cells.Select(Escape));
+    /// <summary>
+    /// Format mapped records using invariant lexical values. Numeric cells retain their
+    /// type-based trust so a negative decimal is not rewritten as spreadsheet text; text
+    /// cells still pass through the formula-injection guard.
+    /// </summary>
+    public string FormatRecords(IReadOnlyList<string> headers, IReadOnlyList<DataRecord> records)
+    {
+        var sb = new StringBuilder();
+        if (_options.HasHeader)
+            sb.Append(JoinRow(headers.Select(header => (string?)header)));
 
-    private string Escape(string? value)
+        foreach (var record in records)
+        {
+            if (sb.Length > 0) sb.Append('\n');
+            var cells = headers.Select(header =>
+            {
+                if (!record.Fields.TryGetValue(header, out var value))
+                    return (Text: (string?)null, IsTrustedNumber: false);
+                return ToCsvCell(value);
+            });
+            sb.Append(JoinTypedRow(cells));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Encode mapped records without a preamble; staging owns the BOM policy.</summary>
+    public byte[] WriteRecords(IReadOnlyList<string> headers, IReadOnlyList<DataRecord> records)
+    {
+        var encoding = _options.Encoding ?? Encoding.UTF8;
+        var noPreamble = Encoding.GetEncoding(encoding.CodePage,
+            EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+        return noPreamble.GetBytes(FormatRecords(headers, records));
+    }
+
+    private string JoinTypedRow(IEnumerable<(string? Text, bool IsTrustedNumber)> cells)
+        => string.Join(_options.Delimiter, cells.Select(cell => Escape(cell.Text, !cell.IsTrustedNumber)));
+
+    private static (string? Text, bool IsTrustedNumber) ToCsvCell(DataValue value)
+    {
+        if (value.Presence is ValuePresence.Missing or ValuePresence.ExplicitNil)
+            return (null, false);
+        if (value.Presence == ValuePresence.Blank)
+            return (string.Empty, false);
+
+        return value.Raw switch
+        {
+            decimal number => (number.ToString(CultureInfo.InvariantCulture), true),
+            long number => (number.ToString(CultureInfo.InvariantCulture), true),
+            int number => (number.ToString(CultureInfo.InvariantCulture), true),
+            bool boolean => (boolean ? "true" : "false", true),
+            DateOnly date => (date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), false),
+            DateTimeOffset instant => (instant.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture), false),
+            IFormattable formattable => (formattable.ToString(null, CultureInfo.InvariantCulture), false),
+            var other => (other?.ToString() ?? string.Empty, false)
+        };
+    }
+
+    private string JoinRow(IEnumerable<string?> cells)
+        => string.Join(_options.Delimiter, cells.Select(cell => Escape(cell)));
+
+    private string Escape(string? value, bool protectFormula = true)
     {
         value ??= "";
         // Formula-injection guard (section 4): neutralize leading formula triggers.
-        if (!_options.AllowFormulas && value.Length > 0 && (value[0] == '=' || value[0] == '+' || value[0] == '-' || value[0] == '@'))
+        if (protectFormula && !_options.AllowFormulas && value.Length > 0
+            && (value[0] == '=' || value[0] == '+' || value[0] == '-' || value[0] == '@'))
             value = "'" + value;
 
         bool needsQuote = value.Contains(_options.Delimiter)
@@ -210,6 +278,7 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
         string suggestedExtension, CancellationToken cancellationToken)
     {
         var path = destination.Path ?? throw new InvalidOperationException("CSV destination has no path.");
+        _ = CountRows(payload);
         var staged = path + ".staged";
         var enc = _options.Encoding ?? new UTF8Encoding(_options.EmitBom);
         using (var fs = new FileStream(staged, FileMode.Create, FileAccess.Write))
@@ -225,9 +294,24 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
         CancellationToken cancellationToken)
     {
         var path = destination.Path ?? throw new InvalidOperationException("CSV destination has no path.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var stagedRows = CountRows(File.ReadAllBytes(stagedPath));
+        if (ReconcileFailProbe?.Invoke(stagedPath) == true)
+            throw new IOException($"Simulated mid-write failure while publishing '{path}'.");
         File.Move(stagedPath, path, overwrite: true);
+        var finalRows = CountRows(File.ReadAllBytes(path));
+        if (finalRows != stagedRows)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Published CSV row count ({finalRows}) does not match staged ({stagedRows}).",
+                DiagnosticStage.Publication);
         var bytes = new FileInfo(path).Length;
         var digest = RunManifest.ComputeSha256(File.ReadAllBytes(path));
         return Task.FromResult(new OutputIdentity(path, digest, bytes, "csv"));
+    }
+
+    private int CountRows(byte[] payload)
+    {
+        var rows = ParseRows(DecodeText(payload)).Count;
+        return Math.Max(0, rows - (_options.HasHeader && rows > 0 ? 1 : 0));
     }
 }

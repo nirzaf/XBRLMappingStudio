@@ -64,6 +64,25 @@ public sealed class ExcelOutputAdapterTests
     }
 
     [Fact]
+    public async Task StagePublish_PreservesLeadingZeroText()
+    {
+        using var ws = new TempWorkspace();
+        var dest = new Adapters.SourceConnection("out", "excel", ws.PathFor("leading-zero.xlsx"));
+        var adapter = new ExcelOutputAdapter();
+        var payload = adapter.WriteWorkbook(
+            new[] { "account", "value" },
+            new IEnumerable<object?>[] { new object?[] { "00123", "-12.50" } });
+        var staged = await adapter.StageArtifactAsync(dest, payload, ".xlsx", default);
+
+        await adapter.PublishAsync(staged, dest, default);
+
+        using var workbook = new XLWorkbook(ws.PathFor("leading-zero.xlsx"));
+        var sheet = workbook.Worksheets.First();
+        Assert.Equal("00123", sheet.Cell(2, 1).GetString());
+        Assert.Equal("-12.50", sheet.Cell(2, 2).GetString());
+    }
+
+    [Fact]
     public async Task PublishToDistinctPath_LeavesSourceWorkbookUntouched()
     {
         using var ws = new TempWorkspace();
