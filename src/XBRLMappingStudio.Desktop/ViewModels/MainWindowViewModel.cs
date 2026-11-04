@@ -110,6 +110,11 @@ public sealed class ConceptRow : ViewModelBase
         : $"{Label}  ({QualifiedName}) — abstract";
 }
 
+public sealed record DestinationKeyOption(IReadOnlyList<string> Columns)
+{
+    public string Display => string.Join(", ", Columns);
+}
+
 /// <summary>
 /// Root window view model. Hosts a real <see cref="DesignerSession"/> over a
 /// <see cref="MappingProject"/>, a paged <see cref="TaxonomyIndex"/>-backed explorer, and
@@ -135,6 +140,17 @@ public sealed class MainWindowViewModel : ViewModelBase
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
+    private string? _destinationPath;
+    private string? _destinationTable;
+    private DestinationKeyOption? _selectedDestinationKey;
+    private SqliteTargetTableSchema? _destinationTableSchema;
+    private IReadOnlyList<string>? _preferredDestinationKey;
+    private bool _isDestinationLoading;
+    private bool _destinationSchemaIsValid;
+    private bool _isDestinationSchemaConfirmed;
+    private string _destinationSchemaStatus = "Choose an existing SQLite database to inspect its tables.";
+    private int _destinationLoadGeneration;
+    private Task _destinationSchemaTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _selectedFactUnit = "USD";
@@ -142,6 +158,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactDecimals = "0";
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
+    private readonly SqliteDestinationInspector _destinationInspector = new();
 
     private FilingProfile _profile;
     private readonly FilingProfileResolver _profileResolver;
@@ -160,6 +177,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                NotifyDestinationCommands();
             }
         }
     }
@@ -172,7 +190,19 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                NotifyDestinationCommands();
             }
+        }
+    }
+    public bool IsDestinationLoading
+    {
+        get => _isDestinationLoading;
+        private set
+        {
+            if (!Set(ref _isDestinationLoading, value)) return;
+            Raise(nameof(CanConfirmDestinationSchema));
+            Raise(nameof(CanSelectDestinationKey));
+            NotifyDestinationCommands();
         }
     }
     public bool AllowSyntheticProfile
@@ -205,6 +235,75 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
         }
     }
+    public string? DestinationPath => _destinationPath;
+    public string DestinationPathDisplay => _destinationPath ?? "No database selected.";
+    public List<string> DestinationTables { get; } = new();
+    public bool HasDestinationTables => DestinationTables.Count > 0;
+    public string? DestinationTable
+    {
+        get => _destinationTable;
+        set
+        {
+            if (!Set(ref _destinationTable, value)) return;
+            _destinationTableSchema = null;
+            _selectedDestinationKey = null;
+            DestinationKeys.Clear();
+            Raise(nameof(SelectedDestinationKey));
+            Raise(nameof(DestinationKeys));
+            ResetDestinationSchemaConfirmation("Inspecting the selected table…");
+            NotifyDestinationCommands();
+            if (value is not null && _destinationPath is not null)
+            {
+                var generation = Interlocked.Increment(ref _destinationLoadGeneration);
+                IsDestinationLoading = true;
+                _destinationSchemaTask = LoadDestinationTableSchemaAsync(value, generation);
+            }
+        }
+    }
+    public List<DestinationKeyOption> DestinationKeys { get; } = new();
+    public DestinationKeyOption? SelectedDestinationKey
+    {
+        get => _selectedDestinationKey;
+        set
+        {
+            if (!Set(ref _selectedDestinationKey, value)) return;
+            IsDestinationSchemaConfirmed = false;
+            ValidateSelectedDestinationSchema();
+            NotifyDestinationCommands();
+        }
+    }
+    public bool DestinationSchemaIsValid
+    {
+        get => _destinationSchemaIsValid;
+        private set
+        {
+            if (!Set(ref _destinationSchemaIsValid, value)) return;
+            Raise(nameof(CanConfirmDestinationSchema));
+            NotifyDestinationCommands();
+        }
+    }
+    public bool IsDestinationSchemaConfirmed
+    {
+        get => _isDestinationSchemaConfirmed;
+        set
+        {
+            if (value && !DestinationSchemaIsValid) return;
+            if (!Set(ref _isDestinationSchemaConfirmed, value)) return;
+            NotifyDestinationCommands();
+        }
+    }
+    public bool CanConfirmDestinationSchema => DestinationSchemaIsValid && !IsDestinationLoading;
+    public bool CanSelectDestinationKey => DestinationKeys.Count > 0 && !IsDestinationLoading;
+    public string DestinationSchemaStatus
+    {
+        get => _destinationSchemaStatus;
+        private set => Set(ref _destinationSchemaStatus, value);
+    }
+    public bool CanSaveDestinationPlan => CanUseSelectedDestination && ProjectPath is not null
+        && !IsBusy && !IsSourceLoading;
+    public bool CanPreviewDestination => CanUseSelectedDestination && !IsBusy && !IsSourceLoading;
+    public bool CanPublishDestination => CanUseSelectedDestination && ProjectPath is not null
+        && IsSavedDestinationCurrent && !IsBusy && !IsSourceLoading;
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
     public SuggestionRow? SelectedSuggestion { get => _selectedSuggestion; set => Set(ref _selectedSuggestion, value); }
     public string SelectedFactUnit { get => _selectedFactUnit; set => Set(ref _selectedFactUnit, value); }
@@ -262,6 +361,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand RedoCommand { get; }
     public RelayCommand SearchTaxonomyCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
+    public RelayCommand ChooseDestinationCommand { get; }
+    public RelayCommand SaveDestinationPlanCommand { get; }
+    public RelayCommand PreviewDestinationCommand { get; }
+    public RelayCommand PublishDestinationCommand { get; }
     public RelayCommand BindSourceColumnCommand { get; }
     public RelayCommand SetConceptCommand { get; }
     public RelayCommand ApplyFactPropertiesCommand { get; }
@@ -319,6 +422,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         RedoCommand = new RelayCommand(_ => { if (Session.CanRedo) { Session.Redo(); RefreshUndoState(); } });
         SearchTaxonomyCommand = new RelayCommand(_ => RunSearch());
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync());
+        ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
+            _ => !IsBusy && !IsDestinationLoading);
+        SaveDestinationPlanCommand = new RelayCommand(_ => SaveDestinationPlan(), _ => CanSaveDestinationPlan);
+        PreviewDestinationCommand = new RelayCommand(async _ => await PreviewDestinationAsync(),
+            _ => CanPreviewDestination);
+        PublishDestinationCommand = new RelayCommand(async _ => await PublishDestinationAsync(),
+            _ => CanPublishDestination);
         BindSourceColumnCommand = new RelayCommand(_ => BindSelectedSourceColumn());
         SetConceptCommand = new RelayCommand(_ => SetSelectedConcept());
         ApplyFactPropertiesCommand = new RelayCommand(_ => ApplySelectedFactProperties());
@@ -391,6 +501,400 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (path is not null) await LoadSourceAsync(path);
         }
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
+    }
+
+    private async Task ChooseDestinationAsync()
+    {
+        if (ProjectPath is null)
+        {
+            StatusText = "Save the project inside its workspace before configuring a destination.";
+            return;
+        }
+        if (_fileDialog is null)
+        {
+            StatusText = "SQLite destination picker is unavailable.";
+            return;
+        }
+
+        try
+        {
+            var path = await _fileDialog.OpenDestinationDatabaseAsync();
+            if (path is not null) await LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+        }
+        catch (Exception ex)
+        {
+            ResetDestinationSchemaConfirmation($"Destination load failed: {ex.Message}");
+            StatusText = "SQLite destination could not be loaded.";
+        }
+    }
+
+    private async Task LoadDestinationDatabaseAsync(
+        string path,
+        string? preferredTable,
+        IReadOnlyList<string>? preferredKey)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var generation = Interlocked.Increment(ref _destinationLoadGeneration);
+        _destinationPath = fullPath;
+        _preferredDestinationKey = preferredKey;
+        Raise(nameof(DestinationPath));
+        Raise(nameof(DestinationPathDisplay));
+        DestinationTables.Clear();
+        DestinationKeys.Clear();
+        _destinationTableSchema = null;
+        _destinationTable = null;
+        _selectedDestinationKey = null;
+        Raise(nameof(DestinationTables));
+        Raise(nameof(HasDestinationTables));
+        Raise(nameof(DestinationTable));
+        Raise(nameof(DestinationKeys));
+        Raise(nameof(SelectedDestinationKey));
+        ResetDestinationSchemaConfirmation("Reading destination tables…");
+        IsDestinationLoading = true;
+        try
+        {
+            var tables = await _destinationInspector.DiscoverTablesAsync(fullPath);
+            if (generation != _destinationLoadGeneration) return;
+            DestinationTables.AddRange(tables);
+            Raise(nameof(DestinationTables));
+            Raise(nameof(HasDestinationTables));
+            if (tables.Count == 0)
+            {
+                DestinationSchemaStatus = "This database has no user tables.";
+                StatusText = DestinationSchemaStatus;
+                return;
+            }
+
+            var selectedTable = preferredTable is not null && tables.Contains(preferredTable, StringComparer.Ordinal)
+                ? preferredTable
+                : tables.Count == 1 ? tables[0] : null;
+            if (selectedTable is null)
+            {
+                DestinationSchemaStatus = "Choose a table to inspect its fact columns and unique keys.";
+                StatusText = DestinationSchemaStatus;
+                return;
+            }
+
+            DestinationTable = selectedTable;
+            await _destinationSchemaTask;
+        }
+        catch (Exception ex)
+        {
+            if (generation != _destinationLoadGeneration) return;
+            ResetDestinationSchemaConfirmation($"Destination inspection failed: {ex.Message}");
+            StatusText = "SQLite destination inspection failed.";
+        }
+        finally
+        {
+            if (generation == _destinationLoadGeneration) IsDestinationLoading = false;
+        }
+    }
+
+    public Task LoadDestinationAsync(string path)
+        => LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+
+    private async Task LoadDestinationTableSchemaAsync(string table, int generation)
+    {
+        try
+        {
+            if (_destinationPath is null) return;
+            var schema = await _destinationInspector.InspectTableAsync(_destinationPath, table);
+            if (generation != _destinationLoadGeneration || table != DestinationTable) return;
+            _destinationTableSchema = schema;
+            DestinationKeys.Clear();
+            var outputColumns = XbrlFactRecordMapper.OutputColumns.ToHashSet(StringComparer.Ordinal);
+            var options = schema.UniqueKeys
+                .Where(key => key.Count > 0 && key.All(outputColumns.Contains))
+                .Select(key => new DestinationKeyOption(key.ToArray()))
+                .OrderByDescending(key => key.Columns.SequenceEqual(new[] { "fact_key" }, StringComparer.Ordinal))
+                .ThenBy(key => key.Display, StringComparer.Ordinal)
+                .ToArray();
+            DestinationKeys.AddRange(options);
+            Raise(nameof(DestinationKeys));
+            Raise(nameof(CanSelectDestinationKey));
+
+            var preferred = _preferredDestinationKey;
+            var selected = preferred is null ? null : options.FirstOrDefault(option =>
+                option.Columns.SequenceEqual(preferred, StringComparer.Ordinal));
+            _preferredDestinationKey = null;
+            SelectedDestinationKey = selected
+                ?? options.FirstOrDefault(option => option.Columns.SequenceEqual(new[] { "fact_key" }, StringComparer.Ordinal))
+                ?? options.FirstOrDefault();
+            if (DestinationKeys.Count == 0)
+            {
+                DestinationSchemaStatus = "No unique key uses supported XBRL fact columns. Choose a table with a unique fact key.";
+                StatusText = DestinationSchemaStatus;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (generation != _destinationLoadGeneration) return;
+            _destinationTableSchema = null;
+            DestinationKeys.Clear();
+            Raise(nameof(DestinationKeys));
+            Raise(nameof(CanSelectDestinationKey));
+            ResetDestinationSchemaConfirmation($"Table inspection failed: {ex.Message}");
+            StatusText = "SQLite destination table inspection failed.";
+        }
+        finally
+        {
+            if (generation == _destinationLoadGeneration) IsDestinationLoading = false;
+        }
+    }
+
+    private void ValidateSelectedDestinationSchema()
+    {
+        var plan = BuildSelectedDestinationPlan();
+        if (plan is null || _destinationTableSchema is null)
+        {
+            DestinationSchemaIsValid = false;
+            if (_destinationPath is null)
+                DestinationSchemaStatus = "Choose an existing SQLite database to inspect its tables.";
+            else if (DestinationTable is null)
+                DestinationSchemaStatus = "Choose a table to inspect its fact columns and unique keys.";
+            else if (SelectedDestinationKey is null)
+                DestinationSchemaStatus = "Select an available unique business key.";
+            return;
+        }
+
+        var diagnostics = DestinationPlanValidator.ValidateSchema(plan, _destinationTableSchema);
+        if (diagnostics.HasBlockingErrors)
+        {
+            DestinationSchemaIsValid = false;
+            DestinationSchemaStatus = string.Join(" ", diagnostics.Items.Select(item => item.Message));
+            return;
+        }
+
+        DestinationSchemaIsValid = true;
+        DestinationSchemaStatus = $"Compatible fact schema. Exact decimals use TEXT; business key '{SelectedDestinationKey?.Display ?? "(none)"}' is unique.";
+    }
+
+    private void ResetDestinationSchemaConfirmation(string message)
+    {
+        DestinationSchemaIsValid = false;
+        IsDestinationSchemaConfirmed = false;
+        DestinationSchemaStatus = message;
+    }
+
+    private DestinationPlan? BuildSelectedDestinationPlan()
+        => _destinationPath is null || DestinationTable is null || SelectedDestinationKey is null
+            ? null
+            : new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.SupportedKind,
+                Locator = _destinationPath,
+                Table = DestinationTable,
+                BusinessKey = SelectedDestinationKey.Columns.ToList()
+            };
+
+    private bool CanUseSelectedDestination => !IsDestinationLoading && _destinationPath is not null
+        && File.Exists(_destinationPath) && DestinationTable is not null && SelectedDestinationKey is not null
+        && DestinationSchemaIsValid && IsDestinationSchemaConfirmed;
+
+    private bool IsSavedDestinationCurrent
+    {
+        get
+        {
+            var selected = BuildSelectedDestinationPlan();
+            var saved = Session.Project.Destination;
+            if (selected is null || saved is null || ProjectPath is null) return false;
+            var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(ProjectPath))!;
+            var savedPath = Path.IsPathRooted(saved.Locator)
+                ? Path.GetFullPath(saved.Locator)
+                : Path.GetFullPath(Path.Combine(projectDirectory, saved.Locator));
+            return PathEquals(savedPath, selected.Locator)
+                && StringComparer.Ordinal.Equals(saved.Kind, selected.Kind)
+                && StringComparer.Ordinal.Equals(saved.Table, selected.Table)
+                && saved.BusinessKey is not null
+                && saved.BusinessKey.SequenceEqual(selected.BusinessKey, StringComparer.Ordinal)
+                && StringComparer.Ordinal.Equals(saved.Format, selected.Format)
+                && StringComparer.Ordinal.Equals(saved.WriteMode, selected.WriteMode)
+                && StringComparer.Ordinal.Equals(saved.Compatibility, selected.Compatibility);
+        }
+    }
+
+    private static bool PathEquals(string left, string right)
+        => StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
+
+    private void NotifyDestinationCommands()
+    {
+        SaveDestinationPlanCommand?.NotifyCanExecuteChanged();
+        PreviewDestinationCommand?.NotifyCanExecuteChanged();
+        PublishDestinationCommand?.NotifyCanExecuteChanged();
+        ChooseDestinationCommand?.NotifyCanExecuteChanged();
+        Raise(nameof(CanSaveDestinationPlan));
+        Raise(nameof(CanPreviewDestination));
+        Raise(nameof(CanPublishDestination));
+        Raise(nameof(CanSelectDestinationKey));
+    }
+
+    private void SaveDestinationPlan()
+    {
+        if (ProjectPath is null)
+        {
+            StatusText = "Save the project inside its workspace before saving a destination plan.";
+            return;
+        }
+        var plan = BuildSelectedDestinationPlan();
+        if (plan is null || _destinationTableSchema is null || !CanUseSelectedDestination)
+        {
+            StatusText = "Confirm a compatible destination table and unique key before saving.";
+            return;
+        }
+        var diagnostics = DestinationPlanValidator.ValidateSchema(plan, _destinationTableSchema);
+        if (diagnostics.HasBlockingErrors)
+        {
+            ShowDestinationDiagnostics(diagnostics.Items);
+            StatusText = "Destination plan was not saved because the target schema is incompatible.";
+            return;
+        }
+
+        try
+        {
+            Session.SetDestination(plan);
+            SaveProjectTo(ProjectPath);
+            StatusText = $"Saved SQLite target {plan.Table}. A reviewer must approve this destination-bound revision before publication.";
+            NotifyDestinationCommands();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Destination plan could not be saved: {ex.Message}";
+        }
+    }
+
+    public async Task PreviewDestinationAsync()
+    {
+        if (IsBusy || !CanUseSelectedDestination) return;
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
+        var plan = BuildSelectedDestinationPlan()!;
+        var project = Session.Project;
+        var semanticDigest = project.ComputeSemanticDigest();
+        IsBusy = true;
+        StatusText = "Running a full destination dry run; no database rows will be written…";
+        try
+        {
+            var root = WorkspaceRoot();
+            var connections = BuildConnections(root);
+            await using var worker = _workerFactory.Create(profile);
+            var result = await new MappingJobService(profile, worker).RunAsync(
+                project, connections, ReadParameters(), preview: false, CancellationToken.None);
+            if (!StringComparer.Ordinal.Equals(semanticDigest, project.ComputeSemanticDigest()))
+            {
+                ShowRunResult(result);
+                StatusText = "The project changed during the dry run. Nothing was written; run the preview again.";
+                return;
+            }
+            if (!result.IsPublishable)
+            {
+                ShowRunResult(result);
+                StatusText = $"Dry run finished: {result.Manifest.Outcome}. No database rows were written.";
+                return;
+            }
+
+            var schema = await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table);
+            var diagnostics = DestinationPlanValidator.ValidateSchema(plan, schema);
+            if (diagnostics.HasBlockingErrors)
+            {
+                ShowDestinationDiagnostics(diagnostics.Items);
+                StatusText = "Dry run found a destination schema problem. No database rows were written.";
+                return;
+            }
+
+            ShowRunResult(result);
+            StatusText = $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Table}. No database rows were written. Publication requires a current approval and final confirmation.";
+        }
+        catch (Exception ex)
+        {
+            ShowDestinationError(ex);
+            StatusText = "Destination dry run failed; no database rows were written.";
+        }
+        finally { IsBusy = false; }
+    }
+
+    public async Task PublishDestinationAsync()
+    {
+        if (IsBusy || IsSourceLoading) return;
+        var project = Session.Project;
+        var plan = project.Destination;
+        if (plan is null || !CanUseSelectedDestination || !IsSavedDestinationCurrent)
+        {
+            StatusText = "Save and confirm the current destination plan before publication.";
+            return;
+        }
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
+        var gate = PublicationGate.Evaluate(project, profile, AllowSyntheticProfile);
+        if (gate.HasBlockingErrors)
+        {
+            ShowDestinationDiagnostics(gate.Items);
+            StatusText = "Publication blocked. The current destination-bound revision requires approval.";
+            return;
+        }
+        if (_fileDialog is null)
+        {
+            StatusText = "Publication confirmation is unavailable.";
+            return;
+        }
+
+        IsBusy = true;
+        StatusText = "Executing the approved mapping before publication…";
+        try
+        {
+            var root = WorkspaceRoot();
+            var connections = BuildConnections(root);
+            await using var worker = _workerFactory.Create(profile);
+            var service = new MappingJobService(profile, worker);
+            var result = await service.RunAsync(project, connections, ReadParameters(),
+                preview: false, CancellationToken.None);
+            if (!result.IsPublishable)
+            {
+                ShowRunResult(result);
+                StatusText = $"Execution finished: {result.Manifest.Outcome}. The SQLite destination was not changed.";
+                return;
+            }
+
+            var schema = await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table);
+            var diagnostics = DestinationPlanValidator.ValidateSchema(plan, schema);
+            if (diagnostics.HasBlockingErrors)
+            {
+                ShowDestinationDiagnostics(diagnostics.Items);
+                StatusText = "The destination schema changed or is incompatible. No database rows were written.";
+                return;
+            }
+
+            var confirmed = await _fileDialog.ConfirmDestinationPublicationAsync(
+                _destinationPath!, plan.Table, plan.BusinessKey, result.Facts.Count, project.ComputeSemanticDigest());
+            if (!confirmed)
+            {
+                ShowRunResult(result);
+                StatusText = "Publication cancelled. The SQLite destination was not changed.";
+                return;
+            }
+
+            var receipt = await service.PublishDestinationAsync(
+                project, result, root, AllowSyntheticProfile, CancellationToken.None);
+            ShowRunResult(result);
+            StatusText = $"Published {receipt.WrittenRows} fact row(s) to {plan.Table}; receipt {receipt.OperationKey}.";
+        }
+        catch (Exception ex)
+        {
+            ShowDestinationError(ex);
+            StatusText = "SQLite publication failed; inspect diagnostics and reconcile the destination.";
+        }
+        finally { IsBusy = false; }
+    }
+
+    private void ShowDestinationDiagnostics(IReadOnlyList<Diagnostic> diagnostics)
+    {
+        Diagnostics.Clear();
+        Diagnostics.AddRange(diagnostics.Select(ToDiagnosticRow));
+        Raise(nameof(Diagnostics));
+    }
+
+    private void ShowDestinationError(Exception exception)
+    {
+        Diagnostics.Clear();
+        Diagnostics.Add(new DiagnosticRow { Display = exception.Message, Severity = "error" });
+        Raise(nameof(Diagnostics));
     }
 
     public async Task LoadSourceAsync(string path)
@@ -705,6 +1209,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = project.LayoutGeneration;
         ClearSourceAndRunResults();
+        _ = LoadSavedDestinationAsync();
         OnSessionChanged();
         RunSearch();
         StatusText = profileAvailable
@@ -715,6 +1220,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ClearSourceAndRunResults()
     {
         Interlocked.Increment(ref _sourceLoadGeneration);
+        ClearDestinationSelection();
         IsSourceLoading = false;
         _sqliteSourcePath = null;
         _selectedSourceTable = null;
@@ -735,6 +1241,46 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(Diagnostics));
     }
 
+    private void ClearDestinationSelection()
+    {
+        Interlocked.Increment(ref _destinationLoadGeneration);
+        _destinationPath = null;
+        _destinationTable = null;
+        _selectedDestinationKey = null;
+        _destinationTableSchema = null;
+        _preferredDestinationKey = null;
+        DestinationTables.Clear();
+        DestinationKeys.Clear();
+        Raise(nameof(DestinationPath));
+        Raise(nameof(DestinationPathDisplay));
+        Raise(nameof(DestinationTables));
+        Raise(nameof(HasDestinationTables));
+        Raise(nameof(DestinationTable));
+        Raise(nameof(DestinationKeys));
+        Raise(nameof(CanSelectDestinationKey));
+        Raise(nameof(SelectedDestinationKey));
+        IsDestinationLoading = false;
+        ResetDestinationSchemaConfirmation("Choose an existing SQLite database to inspect its tables.");
+    }
+
+    private async Task LoadSavedDestinationAsync()
+    {
+        var plan = Session.Project.Destination;
+        if (plan is null || ProjectPath is null) return;
+        try
+        {
+            var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(ProjectPath))!;
+            var path = Path.IsPathRooted(plan.Locator)
+                ? Path.GetFullPath(plan.Locator)
+                : Path.GetFullPath(Path.Combine(projectDirectory, plan.Locator));
+            await LoadDestinationDatabaseAsync(path, plan.Table, plan.BusinessKey?.ToArray());
+        }
+        catch (Exception ex)
+        {
+            ResetDestinationSchemaConfirmation($"Saved destination could not be inspected: {ex.Message}");
+        }
+    }
+
     private async Task SaveProjectAsync()
     {
         try
@@ -752,6 +1298,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public void SaveProjectTo(string path)
     {
+        var hadProjectPath = ProjectPath is not null;
         var fullPath = Path.GetFullPath(path);
         var manager = new ProjectManager(fullPath);
         var saved = manager.Save(Session.Project,
@@ -759,6 +1306,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = saved.NewLayoutGeneration;
         StatusText = $"Saved {Path.GetFileName(fullPath)} (semantic revision {saved.NewSemanticRevision}).";
+        if (!hadProjectPath && _destinationPath is null && Session.Project.Destination is not null)
+            _ = LoadSavedDestinationAsync();
     }
 
     private void Validate()

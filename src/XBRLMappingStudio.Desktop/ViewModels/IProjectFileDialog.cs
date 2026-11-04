@@ -7,4 +7,11 @@ public interface IProjectFileDialog
     Task<string?> SaveProjectAsync();
     Task<string?> SaveReportAsync();
     Task<string?> OpenSourceAsync();
+    Task<string?> OpenDestinationDatabaseAsync();
+    Task<bool> ConfirmDestinationPublicationAsync(
+        string databasePath,
+        string table,
+        IReadOnlyList<string> businessKey,
+        int factCount,
+        string semanticDigest);
 }

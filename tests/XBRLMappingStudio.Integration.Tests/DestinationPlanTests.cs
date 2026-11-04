@@ -1,5 +1,6 @@
 using System.Collections;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Fixtures;
@@ -22,6 +23,28 @@ public sealed class DestinationPlanTests
         var outcome = MappingJobService.ValidateProject(project, Synthetic);
 
         Assert.True(outcome.Success);
+    }
+
+    [Fact]
+    public void ValidateSchemaRejectsNumericAffinityAndMissingFactColumns()
+    {
+        var columns = XbrlFactRecordMapper.OutputColumns.ToDictionary(
+            column => column,
+            column => column switch
+            {
+                "value" => "NUMERIC",
+                "is_nil" or "decimals" => "INTEGER",
+                _ => "TEXT"
+            },
+            StringComparer.Ordinal);
+        columns.Remove("provenance_json");
+        var schema = new SqliteTargetTableSchema("facts", columns,
+            new IReadOnlyList<string>[] { new[] { "fact_key" } });
+
+        var diagnostics = DestinationPlanValidator.ValidateSchema(ValidPlan(), schema);
+
+        Assert.Contains(diagnostics.Items, diagnostic => diagnostic.Code == DiagnosticCodes.IoNumberOutOfBudget);
+        Assert.Contains(diagnostics.Items, diagnostic => diagnostic.Code == DiagnosticCodes.IoColumnMissing);
     }
 
     [Theory]

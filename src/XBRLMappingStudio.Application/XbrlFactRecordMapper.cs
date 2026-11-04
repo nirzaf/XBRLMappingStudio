@@ -16,6 +16,14 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public static class XbrlFactRecordMapper
 {
+    public static IReadOnlyList<string> OutputColumns { get; } = Array.AsReadOnly(new[]
+    {
+        "fact_key", "profile_digest", "concept", "entity_scheme", "entity_identifier",
+        "period_kind", "instant_date", "period_start", "period_end", "unit",
+        "compound_unit", "value", "text_value", "is_nil", "decimals", "language",
+        "dimensions_json", "provenance_json"
+    });
+
     public static IReadOnlyList<DataRecord> ToRecords(
         IReadOnlyList<XbrlFact> facts,
         string profileDigest)

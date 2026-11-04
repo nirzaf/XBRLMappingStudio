@@ -51,6 +51,10 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
     {
         Patterns = new[] { "*.xlsx", "*.csv", "*.json", "*.xml", "*.db", "*.sqlite", "*.sqlite3" }
     };
+    private static readonly FilePickerFileType SqliteDatabaseType = new("SQLite databases")
+    {
+        Patterns = new[] { "*.db", "*.sqlite", "*.sqlite3" }
+    };
 
     public async Task<string?> OpenProjectAsync()
     {
@@ -96,6 +100,66 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
             FileTypeFilter = new[] { SourceType }
         });
         return LocalPath(files.FirstOrDefault()?.Path);
+    }
+
+    public async Task<string?> OpenDestinationDatabaseAsync()
+    {
+        var files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose an existing SQLite destination",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { SqliteDatabaseType }
+        });
+        return LocalPath(files.FirstOrDefault()?.Path);
+    }
+
+    public async Task<bool> ConfirmDestinationPublicationAsync(
+        string databasePath,
+        string table,
+        IReadOnlyList<string> businessKey,
+        int factCount,
+        string semanticDigest)
+    {
+        var dialog = new Window
+        {
+            Title = "Confirm SQLite publication",
+            Width = 560,
+            Height = 340,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var confirm = new Button
+        {
+            Content = $"Publish {factCount} fact row(s)",
+            IsDefault = true,
+            MinWidth = 150
+        };
+        var cancel = new Button { Content = "Cancel", MinWidth = 100 };
+        confirm.Click += (_, _) => dialog.Close(true);
+        cancel.Click += (_, _) => dialog.Close(false);
+
+        var content = new StackPanel { Spacing = 12, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = "This writes fact rows to the selected SQLite table. Existing rows with matching business keys will be updated. Review the details before committing; this action cannot be undone automatically.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Database: {databasePath}\nTable: {table}\nBusiness key: {string.Join(", ", businessKey)}\nFact rows: {factCount}\nApproved project digest: {semanticDigest}",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(confirm);
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<bool>(owner);
     }
 
     private static string? LocalPath(Uri? uri) => uri is { IsFile: true } ? uri.LocalPath : null;

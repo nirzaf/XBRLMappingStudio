@@ -10,6 +10,35 @@ namespace XBRLMappingStudio.Adapters.Tests;
 public sealed class SqliteSourceAdapterTests
 {
     [Fact]
+    public async Task DestinationInspectorDiscoversOnlyCompatibleUniqueKeyMetadataWithoutWriting()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("target-schema.db");
+        await using (var database = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await database.OpenAsync();
+            await using var command = database.CreateCommand();
+            command.CommandText = "CREATE TABLE facts (fact_key TEXT NOT NULL, value TEXT, other TEXT); CREATE UNIQUE INDEX facts_key ON facts(fact_key); CREATE UNIQUE INDEX facts_partial ON facts(other) WHERE other IS NOT NULL; CREATE UNIQUE INDEX facts_nocase ON facts(other COLLATE NOCASE);";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var before = await File.ReadAllBytesAsync(path);
+        var inspector = new SqliteDestinationInspector();
+        var tables = await inspector.DiscoverTablesAsync(path);
+        var schema = await inspector.InspectTableAsync(path, "facts");
+
+        Assert.Equal(new[] { "facts" }, tables);
+        Assert.Equal(new[] { "fact_key", "value", "other" }, schema.Columns.Keys);
+        Assert.Contains(schema.UniqueKeys, key => key.SequenceEqual(new[] { "fact_key" }));
+        Assert.DoesNotContain(schema.UniqueKeys, key => key.SequenceEqual(new[] { "other" }));
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+
+        var missing = ws.PathFor("missing.db");
+        await Assert.ThrowsAsync<AdapterException>(() => inspector.DiscoverTablesAsync(missing));
+        Assert.False(File.Exists(missing));
+    }
+
+    [Fact]
     public async Task ReadsRowsWithSchemaAndCellLineageUsingReadOnlyConnection()
     {
         using var ws = new TempWorkspace();

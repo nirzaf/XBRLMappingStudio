@@ -231,6 +231,44 @@ public sealed class DesignerSession
         return true;
     }
 
+    public bool SetDestination(DestinationPlan? destination)
+    {
+        var snapshot = destination is null
+            ? null
+            : destination with
+            {
+                BusinessKey = destination.BusinessKey is null
+                    ? null!
+                    : new List<string>(destination.BusinessKey)
+            };
+        if (DestinationPlansEqual(_project.Destination, snapshot)) return false;
+        PushUndo();
+        _project.Destination = snapshot;
+        Changed?.Invoke();
+        return true;
+    }
+
+    private static bool DestinationPlansEqual(DestinationPlan? left, DestinationPlan? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        if (left is null || right is null) return false;
+
+        var leftKey = left.BusinessKey;
+        var rightKey = right.BusinessKey;
+        var keysEqual = leftKey is null || rightKey is null
+            ? leftKey is null && rightKey is null
+            : leftKey.SequenceEqual(rightKey, StringComparer.Ordinal);
+
+        return left.Version == right.Version
+            && StringComparer.Ordinal.Equals(left.Kind, right.Kind)
+            && StringComparer.Ordinal.Equals(left.Locator, right.Locator)
+            && StringComparer.Ordinal.Equals(left.Table, right.Table)
+            && StringComparer.Ordinal.Equals(left.Format, right.Format)
+            && keysEqual
+            && StringComparer.Ordinal.Equals(left.WriteMode, right.WriteMode)
+            && StringComparer.Ordinal.Equals(left.Compatibility, right.Compatibility);
+    }
+
     // ---- undo / redo ------------------------------------------------------------
 
     public void Undo()

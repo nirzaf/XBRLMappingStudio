@@ -53,10 +53,13 @@ Core capabilities implemented here:
   report input, each behind a capability-gated, direction-checked interface. `MappingJobService`
   surfaces target and source suitability (IO01) so the designer can disable a read-only
   connector before a user starts mapping.
-- **SQLite input** — table discovery, schema inspection, bounded preview, and shared-engine
-  execution. Provenance uses a stable SHA-256 row identity derived from declared single or
-  composite primary keys; keyless tables fall back to positional provenance with an `IO015`
-  warning. Transactional upsert exists as an adapter API but is not a general publishing flow.
+- **SQLite input and publishing** — table discovery, schema inspection, bounded preview,
+  and shared-engine execution. Provenance uses a stable SHA-256 row identity derived from
+  declared single or composite primary keys; keyless tables use positional provenance with
+  an `IO015` warning. A saved destination plan can publish XBRL fact rows through the CLI
+  or desktop after schema review, current approval, and explicit confirmation, with a
+  transactional upsert and durable receipt. The supported target is the versioned
+  `xbrl-facts-v1` contract; broader table mapping and production database qualification remain open.
 - **Local operational state** — a versioned SQLite application database holds the run
   journal and publication receipts, with non-overwriting online-backup support.
 - **AI-assisted mapping (offline-safe)** — deterministic local retrieval proposes concept
@@ -138,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | 315 test cases across 8 suites; 313 pass and 2 Arelle subprocess cases are gated. |
+| Tests | xUnit 2.9.3 | 319 test cases across 8 suites; 317 pass and 2 Arelle subprocess cases are gated. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -269,17 +272,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-315 test cases across 8 xUnit projects: the default Windows run reports 313 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
+319 test cases across 8 xUnit projects: the latest local Windows Release run reports 317 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
 
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 33 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
 | XBRL.Tests | 49 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
 | AI.Tests | 47 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 48 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, JSON and XML writers with staging/reconciliation, SQLite source snapshot under WAL writes, primary-key row identity and target upsert |
+| Adapters.Tests | 49 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, JSON and XML writers with staging/reconciliation, SQLite source snapshot under WAL writes, read-only destination schema inspection, primary-key row identity and target upsert |
 | Ops.Tests | 47 | Destination locking/publication/journal, local app database migrations and backup, SuggestionAuditStore v1→v2, IO01 capability surfacing, worker supervision, path guard, redaction |
-| Integration.Tests | 62 | CLI parity, destination config save and replay, invalid-target no-mutation, fail-closed profile validation, exact-decimal SQLite publication and receipt replay, independent cross-format fixture oracle, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
-| Desktop.Tests | 21 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, pinned workbook loading, SQLite bindings and key disclosure |
+| Integration.Tests | 63 | CLI parity, destination config save and replay, invalid-target no-mutation, fail-closed profile validation, exact-decimal SQLite publication and receipt replay, schema affinity/key validation, independent cross-format fixture oracle, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
+| Desktop.Tests | 23 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, pinned workbook loading, SQLite destination schema review, no-write dry run, cancel, stale selection and receipt workflow |
 | Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash

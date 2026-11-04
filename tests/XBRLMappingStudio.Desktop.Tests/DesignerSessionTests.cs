@@ -3,6 +3,8 @@ using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Fixtures;
+using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -69,6 +71,39 @@ public sealed class DesignerSessionTests
         Assert.Equal(before, after);
         // Layout actually changed.
         Assert.Equal(999, session.Project.Nodes.Single(n => n.NodeId == "n2").Layout!.X);
+    }
+
+    [Fact]
+    public void SetDestination_IsSemanticAndUndoable()
+    {
+        var session = new DesignerSession(Project());
+        var before = session.Project.ComputeSemanticDigest();
+        var businessKey = new List<string> { "fact_key" };
+        var destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "target.db",
+            Table = "facts",
+            BusinessKey = businessKey
+        };
+
+        Assert.True(session.SetDestination(destination));
+        Assert.NotEqual(before, session.Project.ComputeSemanticDigest());
+        Assert.Equal("facts", session.Project.Destination?.Table);
+        var after = session.Project.ComputeSemanticDigest();
+
+        businessKey.Add("concept");
+        Assert.Equal(new[] { "fact_key" }, session.Project.Destination?.BusinessKey);
+        Assert.False(session.SetDestination(destination with { BusinessKey = new List<string> { "fact_key" } }));
+        Assert.Equal(after, session.Project.ComputeSemanticDigest());
+
+        session.Undo();
+        Assert.Null(session.Project.Destination);
+        Assert.Equal(before, session.Project.ComputeSemanticDigest());
+
+        session.Redo();
+        Assert.Equal("facts", session.Project.Destination?.Table);
+        Assert.Equal(new[] { "fact_key" }, session.Project.Destination?.BusinessKey);
     }
 
     [Fact]
@@ -489,6 +524,150 @@ public sealed class DesignerSessionTests
         {
             releaseSchema.TrySetResult();
             Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopDestinationRequiresSchemaReviewDryRunAndFinalConfirmation()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-destination", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var workbook = TestFixtures.MaterializeWorkbook(dir);
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        var database = System.IO.Path.Combine(dir, "target.sqlite");
+        await CreateFactDatabaseAsync(database);
+        var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+        var dialog = new TestProjectFileDialog(database);
+        try
+        {
+            var viewModel = new MainWindowViewModel(project, dialog);
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadDestinationAsync(database);
+
+            Assert.Equal("facts", viewModel.DestinationTable);
+            Assert.Equal(new[] { "fact_key" }, viewModel.SelectedDestinationKey?.Columns);
+            Assert.True(viewModel.DestinationSchemaIsValid);
+            Assert.False(viewModel.CanSaveDestinationPlan);
+
+            viewModel.IsDestinationSchemaConfirmed = true;
+            Assert.True(viewModel.CanSaveDestinationPlan);
+            var oldDigest = viewModel.Session.Project.ComputeSemanticDigest();
+            viewModel.SaveDestinationPlanCommand.Execute(null);
+
+            Assert.NotEqual(oldDigest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Contains("must approve this destination-bound revision", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.DoesNotContain(viewModel.Session.Project.Approvals,
+                approval => approval.SemanticDigest == viewModel.Session.Project.ComputeSemanticDigest());
+
+            var before = await File.ReadAllBytesAsync(database);
+            await viewModel.PreviewDestinationAsync();
+            Assert.Contains("Dry run complete: 1 fact row", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("No database rows were written", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(database));
+
+            viewModel.Session.Project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = viewModel.Session.Project.SemanticRevision,
+                SemanticDigest = viewModel.Session.Project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = SyntheticProfile.Build().Digest
+            });
+            viewModel.SaveProjectTo(projectPath);
+            Assert.True(viewModel.CanPublishDestination);
+
+            viewModel.DestinationTable = null;
+            Assert.False(viewModel.CanPublishDestination);
+            await viewModel.LoadDestinationAsync(database);
+            Assert.False(viewModel.IsDestinationSchemaConfirmed);
+            viewModel.IsDestinationSchemaConfirmed = true;
+            Assert.True(viewModel.CanPublishDestination);
+
+            dialog.ConfirmationResult = false;
+            await viewModel.PublishDestinationAsync();
+            Assert.Contains("Publication cancelled", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(database));
+
+            dialog.ConfirmationResult = true;
+            await viewModel.PublishDestinationAsync();
+            Assert.Equal(2, dialog.ConfirmationCount);
+            Assert.Equal("facts", dialog.ConfirmedTable);
+            Assert.Equal(1, dialog.ConfirmedFactCount);
+            Assert.Equal(new[] { "fact_key" }, dialog.ConfirmedBusinessKey);
+            Assert.Contains("Published 1 fact row(s)", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("receipt xms-", viewModel.StatusText, StringComparison.Ordinal);
+
+            await using var published = new SqliteConnection($"Data Source={database};Pooling=False;Mode=ReadOnly");
+            await published.OpenAsync();
+            await using var count = published.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM facts";
+            Assert.Equal(1L, await count.ExecuteScalarAsync());
+            count.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts";
+            Assert.Equal(1L, await count.ExecuteScalarAsync());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static async Task CreateFactDatabaseAsync(string path)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE facts (
+                fact_key TEXT NOT NULL PRIMARY KEY,
+                profile_digest TEXT NOT NULL,
+                concept TEXT NOT NULL,
+                entity_scheme TEXT NOT NULL,
+                entity_identifier TEXT NOT NULL,
+                period_kind TEXT NOT NULL,
+                instant_date TEXT NULL,
+                period_start TEXT NULL,
+                period_end TEXT NULL,
+                unit TEXT NULL,
+                compound_unit TEXT NULL,
+                value TEXT NULL,
+                text_value TEXT NULL,
+                is_nil INTEGER NOT NULL,
+                decimals INTEGER NULL,
+                language TEXT NULL,
+                dimensions_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            """;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private sealed class TestProjectFileDialog(string? destinationPath) : IProjectFileDialog
+    {
+        public bool ConfirmationResult { get; set; }
+        public int ConfirmationCount { get; private set; }
+        public string? ConfirmedTable { get; private set; }
+        public IReadOnlyList<string> ConfirmedBusinessKey { get; private set; } = Array.Empty<string>();
+        public int ConfirmedFactCount { get; private set; }
+
+        public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult(destinationPath);
+
+        public Task<bool> ConfirmDestinationPublicationAsync(
+            string databasePath,
+            string table,
+            IReadOnlyList<string> businessKey,
+            int factCount,
+            string semanticDigest)
+        {
+            ConfirmationCount++;
+            ConfirmedTable = table;
+            ConfirmedBusinessKey = businessKey.ToArray();
+            ConfirmedFactCount = factCount;
+            return Task.FromResult(ConfirmationResult);
         }
     }
 }

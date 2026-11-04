@@ -1,5 +1,6 @@
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Project;
+using XBRLMappingStudio.Adapters.Sqlite;
 
 namespace XBRLMappingStudio.Application;
 
@@ -65,5 +66,60 @@ public static class DestinationPlanValidator
         void Unsupported(string message)
             => diagnostics.Error(DiagnosticCodes.IoUnsupportedOperation, DiagnosticSubsystem.Publication,
                 DiagnosticStage.Validation, message, operationId: operationId);
+    }
+
+    public static DiagnosticBag ValidateSchema(DestinationPlan plan, SqliteTargetTableSchema schema)
+    {
+        var diagnostics = Validate(plan);
+        if (diagnostics.HasBlockingErrors) return diagnostics;
+
+        var missingColumns = XbrlFactRecordMapper.OutputColumns
+            .Where(column => !schema.Columns.ContainsKey(column))
+            .ToArray();
+        if (missingColumns.Length > 0)
+        {
+            diagnostics.Error(DiagnosticCodes.IoColumnMissing, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                $"SQLite target '{schema.Name}' is missing fact columns: {string.Join(", ", missingColumns)}.");
+        }
+
+        var unsupportedKeys = plan.BusinessKey
+            .Where(key => !XbrlFactRecordMapper.OutputColumns.Contains(key, StringComparer.Ordinal))
+            .ToArray();
+        if (unsupportedKeys.Length > 0)
+        {
+            diagnostics.Error(DiagnosticCodes.IoColumnMissing, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                $"Business-key columns are not part of the XBRL fact row contract: {string.Join(", ", unsupportedKeys)}.");
+        }
+
+        if (schema.Columns.TryGetValue("value", out var valueType)
+            && !StringComparer.Ordinal.Equals(GetSqliteAffinity(valueType), "TEXT"))
+        {
+            diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                $"Exact decimal column 'value' must have TEXT affinity; '{valueType}' has {GetSqliteAffinity(valueType)} affinity.");
+        }
+
+        if (!schema.UniqueKeys.Any(key => key.SequenceEqual(plan.BusinessKey, StringComparer.Ordinal)))
+        {
+            diagnostics.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                $"SQLite target '{schema.Name}' must have a primary or unique index on the selected business key.");
+        }
+
+        return diagnostics;
+    }
+
+    private static string GetSqliteAffinity(string declaredType)
+    {
+        var type = declaredType.ToUpperInvariant();
+        if (type.Contains("INT", StringComparison.Ordinal)) return "INTEGER";
+        if (type.Contains("CHAR", StringComparison.Ordinal) || type.Contains("CLOB", StringComparison.Ordinal)
+            || type.Contains("TEXT", StringComparison.Ordinal)) return "TEXT";
+        if (type.Length == 0 || type.Contains("BLOB", StringComparison.Ordinal)) return "BLOB";
+        if (type.Contains("REAL", StringComparison.Ordinal) || type.Contains("FLOA", StringComparison.Ordinal)
+            || type.Contains("DOUB", StringComparison.Ordinal)) return "REAL";
+        return "NUMERIC";
     }
 }
