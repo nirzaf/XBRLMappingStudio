@@ -225,7 +225,7 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         var writer = new XmlOutputAdapter();
         var bytes = writer.Write(new[] { record });
         var text = Encoding.UTF8.GetString(bytes);
-        using var parsed = System.Xml.Linq.XDocument.Parse(text);
+        var parsed = System.Xml.Linq.XDocument.Parse(text);
         var row = Assert.Single(parsed.Root!.Elements());
         Assert.Null(row.Element("Absent"));
         var nil = row.Element("Nil");
