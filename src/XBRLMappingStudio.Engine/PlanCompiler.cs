@@ -633,6 +633,18 @@ public sealed class PlanCompiler
             foreach (var (name, value) in outputs)
             {
                 frame.Set(nodeId, name, value);
+
+                // Propagate all upstream contributors across transforms and joins,
+                // rather than relying only on the first DataValue.Source reference.
+                // Operations such as ratios can combine several source cells even
+                // though their result value has no single direct source property.
+                var outputKey = ProvenanceTracker.SlotKey(nodeId, name, row);
+                var inputKeys = node.InputPorts
+                    .Select(port => ProvenanceTracker.SlotKey(nodeId, port.Name, row))
+                    .ToArray();
+                ctx.Provenance.MergeSources(outputKey, inputKeys);
+                if (value.Source is not null)
+                    ctx.Provenance.RecordSource(outputKey, value.Source);
             }
         };
     }

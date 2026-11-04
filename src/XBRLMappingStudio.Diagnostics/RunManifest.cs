@@ -101,7 +101,20 @@ public sealed record OutputIdentity(
     string Path,
     string Digest,
     long Bytes,
-    string Kind);       // "xbrl-json", "xlsx", "db-receipt"
+    string Kind)        // "xbrl-json", "xlsx", "db-receipt"
+{
+    /// <summary>Rows affected by a durable database publication receipt.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? RowsWritten { get; init; }
+
+    /// <summary>Stable operation key stored with a database publication receipt.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OperationKey { get; init; }
+
+    /// <summary>Database table associated with a database publication receipt.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Table { get; init; }
+}
 
 /// <summary>
 /// Mutable collector for diagnostics during a single operation.

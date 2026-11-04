@@ -138,7 +138,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | 308 test cases across 8 suites; 306 pass and 2 Arelle subprocess cases are gated. |
+| Tests | xUnit 2.9.3 | 311 test cases across 8 suites; 309 pass and 2 Arelle subprocess cases are gated. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -269,7 +269,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-308 test cases across 8 xUnit projects: the default Windows run reports 306 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
+311 test cases across 8 xUnit projects: the default Windows run reports 309 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
 
 | Suite | Count | Covers |
 |---|---:|---|
@@ -278,7 +278,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 | AI.Tests | 47 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 47 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, JSON and XML writers with staging/reconciliation, SQLite source (primary-key row identity) and target upsert |
 | Ops.Tests | 47 | Destination locking/publication/journal, local app database migrations and backup, SuggestionAuditStore v1→v2, IO01 capability surfacing, worker supervision, path guard, redaction |
-| Integration.Tests | 56 | CLI parity, exit-code contract, fail-closed profile and destination validation, independent cross-format fixture oracle, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
+| Integration.Tests | 59 | CLI parity, exit-code contract, fail-closed profile and destination validation, exact-decimal SQLite publication and receipt replay, independent cross-format fixture oracle, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
 | Desktop.Tests | 21 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, pinned workbook loading, SQLite bindings and key disclosure |
 | Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 

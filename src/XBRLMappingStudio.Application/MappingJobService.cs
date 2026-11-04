@@ -376,6 +376,171 @@ public sealed class MappingJobService
         return JobResult.FromManifest(manifest, facts, json, context.SampledTotals);
     }
 
+    /// <summary>
+    /// Publish a previously validated, full run through the versioned SQLite
+    /// destination plan. The call rechecks approval and run identity at the write
+    /// boundary; callers cannot publish preview or stale project output.
+    /// </summary>
+    public async Task<SqlitePublishReceipt> PublishDestinationAsync(
+        MappingProject project,
+        JobResult result,
+        string workspaceRoot,
+        bool allowSyntheticProfile,
+        CancellationToken cancellationToken = default)
+    {
+        var plan = project.Destination ?? throw new AdapterException(
+            DiagnosticCodes.IoUnsupportedOperation,
+            "The project has no configured destination.",
+            DiagnosticStage.Publication);
+        var planDiagnostics = DestinationPlanValidator.Validate(plan, result.Manifest.OperationId);
+        if (planDiagnostics.HasBlockingErrors)
+        {
+            var first = planDiagnostics.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new AdapterException(first.Code,
+                string.Join(Environment.NewLine, planDiagnostics.Items.Select(diagnostic => diagnostic.Message)),
+                DiagnosticStage.Publication);
+        }
+
+        if (!result.IsPublishable)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                "Only a successful full run can be written to a durable SQLite destination; previews are never published.",
+                DiagnosticStage.Publication);
+
+        var manifest = result.Manifest;
+        var semanticDigest = project.ComputeSemanticDigest();
+        if (manifest.ProjectId != project.ProjectId
+            || manifest.SemanticRevision != project.SemanticRevision
+            || !StringComparer.Ordinal.Equals(manifest.ProjectSemanticDigest, semanticDigest)
+            || !StringComparer.Ordinal.Equals(manifest.ProfileDigest, _profile.Digest))
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "Run evidence no longer matches the project semantic revision and filing profile.",
+                manifest.RunId, plan.Locator);
+        }
+
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
+        if (gate.HasBlockingErrors)
+        {
+            var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new PublicationException(first.Code,
+                string.Join(Environment.NewLine, gate.Items.Select(diagnostic => diagnostic.Message)),
+                manifest.RunId, plan.Locator);
+        }
+
+        string expectedJson;
+        try
+        {
+            expectedJson = OimSerializer.Serialize(_profile, result.Facts);
+        }
+        catch (XbrlExportException ex)
+        {
+            throw new PublicationException(ex.Code, ex.Message, manifest.RunId, plan.Locator);
+        }
+
+        var jsonBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
+        var jsonDigest = RunManifest.ComputeSha256(jsonBytes);
+        if (!StringComparer.Ordinal.Equals(expectedJson, result.XbrlJson)
+            || !manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+                && output.Digest == jsonDigest
+                && output.Bytes == jsonBytes.Length))
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "The mapped facts do not match the report artifact recorded by the run.",
+                manifest.RunId, plan.Locator);
+        }
+
+        var root = Path.GetFullPath(workspaceRoot);
+        var destinationPath = Path.IsPathRooted(plan.Locator)
+            ? Path.GetFullPath(plan.Locator)
+            : PathGuard.EnsureWithin(root, Path.Combine(root, plan.Locator));
+        if (!File.Exists(destinationPath))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "SQLite destination database must already exist; create or select an existing database file.",
+                DiagnosticStage.Publication);
+
+        var records = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
+        if (records.Count == 0)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "An empty fact set cannot be published to the SQLite destination.",
+                DiagnosticStage.Publication);
+
+        var operationFingerprint = ComputeDestinationOperationFingerprint(
+            project, result, plan, destinationPath, jsonDigest);
+        var operationKey = "xms-" + operationFingerprint["sha256:".Length..];
+        var destination = new SourceConnection(
+            "destination",
+            DestinationPlanValidator.SupportedKind,
+            destinationPath,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
+
+        var receipt = await new SqliteTargetPublisher().PublishAsync(
+            destination,
+            records,
+            plan.BusinessKey,
+            operationKey,
+            operationFingerprint,
+            cancellationToken);
+
+        manifest.Outputs = manifest.Outputs
+            .Where(output => output.Kind != "db-receipt" || output.Path != destinationPath)
+            .Append(new OutputIdentity(destinationPath, receipt.IntentFingerprint, 0, "db-receipt")
+            {
+                RowsWritten = receipt.WrittenRows,
+                OperationKey = receipt.OperationKey,
+                Table = plan.Table
+            })
+            .ToArray();
+        manifest.CompletedUtc = DateTimeOffset.UtcNow;
+        return receipt;
+    }
+
+    private static string ComputeDestinationOperationFingerprint(
+        MappingProject project,
+        JobResult result,
+        DestinationPlan plan,
+        string destinationPath,
+        string reportDigest)
+    {
+        var builder = new StringBuilder();
+        AppendIntentPart(builder, project.ProjectId);
+        AppendIntentPart(builder, project.SemanticRevision.ToString(CultureInfo.InvariantCulture));
+        AppendIntentPart(builder, project.ComputeSemanticDigest());
+        AppendIntentPart(builder, result.Manifest.ProfileDigest);
+        AppendIntentPart(builder, result.Manifest.EngineVersion);
+        AppendIntentPart(builder, destinationPath);
+        AppendIntentPart(builder, plan.Table);
+        AppendIntentPart(builder, plan.Format);
+        AppendIntentPart(builder, plan.WriteMode);
+        AppendIntentPart(builder, plan.Compatibility);
+        AppendIntentPart(builder, reportDigest);
+
+        builder.Append(plan.BusinessKey.Count).Append(':');
+        foreach (var key in plan.BusinessKey)
+            AppendIntentPart(builder, key);
+
+        foreach (var input in result.Manifest.Inputs.OrderBy(input => input.SourceId, StringComparer.Ordinal))
+        {
+            AppendIntentPart(builder, input.SourceId);
+            AppendIntentPart(builder, input.Kind);
+            AppendIntentPart(builder, input.Digest ?? "");
+            AppendIntentPart(builder, input.IsReplayable ? "1" : "0");
+            AppendIntentPart(builder, input.RowIdentityStrategy ?? "");
+        }
+
+        foreach (var parameter in result.Manifest.FrozenParameters.OrderBy(parameter => parameter.Key, StringComparer.Ordinal))
+        {
+            AppendIntentPart(builder, parameter.Key);
+            AppendIntentPart(builder, parameter.Value);
+        }
+
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+            .ToLowerInvariant();
+        return "sha256:" + digest;
+    }
+
+    private static void AppendIntentPart(StringBuilder builder, string value)
+        => builder.Append(value.Length).Append(':').Append(value);
+
     private static ISourceAdapter BuildAdapter(SourceConnection conn) => conn.Kind switch
     {
         "excel" => new ExcelAdapter(),
