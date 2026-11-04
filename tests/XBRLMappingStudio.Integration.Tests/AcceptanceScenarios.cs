@@ -188,7 +188,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
             {
                 command.CommandText = "INSERT INTO financials VALUES($line,$current,$prior)";
                 command.Parameters.Clear();
-                command.Parameters.AddWithValue("$line", $"Line{i}");
+                command.Parameters.AddWithValue("$line", "Revenue");
                 command.Parameters.AddWithValue("$current", i.ToString());
                 command.Parameters.AddWithValue("$prior", (i + 1).ToString());
                 await command.ExecuteNonQueryAsync();
@@ -202,21 +202,25 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         var a = await CreateSource("a.db", reverse: false);
         var b = await CreateSource("b.db", reverse: true);
         var service = NewService();
-        async Task<InputIdentity> Run((MappingProject Project, SourceConnection Connection, string Path) source, bool preview)
+        async Task<JobResult> Run((MappingProject Project, SourceConnection Connection, string Path) source, bool preview)
         {
-            var result = await service.RunAsync(source.Project,
+            return await service.RunAsync(source.Project,
                 new Dictionary<string, SourceConnection> { [source.Connection.SourceId] = source.Connection },
                 new Dictionary<string, string>(), preview, CancellationToken.None);
-            return Assert.Single(result.Manifest.Inputs);
         }
         var fullA = await Run(a, preview: false);
         var fullB = await Run(b, preview: false);
-        Assert.Equal(fullA.Digest, fullB.Digest);
-        Assert.True(fullA.IsReplayable);
+        var inputA = Assert.Single(fullA.Manifest.Inputs);
+        var inputB = Assert.Single(fullB.Manifest.Inputs);
+        Assert.Equal(inputA.Digest, inputB.Digest);
+        Assert.Equal(Enumerable.Range(0, 12).Select(i => (decimal?)(i * 1000m)), fullA.Facts.Select(fact => fact.Value));
+        Assert.Equal(Enumerable.Range(0, 12).Reverse().Select(i => (decimal?)(i * 1000m)), fullB.Facts.Select(fact => fact.Value));
+        Assert.True(inputA.IsReplayable);
         var preview = await Run(a, preview: true);
-        Assert.Equal("sqlite-preview", preview.Kind);
-        Assert.False(preview.IsReplayable);
-        Assert.NotEqual(fullA.Digest, preview.Digest);
+        var previewInput = Assert.Single(preview.Manifest.Inputs);
+        Assert.Equal("sqlite-preview", previewInput.Kind);
+        Assert.False(previewInput.IsReplayable);
+        Assert.NotEqual(inputA.Digest, previewInput.Digest);
     }
 
     [Fact]

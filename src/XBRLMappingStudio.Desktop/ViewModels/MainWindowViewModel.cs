@@ -141,6 +141,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactPeriodType = "duration";
     private string _selectedFactDecimals = "0";
     private readonly IProjectFileDialog? _fileDialog;
+    private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
 
     private readonly FilingProfile _profile;
     private readonly TaxonomyIndex _taxonomy;
@@ -267,8 +268,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     public MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog)
+        : this(project, fileDialog, new SqliteSourceAdapter().InspectSchemaAsync)
+    {
+    }
+
+    internal MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog,
+        Func<SourceConnection, CancellationToken, Task<ISourceSchema>> sqliteSchemaLoader)
     {
         _fileDialog = fileDialog;
+        _sqliteSchemaLoader = sqliteSchemaLoader;
         _profile = SyntheticProfile.Build();
         _taxonomy = new TaxonomyIndex(_profile);
         _session = new DesignerSession(project);
@@ -444,7 +452,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
             config["table"] = table;
             var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
-            var schema = await new SqliteSourceAdapter().InspectSchemaAsync(connection, CancellationToken.None);
+            var schema = await _sqliteSchemaLoader(connection, CancellationToken.None);
             if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));

@@ -78,6 +78,7 @@ public sealed class LocalApplicationDatabaseTests
         }
 
         database.BackupTo(backupPath);
+        Assert.Empty(Directory.GetDirectories(workspace.Path, ".xms-backup-*"));
         if (!OperatingSystem.IsWindows())
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(backupPath));
         using (var backup = new SqliteConnection($"Data Source={backupPath};Mode=ReadOnly"))
@@ -103,6 +104,7 @@ public sealed class LocalApplicationDatabaseTests
         })));
         Assert.Equal(1, results.Count(x => x == "saved"));
         Assert.Equal(1, results.Count(x => x == "exists"));
+        Assert.Empty(Directory.GetDirectories(workspace.Path, ".xms-backup-*"));
         using var verify = new SqliteConnection($"Data Source={backup};Mode=ReadOnly");
         verify.Open();
         using var command = verify.CreateCommand();
@@ -118,6 +120,23 @@ public sealed class LocalApplicationDatabaseTests
         var before = File.GetUnixFileMode(workspace.Path);
         _ = new LocalApplicationDatabase(Path.Combine(workspace.Path, "state.db"));
         Assert.Equal(before, File.GetUnixFileMode(workspace.Path));
+    }
+
+    [Fact]
+    public void PrivateBackupDirectoryRestrictsAccessToCurrentUser()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, $".xms-backup-{Guid.NewGuid():N}");
+        LocalApplicationDatabase.CreatePrivateDirectory(path);
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                Assert.True(new DirectoryInfo(path).GetAccessControl().AreAccessRulesProtected);
+            else
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                    File.GetUnixFileMode(path));
+        }
+        finally { Directory.Delete(path); }
     }
 
     [Fact]

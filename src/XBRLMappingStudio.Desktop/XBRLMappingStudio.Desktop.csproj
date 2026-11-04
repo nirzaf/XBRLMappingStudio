@@ -37,4 +37,8 @@
     <ProjectReference Include="..\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="XBRLMappingStudio.Desktop.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -159,10 +159,6 @@ public sealed class MappingJobService
             }
             if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
             {
-                records = records.Select(record => (Record: record, Key: CanonicalRecord(record)))
-                    .OrderBy(item => item.Key, StringComparer.Ordinal)
-                    .ThenBy(item => item.Record.RowId, StringComparer.Ordinal)
-                    .Select(item => item.Record).ToList();
                 var digest = DigestRecords(conn, records);
                 manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
                     ? input with { Kind = preview ? "sqlite-preview" : "sqlite-table", Digest = digest, IsReplayable = !preview }

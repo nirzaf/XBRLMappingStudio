@@ -44,6 +44,18 @@ public sealed class DesignerSessionTests
         return p;
     }
 
+    private static MappingProject ProjectWithSource()
+    {
+        var project = Project();
+        project.Bindings.Add(new SourceBinding
+        {
+            BindingId = "source",
+            Kind = "csv",
+            DisplayName = "Source"
+        });
+        return project;
+    }
+
     [Fact]
     public void MoveNode_PreservesSemanticDigest()
     {
@@ -289,14 +301,23 @@ public sealed class DesignerSessionTests
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
-            var columns = string.Join(",", Enumerable.Range(0, 900).Select(i => $"c{i} TEXT"));
-            command.CommandText = $"CREATE TABLE wide ({columns});";
+            command.CommandText = "CREATE TABLE wide (value TEXT);";
             await command.ExecuteNonQueryAsync();
         }
         File.WriteAllText(csv, "currentField\nvalue\n");
+        var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSchema = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            var viewModel = new MainWindowViewModel();
+            async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
+                XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
+            {
+                schemaEntered.TrySetResult();
+                await releaseSchema.Task.WaitAsync(cancellationToken);
+                return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
+                    .InspectSchemaAsync(connection, cancellationToken);
+            }
+            var viewModel = new MainWindowViewModel(ProjectWithSource(), null, LoadSchemaAsync);
             viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
             var executeDisabledDuringLoad = false;
             viewModel.PropertyChanged += (_, e) =>
@@ -305,16 +326,20 @@ public sealed class DesignerSessionTests
                     executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
             };
             var staleLoad = viewModel.LoadSourceAsync(database);
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(staleLoad.IsCompleted);
             await viewModel.LoadSourceAsync(csv);
+            releaseSchema.TrySetResult();
             await staleLoad;
             Assert.Contains("currentField", viewModel.SourceColumns);
-            Assert.DoesNotContain("c0", viewModel.SourceColumns);
+            Assert.DoesNotContain("value", viewModel.SourceColumns);
             Assert.Equal("csv", viewModel.Session.Project.Bindings[0].Kind);
             Assert.True(executeDisabledDuringLoad);
             Assert.False(viewModel.IsSourceLoading);
         }
         finally
         {
+            releaseSchema.TrySetResult();
             Directory.Delete(dir, recursive: true);
         }
     }
@@ -330,13 +355,22 @@ public sealed class DesignerSessionTests
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
-            var columns = string.Join(",", Enumerable.Range(0, 900).Select(i => $"c{i} TEXT"));
-            command.CommandText = $"CREATE TABLE wide ({columns});";
+            command.CommandText = "CREATE TABLE wide (value TEXT);";
             await command.ExecuteNonQueryAsync();
         }
+        var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSchema = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            var viewModel = new MainWindowViewModel();
+            async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
+                XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
+            {
+                schemaEntered.TrySetResult();
+                await releaseSchema.Task.WaitAsync(cancellationToken);
+                return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
+                    .InspectSchemaAsync(connection, cancellationToken);
+            }
+            var viewModel = new MainWindowViewModel(ProjectWithSource(), null, LoadSchemaAsync);
             viewModel.SaveProjectTo(projectPath);
             var originalKind = viewModel.Session.Project.Bindings[0].Kind;
             var executeDisabledDuringLoad = false;
@@ -346,10 +380,14 @@ public sealed class DesignerSessionTests
                     executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
             };
             var staleLoad = viewModel.LoadSourceAsync(database);
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(staleLoad.IsCompleted);
             viewModel.LoadProject(projectPath);
+            releaseSchema.TrySetResult();
             await staleLoad;
             Assert.Empty(viewModel.SourceTables);
             Assert.Empty(viewModel.SourceColumns);
+            Assert.DoesNotContain("value", viewModel.SourceColumns);
             Assert.Equal(originalKind, viewModel.Session.Project.Bindings[0].Kind);
             Assert.Null(viewModel.Session.Project.Bindings[0].SchemaFingerprint);
             Assert.True(executeDisabledDuringLoad);
@@ -357,6 +395,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
+            releaseSchema.TrySetResult();
             Directory.Delete(dir, recursive: true);
         }
     }

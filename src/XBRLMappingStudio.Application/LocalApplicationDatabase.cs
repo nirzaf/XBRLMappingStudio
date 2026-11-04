@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace XBRLMappingStudio.Application;
 
@@ -57,14 +59,16 @@ public sealed class LocalApplicationDatabase
         if (File.Exists(fullBackupPath)) throw new IOException("Backup destination already exists; refusing to overwrite it.");
         var directory = System.IO.Path.GetDirectoryName(fullBackupPath)!;
         Directory.CreateDirectory(directory);
-        var temporaryPath = System.IO.Path.Combine(directory,
-            $".{System.IO.Path.GetFileName(fullBackupPath)}.{Guid.NewGuid():N}.tmp");
-        var ownsTemporary = false;
+        var temporaryDirectory = System.IO.Path.Combine(directory, $".xms-backup-{Guid.NewGuid():N}");
+        var temporaryPath = System.IO.Path.Combine(temporaryDirectory, $"{System.IO.Path.GetFileName(fullBackupPath)}.tmp");
+        var ownsTemporaryDirectory = false;
         try
         {
+            CreatePrivateDirectory(temporaryDirectory);
+            ownsTemporaryDirectory = true;
             var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.ReadWrite, Share = FileShare.None };
             if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-            using (new FileStream(temporaryPath, options)) ownsTemporary = true;
+            using (new FileStream(temporaryPath, options)) { }
             using var source = OpenConnection();
             using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
             {
@@ -82,12 +86,27 @@ public sealed class LocalApplicationDatabase
                 File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             File.Move(temporaryPath, fullBackupPath);
         }
-        catch
+        finally
         {
-            if (ownsTemporary)
-                foreach (var file in new[] { temporaryPath, temporaryPath + "-wal", temporaryPath + "-shm" })
-                    try { File.Delete(file); } catch (IOException) { }
-            throw;
+            if (ownsTemporaryDirectory && Directory.Exists(temporaryDirectory))
+                try { Directory.Delete(temporaryDirectory, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    internal static void CreatePrivateDirectory(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var user = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException("Could not determine the current Windows user for the private backup directory.");
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+            FileSystemAclExtensions.CreateDirectory(security, path);
+        }
+        else
+        {
+            Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
     }
 

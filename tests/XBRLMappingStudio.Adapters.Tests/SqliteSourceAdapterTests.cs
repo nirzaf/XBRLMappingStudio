@@ -131,6 +131,35 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task TargetUpsertsRowIdIntegerPrimaryKeyWithoutCollationConflictTarget()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("integer-primary-key.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account INTEGER PRIMARY KEY, amount TEXT); CREATE UNIQUE INDEX uq_account_nocase ON report(account COLLATE NOCASE);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "report" });
+        var publisher = new SqliteTargetPublisher();
+
+        await publisher.PublishAsync(destination, new[] { Record(DataValue.IntegerValue(7), 1m) },
+            new[] { "account" }, "integer-key-1", "intent-1");
+        var updated = await publisher.PublishAsync(destination, new[] { Record(DataValue.IntegerValue(7), 2m) },
+            new[] { "account" }, "integer-key-2", "intent-2");
+
+        Assert.Equal(1, updated.WrittenRows);
+        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        await read.OpenAsync();
+        await using var query = read.CreateCommand();
+        query.CommandText = "SELECT amount FROM report WHERE account=7";
+        Assert.Equal("2", query.ExecuteScalar());
+    }
+
+    [Fact]
     public async Task TargetRejectsNullAndDuplicateBatchKeysAndPartialIndexes()
     {
         using var ws = new TempWorkspace();

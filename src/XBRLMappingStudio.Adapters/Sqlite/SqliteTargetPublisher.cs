@@ -82,7 +82,8 @@ public sealed class SqliteTargetPublisher
             if (Affinity(actualColumns[column]) != "TEXT")
                 throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
                     $"Exact decimal column '{column}' must have TEXT affinity in SQLite target '{table}'.", DiagnosticStage.Publication);
-        if (!await HasUniqueBusinessKeyAsync(connection, transaction, table, businessKey, cancellationToken))
+        var conflictTarget = await GetBusinessKeyConflictTargetAsync(connection, transaction, table, businessKey, cancellationToken);
+        if (conflictTarget is null)
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 $"SQLite target '{table}' must have a primary or unique index on the configured business key.");
         await EnsureUniqueBatchKeysAsync(connection, transaction, table, businessKey, records, cancellationToken);
@@ -90,7 +91,7 @@ public sealed class SqliteTargetPublisher
         var updates = columns.Except(businessKey, StringComparer.Ordinal).ToArray();
         if (updates.Length == 0) throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation, "Upsert requires at least one non-key column.");
         var insert = $"INSERT INTO {Quote(table)} ({string.Join(",", columns.Select(Quote))}) VALUES ({string.Join(",", columns.Select((_, i) => "$v" + i))}) "
-            + $"ON CONFLICT ({string.Join(",", businessKey.Select(c => $"{Quote(c)} COLLATE BINARY"))}) DO UPDATE SET {string.Join(",", updates.Select(c => $"{Quote(c)}=excluded.{Quote(c)}"))}";
+            + $"ON CONFLICT ({conflictTarget}) DO UPDATE SET {string.Join(",", updates.Select(c => $"{Quote(c)}=excluded.{Quote(c)}"))}";
         await using var upsert = connection.CreateCommand();
         upsert.Transaction = transaction;
         upsert.CommandText = insert;
@@ -135,7 +136,7 @@ public sealed class SqliteTargetPublisher
         return names;
     }
 
-    private static async Task<bool> HasUniqueBusinessKeyAsync(SqliteConnection connection, SqliteTransaction transaction,
+    private static async Task<string?> GetBusinessKeyConflictTargetAsync(SqliteConnection connection, SqliteTransaction transaction,
         string table, IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
         var primaryKey = new List<(int Ordinal, string Name, string Type)>();
@@ -154,10 +155,13 @@ public sealed class SqliteTargetPublisher
         indexes.CommandText = $"PRAGMA index_list({Quote(table)})";
         await using var indexReader = await indexes.ExecuteReaderAsync(cancellationToken);
         var uniqueNames = new List<string>();
+        var hasPrimaryKeyIndex = false;
         while (await indexReader.ReadAsync(cancellationToken))
+        {
+            hasPrimaryKeyIndex |= StringComparer.Ordinal.Equals(indexReader.GetString(3), "pk");
             if (indexReader.GetInt32(2) != 0 && indexReader.GetInt32(4) == 0) uniqueNames.Add(indexReader.GetString(1));
+        }
         await indexReader.DisposeAsync();
-        var matchingKeyWithUnsupportedCollation = false;
         foreach (var index in uniqueNames)
         {
             var columns = new List<(int Ordinal, string Name)>();
@@ -176,13 +180,16 @@ public sealed class SqliteTargetPublisher
             }
             if (!hasExpression && columns.OrderBy(x => x.Ordinal).Select(x => x.Name).SequenceEqual(keys, StringComparer.Ordinal))
             {
-                if (collations.All(c => StringComparer.OrdinalIgnoreCase.Equals(c, "BINARY"))) return true;
-                matchingKeyWithUnsupportedCollation = true;
+                if (collations.All(c => StringComparer.OrdinalIgnoreCase.Equals(c, "BINARY")))
+                    return string.Join(",", keys.Select(c => $"{Quote(c)} COLLATE BINARY"));
             }
         }
-        return !matchingKeyWithUnsupportedCollation && orderedPrimaryKey.Length == 1 && keys.Count == 1
+        var isRowIdPrimaryKey = !hasPrimaryKeyIndex && orderedPrimaryKey.Length == 1 && keys.Count == 1
             && StringComparer.Ordinal.Equals(orderedPrimaryKey[0].Name, keys.SingleOrDefault())
             && StringComparer.OrdinalIgnoreCase.Equals(orderedPrimaryKey[0].Type.Trim(), "INTEGER");
+        return isRowIdPrimaryKey
+            ? string.Join(",", keys.Select(Quote))
+            : null;
     }
 
     private static async Task EnsureUniqueBatchKeysAsync(SqliteConnection connection, SqliteTransaction transaction,
