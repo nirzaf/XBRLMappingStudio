@@ -17,6 +17,13 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.0" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.0" />
     <PackageReference Include="Avalonia.Diagnostics" Version="11.1.0" Condition="'$(Configuration)' == 'Debug'" />
+    <!-- Security remediation (GHSA-xrw6-gwf8-vvr9 / CVE-2026-39959, High): Avalonia.Desktop
+         pulls Tmds.DBus.Protocol transitively (Avalonia.X11 -> Avalonia.FreeDesktop) at 0.16.0,
+         which is below the patched line. Pin the transitive to 0.21.3, the 0.x-compatible
+         patched backport, so restore resolves a non-vulnerable version without bumping Avalonia.
+         The Linux FreeDesktop runtime path still needs owner validation; on the Windows x64
+         release target this assembly is never loaded. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <ItemGroup>

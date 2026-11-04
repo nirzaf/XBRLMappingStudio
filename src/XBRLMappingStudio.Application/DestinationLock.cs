@@ -98,16 +98,20 @@ public sealed class DestinationLock : IDisposable
     public static async Task<DestinationLock> AcquireAsync(
         string destinationPath, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        // Monotonic deadline: Environment.TickCount64 is immune to wall-clock adjustments
+        // (NTP slew, DST, manual set) that could otherwise make a DateTime.UtcNow deadline
+        // overshoot or abandon early. ConfigureAwait(false) keeps the returned task safe for
+        // the synchronous PublicationService.Publish caller, which blocks on its completion.
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var acquired = TryAcquire(destinationPath);
             if (acquired is not null) return acquired;
-            if (DateTime.UtcNow >= deadline)
+            if (Environment.TickCount64 >= deadline)
                 throw new DestinationLockedException(destinationPath,
                     $"Destination '{destinationPath}' remained locked past the acquisition deadline.");
-            await Task.Delay(10, cancellationToken);
+            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
         }
     }
 

@@ -194,7 +194,9 @@ public sealed class ProjectManager
     /// </summary>
     public IDisposable AcquireExclusiveLock(int timeoutMs = 2000)
     {
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        // Monotonic acquisition deadline (mirrors DestinationLock.AcquireAsync): a wall-clock
+        // jump must not lengthen or shorten the bounded retry window.
+        var deadline = Environment.TickCount64 + timeoutMs;
         while (true)
         {
             try
@@ -207,7 +209,7 @@ public sealed class ProjectManager
             }
             catch (IOException)
             {
-                if (DateTime.UtcNow >= deadline)
+                if (Environment.TickCount64 >= deadline)
                 {
                     throw new ProjectSaveException(
                         DiagnosticCodes.PrjLockHeld,
@@ -224,10 +226,11 @@ public sealed class ProjectManager
     public IDisposable AcquireSharedLock(int timeoutMs = 2000)
     {
         // Simple approach: refuse to read while the exclusive lock is present.
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        // Monotonic deadline (see AcquireExclusiveLock).
+        var deadline = Environment.TickCount64 + timeoutMs;
         while (File.Exists(LockPath))
         {
-            if (DateTime.UtcNow >= deadline)
+            if (Environment.TickCount64 >= deadline)
             {
                 throw new ProjectSaveException(
                     DiagnosticCodes.PrjLockHeld,
