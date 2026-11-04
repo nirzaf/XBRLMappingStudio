@@ -38,6 +38,11 @@ public sealed class MappingJobService
     /// <summary>Validate + compile the graph in a project. Does not execute.</summary>
     public CompileOutcome Validate(MappingProject project)
     {
+        var profileDiagnostics = PublicationGate.EvaluateProfileIdentity(
+            project, _profile, DiagnosticStage.Validation);
+        if (profileDiagnostics.HasBlockingErrors)
+            return CompileOutcome.Invalid(profileDiagnostics);
+
         var graph = new MappingGraph(project);
         var validator = new GraphValidator(_catalog);
         var diag = validator.Validate(graph);
@@ -64,41 +69,39 @@ public sealed class MappingJobService
     {
         var runId = Guid.NewGuid().ToString("N");
         var opId = Guid.NewGuid().ToString("N");
-        RunManifest manifest;
+        var manifest = new RunManifest
+        {
+            RunId = runId,
+            OperationId = opId,
+            ProjectId = project.ProjectId,
+            SemanticRevision = project.SemanticRevision,
+            ProjectSemanticDigest = project.ComputeSemanticDigest(),
+            ProfileDigest = _profile.Digest,
+            EngineVersion = "1.0.0",
+            StartedUtc = DateTimeOffset.UtcNow,
+            IsPreview = preview,
+            FrozenParameters = new Dictionary<string, string>(parameters)
+        };
+
+        // Reject missing or substituted profiles before hashing or opening any source.
+        var profileDiagnostics = PublicationGate.EvaluateProfileIdentity(
+            project, _profile, DiagnosticStage.Validation, opId);
+        if (profileDiagnostics.HasBlockingErrors)
+        {
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.Diagnostics = profileDiagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
         try
         {
-            manifest = new RunManifest
-            {
-                RunId = runId,
-                OperationId = opId,
-                ProjectId = project.ProjectId,
-                SemanticRevision = project.SemanticRevision,
-                ProjectSemanticDigest = project.ComputeSemanticDigest(),
-                ProfileDigest = _profile.Digest,
-                EngineVersion = "1.0.0",
-                StartedUtc = DateTimeOffset.UtcNow,
-                IsPreview = preview,
-                FrozenParameters = new Dictionary<string, string>(parameters),
-                Inputs = await RecordInputIdentities(connections, cancellationToken)
-            };
+            cancellationToken.ThrowIfCancellationRequested();
+            manifest.Inputs = await RecordInputIdentities(connections, cancellationToken);
         }
         catch (OperationCanceledException)
         {
-            var m = new RunManifest
-            {
-                RunId = runId,
-                OperationId = opId,
-                ProjectId = project.ProjectId,
-                SemanticRevision = project.SemanticRevision,
-                ProjectSemanticDigest = project.ComputeSemanticDigest(),
-                ProfileDigest = _profile.Digest,
-                EngineVersion = "1.0.0",
-                StartedUtc = DateTimeOffset.UtcNow,
-                IsPreview = preview,
-                FrozenParameters = new Dictionary<string, string>(parameters)
-            };
-            m.Outcome = RunOutcome.Cancelled;
-            return JobResult.FromManifest(m, Array.Empty<XbrlFact>(), "");
+            manifest.Outcome = RunOutcome.Cancelled;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
         var compile = Validate(project);

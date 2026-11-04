@@ -306,7 +306,10 @@ static async Task<int> ValidateAsync(string[] args)
     var service = new MappingJobService(profile, worker);
     var outcome = service.Validate(p);
     PrintDiagnostics(outcome.Diagnostics.Items);
-    return outcome.Success ? ExitCodesLocal.Success : ExitCodesLocal.InvalidMapping;
+    if (outcome.Success) return ExitCodesLocal.Success;
+    return outcome.Diagnostics.Items.Any(d => d.Code == DiagnosticCodes.XbrProfileMismatch)
+        ? ExitCodesLocal.IncompleteProfile
+        : ExitCodesLocal.InvalidMapping;
 }
 
 static async Task<int> ExecuteAsync(string[] args, bool preview)
