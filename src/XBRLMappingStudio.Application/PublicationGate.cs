@@ -32,27 +32,9 @@ public static class PublicationGate
         bool allowSyntheticProfile,
         string? operationId = null)
     {
-        var diagnostics = new DiagnosticBag();
-
-        var identityMatches =
-            string.Equals(project.ProfileId, profile.ProfileId, StringComparison.Ordinal)
-            && string.Equals(project.ProfileDigest, profile.Digest, StringComparison.Ordinal);
-
-        if (!identityMatches)
-        {
-            // A substituted or unrecognized profile is fatal on its own; the synthetic
-            // opt-in and approval checks below are meaningless (and would be misleading)
-            // until the caller resolves the correct profile, so stop here.
-            diagnostics.Error(
-                DiagnosticCodes.XbrProfileMismatch,
-                DiagnosticSubsystem.XBRL,
-                DiagnosticStage.Publication,
-                $"Project declares profile '{project.ProfileId}' @ {project.ProfileDigest}, but this "
-                + $"run resolved '{profile.ProfileId}' @ {profile.Digest}. Refusing to publish under "
-                + "a substituted or unrecognized profile.",
-                operationId: operationId);
+        var diagnostics = EvaluateProfileIdentity(project, profile, DiagnosticStage.Publication, operationId);
+        if (diagnostics.HasBlockingErrors)
             return diagnostics;
-        }
 
         var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
         if (isSynthetic && !allowSyntheticProfile)
@@ -82,6 +64,37 @@ public static class PublicationGate
                 $"No approval record covers semantic revision {project.SemanticRevision}, graph digest "
                 + $"{semanticDigest} and profile digest {profile.Digest}. An unattended publication "
                 + "requires approval of the exact executable graph and profile being run.",
+                operationId: operationId);
+        }
+
+        return diagnostics;
+    }
+
+    /// <summary>
+    /// Confirms that the profile resolved for an operation is the immutable profile
+    /// declared by the project. Shared by validation, execution, and publication so
+    /// an unresolved or substituted profile is rejected before source data is read.
+    /// </summary>
+    public static DiagnosticBag EvaluateProfileIdentity(
+        MappingProject project,
+        FilingProfile profile,
+        string stage,
+        string? operationId = null)
+    {
+        var diagnostics = new DiagnosticBag();
+        var identityMatches =
+            string.Equals(project.ProfileId, profile.ProfileId, StringComparison.Ordinal)
+            && string.Equals(project.ProfileDigest, profile.Digest, StringComparison.Ordinal);
+
+        if (!identityMatches)
+        {
+            diagnostics.Error(
+                DiagnosticCodes.XbrProfileMismatch,
+                DiagnosticSubsystem.XBRL,
+                stage,
+                $"Project declares profile '{project.ProfileId}' @ {project.ProfileDigest}, but this "
+                + $"run resolved '{profile.ProfileId}' @ {profile.Digest}. Refusing to continue under "
+                + "a substituted or unrecognized profile.",
                 operationId: operationId);
         }
 

@@ -150,6 +150,36 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Equal(2, proc.ExitCode);
     }
 
+    [Fact]
+    public async Task Cli_ValidateWithSubstitutedProfileReturnsIncompleteProfile()
+    {
+        var source = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        var project = new MappingProject
+        {
+            SchemaVersion = source.SchemaVersion,
+            ProjectId = source.ProjectId,
+            Name = source.Name,
+            ProfileId = "qatar-real-taxonomy-v1",
+            ProfileDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            FunctionCatalogVersion = source.FunctionCatalogVersion,
+            SemanticRevision = source.SemanticRevision,
+            LayoutGeneration = source.LayoutGeneration,
+            Metadata = source.Metadata,
+            Nodes = source.Nodes,
+            Edges = source.Edges,
+            Bindings = source.Bindings,
+            Functions = source.Functions,
+            Approvals = source.Approvals
+        };
+        var projectPath = Path.Combine(_dir, "substituted-profile.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "validate", projectPath);
+
+        Assert.Equal(4, exit); // IncompleteProfile
+        Assert.Contains("XBR015", stderr, StringComparison.Ordinal);
+    }
+
     // ---- OG01/OG02: fail-closed publishing through the real CLI process. --------
 
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunCliAsync(
