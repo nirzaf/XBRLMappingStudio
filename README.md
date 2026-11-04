@@ -138,7 +138,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | 288 test cases across 8 suites; 286 pass and 2 Arelle subprocess cases are gated. |
+| Tests | xUnit 2.9.3 | 300 test cases across 8 suites; 298 pass and 2 Arelle subprocess cases are gated. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -230,15 +230,17 @@ dotnet publish src/XBRLMappingStudio.CLI -c Release -r osx-x64  --self-contained
 
 `xbrl-studio` shares the exact engine, adapters, and project format the designer uses.
 Standard output carries machine-readable results; standard error carries diagnostics.
+Commands that use the built-in synthetic taxonomy require `--allow-synthetic-profile`;
+this development opt-in does not qualify a regulator profile.
 
 | Command | Purpose |
 |---|---|
 | `inspect <project.xmap>` | Print the project's bound sources and schemas. |
-| `validate <project.xmap>` | Run graph validation; non-zero exit on blocking diagnostics. |
-| `preview <project.xmap> --binding <id>=<path> --rows <n>` | Sampled, visibly-partial execution. |
-| `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>]` | Full run producing xBRL-JSON; all source, output and manifest paths stay inside the workspace root (defaults to the project directory). |
-| `taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search. |
-| `validate-artifact <file.xbrl.json>` | Filing-rule validation of the exported artifact — synthetic validator by default; add `--arelle --python <exe> --taxonomy-root <dir>` (optionally `--package <zip>`, `--plugin <name>`, `--disclosure-system <name>`) for independent offline Arelle validation. Install the pinned worker runtime from `tools/worker/requirements.lock`. |
+| `validate <project.xmap> [--allow-synthetic-profile]` | Run graph validation; the built-in development profile requires explicit opt-in. |
+| `preview <project.xmap> --binding <id>=<path> --rows <n> [--allow-synthetic-profile]` | Sampled, visibly-partial execution. |
+| `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>] [--allow-synthetic-profile]` | Full run producing xBRL-JSON; all source, output and manifest paths stay inside the workspace root (defaults to the project directory). |
+| `taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search against the synthetic development taxonomy. |
+| `validate-artifact <file.xbrl.json> [--allow-synthetic-profile]` | Local filing-rule validation requires the explicit development-profile flag; add `--arelle --python <exe> --taxonomy-root <dir>` (optionally `--package <zip>`, `--plugin <name>`, `--disclosure-system <name>`) for independent offline Arelle validation. Install the pinned worker runtime from `tools/worker/requirements.lock`. |
 | `inspect-run-result <runId>` | Look up a run's journal result. |
 | `support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]` | Redacted diagnostic bundle. |
 
@@ -259,7 +261,7 @@ Example:
 
 ```bash
 dotnet run --project src/XBRLMappingStudio.CLI -- \
-  execute my.xmap --binding wb=Quarterly.xlsx --output out.json
+  execute my.xmap --binding wb=Quarterly.xlsx --output out.json --allow-synthetic-profile
 echo $?   # 0 on success, 2 on invalid mapping, ...
 ```
 
@@ -267,7 +269,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-288 test cases across 8 xUnit projects: the default Windows run reports 286 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
+300 test cases across 8 xUnit projects: the default Windows run reports 298 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
 
 | Suite | Count | Covers |
 |---|---:|---|

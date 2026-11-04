@@ -222,11 +222,23 @@ public sealed class DesignerSessionTests
     public void DefaultDesktopProject_ValidatesThroughSharedJobService()
     {
         var viewModel = new MainWindowViewModel();
+        viewModel.AllowSyntheticProfile = true;
 
         viewModel.ValidateCommand.Execute(null);
 
         Assert.Equal("Validation complete.", viewModel.StatusText);
         Assert.DoesNotContain(viewModel.Diagnostics, row => row.Severity == "error");
+    }
+
+    [Fact]
+    public void DefaultDesktopProject_RequiresSyntheticProfileOptInForValidation()
+    {
+        var viewModel = new MainWindowViewModel();
+
+        viewModel.ValidateCommand.Execute(null);
+
+        Assert.Equal("Operation blocked by filing-profile resolution.", viewModel.StatusText);
+        Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR017", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -261,6 +273,7 @@ public sealed class DesignerSessionTests
         try
         {
             var viewModel = new MainWindowViewModel();
+            viewModel.AllowSyntheticProfile = true;
             viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
             viewModel.Session.SetNodeParameter("sample-value", "column", "OldColumn");
             await viewModel.LoadSourceAsync(csv);

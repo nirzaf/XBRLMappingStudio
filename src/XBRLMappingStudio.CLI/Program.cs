@@ -48,12 +48,12 @@ static int PrintUsage()
     Console.Error.WriteLine();
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
-    Console.Error.WriteLine("  xbrl-studio validate <project.xmap>");
+    Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
-    Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
-    Console.Error.WriteLine("  xbrl-studio taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
-    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json>");
+    Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
+    Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
+    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
     Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]");
@@ -69,17 +69,25 @@ static int TaxonomySearch(string[] args)
     string? lang = null;
     int page = 0;
     int size = XBRLMappingStudio.XBRL.TaxonomyIndex.DefaultPageSize;
+    bool allowSyntheticProfile = false;
 
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
         {
+            case "--allow-synthetic-profile": allowSyntheticProfile = true; break;
             case "--query": if (i + 1 < args.Length) query = args[++i]; break;
             case "--lang": if (i + 1 < args.Length) lang = args[++i]; break;
             case "--page": if (i + 1 < args.Length) page = int.Parse(args[++i]); break;
             case "--size": if (i + 1 < args.Length) size = int.Parse(args[++i]); break;
             default: Console.Error.WriteLine($"Unrecognized option: {args[i]}"); return ExitCodesLocal.IncompleteProfile;
         }
+    }
+
+    if (!allowSyntheticProfile)
+    {
+        Console.Error.WriteLine("Taxonomy search uses the synthetic development profile. Pass --allow-synthetic-profile to continue.");
+        return ExitCodesLocal.IncompleteProfile;
     }
 
     var profile = SyntheticProfile.Build();
@@ -117,6 +125,7 @@ static async Task<int> ValidateArtifactAsync(string[] args)
     if (!File.Exists(args[0])) { Console.Error.WriteLine($"Artifact not found: {args[0]}"); return ExitCodesLocal.DataError; }
 
     bool useArelle = false;
+    bool allowSyntheticProfile = false;
     string? python = null;
     string? taxonomyRoot = null;
     string? disclosureSystem = null;
@@ -126,6 +135,7 @@ static async Task<int> ValidateArtifactAsync(string[] args)
     {
         switch (args[i])
         {
+            case "--allow-synthetic-profile": allowSyntheticProfile = true; break;
             case "--arelle": useArelle = true; break;
             case "--python" when i + 1 < args.Length: python = args[++i]; break;
             case "--taxonomy-root" when i + 1 < args.Length: taxonomyRoot = args[++i]; break;
@@ -134,6 +144,12 @@ static async Task<int> ValidateArtifactAsync(string[] args)
             case "--plugin" when i + 1 < args.Length: plugins.Add(args[++i]); break;
             default: Console.Error.WriteLine($"Unrecognized or incomplete option: {args[i]}"); return ExitCodesLocal.IncompleteProfile;
         }
+    }
+
+    if (!useArelle && !allowSyntheticProfile)
+    {
+        Console.Error.WriteLine("Local artifact validation uses the synthetic development profile. Pass --allow-synthetic-profile to continue.");
+        return ExitCodesLocal.IncompleteProfile;
     }
 
     if (useArelle)
@@ -312,17 +328,36 @@ static int Inspect(string[] args)
 static async Task<int> ValidateAsync(string[] args)
 {
     if (args.Length < 1) { Console.Error.WriteLine("validate requires <project>"); return ExitCodesLocal.IncompleteProfile; }
-    var pm = new ProjectManager(args[0]);
-    var p = pm.Load();
-    var profile = SyntheticProfile.Build();
-    await using var worker = new LocalSyntheticWorker(profile);
-    var service = new MappingJobService(profile, worker);
-    var outcome = service.Validate(p);
-    PrintDiagnostics(outcome.Diagnostics.Items);
-    if (outcome.Success) return ExitCodesLocal.Success;
-    return outcome.Diagnostics.Items.Any(d => d.Code == DiagnosticCodes.XbrProfileMismatch)
-        ? ExitCodesLocal.IncompleteProfile
-        : ExitCodesLocal.InvalidMapping;
+    bool allowSyntheticProfile = false;
+    for (int i = 1; i < args.Length; i++)
+    {
+        if (args[i] == "--allow-synthetic-profile") allowSyntheticProfile = true;
+        else { Console.Error.WriteLine($"Unrecognized option: {args[i]}"); return ExitCodesLocal.IncompleteProfile; }
+    }
+
+    try
+    {
+        var p = new ProjectManager(args[0]).Load();
+        var resolution = FilingProfileResolver.DevelopmentOnly().Resolve(p, allowSyntheticProfile);
+        if (!resolution.Success)
+        {
+            PrintDiagnostics(resolution.Diagnostics.Items);
+            return ExitCodesLocal.IncompleteProfile;
+        }
+
+        var profile = resolution.Profile!;
+        var outcome = MappingJobService.ValidateProject(p, profile);
+        PrintDiagnostics(outcome.Diagnostics.Items);
+        if (outcome.Success) return ExitCodesLocal.Success;
+        return outcome.Diagnostics.Items.Any(d => d.Code == DiagnosticCodes.XbrProfileMismatch)
+            ? ExitCodesLocal.IncompleteProfile
+            : ExitCodesLocal.InvalidMapping;
+    }
+    catch (ProjectSchemaException ex)
+    {
+        Console.Error.WriteLine($"PRJ: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.IncompleteProfile;
+    }
 }
 
 static async Task<int> ExecuteAsync(string[] args, bool preview)
@@ -400,6 +435,14 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     {
         var pm = new ProjectManager(projectPath);
         var p = pm.Load();
+        var profileResolution = FilingProfileResolver.DevelopmentOnly().Resolve(
+            p, allowSyntheticProfile, DiagnosticStage.Validation);
+        if (!profileResolution.Success)
+        {
+            PrintDiagnostics(profileResolution.Diagnostics.Items);
+            return ExitCodesLocal.IncompleteProfile;
+        }
+        var profile = profileResolution.Profile!;
         var workspaceRoot = Path.GetFullPath(workspaceRootArg ?? Path.GetDirectoryName(Path.GetFullPath(projectPath))!);
         string GuardPath(string path) => PathGuard.EnsureWithin(workspaceRoot,
             Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
@@ -430,8 +473,6 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         if (output is not null) output = GuardPath(output);
         if (manifestPath is not null) manifestPath = GuardPath(manifestPath);
 
-        var profile = SyntheticProfile.Build();
-
         // EG03/XG01: an unattended (non-preview) execute is a production publication and
         // must clear the profile-identity, explicit-synthetic-opt-in, and approval gates
         // before the graph runs at all — a missing, substituted, or unapproved profile
@@ -450,22 +491,28 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             }
         }
 
-        IWorkerClient worker;
-        if (useArelle)
+        IWorkerClient CreateArelleWorker(FilingProfile selectedProfile)
         {
             var script = FindArelleWorkerScript();
             var root = taxonomyRoot ?? FindArelleTaxonomyRoot();
             if (script is null || root is null)
             {
-                Console.Error.WriteLine("Arelle worker or taxonomy package was not found; provide --taxonomy-root and run from a checkout or packaged CLI.");
-                return ExitCodesLocal.IncompleteProfile;
+                throw new InvalidOperationException(
+                    "Arelle worker or taxonomy package was not found; provide --taxonomy-root and run from a checkout or packaged CLI.");
             }
-            worker = new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"),
+            return new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"),
                 new[] { script, "--taxonomy-root", Path.GetFullPath(root) });
         }
-        else
+
+        IWorkerClient worker;
+        try
         {
-            worker = new LocalSyntheticWorker(profile);
+            worker = new FilingProfileWorkerFactory(CreateArelleWorker).Create(profile, useArelle);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodesLocal.IncompleteProfile;
         }
         await using var workerLifetime = worker;
         var service = new MappingJobService(profile, worker);

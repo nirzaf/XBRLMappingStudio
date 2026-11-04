@@ -86,4 +86,18 @@ where explicitly narrowed below.
 - Wave 2 additions: JsonAndXmlOutputAdapterTests (+7 covering IO05/IO06 staging, round-trip, mixed-content refusal, mid-write fault).
 - Local SQLite v2 schema migration adds six columns to `suggestion_audit` (method, actor, prompt_template_revision, original_proposal_json, approved_edit_json, provider_snapshot_limitation) with historical v1 rows preserved.
 
+## Pending-features specification progress
+
+| Ticket | Status | Evidence and limitation |
+|---|---|---|
+| FND-01 | Implemented and verified | Exact baseline and preservation notes are recorded in `verification-baseline-2026-11-04.md`; the existing XBRL guide remains protected by CI hygiene. |
+| FND-03 | Partially implemented | This matrix records the latest profile-resolution slice and local test results; remaining ticket statuses are not promoted without their acceptance evidence. |
+| FND-04 | Partially implemented | CI hygiene now protects `XBRL_Mapping_Studio.md`; the full pending-ticket test matrix remains to be wired as each slice lands. |
+| TAX-01 | Partially implemented | `FilingProfileResolver` checks registered `ProfileId` and digest and requires explicit synthetic opt-in before profile-bound actions. Only the built-in synthetic profile is registered; persistent real-profile manifests, on-disk package verification, migration metadata, and real profiles remain open. |
+| TAX-04 | Partially implemented | `FilingProfileWorkerFactory` prevents a non-synthetic profile from silently using the local synthetic worker. CLI Arelle composition is available; real-profile package and desktop Arelle configuration are not yet installed. |
+| XBR-01 | Partially implemented | CLI validation resolves profile identity before opening source adapters; preview/execute require explicit synthetic opt-in and use the shared worker factory. Exact staged-byte Arelle validation and qualified real-profile execution remain open. |
+| XBR-02 | Partially implemented | Desktop profile-dependent validation, suggestions, preview, and execution resolve the project identity and block when unresolved; real-profile catalogue, desktop Arelle wiring, and interactive parity remain open. |
+
+Latest local verification after this slice: Release solution tests passed 298 with 2 gated Arelle tests skipped (300 total); pinned Python worker tests passed 6/6; with `XMS_ARELLE_E2E=1` and the pinned Python 3.12.11 environment, the .NET Arelle execution tests passed 2/2. The full test suite builds as part of `dotnet test`; a separate solution build previously passed with zero warnings and errors. These results are local checkout evidence, not CI or regulator acceptance.
+
 The pending-features specification is being implemented on `main` in bounded groups. External decisions (filing authority, taxonomy and PDF rights, provider policy, hardware/signing and production database vendor) remain open; this status file will be updated only with evidence from the resulting changes and CI.

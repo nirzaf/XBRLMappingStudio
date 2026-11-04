@@ -143,8 +143,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
 
-    private readonly FilingProfile _profile;
-    private readonly TaxonomyIndex _taxonomy;
+    private FilingProfile _profile;
+    private readonly FilingProfileResolver _profileResolver;
+    private readonly FilingProfileWorkerFactory _workerFactory;
+    private TaxonomyIndex _taxonomy;
     private DesignerSession _session;
 
     public string Title { get => _title; set => Set(ref _title, value); }
@@ -173,7 +175,20 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
         }
     }
-    public bool AllowSyntheticProfile { get => _allowSyntheticProfile; set => Set(ref _allowSyntheticProfile, value); }
+    public bool AllowSyntheticProfile
+    {
+        get => _allowSyntheticProfile;
+        set
+        {
+            if (!Set(ref _allowSyntheticProfile, value)) return;
+            if (value)
+            {
+                Diagnostics.Clear();
+                Raise(nameof(Diagnostics));
+            }
+            RunSearch();
+        }
+    }
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
     public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
@@ -273,12 +288,17 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     internal MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog,
-        Func<SourceConnection, CancellationToken, Task<ISourceSchema>> sqliteSchemaLoader)
+        Func<SourceConnection, CancellationToken, Task<ISourceSchema>> sqliteSchemaLoader,
+        FilingProfileResolver? profileResolver = null,
+        FilingProfileWorkerFactory? workerFactory = null)
     {
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
+        _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
+        _workerFactory = workerFactory ?? new FilingProfileWorkerFactory();
         _profile = SyntheticProfile.Build();
         _taxonomy = new TaxonomyIndex(_profile);
+        RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
 
@@ -338,13 +358,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void NewProject()
     {
         _session.Changed -= OnSessionChanged;
-        _session = new DesignerSession(BuildSampleProject());
+        var project = BuildSampleProject();
+        RefreshProfileForProject(project);
+        _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         SelectedNode = null;
         ProjectPath = null;
         _expectedLayoutGeneration = null;
         ClearSourceAndRunResults();
         OnSessionChanged();
+        RunSearch();
         StatusText = "New project ready.";
     }
 
@@ -491,12 +514,15 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void SetSelectedConcept()
     {
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         if (SelectedConcept is null || SelectedNode is null)
         { StatusText = "Select a taxonomy concept and an XBRL Fact node first."; return; }
         if (SelectedNode.NodeType != NodeTypeConstants.FactConstruct)
         { StatusText = "The selected node is not an XBRL Fact node."; return; }
         if (!SelectedConcept.IsFactTargetable)
         { StatusText = "Abstract concepts cannot be used as fact targets."; return; }
+        if (profile.FindConcept(SelectedConcept.QualifiedName) is null)
+        { StatusText = "The selected concept is not part of this project's filing profile."; return; }
         Session.SetNodeParameter(SelectedNode.NodeId, "concept", SelectedConcept.QualifiedName);
         StatusText = $"Proposed target {SelectedConcept.QualifiedName} for {SelectedNodeDisplayName}. Review its unit and period before execution.";
     }
@@ -525,6 +551,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public async Task SuggestMappingsAsync()
     {
+        if (!TryResolveProfile(AllowSyntheticProfile, out _)) return;
         if (SelectedSourceBindingId is null || string.IsNullOrWhiteSpace(SelectedSourceColumn))
         {
             StatusText = "Choose a source file and select a source field first.";
@@ -558,6 +585,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ApplySelectedSuggestion()
     {
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         if (SelectedSuggestion is null || SelectedSourceBindingId is null || SelectedNode is null
             || SelectedNode.NodeType != NodeTypeConstants.FactConstruct
             || string.IsNullOrWhiteSpace(SelectedSourceColumn))
@@ -603,7 +631,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             System.Globalization.CultureInfo.InvariantCulture, out var parsedDecimals) ? parsedDecimals : null;
         var draft = new DraftMapping(SelectedSuggestion.SuggestionId, SelectedSourceColumn,
             concept.QualifiedName, unit, concept.PeriodType, decimals);
-        var draftValidation = new DraftValidator(_taxonomy, _profile).Validate(new[] { draft });
+        var draftValidation = new DraftValidator(_taxonomy, profile).Validate(new[] { draft });
         if (!draftValidation.Accepted)
         {
             Diagnostics.Clear();
@@ -618,7 +646,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var candidateFact = candidate.Nodes.Single(node => node.NodeId == SelectedNode.NodeId);
         candidateFact.Parameters["concept"] = concept.QualifiedName;
         candidateFact.Parameters["periodType"] = concept.PeriodType;
-        var compile = new MappingJobService(_profile, new LocalSyntheticWorker(_profile)).Validate(candidate);
+        var compile = MappingJobService.ValidateProject(candidate, profile);
         if (!compile.Success)
         {
             Diagnostics.Clear();
@@ -669,6 +697,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var fullPath = Path.GetFullPath(path);
         var manager = new ProjectManager(fullPath);
         var project = manager.Load();
+        var profileAvailable = RefreshProfileForProject(project);
         _session.Changed -= OnSessionChanged;
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
@@ -677,7 +706,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         _expectedLayoutGeneration = project.LayoutGeneration;
         ClearSourceAndRunResults();
         OnSessionChanged();
-        StatusText = $"Opened {Path.GetFileName(fullPath)}.";
+        RunSearch();
+        StatusText = profileAvailable
+            ? $"Opened {Path.GetFileName(fullPath)}."
+            : $"Opened {Path.GetFileName(fullPath)}, but its filing profile is not installed.";
     }
 
     private void ClearSourceAndRunResults()
@@ -731,8 +763,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void Validate()
     {
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         Diagnostics.Clear();
-        var compiled = new MappingJobService(_profile, new LocalSyntheticWorker(_profile)).Validate(Session.Project);
+        var compiled = MappingJobService.ValidateProject(Session.Project, profile);
         if (compiled.Diagnostics.Items.Count == 0)
             Diagnostics.Add(new DiagnosticRow { Display = "Mapping graph and filing profile validated.", Severity = "info" });
         else
@@ -745,14 +778,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         if (IsSourceLoading) { StatusText = "Wait for source loading to finish before previewing."; return; }
         if (IsBusy) return;
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         IsBusy = true;
         StatusText = "Running bounded preview…";
         try
         {
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
-            await using var worker = new LocalSyntheticWorker(_profile);
-            var result = await new MappingJobService(_profile, worker).RunAsync(
+            await using var worker = _workerFactory.Create(profile);
+            var result = await new MappingJobService(profile, worker).RunAsync(
                 Session.Project, connections, ReadParameters(), preview: true, CancellationToken.None);
             ShowRunResult(result);
             StatusText = $"Preview finished: {result.Manifest.Outcome}. Sampled output is partial.";
@@ -771,7 +805,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         if (IsSourceLoading) { StatusText = "Wait for source loading to finish before executing."; return; }
         if (IsBusy) return;
-        var gate = PublicationGate.Evaluate(Session.Project, _profile, AllowSyntheticProfile);
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
+        var gate = PublicationGate.Evaluate(Session.Project, profile, AllowSyntheticProfile);
         if (gate.HasBlockingErrors)
         {
             Diagnostics.Clear();
@@ -793,8 +828,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
-            await using var worker = new LocalSyntheticWorker(_profile);
-            var result = await new MappingJobService(_profile, worker).RunAsync(
+            await using var worker = _workerFactory.Create(profile);
+            var result = await new MappingJobService(profile, worker).RunAsync(
                 Session.Project, connections, ReadParameters(), preview: false, CancellationToken.None);
             ShowRunResult(result);
             if (!result.IsPublishable)
@@ -804,7 +839,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
             var receipt = new PublicationService(new RunJournal()).PublishAuthorized(
                 outputPath, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), root,
-                Session.Project, _profile, AllowSyntheticProfile, result);
+                Session.Project, profile, AllowSyntheticProfile, result);
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";
         }
         catch (Exception ex)
@@ -815,6 +850,45 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = "Execution failed; no unvalidated output was published.";
         }
         finally { IsBusy = false; }
+    }
+
+    private bool TryResolveProfile(bool allowSyntheticProfile, out FilingProfile profile)
+    {
+        var resolution = _profileResolver.Resolve(Session.Project, allowSyntheticProfile);
+        if (!resolution.Success)
+        {
+            Diagnostics.Clear();
+            Diagnostics.AddRange(resolution.Diagnostics.Items.Select(ToDiagnosticRow));
+            Raise(nameof(Diagnostics));
+            StatusText = "Operation blocked by filing-profile resolution.";
+            profile = null!;
+            return false;
+        }
+
+        profile = resolution.Profile!;
+        return true;
+    }
+
+    private bool RefreshProfileForProject(MappingProject project)
+    {
+        var resolution = _profileResolver.Resolve(project, allowSyntheticProfile: true);
+        if (resolution.Success)
+        {
+            _profile = resolution.Profile!;
+            _taxonomy = new TaxonomyIndex(_profile);
+            return true;
+        }
+
+        // Keep the designer inspectable while profile-dependent commands remain blocked
+        // by TryResolveProfile. Never treat this display-only fallback as the project's
+        // selected profile.
+        _profile = SyntheticProfile.Build();
+        _taxonomy = new TaxonomyIndex(_profile);
+        Diagnostics.Clear();
+        Diagnostics.AddRange(resolution.Diagnostics.Items.Select(ToDiagnosticRow));
+        Raise(nameof(Diagnostics));
+        StatusText = "The project's filing profile is not installed; profile-dependent actions are blocked.";
+        return false;
     }
 
     private string WorkspaceRoot() => ProjectPath is null
@@ -890,6 +964,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void RunSearch(bool keepPage = false)
     {
+        if (!TryResolveProfile(AllowSyntheticProfile, out _)) return;
         if (!keepPage) _resultPage = 0;
         var page = _taxonomy.Search(SearchTerm, SearchLanguage, _resultPage, TaxonomyIndex.DefaultPageSize);
         ConceptResults.Clear();

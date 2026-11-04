@@ -37,19 +37,27 @@ public sealed class MappingJobService
 
     /// <summary>Validate + compile the graph in a project. Does not execute.</summary>
     public CompileOutcome Validate(MappingProject project)
+        => ValidateProject(project, _profile, _catalog);
+
+    /// <summary>Profile-specific graph validation that does not require a worker process.</summary>
+    public static CompileOutcome ValidateProject(
+        MappingProject project,
+        FilingProfile profile,
+        FunctionCatalog? catalog = null)
     {
         var profileDiagnostics = PublicationGate.EvaluateProfileIdentity(
-            project, _profile, DiagnosticStage.Validation);
+            project, profile, DiagnosticStage.Validation);
         if (profileDiagnostics.HasBlockingErrors)
             return CompileOutcome.Invalid(profileDiagnostics);
 
         var graph = new MappingGraph(project);
-        var validator = new GraphValidator(_catalog);
+        var effectiveCatalog = catalog ?? FunctionCatalog.Default;
+        var validator = new GraphValidator(effectiveCatalog);
         var diag = validator.Validate(graph);
         if (diag.HasBlockingErrors)
             return CompileOutcome.Invalid(diag);
-        var compiler = new PlanCompiler(_catalog);
-        var result = compiler.Compile(graph, _profile);
+        var compiler = new PlanCompiler(effectiveCatalog);
+        var result = compiler.Compile(graph, profile);
         if (!result.Success || result.Plan is null)
             return CompileOutcome.Invalid(result.Diagnostics);
         return CompileOutcome.Ok(result.Plan, graph, diag);

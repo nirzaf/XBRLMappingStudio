@@ -139,7 +139,7 @@ public sealed class CliParityTests : IAsyncLifetime
         pm.Save(project);
 
         var cli = LocateCli();
-        var psi = BuildStartInfo(cli, "validate", projectPath);
+        var psi = BuildStartInfo(cli, "validate", projectPath, "--allow-synthetic-profile");
 
         using var proc = Process.Start(psi)!;
         await proc.StandardOutput.ReadToEndAsync();
@@ -148,6 +148,43 @@ public sealed class CliParityTests : IAsyncLifetime
 
         // Invalid mapping exit code = 2 per ExitCodes contract.
         Assert.Equal(2, proc.ExitCode);
+    }
+
+    [Fact]
+    public async Task Cli_ValidateRequiresExplicitSyntheticProfileOptIn()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var projectPath = Path.Combine(_dir, "validate-synthetic.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var (blockedExit, _, blockedError) = await RunCliAsync(LocateCli(), "validate", projectPath);
+        Assert.Equal(4, blockedExit);
+        Assert.Contains("XBR017", blockedError, StringComparison.Ordinal);
+
+        var (allowedExit, _, allowedError) = await RunCliAsync(
+            LocateCli(), "validate", projectPath, "--allow-synthetic-profile");
+        Assert.True(allowedExit == 0, $"Expected opted-in validation to pass, got {allowedExit}.\n{allowedError}");
+    }
+
+    [Fact]
+    public async Task Cli_TaxonomySearchRequiresSyntheticProfileOptIn()
+    {
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "taxonomy-search", "--query", "revenue");
+
+        Assert.Equal(4, exit);
+        Assert.Contains("--allow-synthetic-profile", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_LocalArtifactValidationRequiresSyntheticProfileOptIn()
+    {
+        var artifactPath = Path.Combine(_dir, "local-validation.xbrl.json");
+        await File.WriteAllTextAsync(artifactPath, "{}");
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "validate-artifact", artifactPath);
+
+        Assert.Equal(4, exit);
+        Assert.Contains("--allow-synthetic-profile", stderr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -178,6 +215,39 @@ public sealed class CliParityTests : IAsyncLifetime
 
         Assert.Equal(4, exit); // IncompleteProfile
         Assert.Contains("XBR015", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteWithUnknownProfileFailsBeforeOpeningSource()
+    {
+        var source = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var project = new MappingProject
+        {
+            SchemaVersion = source.SchemaVersion,
+            ProjectId = source.ProjectId,
+            Name = source.Name,
+            ProfileId = "uninstalled-profile-v1",
+            ProfileDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            FunctionCatalogVersion = source.FunctionCatalogVersion,
+            SemanticRevision = source.SemanticRevision,
+            LayoutGeneration = source.LayoutGeneration,
+            Metadata = source.Metadata,
+            Nodes = source.Nodes,
+            Edges = source.Edges,
+            Bindings = source.Bindings.Select(b => b with { Locator = Path.Combine(_dir, "missing-source.xlsx") }).ToList(),
+            Functions = source.Functions,
+            Approvals = source.Approvals
+        };
+        var projectPath = Path.Combine(_dir, "unknown-profile-before-source.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var (exit, _, stderr) = await RunCliAsync(
+            LocateCli(), "execute", projectPath, "--allow-synthetic-profile");
+
+        Assert.Equal(4, exit);
+        Assert.Contains("XBR015", stderr, StringComparison.Ordinal);
+        Assert.Contains("no source data was read", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("IO001", stderr, StringComparison.Ordinal);
     }
 
     // ---- OG01/OG02: fail-closed publishing through the real CLI process. --------
@@ -351,7 +421,7 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Cli_PreviewDoesNotRequireApproval_OrSyntheticOptIn()
+    public async Task Cli_PreviewRequiresSyntheticOptIn_ButNotApproval()
     {
         // EG03 boundary: a draft preview stays available on an unapproved, unacknowledged
         // revision so a reviewer can inspect before accepting — only publish gates close.
@@ -360,7 +430,8 @@ public sealed class CliParityTests : IAsyncLifetime
         new ProjectManager(projectPath).Save(project);
 
         var cli = LocateCli();
-        var (exit, stdout, stderr) = await RunCliAsync(cli, "preview", projectPath);
+        var (exit, stdout, stderr) = await RunCliAsync(
+            cli, "preview", projectPath, "--allow-synthetic-profile");
 
         Assert.True(exit is 0 or 1, $"Expected preview to run, got exit {exit}.\nstderr:\n{stderr}");
         Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);

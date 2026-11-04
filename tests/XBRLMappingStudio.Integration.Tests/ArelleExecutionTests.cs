@@ -41,6 +41,7 @@ public sealed class ArelleExecutionTests
                 cliAssembly,
                 "preview",
                 projectPath,
+                "--allow-synthetic-profile",
                 "--arelle",
                 "--python",
                 python!,
