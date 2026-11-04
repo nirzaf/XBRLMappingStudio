@@ -1,2 +1,5 @@
 # Taxonomy package digests bind exact file bytes and must not vary by checkout OS.
 /tools/worker/taxonomy/** -text
+
+# Acceptance fixture digests bind exact authored bytes across Windows and Linux.
+/tests/XBRLMappingStudio.Fixtures/AcceptanceFixtures/** -text

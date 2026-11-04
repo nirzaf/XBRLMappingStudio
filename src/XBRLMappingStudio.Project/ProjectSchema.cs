@@ -166,6 +166,28 @@ public sealed record ProjectMetadata
 }
 
 /// <summary>
+/// Versioned durable destination intent. Version 1 deliberately supports only the
+/// transactional SQLite fact-table contract; additional kinds require an explicit
+/// contract rather than inferring behavior from a filename extension.
+/// </summary>
+public sealed record DestinationPlan
+{
+    public const int CurrentVersion = 1;
+
+    public int Version { get; init; } = CurrentVersion;
+    public required string Kind { get; init; }
+
+    /// <summary>Path relative to the project directory, or an absolute host path.</summary>
+    public required string Locator { get; init; }
+
+    public required string Table { get; init; }
+    public string Format { get; init; } = "xbrl-facts-v1";
+    public List<string> BusinessKey { get; init; } = new();
+    public string WriteMode { get; init; } = "upsert";
+    public string Compatibility { get; init; } = "strict";
+}
+
+/// <summary>
 /// Root of a saved mapping. Semantic revision (executable content) is maintained
 /// independently from the layout generation (full-document save) per BASE03.
 /// </summary>
@@ -202,6 +224,12 @@ public sealed class MappingProject
     public List<MappingEdge> Edges { get; init; } = new();
     public List<SourceBinding> Bindings { get; init; } = new();
     public List<FunctionDefinition> Functions { get; init; } = new();
+
+    /// <summary>
+    /// Optional, versioned output intent. Its absence preserves the v1 .xmap contract
+    /// and existing projects continue to load without migration.
+    /// </summary>
+    public DestinationPlan? Destination { get; set; }
 
     /// <summary>Approvals recorded per semantic revision.</summary>
     public List<ApprovalRecord> Approvals { get; init; } = new();

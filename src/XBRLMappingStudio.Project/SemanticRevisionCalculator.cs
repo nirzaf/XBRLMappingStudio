@@ -95,6 +95,26 @@ public static class SemanticRevisionCalculator
         }
         sb.Append(']');
 
+        // A configured destination changes the executable/publication intent and
+        // therefore invalidates approvals. Keep the no-destination representation
+        // byte-for-byte compatible with the pre-destination v1 semantic digest.
+        if (project.Destination is { } destination)
+        {
+            sb.Append("|destination=[");
+            AppendPart(sb, destination.Version.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendPart(sb, destination.Kind ?? "");
+            AppendPart(sb, destination.Locator ?? "");
+            AppendPart(sb, destination.Table ?? "");
+            AppendPart(sb, destination.Format ?? "");
+            AppendPart(sb, destination.WriteMode ?? "");
+            AppendPart(sb, destination.Compatibility ?? "");
+            var businessKey = destination.BusinessKey ?? new List<string>();
+            sb.Append(businessKey.Count).Append(':');
+            foreach (var key in businessKey)
+                AppendPart(sb, key ?? "");
+            sb.Append(']');
+        }
+
         var bytes = Encoding.UTF8.GetBytes(sb.ToString());
         var hash = SHA256.HashData(bytes);
         return "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
@@ -118,6 +138,9 @@ public static class SemanticRevisionCalculator
         }
         sb.Append('}');
     }
+
+    private static void AppendPart(StringBuilder sb, string value)
+        => sb.Append(value.Length).Append(':').Append(value);
 
     private static string RenderValue(object? value) => value switch
     {

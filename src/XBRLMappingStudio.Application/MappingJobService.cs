@@ -50,6 +50,10 @@ public sealed class MappingJobService
         if (profileDiagnostics.HasBlockingErrors)
             return CompileOutcome.Invalid(profileDiagnostics);
 
+        var destinationDiagnostics = DestinationPlanValidator.Validate(project.Destination);
+        if (destinationDiagnostics.HasBlockingErrors)
+            return CompileOutcome.Invalid(destinationDiagnostics);
+
         var graph = new MappingGraph(project);
         var effectiveCatalog = catalog ?? FunctionCatalog.Default;
         var validator = new GraphValidator(effectiveCatalog);
@@ -101,6 +105,16 @@ public sealed class MappingJobService
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
+        // Validate the saved destination and graph before hashing or opening any
+        // source. A malformed target plan must fail closed without touching inputs.
+        var compile = Validate(project);
+        if (!compile.Success || compile.Plan is null)
+        {
+            manifest.Outcome = RunOutcome.InvalidMapping;
+            manifest.Diagnostics = compile.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -109,14 +123,6 @@ public sealed class MappingJobService
         catch (OperationCanceledException)
         {
             manifest.Outcome = RunOutcome.Cancelled;
-            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-        }
-
-        var compile = Validate(project);
-        if (!compile.Success || compile.Plan is null)
-        {
-            manifest.Outcome = RunOutcome.InvalidMapping;
-            manifest.Diagnostics = compile.Diagnostics.Items;
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 

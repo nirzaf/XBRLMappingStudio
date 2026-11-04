@@ -126,4 +126,45 @@ public sealed class ProjectManagerTests : IDisposable
         Assert.Equal(project.Nodes.Count, reloaded.Nodes.Count);
         Assert.Equal(project.Edges.Count, reloaded.Edges.Count);
     }
+
+    [Fact]
+    public void LegacyProjectWithoutDestination_RemainsReadableAndKeepsItsSemanticDigest()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(
+            idSeed: Guid.Parse("33333333-1111-2222-3333-444444444450"));
+        var legacyJson = ProjectSerializer.Serialize(project);
+
+        Assert.DoesNotContain("\"destination\"", legacyJson, StringComparison.Ordinal);
+        var reloaded = ProjectSerializer.Deserialize(legacyJson);
+
+        Assert.Null(reloaded.Destination);
+        Assert.Equal(project.ComputeSemanticDigest(), reloaded.ComputeSemanticDigest());
+    }
+
+    [Fact]
+    public void DestinationPlan_RoundTripsAndChangesSemanticRevision()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(
+            idSeed: Guid.Parse("33333333-1111-2222-3333-444444444451"));
+        var manager = new ProjectManager(ProjectPath());
+        var first = manager.Save(project);
+
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "output/report.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" }
+        };
+        var second = manager.Save(project, expectedLayoutGeneration: first.NewLayoutGeneration);
+        var reloaded = manager.Load();
+
+        Assert.Equal(first.NewSemanticRevision + 1, second.NewSemanticRevision);
+        Assert.NotNull(reloaded.Destination);
+        Assert.Equal(project.Destination!.Kind, reloaded.Destination.Kind);
+        Assert.Equal(project.Destination.Locator, reloaded.Destination.Locator);
+        Assert.Equal(project.Destination.Table, reloaded.Destination.Table);
+        Assert.Equal(project.Destination.BusinessKey, reloaded.Destination.BusinessKey);
+        Assert.Equal(project.ComputeSemanticDigest(), reloaded.ComputeSemanticDigest());
+    }
 }

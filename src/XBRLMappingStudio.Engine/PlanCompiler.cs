@@ -267,6 +267,7 @@ public sealed class PlanCompiler
             Edges = newEdges,
             Bindings = graph.Source.Bindings,
             Functions = graph.Source.Functions,
+            Destination = graph.Source.Destination,
             Approvals = graph.Source.Approvals
         };
         return new MappingGraph(expanded);
