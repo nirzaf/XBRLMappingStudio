@@ -437,7 +437,12 @@ public sealed class DesignerSessionTests
         }
         try
         {
-            var viewModel = new MainWindowViewModel(ProjectWithSource());
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with
+            {
+                Configuration = new Dictionary<string, object?> { ["decimalColumns"] = "amount" }
+            };
+            var viewModel = new MainWindowViewModel(project);
             viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
 
             await viewModel.LoadSourceAsync(database);
@@ -445,6 +450,10 @@ public sealed class DesignerSessionTests
             Assert.Contains("account", viewModel.SourceColumns);
             Assert.Contains("Primary key: account", viewModel.StatusText, StringComparison.Ordinal);
             Assert.Contains("stable row identity enabled", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("Row identity: sqlite-primary-key-sha256", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("Exact decimal overrides: amount", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("Decimal text culture: InvariantCulture", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("writing is unsupported", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
         }
         finally
         {

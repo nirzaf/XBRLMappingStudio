@@ -21,6 +21,30 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     public string Kind => "sqlite";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
 
+    public static SqliteSourceDescriptor Describe(SourceConnection connection, ISourceSchema schema)
+    {
+        if (!StringComparer.Ordinal.Equals(connection.SourceId, schema.SourceId))
+            throw new ArgumentException("The inspected schema belongs to a different source.", nameof(schema));
+
+        var columns = schema.Columns.OrderBy(column => column.Ordinal).ToArray();
+        var primaryKey = columns.Where(column => column.PrimaryKeyOrdinal > 0)
+            .OrderBy(column => column.PrimaryKeyOrdinal)
+            .Select(column => column.Name)
+            .ToArray();
+        var decimalOverrides = DecimalOverrides(connection).Order(StringComparer.Ordinal).ToArray();
+        var unknownOverrides = decimalOverrides.Except(columns.Select(column => column.Name), StringComparer.Ordinal).ToArray();
+        return new SqliteSourceDescriptor(
+            GetConfiguredTable(connection),
+            schema.Fingerprint,
+            columns,
+            primaryKey,
+            decimalOverrides,
+            unknownOverrides,
+            primaryKey.Length > 0 ? StablePrimaryKeyIdentityStrategy : PositionalIdentityStrategy,
+            "InvariantCulture",
+            AdapterCapabilities.ReadOnly);
+    }
+
     public async Task<IReadOnlyList<string>> DiscoverTablesAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
         await using var db = await OpenConnectionAsync(connection, cancellationToken);
@@ -244,4 +268,20 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
             _ => DataValue.StringValue(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "")
         };
     }
+}
+
+/// <summary>Read-only source facts needed to review a SQLite mapping before execution.</summary>
+public sealed record SqliteSourceDescriptor(
+    string Table,
+    string SchemaFingerprint,
+    IReadOnlyList<ColumnSchema> Columns,
+    IReadOnlyList<string> PrimaryKeyColumns,
+    IReadOnlyList<string> DecimalOverrides,
+    IReadOnlyList<string> UnknownDecimalOverrides,
+    string RowIdentityStrategy,
+    string DecimalCulture,
+    AdapterCapabilities Capabilities)
+{
+    public bool HasStableRowIdentity
+        => StringComparer.Ordinal.Equals(RowIdentityStrategy, SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy);
 }

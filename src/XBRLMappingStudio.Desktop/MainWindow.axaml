@@ -68,6 +68,9 @@
                    SelectedItem="{Binding SelectedSourceColumn}"
                    MaxHeight="180"
                    AutomationProperties.Name="Source columns" />
+          <TextBlock DockPanel.Dock="Top" Text="{Binding SourceInspectionSummary}"
+                     TextWrapping="Wrap" MaxHeight="120" Margin="0,4,0,8"
+                     AutomationProperties.Name="Source schema and capabilities" />
           <Button DockPanel.Dock="Top" Content="Bind field to selected Excel Field node"
                   Command="{Binding BindSourceColumnCommand}" />
           <Button DockPanel.Dock="Top" Content="Suggest concepts offline"

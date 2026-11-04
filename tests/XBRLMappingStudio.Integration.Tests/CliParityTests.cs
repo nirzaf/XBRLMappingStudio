@@ -125,6 +125,52 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_InspectSourceReportsSqliteIdentityDecimalsAndReadOnlyCapabilities()
+    {
+        var databasePath = Path.Combine(_dir, "source.sqlite");
+        await using (var database = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+        {
+            await database.OpenAsync();
+            await using var command = database.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (tenant TEXT NOT NULL, account TEXT NOT NULL, amount TEXT, PRIMARY KEY(tenant, account));";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        project.Bindings[0] = project.Bindings[0] with
+        {
+            Kind = "sqlite",
+            Locator = "source.sqlite",
+            Configuration = new Dictionary<string, object?>
+            {
+                ["table"] = "ledger",
+                ["decimalColumns"] = "amount"
+            }
+        };
+        var projectPath = Path.Combine(_dir, "sqlite-source.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "inspect-source", projectPath);
+
+        Assert.Equal(0, exit);
+        Assert.Empty(stderr);
+        using var document = JsonDocument.Parse(stdout);
+        var root = document.RootElement;
+        Assert.Equal("ledger", root.GetProperty("table").GetString());
+        Assert.Equal("sqlite-primary-key-sha256", root.GetProperty("rowIdentityStrategy").GetString());
+        Assert.True(root.GetProperty("hasStableRowIdentity").GetBoolean());
+        Assert.Equal("InvariantCulture", root.GetProperty("decimalCulture").GetString());
+        Assert.Equal(new[] { "tenant", "account" }, root.GetProperty("primaryKeyColumns").EnumerateArray()
+            .Select(value => value.GetString()).ToArray());
+        Assert.Equal(new[] { "amount" }, root.GetProperty("configuredExactDecimalColumns").EnumerateArray()
+            .Select(value => value.GetString()).ToArray());
+        var capabilities = root.GetProperty("capabilities");
+        Assert.True(capabilities.GetProperty("reading").GetBoolean());
+        Assert.True(capabilities.GetProperty("lineage").GetBoolean());
+        Assert.False(capabilities.GetProperty("publication").GetBoolean());
+    }
+
+    [Fact]
     public async Task Cli_ConfigureDestinationPersistsPlanAndInvalidatesPriorApproval()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);

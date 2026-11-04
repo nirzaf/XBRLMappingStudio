@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Sqlite;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
@@ -25,6 +26,7 @@ var rest = args.Skip(1).ToArray();
 return command switch
 {
     "inspect" => Inspect(rest),
+    "inspect-source" => await InspectSourceAsync(rest),
     "validate" => await ValidateAsync(rest),
     "configure-destination" => ConfigureDestination(rest),
     "taxonomy-search" => TaxonomySearch(rest),
@@ -50,6 +52,7 @@ static int PrintUsage()
     Console.Error.WriteLine();
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
+    Console.Error.WriteLine("  xbrl-studio inspect-source <project.xmap> [--binding <id>] (SQLite source schema and capabilities)");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
@@ -337,6 +340,105 @@ static int Inspect(string[] args)
     foreach (var e in p.Edges)
         Console.WriteLine($"  edge  {e.EdgeId}: {e.SourceNodeId}.{e.SourcePortName} -> {e.TargetNodeId}.{e.TargetPortName}");
     return ExitCodesLocal.Success;
+}
+
+static async Task<int> InspectSourceAsync(string[] args)
+{
+    if (args.Length < 1)
+    {
+        Console.Error.WriteLine("inspect-source requires <project> [--binding <id>]");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    string? bindingId = null;
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i] == "--binding" && i + 1 < args.Length) bindingId = args[++i];
+        else
+        {
+            Console.Error.WriteLine($"Unrecognized or incomplete option: {args[i]}");
+            return ExitCodesLocal.IncompleteProfile;
+        }
+    }
+
+    try
+    {
+        var projectPath = Path.GetFullPath(args[0]);
+        var project = new ProjectManager(projectPath).Load();
+        var sourceBindings = project.Bindings.Where(binding => binding.Kind != "param").ToArray();
+        var selected = bindingId is null
+            ? sourceBindings.Length == 1 ? sourceBindings[0] : null
+            : sourceBindings.FirstOrDefault(binding => StringComparer.Ordinal.Equals(binding.BindingId, bindingId));
+        if (selected is null)
+        {
+            Console.Error.WriteLine(bindingId is null
+                ? "Select a source with --binding when the project has zero or multiple source bindings."
+                : $"Source binding '{bindingId}' was not found.");
+            return ExitCodesLocal.IncompleteProfile;
+        }
+        if (!StringComparer.OrdinalIgnoreCase.Equals(selected.Kind, "sqlite"))
+        {
+            Console.Error.WriteLine($"inspect-source currently supports SQLite sources; binding '{selected.BindingId}' is '{selected.Kind}'.");
+            return ExitCodesLocal.IncompleteProfile;
+        }
+        if (string.IsNullOrWhiteSpace(selected.Locator))
+        {
+            Console.Error.WriteLine($"SQLite binding '{selected.BindingId}' has no source path.");
+            return ExitCodesLocal.DataError;
+        }
+
+        var workspace = Path.GetDirectoryName(projectPath)!;
+        var sourcePath = PathGuard.EnsureWithin(workspace,
+            Path.IsPathRooted(selected.Locator) ? selected.Locator : Path.Combine(workspace, selected.Locator));
+        var configuration = selected.Configuration.ToDictionary(
+            pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
+        var connection = new SourceConnection(selected.BindingId, selected.Kind, sourcePath, configuration);
+        var adapter = new SqliteSourceAdapter();
+        var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+        var descriptor = SqliteSourceAdapter.Describe(connection, schema);
+        var output = new
+        {
+            sourceId = selected.BindingId,
+            kind = selected.Kind,
+            table = descriptor.Table,
+            schemaFingerprint = descriptor.SchemaFingerprint,
+            primaryKeyColumns = descriptor.PrimaryKeyColumns,
+            rowIdentityStrategy = descriptor.RowIdentityStrategy,
+            hasStableRowIdentity = descriptor.HasStableRowIdentity,
+            configuredExactDecimalColumns = descriptor.DecimalOverrides,
+            unknownDecimalOverrides = descriptor.UnknownDecimalOverrides,
+            decimalCulture = descriptor.DecimalCulture,
+            capabilities = new
+            {
+                schemaInspection = descriptor.Capabilities.SupportsSchemaInspection,
+                sampling = descriptor.Capabilities.SupportsSampling,
+                reading = descriptor.Capabilities.SupportsReading,
+                stagedWrite = descriptor.Capabilities.SupportsStagedWrite,
+                publication = descriptor.Capabilities.SupportsPublication,
+                lineage = descriptor.Capabilities.SupportsLineage
+            },
+            columns = descriptor.Columns.Select(column => new
+            {
+                name = column.Name,
+                inferredShape = column.InferredShape.ToString(),
+                ordinal = column.Ordinal,
+                primaryKeyOrdinal = column.PrimaryKeyOrdinal,
+                exactDecimalOverride = descriptor.DecimalOverrides.Contains(column.Name, StringComparer.Ordinal)
+            })
+        };
+        Console.WriteLine(JsonSerializer.Serialize(output, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        }));
+        return ExitCodesLocal.Success;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or AdapterException
+        or ArgumentException or InvalidOperationException or SqliteException)
+    {
+        Console.Error.WriteLine($"SQLite source inspection failed: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
 }
 
 static int ConfigureDestination(string[] args)

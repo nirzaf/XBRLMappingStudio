@@ -139,6 +139,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _selectedSourceColumn;
     private string? _selectedSourceTable;
     private string? _sqliteSourcePath;
+    private string _sourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
@@ -270,6 +271,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         ? "The dry run checks the full mapping and target schema. Publication rechecks approval and schema, then asks for final confirmation."
         : "The dry run checks the full mapping and output contract. Publication rechecks approval, stages and validates the file, then asks for final confirmation.";
     public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
+    public string SourceInspectionSummary
+    {
+        get => _sourceInspectionSummary;
+        private set => Set(ref _sourceInspectionSummary, value);
+    }
     public string? SelectedSourceTable
     {
         get => _selectedSourceTable;
@@ -1176,6 +1182,9 @@ public sealed class MainWindowViewModel : ViewModelBase
             _sqliteSourcePath = kind == "sqlite" ? safePath : null;
             SourceTables.Clear();
             SourceColumns.Clear();
+            SourceInspectionSummary = kind == "sqlite"
+                ? "Choose a SQLite table to inspect its primary key, decimal rules and read-only capabilities."
+                : $"Source type: {kind}.";
             _selectedSourceTable = null;
             Raise(nameof(SelectedSourceTable));
             Raise(nameof(SourceColumns));
@@ -1236,6 +1245,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
             var schema = await _sqliteSchemaLoader(connection, CancellationToken.None);
             if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
+            var descriptor = SqliteSourceAdapter.Describe(connection, schema);
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
             binding = binding with { Kind = "sqlite", Locator = _sqliteSourcePath,
@@ -1244,15 +1254,28 @@ public sealed class MainWindowViewModel : ViewModelBase
             Session.SetBinding(binding);
             SelectedSourceBindingId = binding.BindingId;
             Raise(nameof(SourceColumns));
-            var primaryKeys = schema.Columns.Where(column => column.PrimaryKeyOrdinal > 0)
-                .OrderBy(column => column.PrimaryKeyOrdinal)
-                .Select(column => column.Name)
-                .ToArray();
-            StatusText = primaryKeys.Length > 0
-                ? $"Loaded {schema.Columns.Count} fields from {table}. Primary key: {string.Join(", ", primaryKeys)}; stable row identity enabled."
+            var primaryKeyText = descriptor.PrimaryKeyColumns.Count > 0
+                ? string.Join(", ", descriptor.PrimaryKeyColumns)
+                : "none; row identity is positional and may shift between reads";
+            var decimalText = descriptor.DecimalOverrides.Count > 0
+                ? string.Join(", ", descriptor.DecimalOverrides)
+                : "none configured";
+            SourceInspectionSummary = $"SQLite table: {descriptor.Table}. Primary key: {primaryKeyText}. "
+                + $"Row identity: {descriptor.RowIdentityStrategy}. Exact decimal overrides: {decimalText}. "
+                + $"Decimal text culture: {descriptor.DecimalCulture}; SQLite REAL values are refused. "
+                + "Capabilities: schema inspection, sampling, reading and lineage; writing is unsupported."
+                + (descriptor.UnknownDecimalOverrides.Count > 0
+                    ? $" Unknown decimal override columns: {string.Join(", ", descriptor.UnknownDecimalOverrides)}."
+                    : string.Empty);
+            StatusText = descriptor.HasStableRowIdentity
+                ? $"Loaded {schema.Columns.Count} fields from {table}. Primary key: {string.Join(", ", descriptor.PrimaryKeyColumns)}; stable row identity enabled."
                 : $"Loaded {schema.Columns.Count} fields from {table}. No primary key detected; SQLite does not guarantee row ordering, so positional row provenance may shift between reads.";
         }
-        catch (Exception ex) { StatusText = $"SQLite table load failed: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            SourceInspectionSummary = $"SQLite source inspection failed: {ex.Message}";
+            StatusText = $"SQLite table load failed: {ex.Message}";
+        }
         finally
         {
             if (generation == _sourceLoadGeneration) IsSourceLoading = false;
@@ -1484,6 +1507,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedSuggestion = null;
         SourceColumns.Clear();
         SourceTables.Clear();
+        SourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
         AiSuggestions.Clear();
         PreviewFacts.Clear();
         Diagnostics.Clear();
