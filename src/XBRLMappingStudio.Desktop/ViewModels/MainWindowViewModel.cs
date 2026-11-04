@@ -132,6 +132,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _selectedSourceColumn;
     private string? _selectedSourceTable;
     private string? _sqliteSourcePath;
+    private int _sourceLoadGeneration;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _selectedFactUnit = "USD";
@@ -156,7 +157,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (Set(ref _selectedSourceTable, value) && value is not null && _sqliteSourcePath is not null)
-                _ = LoadSqliteTableAsync(value);
+                _ = LoadSqliteTableAsync(value, _sourceLoadGeneration);
         }
     }
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
@@ -334,6 +335,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public async Task LoadSourceAsync(string path)
     {
+        var generation = Interlocked.Increment(ref _sourceLoadGeneration);
         if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
         try
         {
@@ -367,6 +369,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 SelectedSourceBindingId = binding.BindingId;
                 var sqlite = new SqliteSourceAdapter();
                 SourceTables.AddRange(await sqlite.DiscoverTablesAsync(connection, CancellationToken.None));
+                if (generation != _sourceLoadGeneration) return;
                 Raise(nameof(SourceTables));
                 Raise(nameof(HasSourceTables));
                 if (SourceTables.Count == 0) throw new InvalidOperationException("The SQLite database has no user tables.");
@@ -382,6 +385,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
             var adapter = BuildSourceAdapter(connection);
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            if (generation != _sourceLoadGeneration) return;
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });
@@ -392,7 +396,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
     }
 
-    private async Task LoadSqliteTableAsync(string table)
+    private async Task LoadSqliteTableAsync(string table, int generation)
     {
         if (_sqliteSourcePath is null) return;
         try
@@ -404,6 +408,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             config["table"] = table;
             var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
             var schema = await new SqliteSourceAdapter().InspectSchemaAsync(connection, CancellationToken.None);
+            if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
             binding = binding with { Kind = "sqlite", Locator = _sqliteSourcePath,
@@ -600,7 +605,6 @@ public sealed class MainWindowViewModel : ViewModelBase
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(connection.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
-        "sqlite" => new SqliteSourceAdapter(),
         _ => throw new NotSupportedException($"Adapter '{connection.Kind}' is not supported for source browsing.")
     };
 
@@ -738,7 +742,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 StatusText = $"Execution finished: {result.Manifest.Outcome}. No artifact was published.";
                 return;
             }
-            var receipt = new PublicationService(new RunJournal(root)).PublishAuthorized(
+            var receipt = new PublicationService(new RunJournal()).PublishAuthorized(
                 outputPath, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), root,
                 Session.Project, _profile, AllowSyntheticProfile, result);
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";

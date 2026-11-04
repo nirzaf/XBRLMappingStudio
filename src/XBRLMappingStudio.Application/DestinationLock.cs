@@ -140,10 +140,10 @@ public sealed class DestinationLock : IDisposable
 }
 
 /// <summary>
-/// Persistent per-run journal at <c>~/.xbrlmappingstudio/journal/&lt;runId&gt;.json</c>
-/// (OPS02). Every publication phase is recorded before it happens; a host restart lost
-/// mid-replace leaves an unfinalized entry that <see cref="RecoverUnfinalized"/> can
-/// adjudicate against the on-disk destination digest before any retry is attempted.
+/// SQLite-backed per-run journal (OPS02). A supplied <c>rootOverride</c> selects the
+/// legacy JSON journal for compatibility and isolated tests. Every publication phase is
+/// recorded before it happens; a host restart lost mid-replace leaves an unfinalized
+/// entry that <see cref="RecoverUnfinalized"/> adjudicates before retry.
 /// </summary>
 public sealed class RunJournal
 {
@@ -203,6 +203,12 @@ public sealed class RunJournal
                 receipt.Parameters.AddWithValue("$updated", entry.UpdatedUtc.ToString("O"));
                 receipt.ExecuteNonQuery();
             }
+            else
+            {
+                receipt.CommandText = "DELETE FROM publication_receipts WHERE run_id=$id";
+                receipt.Parameters.AddWithValue("$id", entry.RunId);
+                receipt.ExecuteNonQuery();
+            }
             transaction.Commit();
             return;
         }
@@ -236,8 +242,15 @@ public sealed class RunJournal
 
     private void ImportLegacyJournal()
     {
+        using (var connection = _database!.OpenConnection())
+        using (var check = connection.CreateCommand())
+        {
+            check.CommandText = "SELECT value FROM app_settings WHERE key='legacy_json_journal_imported'";
+            if (check.ExecuteScalar() is string) return;
+        }
         var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".xbrlmappingstudio", "journal");
         if (!Directory.Exists(legacy)) return;
+        var complete = true;
         foreach (var file in Directory.EnumerateFiles(legacy, "*.json").OrderBy(x => x, StringComparer.Ordinal))
         {
             try
@@ -245,7 +258,15 @@ public sealed class RunJournal
                 var entry = JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(file));
                 if (entry is not null && Load(entry.RunId) is null) Save(entry);
             }
-            catch (Exception ex) when (ex is IOException or JsonException or SqliteException) { }
+            catch (Exception ex) when (ex is IOException or JsonException or SqliteException) { complete = false; }
+        }
+        if (complete)
+        {
+            using var connection = _database.OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = "INSERT INTO app_settings(key,value,updated_utc) VALUES('legacy_json_journal_imported','1',$time) ON CONFLICT(key) DO NOTHING";
+            command.Parameters.AddWithValue("$time", DateTimeOffset.UtcNow.ToString("O"));
+            command.ExecuteNonQuery();
         }
     }
 

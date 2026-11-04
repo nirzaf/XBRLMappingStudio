@@ -45,6 +45,22 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task DiscoveryExcludesOnlyLiteralSqliteInternalPrefix()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("tables.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (id TEXT); CREATE TABLE sqliteData (id TEXT); CREATE TABLE [sqlite-x] (id TEXT); CREATE TABLE generated (id INTEGER PRIMARY KEY AUTOINCREMENT);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var tables = await new SqliteSourceAdapter().DiscoverTablesAsync(new SourceConnection("s", "sqlite", path), default);
+        Assert.Equal(new[] { "generated", "ledger", "sqlite-x", "sqliteData" }, tables);
+    }
+
+    [Fact]
     public async Task RejectsFloatingPointFinancialValuesAndTableSqlInjection()
     {
         using var ws = new TempWorkspace();
@@ -102,6 +118,9 @@ public sealed class SqliteSourceAdapterTests
                 new[] { Record("007", 999m) }, new[] { "account" }, "op-1", intent));
             Assert.Equal(DiagnosticCodes.PubReceiptConflict, conflict.Code);
         }
+        var changedIntentOnly = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record("007", 123.4500m) }, new[] { "account" }, "op-1", "sha256:intent-changed-only"));
+        Assert.Equal(DiagnosticCodes.PubReceiptConflict, changedIntentOnly.Code);
 
         await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
         await read.OpenAsync();
@@ -109,6 +128,104 @@ public sealed class SqliteSourceAdapterTests
         query.CommandText = "SELECT amount FROM report WHERE account=$account";
         query.Parameters.AddWithValue("$account", "007");
         Assert.Equal("123.4500", query.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task TargetRejectsNullAndDuplicateBatchKeysAndPartialIndexes()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("keys.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account TEXT, amount TEXT); CREATE UNIQUE INDEX uq_report_account ON report(account) WHERE account <> '';";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path, new Dictionary<string, string> { ["table"] = "report" });
+        var publisher = new SqliteTargetPublisher();
+        var partial = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record("007", 1m) }, new[] { "account" }, "partial", "intent"));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, partial.Code);
+
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "DROP INDEX uq_report_account; CREATE UNIQUE INDEX uq_report_account ON report(account);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var duplicate = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record("007", 1m), Record("007", 2m) }, new[] { "account" }, "dupe", "intent"));
+        Assert.Equal(DiagnosticCodes.IoDuplicateKey, duplicate.Code);
+        var nil = new XBRLMappingStudio.Engine.DataRecord { RowId = "nil", Fields = new Dictionary<string, DataValue>
+        {
+            ["account"] = DataValue.ExplicitNil(PortShape.String), ["amount"] = DataValue.DecimalValue(1m)
+        }};
+        var nullKey = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { nil }, new[] { "account" }, "nil", "intent"));
+        Assert.Equal(DiagnosticCodes.IoDuplicateKey, nullKey.Code);
+    }
+
+    [Fact]
+    public async Task TargetRejectsDecimalValuesForNumericAffinity()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("numeric.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account TEXT PRIMARY KEY, amount NUMERIC);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path, new Dictionary<string, string> { ["table"] = "report" });
+        var error = await Assert.ThrowsAsync<AdapterException>(() => new SqliteTargetPublisher().PublishAsync(destination,
+            new[] { Record("007", 12345678901234567890.12345678m) }, new[] { "account" }, "numeric", "intent"));
+        Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, error.Code);
+    }
+
+    [Fact]
+    public async Task TargetAcceptsCompositeBusinessKeysWithoutCollapsingDistinctTuples()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("composite.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (tenant TEXT NOT NULL, account TEXT NOT NULL, amount TEXT, UNIQUE(tenant,account));";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path, new Dictionary<string, string> { ["table"] = "report" });
+        var error = await Assert.ThrowsAsync<AdapterException>(() => new SqliteTargetPublisher().PublishAsync(destination,
+            new[] { CompositeRecord("t1", "a1", 1m), CompositeRecord("t1", "a1", 2m) },
+            new[] { "tenant", "account" }, "duplicate-composite", "intent"));
+        Assert.Equal(DiagnosticCodes.IoDuplicateKey, error.Code);
+        var receipt = await new SqliteTargetPublisher().PublishAsync(destination,
+            new[] { CompositeRecord("t1", "a1", 1m), CompositeRecord("t1", "a2", 2m) },
+            new[] { "tenant", "account" }, "distinct-composite", "intent");
+        Assert.Equal(2, receipt.WrittenRows);
+    }
+
+    [Fact]
+    public async Task IntentFingerprintDistinguishesValueShape()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("shape.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account, amount TEXT, UNIQUE(account));";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path, new Dictionary<string, string> { ["table"] = "report" });
+        var publisher = new SqliteTargetPublisher();
+        await publisher.PublishAsync(destination, new[] { Record(DataValue.IntegerValue(7), 1m) }, new[] { "account" }, "shape", "same-upstream");
+        var error = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record(DataValue.StringValue("7"), 1m) }, new[] { "account" }, "shape", "same-upstream"));
+        Assert.Equal(DiagnosticCodes.PubReceiptConflict, error.Code);
     }
 
     [Fact]
@@ -158,11 +275,26 @@ public sealed class SqliteSourceAdapterTests
     }
 
     private static XBRLMappingStudio.Engine.DataRecord Record(string account, decimal amount)
+        => Record(DataValue.StringValue(account), amount);
+
+    private static XBRLMappingStudio.Engine.DataRecord Record(DataValue account, decimal amount)
         => new()
         {
-            RowId = account,
+            RowId = "key",
             Fields = new Dictionary<string, DataValue>
             {
+                ["account"] = account,
+                ["amount"] = DataValue.DecimalValue(amount)
+            }
+        };
+
+    private static XBRLMappingStudio.Engine.DataRecord CompositeRecord(string tenant, string account, decimal amount)
+        => new()
+        {
+            RowId = tenant + ":" + account,
+            Fields = new Dictionary<string, DataValue>
+            {
+                ["tenant"] = DataValue.StringValue(tenant),
                 ["account"] = DataValue.StringValue(account),
                 ["amount"] = DataValue.DecimalValue(amount)
             }

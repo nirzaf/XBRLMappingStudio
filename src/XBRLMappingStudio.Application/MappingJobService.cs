@@ -162,7 +162,7 @@ public sealed class MappingJobService
             {
                 var digest = DigestRecords(conn, records);
                 manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
-                    ? input with { Kind = "sqlite-table", Digest = digest, IsReplayable = true }
+                    ? input with { Kind = preview ? "sqlite-preview" : "sqlite-table", Digest = digest, IsReplayable = !preview }
                     : input).ToArray();
             }
         }
@@ -390,17 +390,17 @@ public sealed class MappingJobService
         AppendPart(builder, connection.Configuration is not null
             && connection.Configuration.TryGetValue("table", out var table) ? table : "");
         builder.Append(records.Count).Append(':');
-        foreach (var record in records)
+        var rows = records.Select(record =>
         {
-            AppendPart(builder, record.RowId);
-            builder.Append(record.Fields.Count).Append(':');
+            var row = new StringBuilder();
+            row.Append(record.Fields.Count).Append(':');
             foreach (var field in record.Fields.OrderBy(x => x.Key, StringComparer.Ordinal))
             {
-                AppendPart(builder, field.Key);
-                AppendPart(builder, field.Value.Shape.ToString());
-                builder.Append((int)field.Value.Presence).Append(':');
-                AppendPart(builder, field.Value.LexicalSource ?? "");
-                AppendPart(builder, field.Value.Raw switch
+                AppendPart(row, field.Key);
+                AppendPart(row, field.Value.Shape.ToString());
+                row.Append((int)field.Value.Presence).Append(':');
+                AppendPart(row, field.Value.LexicalSource ?? "");
+                AppendPart(row, field.Value.Raw switch
                 {
                     null => "",
                     string value => value,
@@ -411,7 +411,9 @@ public sealed class MappingJobService
                     var value => value.ToString() ?? ""
                 });
             }
-        }
+            return row.ToString();
+        }).Order(StringComparer.Ordinal);
+        foreach (var row in rows) AppendPart(builder, row);
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
     }
 

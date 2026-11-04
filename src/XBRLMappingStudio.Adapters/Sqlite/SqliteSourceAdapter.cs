@@ -19,7 +19,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     {
         await using var db = await OpenConnectionAsync(connection, cancellationToken);
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+        command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7) <> 'sqlite_' ORDER BY name";
         var tables = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) tables.Add(reader.GetString(0));

@@ -38,7 +38,7 @@ public sealed class LocalApplicationDatabaseTests
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "CREATE TABLE preserve_me(value TEXT); PRAGMA user_version=99;";
+            command.CommandText = "PRAGMA journal_mode=DELETE; CREATE TABLE preserve_me(value TEXT); INSERT INTO preserve_me VALUES('keep'); PRAGMA user_version=99;";
             command.ExecuteNonQuery();
         }
 
@@ -46,8 +46,21 @@ public sealed class LocalApplicationDatabaseTests
         using var verify = new SqliteConnection($"Data Source={path}");
         verify.Open();
         using var check = verify.CreateCommand();
-        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='preserve_me'";
-        Assert.Equal(1L, check.ExecuteScalar());
+        check.CommandText = "SELECT value FROM preserve_me";
+        Assert.Equal("keep", check.ExecuteScalar());
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(99L, check.ExecuteScalar());
+        check.CommandText = "PRAGMA journal_mode";
+        Assert.Equal("delete", check.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task ConcurrentFirstLaunchSerializesSchemaMigration()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "concurrent.db");
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => new LocalApplicationDatabase(path))));
+        Assert.Equal("ok", new LocalApplicationDatabase(path).IntegrityCheck());
     }
 
     [Fact]
@@ -73,6 +86,60 @@ public sealed class LocalApplicationDatabaseTests
             Assert.Equal("light", command.ExecuteScalar());
         }
         Assert.Throws<IOException>(() => database.BackupTo(backupPath));
+    }
+
+    [Fact]
+    public async Task ConcurrentBackupsPublishOnlyOneSnapshotWithoutOverwriting()
+    {
+        using var workspace = new TemporaryDirectory();
+        var database = new LocalApplicationDatabase(Path.Combine(workspace.Path, "state.db"));
+        var backup = Path.Combine(workspace.Path, "shared-backup.db");
+        var results = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            try { database.BackupTo(backup); return "saved"; }
+            catch (IOException) { return "exists"; }
+        })));
+        Assert.Equal(1, results.Count(x => x == "saved"));
+        Assert.Equal(1, results.Count(x => x == "exists"));
+        using var verify = new SqliteConnection($"Data Source={backup};Mode=ReadOnly");
+        verify.Open();
+        using var command = verify.CreateCommand();
+        command.CommandText = "PRAGMA integrity_check";
+        Assert.Equal("ok", command.ExecuteScalar());
+    }
+
+    [Fact]
+    public void CallerOwnedParentDirectoryPermissionsAreUnchanged()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var workspace = new TemporaryDirectory();
+        var before = File.GetUnixFileMode(workspace.Path);
+        _ = new LocalApplicationDatabase(Path.Combine(workspace.Path, "state.db"));
+        Assert.Equal(before, File.GetUnixFileMode(workspace.Path));
+    }
+
+    [Fact]
+    public void FailedReceiptInsertRollsBackTheJournalRow()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "state.db");
+        var database = new LocalApplicationDatabase(path);
+        using (var connection = database.OpenConnection())
+        using (var trigger = connection.CreateCommand())
+        {
+            trigger.CommandText = "CREATE TRIGGER fail_receipt BEFORE INSERT ON publication_receipts BEGIN SELECT RAISE(ABORT,'injected'); END";
+            trigger.ExecuteNonQuery();
+        }
+        var journal = new RunJournal(databasePath: path);
+        var entry = new JournalEntry("rollback", "/workspace/report.json", JournalState.Finalized,
+            "sha256:a", "sha256:a", "lock", DateTimeOffset.UtcNow);
+        Assert.Throws<SqliteException>(() => journal.Save(entry));
+        using var verify = database.OpenConnection();
+        using var check = verify.CreateCommand();
+        check.CommandText = "SELECT COUNT(*) FROM run_journal WHERE run_id='rollback'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM publication_receipts WHERE run_id='rollback'";
+        Assert.Equal(0L, check.ExecuteScalar());
     }
 
     private sealed class TemporaryDirectory : IDisposable

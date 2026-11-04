@@ -4,6 +4,7 @@ using System.Text;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
+using XBRLMappingStudio.Project;
 
 namespace XBRLMappingStudio.Adapters.Sqlite;
 
@@ -29,6 +30,9 @@ public sealed class SqliteTargetPublisher
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, "Input records have inconsistent field sets.");
         if (businessKey.Except(columns, StringComparer.Ordinal).Any())
             throw new AdapterException(DiagnosticCodes.IoColumnMissing, "Every business-key field must be present in the input records.");
+        if (records.Any(record => businessKey.Any(key => record.Fields[key].Presence is ValuePresence.Missing or ValuePresence.ExplicitNil
+                || record.Fields[key].Raw is null)))
+            throw new AdapterException(DiagnosticCodes.IoDuplicateKey, "SQLite business-key values cannot be missing or null.", DiagnosticStage.Publication);
         var effectiveIntent = Fingerprint(destination, table, records, businessKey, intentFingerprint, columns);
 
         await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -67,16 +71,21 @@ public sealed class SqliteTargetPublisher
         }
 
         var actualColumns = await ReadColumnsAsync(connection, transaction, table, cancellationToken);
-        var missing = columns.Except(actualColumns, StringComparer.Ordinal).ToArray();
+        var missing = columns.Except(actualColumns.Keys, StringComparer.Ordinal).ToArray();
         if (missing.Length != 0)
             throw new AdapterException(DiagnosticCodes.IoColumnMissing,
                 $"SQLite target '{table}' is missing columns: {string.Join(", ", missing)}.");
         foreach (var key in businessKey)
-            if (!actualColumns.Contains(key, StringComparer.Ordinal))
+            if (!actualColumns.ContainsKey(key))
                 throw new AdapterException(DiagnosticCodes.IoColumnMissing, $"Business-key column '{key}' does not exist in '{table}'.");
+        foreach (var column in columns.Where(c => records.Any(r => r.Fields[c].Shape == PortShape.Decimal)))
+            if (Affinity(actualColumns[column]) != "TEXT")
+                throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                    $"Exact decimal column '{column}' must have TEXT affinity in SQLite target '{table}'.", DiagnosticStage.Publication);
         if (!await HasUniqueBusinessKeyAsync(connection, transaction, table, businessKey, cancellationToken))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 $"SQLite target '{table}' must have a primary or unique index on the configured business key.");
+        await EnsureUniqueBatchKeysAsync(connection, transaction, table, businessKey, records, cancellationToken);
 
         var updates = columns.Except(businessKey, StringComparer.Ordinal).ToArray();
         if (updates.Length == 0) throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation, "Upsert requires at least one non-key column.");
@@ -113,15 +122,15 @@ public sealed class SqliteTargetPublisher
         return new SqlitePublishReceipt(operationKey, effectiveIntent, records.Count, completed);
     }
 
-    private static async Task<HashSet<string>> ReadColumnsAsync(SqliteConnection connection, SqliteTransaction transaction,
+    private static async Task<Dictionary<string, string>> ReadColumnsAsync(SqliteConnection connection, SqliteTransaction transaction,
         string table, CancellationToken cancellationToken)
     {
-        var names = new HashSet<string>(StringComparer.Ordinal);
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"PRAGMA table_info({Quote(table)})";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) names.Add(reader.GetString(1));
+        while (await reader.ReadAsync(cancellationToken)) names.Add(reader.GetString(1), reader.IsDBNull(2) ? "" : reader.GetString(2));
         if (names.Count == 0) throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, $"SQLite target table '{table}' does not exist.");
         return names;
     }
@@ -146,7 +155,7 @@ public sealed class SqliteTargetPublisher
         await using var indexReader = await indexes.ExecuteReaderAsync(cancellationToken);
         var uniqueNames = new List<string>();
         while (await indexReader.ReadAsync(cancellationToken))
-            if (indexReader.GetInt32(2) != 0) uniqueNames.Add(indexReader.GetString(1));
+            if (indexReader.GetInt32(2) != 0 && indexReader.GetInt32(4) == 0) uniqueNames.Add(indexReader.GetString(1));
         await indexReader.DisposeAsync();
         foreach (var index in uniqueNames)
         {
@@ -160,6 +169,41 @@ public sealed class SqliteTargetPublisher
             if (columns.OrderBy(x => x.Ordinal).Select(x => x.Name).SequenceEqual(keys, StringComparer.Ordinal)) return true;
         }
         return false;
+    }
+
+    private static async Task EnsureUniqueBatchKeysAsync(SqliteConnection connection, SqliteTransaction transaction,
+        string table, IReadOnlyList<string> keys, IReadOnlyList<DataRecord> records, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"CREATE TEMP TABLE \"__xms_batch_keys\" AS SELECT {string.Join(",", keys.Select(Quote))} FROM {Quote(table)} WHERE 0; CREATE UNIQUE INDEX \"__xms_batch_keys_unique\" ON \"__xms_batch_keys\" ({string.Join(",", keys.Select(Quote))});";
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        command.CommandText = $"INSERT INTO temp.\"__xms_batch_keys\" ({string.Join(",", keys.Select(Quote))}) VALUES ({string.Join(",", keys.Select((_, i) => "$k" + i))})";
+        for (var i = 0; i < keys.Count; i++) command.Parameters.AddWithValue("$k" + i, DBNull.Value);
+        try
+        {
+            foreach (var record in records)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                for (var i = 0; i < keys.Count; i++) command.Parameters[i].Value = ToSql(record.Fields[keys[i]]);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        {
+            throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
+                $"SQLite input batch contains duplicate business-key values ({ex.Message}).", DiagnosticStage.Publication);
+        }
+    }
+
+    private static string Affinity(string declaredType)
+    {
+        var type = declaredType.ToUpperInvariant();
+        if (type.Contains("INT", StringComparison.Ordinal)) return "INTEGER";
+        if (type.Contains("CHAR", StringComparison.Ordinal) || type.Contains("CLOB", StringComparison.Ordinal) || type.Contains("TEXT", StringComparison.Ordinal)) return "TEXT";
+        if (type.Length == 0 || type.Contains("BLOB", StringComparison.Ordinal)) return "BLOB";
+        if (type.Contains("REAL", StringComparison.Ordinal) || type.Contains("FLOA", StringComparison.Ordinal) || type.Contains("DOUB", StringComparison.Ordinal)) return "REAL";
+        return "NUMERIC";
     }
 
     private static object ToSql(DataValue value)
@@ -192,8 +236,11 @@ public sealed class SqliteTargetPublisher
             {
                 var value = record.Fields[column];
                 AppendPart(builder, column);
+                AppendPart(builder, value.Shape.ToString());
                 builder.Append((int)value.Presence).Append(':');
                 AppendPart(builder, ValueText(value.Raw));
+                AppendPart(builder, value.Raw?.GetType().FullName ?? "null");
+                AppendPart(builder, Convert.ToString(ToSql(value), CultureInfo.InvariantCulture) ?? "null");
             }
         }
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();

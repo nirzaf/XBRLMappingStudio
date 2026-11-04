@@ -10,14 +10,14 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 | BASE04 | Implemented and verified | `src/XBRLMappingStudio.Diagnostics/`; adapter and integration tests. |
 | MAP01 | Implemented and verified | `src/XBRLMappingStudio.Engine/MappingGraph.cs`, `PlanCompiler.cs`; engine tests. |
 | MAP02 | Implemented and verified | `src/XBRLMappingStudio.Engine/` function and collection execution; engine tests. |
-| MAP03 | Partially implemented | `src/XBRLMappingStudio.Adapters/`; SQLite, Excel, CSV, JSON, XML and XBRL report subsets only; no qualified external DB family or PDF adapter. |
+| MAP03 | Partially implemented | Deterministic plan compilation/execution and cancellation are covered by `tests/XBRLMappingStudio.Engine.Tests/EngineTests.cs` and `tests/XBRLMappingStudio.Integration.Tests/AcceptanceScenarios.cs`; provenance tracking exists in `src/XBRLMappingStudio.Engine/ProvenanceTracker.cs`, but broader qualification and connector coverage remain open under IO07–IO12. |
 | MAP04 | Partially implemented | `src/XBRLMappingStudio.Engine/` and `src/XBRLMappingStudio.XBRL/`; exact decimal domain is CLR decimal, not the full guide domain. |
 | MAP05 | Partially implemented | Graph validation and deterministic execution exist; remaining constructs/profile constraints are not fully qualified. |
 | MAP06 | Partially implemented | `src/XBRLMappingStudio.Engine/ProvenanceTracker.cs`; supported record/fact lineage only. |
 | MAP07 | Partially implemented | Project reusable function metadata exists; graphical authoring and full reuse lifecycle are incomplete. |
 | MAP08 | Implemented and verified | Bounded preview and partial totals in `src/XBRLMappingStudio.Application/MappingJobService.cs`; integration tests. |
 | IO01 | Partially implemented | `src/XBRLMappingStudio.Adapters/ISourceAdapter.cs`, `MappingJobService.cs`; adapter capability contract and SQLite shared-service execution verified, but UI connector coverage remains partial. |
-| IO02 | Implemented and verified for supported subsets | CSV, Excel, JSON, XML adapters and focused tests under `src/XBRLMappingStudio.Adapters/` and `tests/XBRLMappingStudio.Adapters.Tests/`. |
+| IO02 | Implemented and verified for supported XLSX input subset | `src/XBRLMappingStudio.Adapters/Excel/` and focused Excel source tests under `tests/XBRLMappingStudio.Adapters.Tests/`. |
 | IO03 | Partially implemented | `src/XBRLMappingStudio.Adapters/`; schema fingerprints and drift checks; not every format has a fully qualified round-trip. |
 | IO04 | Partially implemented | Excel/CSV exports exist; report output goes through staged publication; target capability matrix is incomplete. |
 | IO05 | Implemented and verified for file outputs | `src/XBRLMappingStudio.Application/PublicationService.cs`, file target adapters and publication tests. |
@@ -39,7 +39,7 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 | XBR09 | Blocked by release dependencies | Signed Windows packaging, clean-machine Windows acceptance, licensing and filing-profile sign-off require external credentials, hardware, rights and reviewer evidence. |
 | AI01 | Implemented and verified for offline mode | `src/XBRLMappingStudio.AI/AiPolicy.cs`; offline tests assert no outbound provider calls. |
 | AI02 | Implemented and verified for local synthetic index | `LocalRetrievalRanker.cs` and deterministic retrieval tests; real taxonomy scale not qualified. |
-| AI03 | Partially implemented | Provider abstraction and structured validation exist; `Microsoft.Extensions.AI` integration is absent. |
+| AI03 | Partially implemented | `src/XBRLMappingStudio.AI/Providers.cs` bridges `Microsoft.Extensions.AI`; provider configuration and production qualification remain incomplete. |
 | AI04 | Partially implemented | `DraftValidator.cs` plus project digest/source identity checks; no full profile-aware model workflow. |
 | AI05 | Partially implemented | Desktop offline suggestions and undo tests exist; batch review and complete graph workflow remain incomplete. |
 | AI06 | Partially implemented | Audit types exist, but SQLite audit events are not yet wired through suggestion decisions and privacy evaluation is incomplete. |
@@ -74,9 +74,9 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 
 ## Current verification
 
-- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore` — passed with 0 warnings and 0 errors before the final docs and test assertion edits.
-- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore` — passed, 228 tests, 0 failed, 0 skipped.
+- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed with 0 warnings and 0 errors for this revision.
+- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed, 239 tests, 0 failed, 0 skipped for this revision.
 - `PYTHONPATH=/tmp/xms-worker-venv/lib/python3.12/site-packages python3 -m pytest tools/worker/tests -q` — passed, 5 tests, using the exact pinned `tools/worker/requirements.lock` installed into a temporary Python 3.12 environment with hashes enforced.
-- `git diff --check` — run before handoff.
+- `git diff --check` — passed for this revision.
 
 No performance result is claimed. No interactive desktop, Windows, installer, or real regulator profile was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.

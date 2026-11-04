@@ -1,6 +1,7 @@
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
+using Microsoft.Data.Sqlite;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -270,6 +271,40 @@ public sealed class DesignerSessionTests
             Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
             viewModel.Session.Undo();
             Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StaleSqliteSchemaLoadCannotReplaceNewerSourceSelection()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-race", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "wide.sqlite");
+        var csv = System.IO.Path.Combine(dir, "current.csv");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            var columns = string.Join(",", Enumerable.Range(0, 900).Select(i => $"c{i} TEXT"));
+            command.CommandText = $"CREATE TABLE wide ({columns});";
+            await command.ExecuteNonQueryAsync();
+        }
+        File.WriteAllText(csv, "currentField\nvalue\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            var staleLoad = viewModel.LoadSourceAsync(database);
+            await viewModel.LoadSourceAsync(csv);
+            await staleLoad;
+            await Task.Delay(100);
+            Assert.Contains("currentField", viewModel.SourceColumns);
+            Assert.DoesNotContain("c0", viewModel.SourceColumns);
+            Assert.Equal("csv", viewModel.Session.Project.Bindings[0].Kind);
         }
         finally
         {

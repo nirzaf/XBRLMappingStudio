@@ -10,11 +10,13 @@ public sealed class LocalApplicationDatabase
 
     public LocalApplicationDatabase(string? path = null)
     {
+        var applicationOwnedPath = path is null;
         Path = System.IO.Path.GetFullPath(path ?? DefaultPath());
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-        RestrictDirectoryPermissions(System.IO.Path.GetDirectoryName(Path)!);
+        var directory = System.IO.Path.GetDirectoryName(Path)!;
+        Directory.CreateDirectory(directory);
+        if (applicationOwnedPath) RestrictDirectoryPermissions(directory);
         Migrate();
-        if (!OperatingSystem.IsWindows())
+        if (applicationOwnedPath && !OperatingSystem.IsWindows())
         {
             try { File.SetUnixFileMode(Path, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
             catch (PlatformNotSupportedException) { }
@@ -49,29 +51,36 @@ public sealed class LocalApplicationDatabase
     public void BackupTo(string backupPath)
     {
         var fullBackupPath = System.IO.Path.GetFullPath(backupPath);
-        if (StringComparer.OrdinalIgnoreCase.Equals(Path, fullBackupPath))
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (comparer.Equals(Path, fullBackupPath))
             throw new ArgumentException("Backup path must differ from the application database.", nameof(backupPath));
         if (File.Exists(fullBackupPath)) throw new IOException("Backup destination already exists; refusing to overwrite it.");
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(fullBackupPath)!);
+        var directory = System.IO.Path.GetDirectoryName(fullBackupPath)!;
+        Directory.CreateDirectory(directory);
+        var temporaryPath = System.IO.Path.Combine(directory,
+            $".{System.IO.Path.GetFileName(fullBackupPath)}.{Guid.NewGuid():N}.tmp");
         try
         {
             using var source = OpenConnection();
-            using var target = new SqliteConnection(new SqliteConnectionStringBuilder
+            using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = fullBackupPath,
+                DataSource = temporaryPath,
                 Mode = SqliteOpenMode.ReadWriteCreate,
                 Pooling = false,
                 DefaultTimeout = 5,
                 ForeignKeys = true
-            }.ToString());
-            target.Open();
-            source.BackupDatabase(target);
+            }.ToString()))
+            {
+                target.Open();
+                source.BackupDatabase(target);
+            }
             if (!OperatingSystem.IsWindows())
-                File.SetUnixFileMode(fullBackupPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(temporaryPath, fullBackupPath);
         }
         catch
         {
-            foreach (var file in new[] { fullBackupPath, fullBackupPath + "-wal", fullBackupPath + "-shm" })
+            foreach (var file in new[] { temporaryPath, temporaryPath + "-wal", temporaryPath + "-shm" })
                 try { File.Delete(file); } catch (IOException) { }
             throw;
         }
@@ -80,12 +89,7 @@ public sealed class LocalApplicationDatabase
     private void Migrate()
     {
         using var connection = OpenConnection();
-        using (var wal = connection.CreateCommand())
-        {
-            wal.CommandText = "PRAGMA journal_mode=WAL";
-            _ = wal.ExecuteScalar();
-        }
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
         using var versionCommand = connection.CreateCommand();
         versionCommand.Transaction = transaction;
         versionCommand.CommandText = "PRAGMA user_version";
@@ -142,6 +146,9 @@ public sealed class LocalApplicationDatabase
             migration.ExecuteNonQuery();
         }
         transaction.Commit();
+        using var wal = connection.CreateCommand();
+        wal.CommandText = "PRAGMA journal_mode=WAL";
+        _ = wal.ExecuteScalar();
     }
 
     private static string DefaultPath()

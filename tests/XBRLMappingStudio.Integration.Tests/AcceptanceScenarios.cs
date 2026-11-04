@@ -172,6 +172,54 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SqliteInputDigestIsOrderIndependentAndPreviewIsNotReplayable()
+    {
+        async Task<(MappingProject Project, SourceConnection Connection, string Path)> CreateSource(string name, bool reverse)
+        {
+            var path = Path.Combine(_dir, name);
+            await using var db = new SqliteConnection($"Data Source={path}");
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT);";
+            await command.ExecuteNonQueryAsync();
+            var values = Enumerable.Range(0, 12);
+            if (reverse) values = values.Reverse();
+            foreach (var i in values)
+            {
+                command.CommandText = "INSERT INTO financials VALUES($line,$current,$prior)";
+                command.Parameters.Clear();
+                command.Parameters.AddWithValue("$line", $"Line{i}");
+                command.Parameters.AddWithValue("$current", i.ToString());
+                command.Parameters.AddWithValue("$prior", (i + 1).ToString());
+                await command.ExecuteNonQueryAsync();
+            }
+            var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+            var binding = project.Bindings[0];
+            project.Bindings[0] = binding with { Kind = "sqlite", Locator = path, Configuration = new Dictionary<string, object?> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" } };
+            return (project, new SourceConnection(binding.BindingId, "sqlite", path, new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" }), path);
+        }
+
+        var a = await CreateSource("a.db", reverse: false);
+        var b = await CreateSource("b.db", reverse: true);
+        var service = NewService();
+        async Task<InputIdentity> Run((MappingProject Project, SourceConnection Connection, string Path) source, bool preview)
+        {
+            var result = await service.RunAsync(source.Project,
+                new Dictionary<string, SourceConnection> { [source.Connection.SourceId] = source.Connection },
+                new Dictionary<string, string>(), preview, CancellationToken.None);
+            return Assert.Single(result.Manifest.Inputs);
+        }
+        var fullA = await Run(a, preview: false);
+        var fullB = await Run(b, preview: false);
+        Assert.Equal(fullA.Digest, fullB.Digest);
+        Assert.True(fullA.IsReplayable);
+        var preview = await Run(a, preview: true);
+        Assert.Equal("sqlite-preview", preview.Kind);
+        Assert.False(preview.IsReplayable);
+        Assert.NotEqual(fullA.Digest, preview.Digest);
+    }
+
+    [Fact]
     public async Task XbrlJson_RoundTrips_BackToFacts()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
