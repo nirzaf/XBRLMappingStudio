@@ -67,6 +67,15 @@ public static class DiagnosticCodes
     public const string XbrDuplicateFact = "XBR012";
     public const string XbrDimensionInvalid = "XBR013";
     public const string XbrRequiredCheckMissing = "XBR014";
+    /// <summary>EG03/XG01: profile declared by the project does not match the profile
+    /// actually resolved for this run (missing or substituted profile identity).</summary>
+    public const string XbrProfileMismatch = "XBR015";
+    /// <summary>EG03: no approval record covers the current semantic revision and
+    /// profile digest, so an unattended (production) publication is not authorized.</summary>
+    public const string XbrApprovalRequired = "XBR016";
+    /// <summary>XG01: the synthetic placeholder profile was selected for a production
+    /// run without the caller explicitly opting in; publication is refused.</summary>
+    public const string XbrSyntheticProfileNotAuthorized = "XBR017";
 
     // WKR - Worker process protocol
     public const string WkrHandshakeFailed = "WKR001";

@@ -51,7 +51,11 @@ public sealed class ExcelAdapter : ISourceAdapter
         var lastDataRow = sheet.LastRowUsed()?.RowNumber() ?? headerRow;
         var columns = DiscoverColumns(sheet, headerRow);
         var unitHints = ExtractUnitHints(sheet, headerRow);
-        var fingerprint = ExcelSchema.ComputeFingerprint(sheet.Name, columns);
+        // IG01: the fingerprint must cover the unit/scale/period heading anchors found
+        // above the header, not just the column names, so a "thousands" -> "units"
+        // relabel is detected as schema drift instead of silently re-exporting the
+        // old-scaled amount.
+        var fingerprint = ExcelSchema.ComputeFingerprint(sheet.Name, columns, unitHints);
         ISourceSchema schema = new ExcelSchema(
             SourceId: connection.SourceId,
             SheetName: sheet.Name,

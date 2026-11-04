@@ -81,15 +81,19 @@ public sealed class CliParityTests : IAsyncLifetime
     [Fact]
     public async Task Cli_ExecuteMatchesInProcess_WhenGivenSavedProject()
     {
-        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        // A production (non-preview) execute must clear the EG03/XG01 publication gate:
+        // an approved project plus an explicit synthetic-profile acknowledgment.
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
         var projectPath = Path.Combine(_dir, "revenue.xmap");
         var pm = new ProjectManager(projectPath);
         pm.Save(project);
 
         var cli = LocateCli();
         var outputPath = Path.Combine(_dir, "cli-out.json");
+        var manifestPath = Path.Combine(_dir, "cli-manifest.json");
 
-        var psi = BuildStartInfo(cli, "execute", projectPath, "--output", outputPath);
+        var psi = BuildStartInfo(cli, "execute", projectPath,
+            "--output", outputPath, "--manifest", manifestPath, "--allow-synthetic-profile");
 
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("CLI process failed to start.");
@@ -141,5 +145,180 @@ public sealed class CliParityTests : IAsyncLifetime
 
         // Invalid mapping exit code = 2 per ExitCodes contract.
         Assert.Equal(2, proc.ExitCode);
+    }
+
+    // ---- OG01/OG02: fail-closed publishing through the real CLI process. --------
+
+    private static async Task<(int ExitCode, string Stdout, string Stderr)> RunCliAsync(
+        (string FileName, bool IsAppHost) cli, string verb, params string[] extra)
+    {
+        var psi = BuildStartInfo(cli, verb, extra);
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("CLI process failed to start.");
+        var stdout = await proc.StandardOutput.ReadToEndAsync();
+        var stderr = await proc.StandardError.ReadToEndAsync();
+        await proc.WaitForExitAsync();
+        return (proc.ExitCode, stdout, stderr);
+    }
+
+    private static async Task<string> ReadRunIdFromManifestAsync(string manifestPath)
+    {
+        var json = await File.ReadAllTextAsync(manifestPath);
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("RunId").GetString()
+            ?? throw new InvalidOperationException("Manifest missing RunId.");
+    }
+
+    [Fact]
+    public async Task Cli_ExecutePublishes_ThroughPublicationService_AndReceiptIsInspectable()
+    {
+        // OG02: a valid, approved production run writes through the four-phase publisher,
+        // and its receipt must be retrievable by run id via the inspect-run-result verb.
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "publish-ok.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var cli = LocateCli();
+        var outputPath = Path.Combine(_dir, "publish-ok-out.json");
+        var manifestPath = Path.Combine(_dir, "publish-ok-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--manifest", manifestPath, "--allow-synthetic-profile");
+        Assert.True(exit == 0, $"Expected exit 0, got {exit}.\nstderr:\n{stderr}");
+        Assert.True(File.Exists(outputPath));
+
+        var runId = await ReadRunIdFromManifestAsync(manifestPath);
+        var (inspectExit, inspectStdout, inspectStderr) = await RunCliAsync(cli, "inspect-run-result", runId);
+        Assert.True(inspectExit == 0,
+            $"inspect-run-result should find the receipt, got exit {inspectExit}.\nstderr:\n{inspectStderr}");
+        using var doc = JsonDocument.Parse(inspectStdout);
+        // JournalState.Finalized == 3: the run completed every publication phase.
+        Assert.Equal(3, doc.RootElement.GetProperty("State").GetInt32());
+        Assert.Equal(Path.GetFullPath(outputPath).Replace('\\', '/'),
+            doc.RootElement.GetProperty("DestinationPath").GetString()?.Replace('\\', '/'));
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteInvalidMapping_PreservesPriorOutput_AndIssuesNoReceipt()
+    {
+        // OG01 core sentinel: seed a prior accepted destination. An invalid graph must
+        // leave it byte-identical and must not create a run-journal entry.
+        var priorBytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02 };
+        var outputPath = Path.Combine(_dir, "fail-closed-out.json");
+        await File.WriteAllBytesAsync(outputPath, priorBytes);
+
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        project.Nodes.Add(new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = "quantumFlanger",
+            DisplayName = "Unknown"
+        });
+        var projectPath = Path.Combine(_dir, "fail-closed.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var cli = LocateCli();
+        var manifestPath = Path.Combine(_dir, "fail-closed-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.Equal(2, exit); // InvalidMapping
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(outputPath));
+        Assert.Contains("no publication receipt issued", stderr, StringComparison.Ordinal);
+
+        var runId = await ReadRunIdFromManifestAsync(manifestPath);
+        var (inspectExit, _, _) = await RunCliAsync(cli, "inspect-run-result", runId);
+        Assert.Equal(3, inspectExit); // DataError: "No journal entry for run" — never published.
+    }
+
+    // ---- EG03/XG01: profile identity + approval gate before production publish. ----
+
+    [Fact]
+    public async Task Cli_ExecuteWithoutApproval_IsBlockedAsAuthorizationFailure_AndWritesNothing()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        var projectPath = Path.Combine(_dir, "no-approval.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var cli = LocateCli();
+        var outputPath = Path.Combine(_dir, "no-approval-out.json");
+
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--allow-synthetic-profile");
+
+        Assert.Equal(5, exit); // AuthorizationFailure
+        Assert.False(File.Exists(outputPath));
+        Assert.Contains("XBR016", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteWithoutSyntheticOptIn_IsBlocked_AndWritesNothing()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "no-synthetic-flag.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var cli = LocateCli();
+        var outputPath = Path.Combine(_dir, "no-synthetic-flag-out.json");
+
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath, "--output", outputPath);
+
+        Assert.Equal(4, exit); // IncompleteProfile
+        Assert.False(File.Exists(outputPath));
+        Assert.Contains("XBR017", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteWithSubstitutedProfile_IsBlocked_AndPreservesPriorOutput()
+    {
+        const string priorContent = "PRIOR-ACCEPTED";
+        var outputPath = Path.Combine(_dir, "substituted-out.json");
+        File.WriteAllText(outputPath, priorContent);
+
+        var approved = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        // A project created against a different (e.g. a real, non-synthetic) taxonomy
+        // profile must be refused outright rather than executed under the synthetic one.
+        var substituted = new MappingProject
+        {
+            ProjectId = approved.ProjectId,
+            Name = approved.Name,
+            ProfileId = "qatar-real-taxonomy-v1",
+            ProfileDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            FunctionCatalogVersion = approved.FunctionCatalogVersion,
+            SemanticRevision = approved.SemanticRevision,
+            Metadata = approved.Metadata,
+            Nodes = approved.Nodes,
+            Edges = approved.Edges,
+            Bindings = approved.Bindings,
+            Functions = approved.Functions,
+            Approvals = approved.Approvals,
+        };
+        var projectPath = Path.Combine(_dir, "substituted.xmap");
+        new ProjectManager(projectPath).Save(substituted);
+
+        var cli = LocateCli();
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--allow-synthetic-profile");
+
+        Assert.Equal(4, exit); // IncompleteProfile (profile identity mismatch)
+        Assert.Equal(priorContent, File.ReadAllText(outputPath)); // unchanged
+        Assert.Contains("XBR015", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_PreviewDoesNotRequireApproval_OrSyntheticOptIn()
+    {
+        // EG03 boundary: a draft preview stays available on an unapproved, unacknowledged
+        // revision so a reviewer can inspect before accepting — only publish gates close.
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        var projectPath = Path.Combine(_dir, "preview-no-approval.xmap");
+        new ProjectManager(projectPath).Save(project);
+
+        var cli = LocateCli();
+        var (exit, stdout, stderr) = await RunCliAsync(cli, "preview", projectPath);
+
+        Assert.True(exit is 0 or 1, $"Expected preview to run, got exit {exit}.\nstderr:\n{stderr}");
+        Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);
     }
 }

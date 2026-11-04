@@ -48,22 +48,25 @@ public static class TestFixtures
 
     /// <summary>
     /// Workbook layout (rows 1-6, columns A-D):
-    ///   A1: (blank),    B1: "2025",     C1: "2024",   D1: "instant"
-    ///   A2: "QAR thousands", (blank headings)
+    ///   A1: <paramref name="unitHeading">,  B1: "2025",     C1: "2024",   D1: "instant"
+    ///   A2: (blank headings)
     ///   A3: "Line",     B3: "Current",  C3: "Prior",  D3: "AsOf"
     ///   A4: "Revenue",  B4: 1250,       C4: 1100,     D4: (blank)
     ///   A5: "Assets",   B5: 5000,       C5: 4700,     D5: 2025-12-31
     ///   A6: "Zero",     B6: 0,          C6: 0,        D6: (blank)
     ///   A7: "Blank",    B7: "",         C7: "",       D7: (blank)
+    /// <paramref name="unitHeading"/> exists so a test can re-materialize the same
+    /// workbook with a different unit/scale banner (e.g. "QAR units") over the same
+    /// path to reproduce the IG01 heading-drift scenario.
     /// </summary>
-    public static string MaterializeWorkbook(string directory)
+    public static string MaterializeWorkbook(string directory, string unitHeading = "QAR thousands")
     {
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, WorkbookName);
         using var wb = new XLWorkbook();
         var ws = wb.Worksheets.Add(SheetName);
 
-        ws.Cell("A1").Value = "QAR thousands"; // unit + scale heading for section 5.2 fixture
+        ws.Cell("A1").Value = unitHeading; // unit + scale heading for section 5.2 fixture
         ws.Cell("B1").Value = "2025";
         ws.Cell("C1").Value = "2024";
 
@@ -94,12 +97,16 @@ public static class TestFixtures
     /// <summary>
     /// A minimal revenue-mapping project on top of the fixture workbook:
     /// ExcelField(Revenue column) -> Scale(1000) -> FactConstruct(Revenue, QAR, decimals=-3).
+    /// <paramref name="approved"/> adds an <see cref="ApprovalRecord"/> for the initial
+    /// semantic revision; production (non-preview) publication via the CLI requires one
+    /// (EG03/XG01) so a project destined for an unattended execute run must be built approved.
     /// </summary>
     public static MappingProject BuildRevenueMappingProject(
         string? workbookPath = null,
         string? concept = null,
         string? periodType = null,
-        Guid? idSeed = null)
+        Guid? idSeed = null,
+        bool approved = false)
     {
         var nextId = idSeed is { } seed
             ? DeterministicId.FromSeed(seed)
@@ -278,6 +285,18 @@ public static class TestFixtures
                 }
             }
         };
+        if (approved)
+        {
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                ApprovedBy = "fixture-approver",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = profile.Digest,
+                Authority = "fixture-harness",
+                Notes = "Approved for use in fail-closed publication regression tests."
+            });
+        }
         return project;
     }
 

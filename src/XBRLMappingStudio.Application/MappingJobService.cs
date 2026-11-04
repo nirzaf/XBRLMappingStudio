@@ -72,6 +72,7 @@ public sealed class MappingJobService
                 ProfileDigest = _profile.Digest,
                 EngineVersion = "1.0.0",
                 StartedUtc = DateTimeOffset.UtcNow,
+                IsPreview = preview,
                 FrozenParameters = new Dictionary<string, string>(parameters),
                 Inputs = await RecordInputIdentities(connections, cancellationToken)
             };
@@ -87,6 +88,7 @@ public sealed class MappingJobService
                 ProfileDigest = _profile.Digest,
                 EngineVersion = "1.0.0",
                 StartedUtc = DateTimeOffset.UtcNow,
+                IsPreview = preview,
                 FrozenParameters = new Dictionary<string, string>(parameters)
             };
             m.Outcome = RunOutcome.Cancelled;
@@ -122,6 +124,7 @@ public sealed class MappingJobService
                     $"No connection supplied for binding '{binding.BindingId}'.",
                     operationId: opId);
                 manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
 
@@ -138,6 +141,7 @@ public sealed class MappingJobService
                     $"Source '{binding.DisplayName}' schema changed since the mapping was saved. Remap before running.",
                     operationId: opId);
                 manifest.Outcome = RunOutcome.DataError;
+                manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
 
@@ -326,6 +330,18 @@ public sealed record JobResult(
     // reviewer cannot mistake a sampled total for a full-run figure.
     IReadOnlyList<SampledTotal> SampledTotals)
 {
+    /// <summary>
+    /// OG01 fail-closed publishing: only a completed, full-run (non-preview) execution
+    /// whose outcome is an unqualified success or success-with-warnings is eligible to
+    /// be written to a durable destination. Every other terminal state (cancelled,
+    /// invalid mapping, data error, incomplete configuration, authorization failure,
+    /// operational failure, unknown, or any preview) must leave a prior accepted
+    /// destination untouched and issue no publication receipt.
+    /// </summary>
+    public bool IsPublishable =>
+        !Manifest.IsPreview
+        && Manifest.Outcome is RunOutcome.Success or RunOutcome.SuccessWithWarnings;
+
     internal static JobResult FromManifest(RunManifest manifest, IReadOnlyList<XbrlFact> facts, string json,
         IReadOnlyList<SampledTotal>? sampledTotals = null)
     {

@@ -49,7 +49,7 @@ static int PrintUsage()
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap>");
-    Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path>");
+    Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json>");
@@ -228,6 +228,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     string? output = null;
     string? manifestPath = null;
     int rows = 10;
+    bool allowSyntheticProfile = false;
 
     for (int i = 1; i < args.Length; i++)
     {
@@ -255,6 +256,9 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                 if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
                 rows = int.Parse(args[++i]);
                 break;
+            case "--allow-synthetic-profile":
+                allowSyntheticProfile = true;
+                break;
             default:
                 Console.Error.WriteLine($"Unrecognized option: {args[i]}");
                 return ExitCodesLocal.IncompleteProfile;
@@ -280,6 +284,25 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             conns[id] = new SourceConnection(id, "excel", path);
 
         var profile = SyntheticProfile.Build();
+
+        // EG03/XG01: an unattended (non-preview) execute is a production publication and
+        // must clear the profile-identity, explicit-synthetic-opt-in, and approval gates
+        // before the graph runs at all — a missing, substituted, or unapproved profile
+        // fails here, leaving any previously accepted destination untouched.
+        if (!preview)
+        {
+            var gate = PublicationGate.Evaluate(p, profile, allowSyntheticProfile);
+            if (gate.HasBlockingErrors)
+            {
+                PrintDiagnostics(gate.Items);
+                // Profile identity/synthetic-mode problems are a configuration/authz
+                // refusal to run; a missing approval specifically is an authorization
+                // failure per the section 9 exit-code contract.
+                bool onlyApproval = gate.Items.All(d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+                return onlyApproval ? ExitCodesLocal.AuthorizationFailure : ExitCodesLocal.IncompleteProfile;
+            }
+        }
+
         await using var worker = new LocalSyntheticWorker(profile);
         var service = new MappingJobService(profile, worker);
         using var cts = new CancellationTokenSource();
@@ -294,13 +317,37 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         }
         else if (output is not null)
         {
-            var dir = Path.GetDirectoryName(output);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            var tmp = output + ".tmp";
-            await File.WriteAllTextAsync(tmp, result.XbrlJson);
-            if (File.Exists(output)) File.Replace(tmp, output, null);
-            else File.Move(tmp, output);
-            Console.Error.WriteLine($"Wrote {output} ({result.XbrlJson.Length} bytes)");
+            // OG01/OG02 fail-closed publishing: only a publishable full-run result may
+            // touch the destination, and it goes through PublicationService (stage ->
+            // verify -> atomic replace -> receipt under a run journal), never a direct
+            // file write. Anything else — cancelled, invalid mapping, data error, an
+            // incomplete or unauthorized run, or a publication failure mid-replace —
+            // leaves a prior accepted file byte-identical and issues no receipt.
+            if (!result.IsPublishable)
+            {
+                Console.Error.WriteLine(
+                    $"Run {result.Manifest.RunId} finished as {result.Manifest.Outcome}; "
+                    + "destination left unchanged and no publication receipt issued.");
+            }
+            else
+            {
+                try
+                {
+                    var publisher = new PublicationService(new RunJournal());
+                    var receipt = publisher.Publish(
+                        output,
+                        System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
+                        runId: result.Manifest.RunId);
+                    Console.Error.WriteLine(
+                        $"Published {receipt.DestinationPath} ({result.XbrlJson.Length} bytes) "
+                        + $"run={receipt.RunId} digest={receipt.FinalDigest}.");
+                }
+                catch (PublicationException ex)
+                {
+                    Console.Error.WriteLine($"PUB: {ex.Code}: {ex.Message}");
+                    return ExitCodesLocal.OperationalFailure;
+                }
+            }
         }
 
         if (manifestPath is not null)

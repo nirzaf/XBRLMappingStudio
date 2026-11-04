@@ -1,0 +1,107 @@
+using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Fixtures;
+using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
+
+namespace XBRLMappingStudio.Integration.Tests;
+
+/// <summary>
+/// EG03/XG01: the publication gate is checked directly, independent of the CLI's
+/// argument parsing, so its three distinct blocking conditions are each pinned to a
+/// stable, never-reused diagnostic code.
+/// </summary>
+public sealed class PublicationGateTests
+{
+    private static readonly FilingProfile Synthetic = SyntheticProfile.Build();
+
+    private static MappingProject Project(string workbookPath = "unused.xlsx", bool approved = true)
+        => TestFixtures.BuildRevenueMappingProject(workbookPath, approved: approved);
+
+    [Fact]
+    public void Approved_OptedInSyntheticRun_Passes()
+    {
+        var diagnostics = PublicationGate.Evaluate(Project(), Synthetic, allowSyntheticProfile: true);
+        Assert.False(diagnostics.HasBlockingErrors);
+    }
+
+    [Fact]
+    public void SubstitutedProfile_Blocks_XBR015_BeforeAnyOtherCheck()
+    {
+        var project = Project();
+        var foreignProfile = new FilingProfile
+        {
+            ProfileId = "some-real-taxonomy-v1",
+            Digest = "sha256:deadbeef",
+            Concepts = Synthetic.Concepts,
+            SupportedUnits = Synthetic.SupportedUnits,
+        };
+
+        var diagnostics = PublicationGate.Evaluate(project, foreignProfile, allowSyntheticProfile: true);
+
+        Assert.True(diagnostics.HasBlockingErrors);
+        Assert.Contains(diagnostics.Items, d => d.Code == DiagnosticCodes.XbrProfileMismatch && d.IsBlocking);
+        // A profile-identity failure short-circuits; it must not also pile on a
+        // (moot) approval or synthetic-mode complaint.
+        Assert.DoesNotContain(diagnostics.Items, d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+        Assert.DoesNotContain(diagnostics.Items, d => d.Code == DiagnosticCodes.XbrSyntheticProfileNotAuthorized);
+    }
+
+    [Fact]
+    public void SyntheticProfile_WithoutExplicitOptIn_Blocks_XBR017()
+    {
+        var diagnostics = PublicationGate.Evaluate(Project(), Synthetic, allowSyntheticProfile: false);
+
+        Assert.True(diagnostics.HasBlockingErrors);
+        Assert.Contains(diagnostics.Items,
+            d => d.Code == DiagnosticCodes.XbrSyntheticProfileNotAuthorized && d.IsBlocking);
+    }
+
+    [Fact]
+    public void UnapprovedRevision_Blocks_XBR016()
+    {
+        var diagnostics = PublicationGate.Evaluate(Project(approved: false), Synthetic, allowSyntheticProfile: true);
+
+        Assert.True(diagnostics.HasBlockingErrors);
+        Assert.Contains(diagnostics.Items,
+            d => d.Code == DiagnosticCodes.XbrApprovalRequired && d.IsBlocking);
+        Assert.DoesNotContain(diagnostics.Items, d => d.Code == DiagnosticCodes.XbrSyntheticProfileNotAuthorized);
+    }
+
+    [Fact]
+    public void ApprovalForADifferentRevisionOrProfileDigest_DoesNotSatisfyTheGate()
+    {
+        var project = Project();
+        var approval = project.Approvals.Single();
+
+        var staleRevision = approval with { SemanticRevision = approval.SemanticRevision + 1 };
+        var staleDigest = approval with { ProfileDigest = "sha256:some-other-digest" };
+
+        var projectWithStaleRevision = CloneWithApprovals(project, staleRevision);
+        var projectWithStaleDigest = CloneWithApprovals(project, staleDigest);
+
+        Assert.Contains(
+            PublicationGate.Evaluate(projectWithStaleRevision, Synthetic, allowSyntheticProfile: true).Items,
+            d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+        Assert.Contains(
+            PublicationGate.Evaluate(projectWithStaleDigest, Synthetic, allowSyntheticProfile: true).Items,
+            d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+    }
+
+    private static MappingProject CloneWithApprovals(MappingProject source, ApprovalRecord approval)
+        => new()
+        {
+            ProjectId = source.ProjectId,
+            Name = source.Name,
+            ProfileId = source.ProfileId,
+            ProfileDigest = source.ProfileDigest,
+            FunctionCatalogVersion = source.FunctionCatalogVersion,
+            SemanticRevision = source.SemanticRevision,
+            Metadata = source.Metadata,
+            Nodes = source.Nodes,
+            Edges = source.Edges,
+            Bindings = source.Bindings,
+            Functions = source.Functions,
+            Approvals = new List<ApprovalRecord> { approval },
+        };
+}

@@ -4,8 +4,11 @@ namespace XBRLMappingStudio.Adapters.Excel;
 
 /// <summary>
 /// Schema discovered in an XLSX workbook for one selected sheet or named range.
-/// A fingerprint covers sheet name + ordered column names + inferred types so that
-/// header shifts or column renames produce a detectable change (IO02).
+/// A fingerprint covers sheet name + ordered column names + inferred types + the
+/// unit/scale/period heading anchors found above the header (IG01), so that header
+/// shifts, column renames, or a change from e.g. "QAR thousands" to "QAR units"
+/// produce a detectable change (IO02) rather than silently re-emitting a stale,
+/// wrongly-scaled amount.
 /// </summary>
 public sealed record ExcelSchema(
     string SourceId,
@@ -17,11 +20,26 @@ public sealed record ExcelSchema(
     IReadOnlyList<string> UnitHeadingHints,
     string Fingerprint) : ISourceSchema
 {
-    public static string ComputeFingerprint(string sheet, IEnumerable<ColumnSchema> cols)
+    public static string ComputeFingerprint(
+        string sheet,
+        IEnumerable<ColumnSchema> cols,
+        IEnumerable<string>? unitHeadingHints = null)
     {
+        // Heading anchors are sorted so that a pure reorder of the banner cells above
+        // the header row (without changing which anchors exist) does not look like a
+        // schema change; only appearing/disappearing/altering anchor text does.
+        var anchors = (unitHeadingHints ?? Array.Empty<string>())
+            .Select(h => h.Trim())
+            .Where(h => h.Length > 0)
+            .OrderBy(h => h, StringComparer.Ordinal)
+            .ToList();
+        var anchorPart = anchors.Count > 0
+            ? new[] { "anchors:" + string.Join(",", anchors) }
+            : Array.Empty<string>();
         var joined = string.Join('|', new[] { sheet }
             .Concat(cols.OrderBy(c => c.Ordinal)
-                .Select(c => $"{c.Ordinal}:{c.Name}:{c.InferredShape}")));
+                .Select(c => $"{c.Ordinal}:{c.Name}:{c.InferredShape}"))
+            .Concat(anchorPart));
         return XBRLMappingStudio.Diagnostics.RunManifest.ComputeSha256(joined);
     }
 }

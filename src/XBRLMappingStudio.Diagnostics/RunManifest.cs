@@ -56,6 +56,15 @@ public sealed class RunManifest
     public IReadOnlyList<OutputIdentity> Outputs { get; set; } = Array.Empty<OutputIdentity>();
 
     public RunOutcome Outcome { get; set; } = RunOutcome.Unknown;
+
+    /// <summary>
+    /// True when this run was a bounded preview/draft evaluation rather than a full,
+    /// publishable execution. A preview outcome is labelled separately from a full run
+    /// even when both finish with <see cref="RunOutcome.SuccessWithWarnings"/>, so a
+    /// sampled preview can never be mistaken for something fit to publish (OG01).
+    /// </summary>
+    public bool IsPreview { get; set; }
+
     public IReadOnlyList<Diagnostic> Diagnostics { get; set; } = Array.Empty<Diagnostic>();
 
     public static string ComputeSha256(Stream stream)
