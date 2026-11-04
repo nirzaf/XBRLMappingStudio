@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using XBRLMappingStudio.Adapters;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Project;
@@ -25,6 +26,7 @@ return command switch
 {
     "inspect" => Inspect(rest),
     "validate" => await ValidateAsync(rest),
+    "configure-destination" => ConfigureDestination(rest),
     "taxonomy-search" => TaxonomySearch(rest),
     "validate-artifact" => await ValidateArtifactAsync(rest),
     "inspect-run-result" => InspectRunResult(rest),
@@ -49,8 +51,9 @@ static int PrintUsage()
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
+    Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
-    Console.Error.WriteLine("                       [--workspace-root <dir>] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
+    Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> [--allow-synthetic-profile]");
@@ -317,12 +320,124 @@ static int Inspect(string[] args)
     Console.WriteLine($"Nodes:          {p.Nodes.Count}");
     Console.WriteLine($"Edges:          {p.Edges.Count}");
     Console.WriteLine($"Bindings:       {p.Bindings.Count}");
+    if (p.Destination is { } destination)
+    {
+        Console.WriteLine($"Destination:    {destination.Kind} {destination.Locator}#{destination.Table}");
+        Console.WriteLine($"  format/write: {destination.Format} / {destination.WriteMode}");
+        Console.WriteLine($"  business key: {string.Join(",", destination.BusinessKey)}");
+    }
+    else
+    {
+        Console.WriteLine("Destination:    none");
+    }
     Console.WriteLine($"Digest:         {p.ComputeSemanticDigest()}");
     foreach (var n in p.Nodes)
         Console.WriteLine($"  node  {n.NodeId} [{n.NodeType}] {n.DisplayName}");
     foreach (var e in p.Edges)
         Console.WriteLine($"  edge  {e.EdgeId}: {e.SourceNodeId}.{e.SourcePortName} -> {e.TargetNodeId}.{e.TargetPortName}");
     return ExitCodesLocal.Success;
+}
+
+static int ConfigureDestination(string[] args)
+{
+    if (args.Length < 1)
+    {
+        Console.Error.WriteLine("configure-destination requires <project>");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    var projectPath = args[0];
+    string? kind = null;
+    string? locator = null;
+    string? table = null;
+    string? keyList = null;
+    string writeMode = "upsert";
+    for (int i = 1; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--kind" when i + 1 < args.Length: kind = args[++i]; break;
+            case "--path" when i + 1 < args.Length: locator = args[++i]; break;
+            case "--table" when i + 1 < args.Length: table = args[++i]; break;
+            case "--key" when i + 1 < args.Length: keyList = args[++i]; break;
+            case "--write-mode" when i + 1 < args.Length: writeMode = args[++i]; break;
+            default:
+                Console.Error.WriteLine($"Unrecognized or incomplete option: {args[i]}");
+                return ExitCodesLocal.IncompleteProfile;
+        }
+    }
+
+    if (kind is null || locator is null || table is null || keyList is null)
+    {
+        Console.Error.WriteLine("configure-destination requires --kind, --path, --table and --key.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    try
+    {
+        var manager = new ProjectManager(projectPath);
+        var project = manager.Load();
+        var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+        var fullDestination = Path.IsPathRooted(locator)
+            ? Path.GetFullPath(locator)
+            : PathGuard.EnsureWithin(projectDirectory, Path.Combine(projectDirectory, locator));
+        if (!File.Exists(fullDestination))
+        {
+            var missing = new DiagnosticBag();
+            missing.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                "SQLite destination database must already exist; configure-destination will not create it.");
+            PrintDiagnostics(missing.Items);
+            return ExitCodesLocal.DataError;
+        }
+
+        var storedLocator = Path.IsPathRooted(locator)
+            ? fullDestination
+            : Path.GetRelativePath(projectDirectory, fullDestination);
+        var plan = new DestinationPlan
+        {
+            Kind = kind,
+            Locator = storedLocator,
+            Table = table,
+            BusinessKey = keyList.Split(',', StringSplitOptions.None)
+                .Select(key => key.Trim())
+                .ToList(),
+            WriteMode = writeMode
+        };
+        var diagnostics = DestinationPlanValidator.Validate(plan);
+        if (diagnostics.HasBlockingErrors)
+        {
+            PrintDiagnostics(diagnostics.Items);
+            return ExitCodesLocal.InvalidMapping;
+        }
+
+        project.Destination = plan;
+        var saved = manager.Save(project, expectedLayoutGeneration: project.LayoutGeneration);
+        Console.Error.WriteLine(
+            $"Saved SQLite destination at semantic revision {saved.NewSemanticRevision}. "
+            + "A reviewer must approve this destination-bound revision before a full publish.");
+        return ExitCodesLocal.Success;
+    }
+    catch (ProjectSchemaException ex)
+    {
+        Console.Error.WriteLine($"PRJ: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    catch (ProjectSaveException ex)
+    {
+        Console.Error.WriteLine($"PRJ: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.OperationalFailure;
+    }
+    catch (UnauthorizedAccessException ex)
+    {
+        Console.Error.WriteLine($"IO: {DiagnosticCodes.IoPathEscapesWorkspace}: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+    catch (IOException ex)
+    {
+        Console.Error.WriteLine($"IO: {DiagnosticCodes.IoSchemaMismatch}: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
 }
 
 static async Task<int> ValidateAsync(string[] args)
@@ -372,6 +487,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     int rows = 10;
     bool allowSyntheticProfile = false;
     bool useArelle = false;
+    bool publishDestination = false;
     string? python = null;
     string? taxonomyRoot = null;
 
@@ -408,6 +524,9 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             case "--allow-synthetic-profile":
                 allowSyntheticProfile = true;
                 break;
+            case "--publish-destination":
+                publishDestination = true;
+                break;
             case "--arelle":
                 useArelle = true;
                 break;
@@ -431,6 +550,17 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         return ExitCodesLocal.IncompleteProfile;
     }
 
+    if (preview && publishDestination)
+    {
+        Console.Error.WriteLine("Preview runs cannot publish to a durable destination.");
+        return ExitCodesLocal.InvalidMapping;
+    }
+    if (publishDestination && output is not null)
+    {
+        Console.Error.WriteLine("Choose either --output for xBRL-JSON or --publish-destination for SQLite; combined publication is not supported.");
+        return ExitCodesLocal.InvalidMapping;
+    }
+
     try
     {
         var pm = new ProjectManager(projectPath);
@@ -443,9 +573,25 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             return ExitCodesLocal.IncompleteProfile;
         }
         var profile = profileResolution.Profile!;
-        var workspaceRoot = Path.GetFullPath(workspaceRootArg ?? Path.GetDirectoryName(Path.GetFullPath(projectPath))!);
+        var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+        var workspaceRoot = Path.GetFullPath(workspaceRootArg ?? projectDirectory);
         string GuardPath(string path) => PathGuard.EnsureWithin(workspaceRoot,
             Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
+
+        if (publishDestination && p.Destination is null)
+        {
+            Console.Error.WriteLine($"IO: {DiagnosticCodes.IoUnsupportedOperation}: The project has no saved destination plan.");
+            return ExitCodesLocal.InvalidMapping;
+        }
+        if (publishDestination)
+        {
+            var destinationDiagnostics = DestinationPlanValidator.Validate(p.Destination);
+            if (destinationDiagnostics.HasBlockingErrors)
+            {
+                PrintDiagnostics(destinationDiagnostics.Items);
+                return ExitCodesLocal.InvalidMapping;
+            }
+        }
 
         var conns = new Dictionary<string, SourceConnection>(StringComparer.Ordinal);
         foreach (var b in p.Bindings)
@@ -522,7 +668,66 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         var result = await service.RunAsync(p, conns, parameters, preview, cts.Token);
         PrintDiagnostics(result.Diagnostics.Items);
 
-        if (preview)
+        void RecordDestinationFailure(Diagnostic diagnostic, RunOutcome outcome)
+        {
+            result.Diagnostics.Add(diagnostic);
+            result.Manifest.Diagnostics = result.Manifest.Diagnostics.Append(diagnostic).ToArray();
+            result.Manifest.Outcome = outcome;
+            result.Manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            PrintDiagnostics(new[] { diagnostic });
+        }
+
+        if (publishDestination)
+        {
+            if (!result.IsPublishable)
+            {
+                Console.Error.WriteLine(
+                    $"Run {result.Manifest.RunId} finished as {result.Manifest.Outcome}; "
+                    + "SQLite destination left unchanged and no database receipt issued.");
+            }
+            else
+            {
+                try
+                {
+                    var receipt = await service.PublishDestinationAsync(
+                        p, result, projectDirectory, allowSyntheticProfile, cts.Token);
+                    Console.Error.WriteLine(
+                        $"Published SQLite {receipt.OperationKey} ({receipt.WrittenRows} row(s)) "
+                        + $"table={p.Destination!.Table} intent={receipt.IntentFingerprint}.");
+                }
+                catch (AdapterException ex)
+                {
+                    var outcome = ex.Code == DiagnosticCodes.IoUnsupportedOperation
+                        ? RunOutcome.InvalidMapping
+                        : RunOutcome.DataError;
+                    RecordDestinationFailure(ex.ToDiagnostic(operationId: result.Manifest.OperationId), outcome);
+                }
+                catch (PublicationException ex)
+                {
+                    var outcome = ex.Code switch
+                    {
+                        DiagnosticCodes.XbrApprovalRequired => RunOutcome.AuthorizationFailure,
+                        DiagnosticCodes.XbrSyntheticProfileNotAuthorized => RunOutcome.IncompleteConfiguration,
+                        _ => RunOutcome.InvalidMapping
+                    };
+                    RecordDestinationFailure(ex.ToDiagnostic(), outcome);
+                }
+                catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
+                {
+                    RecordDestinationFailure(new Diagnostic
+                    {
+                        Code = DiagnosticCodes.PubPartialFailure,
+                        Subsystem = DiagnosticSubsystem.Publication,
+                        Severity = DiagnosticSeverity.Error,
+                        Stage = DiagnosticStage.Publication,
+                        IsBlocking = true,
+                        Message = "SQLite publication did not return a durable receipt; reconcile the destination before retrying. " + ex.Message,
+                        OperationId = result.Manifest.OperationId
+                    }, RunOutcome.Unknown);
+                }
+            }
+        }
+        else if (preview)
         {
             if (!string.IsNullOrEmpty(result.XbrlJson)) Console.WriteLine(result.XbrlJson);
         }

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
@@ -120,6 +122,115 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Equal("1250000", actual.GetProperty("value").GetString());
         Assert.Equal("iso4217:QAR", dimensions.GetProperty("unit").GetString());
         Assert.Equal(-3, actual.GetProperty("decimals").GetInt32());
+    }
+
+    [Fact]
+    public async Task Cli_ConfigureDestinationPersistsPlanAndInvalidatesPriorApproval()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "configure-target.xmap");
+        new ProjectManager(projectPath).Save(project);
+        await CreateSqliteDatabaseAsync(Path.Combine(_dir, "target.db"), includeFactTable: false);
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "configure-destination", projectPath,
+            "--kind", "sqlite", "--path", "target.db", "--table", "facts",
+            "--key", "fact_key", "--write-mode", "upsert");
+
+        Assert.Equal(0, exit);
+        Assert.Contains("must approve this destination-bound revision", stderr, StringComparison.Ordinal);
+        var saved = new ProjectManager(projectPath).Load();
+        Assert.NotNull(saved.Destination);
+        Assert.Equal("sqlite", saved.Destination.Kind);
+        Assert.Equal("target.db", saved.Destination.Locator);
+        Assert.Equal("facts", saved.Destination.Table);
+        Assert.Equal(new[] { "fact_key" }, saved.Destination.BusinessKey);
+        Assert.Equal("upsert", saved.Destination.WriteMode);
+        Assert.DoesNotContain(saved.Approvals, approval => approval.SemanticDigest == saved.ComputeSemanticDigest());
+    }
+
+    [Fact]
+    public async Task Cli_ExecutePublishesSavedSqlitePlanAndRecordsDatabaseReceipt()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "sqlite-publish.xmap");
+        var manager = new ProjectManager(projectPath);
+        manager.Save(project);
+        var targetPath = Path.Combine(_dir, "target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+
+        var (configureExit, _, configureError) = await RunCliAsync(LocateCli(), "configure-destination", projectPath,
+            "--kind", "sqlite", "--path", "target.db", "--table", "facts",
+            "--key", "fact_key", "--write-mode", "upsert");
+        Assert.True(configureExit == 0, $"Destination configuration failed ({configureExit}).\n{configureError}");
+
+        project = manager.Load();
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        manager.Save(project, expectedLayoutGeneration: project.LayoutGeneration);
+
+        var manifestPath = Path.Combine(_dir, "sqlite-publish-manifest.json");
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--publish-destination", "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.True(exit == 0, $"Expected SQLite execution to succeed, got {exit}.\nstderr:\n{stderr}");
+        Assert.Contains("Published SQLite", stderr, StringComparison.Ordinal);
+        using (var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath)))
+        {
+            var receipt = Assert.Single(manifest.RootElement.GetProperty("Outputs").EnumerateArray(),
+                output => output.GetProperty("Kind").GetString() == "db-receipt");
+            Assert.Equal(1, receipt.GetProperty("RowsWritten").GetInt32());
+            Assert.Equal("facts", receipt.GetProperty("Table").GetString());
+            Assert.StartsWith("xms-", receipt.GetProperty("OperationKey").GetString(), StringComparison.Ordinal);
+        }
+
+        await using var database = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = "SELECT value FROM facts";
+        Assert.Equal("1250000", (string?)await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task Cli_InvalidSqliteTableReturnsDataErrorWithoutMutatingDatabase()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        var targetPath = Path.Combine(_dir, "invalid-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: false);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "invalid-target.db",
+            Table = "missing_facts",
+            BusinessKey = new List<string> { "fact_key" }
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "invalid-target.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var before = await File.ReadAllBytesAsync(targetPath);
+        var manifestPath = Path.Combine(_dir, "invalid-target-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--publish-destination", "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.Equal(3, exit);
+        Assert.Contains("IO001", stderr, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(targetPath));
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+        Assert.Contains(manifest.RootElement.GetProperty("Diagnostics").EnumerateArray(), diagnostic =>
+            diagnostic.GetProperty("Code").GetString() == DiagnosticCodes.IoSchemaMismatch);
     }
 
     [Fact]
@@ -270,6 +381,38 @@ public sealed class CliParityTests : IAsyncLifetime
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.GetProperty("RunId").GetString()
             ?? throw new InvalidOperationException("Manifest missing RunId.");
+    }
+
+    private static async Task CreateSqliteDatabaseAsync(string path, bool includeFactTable)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        if (!includeFactTable) return;
+
+        await using var command = database.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE facts (
+                fact_key TEXT NOT NULL PRIMARY KEY,
+                profile_digest TEXT NOT NULL,
+                concept TEXT NOT NULL,
+                entity_scheme TEXT NOT NULL,
+                entity_identifier TEXT NOT NULL,
+                period_kind TEXT NOT NULL,
+                instant_date TEXT NULL,
+                period_start TEXT NULL,
+                period_end TEXT NULL,
+                unit TEXT NULL,
+                compound_unit TEXT NULL,
+                value TEXT NULL,
+                text_value TEXT NULL,
+                is_nil INTEGER NOT NULL,
+                decimals INTEGER NULL,
+                language TEXT NULL,
+                dimensions_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL
+            );
+            """;
+        await command.ExecuteNonQueryAsync();
     }
 
     [Fact]
