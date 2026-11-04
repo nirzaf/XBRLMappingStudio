@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -93,13 +94,13 @@ def safe_taxonomy_urls(report, taxonomy_root):
         elif parsed.scheme == "file":
             if taxonomy_root is None:
                 raise ValueError("A taxonomy root is required for file taxonomy references")
-            local = within_root(unquote(parsed.path), taxonomy_root)
-            fixed.append(local.as_uri())
+            local = within_root(url2pathname(unquote(parsed.path)), taxonomy_root)
+            fixed.append(str(local) if os.name == "nt" else local.as_uri())
         elif parsed.scheme == "":
             if taxonomy_root is None:
                 raise ValueError("A taxonomy root is required for relative taxonomy references")
             local = within_root(Path(taxonomy_root) / unquote(parsed.path), taxonomy_root)
-            fixed.append(local.as_uri())
+            fixed.append(str(local) if os.name == "nt" else local.as_uri())
         else:
             raise ValueError("Only HTTP(S) package references and root-scoped local taxonomy files are supported")
     info["taxonomy"] = fixed
