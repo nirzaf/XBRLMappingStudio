@@ -231,7 +231,10 @@ public sealed class JsonAdapter : ISourceAdapter
             switch (value)
             {
                 case JObject nested:
-                    Flatten(path, nested, fields, srcs, sourceId, rowIdx);
+                    if (nested.Props.Count == 0)
+                        SetLeaf(path, nested, fields, srcs, sourceId, rowIdx);
+                    else
+                        Flatten(path, nested, fields, srcs, sourceId, rowIdx);
                     break;
                 case JArray arr:
                     SetLeaf(path, arr, fields, srcs, sourceId, rowIdx);
@@ -250,14 +253,14 @@ public sealed class JsonAdapter : ISourceAdapter
         var src = new SourceReference(sourceId, $"json#r{rowIdx + 1}:{path}");
         DataValue value = node switch
         {
-            JLeaf { Kind: JsonValueKind.Null } => DataValue.Missing(),
+            JLeaf { Kind: JsonValueKind.Null } => DataValue.ExplicitNil(PortShape.String),
             JLeaf { Kind: JsonValueKind.Number } l => DataValue.DecimalValue(
                 decimal.Parse(l.Text!, CultureInfo.InvariantCulture), src, l.Text),
             JLeaf { Kind: JsonValueKind.True or JsonValueKind.False } l
                 => DataValue.BoolValue(l.Kind == JsonValueKind.True),
             JLeaf l => DataValue.StringValue(l.Text ?? "", src),
-            JArray a => DataValue.StringValue(Render(a), src),
-            JObject o => DataValue.StringValue(Render(o), src),
+            JArray a => DataValue.Opaque(PortShape.Record, Render(a), src),
+            JObject o => DataValue.Opaque(PortShape.Record, Render(o), src),
             _ => DataValue.Missing()
         };
         fields[path] = value;
@@ -266,9 +269,12 @@ public sealed class JsonAdapter : ISourceAdapter
 
     private static string Render(JNode node) => node switch
     {
-        JLeaf l => l.Kind == JsonValueKind.String ? $"\"{l.Text}\"" : (l.Text ?? "null"),
+        JLeaf l => l.Kind == JsonValueKind.String
+            ? JsonSerializer.Serialize(l.Text)
+            : (l.Text ?? "null"),
         JArray a => "[" + string.Join(", ", a.Items.Select(Render)) + "]",
-        JObject o => "{" + string.Join(", ", o.Props.Select(p => $"\"{p.Key}\": {Render(p.Value)}")) + "}",
+        JObject o => "{" + string.Join(", ", o.Props.Select(p =>
+            $"{JsonSerializer.Serialize(p.Key)}: {Render(p.Value)}")) + "}",
         _ => ""
     };
 

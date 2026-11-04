@@ -51,7 +51,7 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
     public async Task JsonWriter_RoundTrips_NestedArrays_EmptyArray_Null_Missing_AndDistinct()
     {
         var bytes = Encoding.UTF8.GetBytes(
-            """[{"a":{"b":1},"list":[1,2,3],"empty":[],"nothing":null,"s":"hi"},{"other":true}]""");
+            """[{"a":{"b":1},"list":[1,2,3],"strings":["a\"b","c\\d"],"empty":[],"nothing":null,"s":"hi"},{"other":true}]""");
         var source = TempPath("input.json");
         var dest = TempPath("output.json");
         await File.WriteAllBytesAsync(source, bytes);
@@ -79,10 +79,15 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         Assert.Equal("1", reparsed[0].Fields["a.b"].Raw?.ToString());
         Assert.Equal("hi", reparsed[0].Fields["s"].Raw?.ToString());
         Assert.Contains("[1, 2, 3]", reparsed[0].Fields["list"].Raw as string);
+        Assert.Contains("a\\\"b", reparsed[0].Fields["strings"].Raw as string);
         Assert.Contains("[]", reparsed[0].Fields["empty"].Raw as string);
         // Explicit null and boolean survive as distinct leaves.
-        Assert.True(reparsed[0].Fields["nothing"].IsMissing);
+        Assert.True(reparsed[0].Fields["nothing"].IsNil);
         Assert.Equal(true, reparsed[1].Fields["other"].Raw);
+
+        using var json = JsonDocument.Parse(await File.ReadAllBytesAsync(dest));
+        Assert.Equal(JsonValueKind.Null, json.RootElement[0].GetProperty("nothing").ValueKind);
+        Assert.False(json.RootElement[0].TryGetProperty("absent", out _));
     }
 
     [Fact]
@@ -122,6 +127,40 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         using var doc = JsonDocument.Parse(empty);
         Assert.Equal(JsonValueKind.Array, doc.RootElement.ValueKind);
         Assert.Equal(0, doc.RootElement.GetArrayLength());
+    }
+
+    [Fact]
+    public void JsonWriter_OmitsMissing_AndKeepsLiteralJsonTextAsString()
+    {
+        var writer = new JsonOutputAdapter();
+        var record = Record(
+            ("missing", DataValue.Missing()),
+            ("nil", DataValue.ExplicitNil(PortShape.String)),
+            ("literal", DataValue.StringValue("[]")),
+            ("integer", DataValue.IntegerValue(7)));
+        using var doc = JsonDocument.Parse(writer.Write(new[] { record }));
+        Assert.False(doc.RootElement[0].TryGetProperty("missing", out _));
+        Assert.Equal(JsonValueKind.Null, doc.RootElement[0].GetProperty("nil").ValueKind);
+        Assert.Equal(JsonValueKind.String, doc.RootElement[0].GetProperty("literal").ValueKind);
+        Assert.Equal("[]", doc.RootElement[0].GetProperty("literal").GetString());
+        Assert.Equal(JsonValueKind.Number, doc.RootElement[0].GetProperty("integer").ValueKind);
+        Assert.Equal(7, doc.RootElement[0].GetProperty("integer").GetInt64());
+    }
+
+    [Fact]
+    public void JsonWriter_SingleObjectModeRefusesMultipleRecordsAndConflictingPaths()
+    {
+        var single = new JsonOutputAdapter { EmitArray = false };
+        Assert.Throws<AdapterException>(() => single.Write(new[]
+        {
+            Record(("a", DataValue.StringValue("1"))),
+            Record(("a", DataValue.StringValue("2")))
+        }));
+
+        var conflict = Record(
+            ("a", DataValue.StringValue("scalar")),
+            ("a.b", DataValue.StringValue("nested")));
+        Assert.Throws<AdapterException>(() => new JsonOutputAdapter().Write(new[] { conflict }));
     }
 
     // ---------- IO06 XML writer ----------
@@ -177,12 +216,30 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
     }
 
     [Fact]
-    public void XmlWriter_MissingAndNilFieldsBecomeXsiNilEmptyElements()
+    public async Task XmlWriter_OmitsMissingAndPreservesNil()
     {
+        var dest = TempPath("nil.xml");
         var record = Record(
             ("Absent", DataValue.Missing()),
             ("Nil", DataValue.ExplicitNil(PortShape.String)));
-        var text = Encoding.UTF8.GetString(new XmlOutputAdapter().Write(new[] { record }));
-        Assert.Contains("xsi:nil=\"true\"", text);
+        var writer = new XmlOutputAdapter();
+        var bytes = writer.Write(new[] { record });
+        var text = Encoding.UTF8.GetString(bytes);
+        using var parsed = System.Xml.Linq.XDocument.Parse(text);
+        var row = Assert.Single(parsed.Root!.Elements());
+        Assert.Null(row.Element("Absent"));
+        var nil = row.Element("Nil");
+        Assert.NotNull(nil);
+        Assert.Equal("true", (string?)nil!.Attribute(System.Xml.Linq.XName.Get(
+            "nil", "http://www.w3.org/2001/XMLSchema-instance")));
+
+        var conn = new SourceConnection("dst", "xml", dest);
+        var staged = await writer.StageArtifactAsync(conn, bytes, ".xml", default);
+        await writer.PublishAsync(staged, conn, default);
+        var reader = new XmlAdapter();
+        var schema = await reader.InspectSchemaAsync(conn, default);
+        var roundTrip = new List<DataRecord>();
+        await foreach (var r in reader.ReadFullAsync(conn, schema, default)) roundTrip.Add(r);
+        Assert.True(Assert.Single(roundTrip).Fields["Nil"].IsNil);
     }
 }

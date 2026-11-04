@@ -127,6 +127,17 @@ public sealed class XmlAdapter : ISourceAdapter
         Dictionary<string, DataValue> fields, Dictionary<string, SourceReference> srcs,
         string sourceId, int rowIdx)
     {
+        XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        var nil = (string?)el.Attribute(xsi + "nil");
+        if (nil is "true" or "1")
+        {
+            if (prefix.Length == 0) prefix = "_text";
+            var nilSource = new SourceReference(sourceId, $"xml#r{rowIdx + 1}:{prefix}");
+            fields[prefix] = DataValue.ExplicitNil(PortShape.String);
+            srcs[prefix] = nilSource;
+            return;
+        }
+
         foreach (var attr in el.Attributes())
         {
             if (attr.IsNamespaceDeclaration) continue;

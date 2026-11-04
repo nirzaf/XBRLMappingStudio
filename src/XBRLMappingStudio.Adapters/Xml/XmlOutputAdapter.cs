@@ -76,11 +76,13 @@ public sealed class XmlOutputAdapter : ITargetAdapter
 
                 foreach (var (name, value) in record.Fields)
                 {
+                    if (value.IsMissing) continue;
+
                     var (ns, local) = SplitQualifiedName(name);
                     if (ns is null) writer.WriteStartElement(local);
                     else writer.WriteStartElement(local, ns);
 
-                    if (value.IsMissing || value.IsNil)
+                    if (value.IsNil)
                     {
                         writer.WriteAttributeString("xsi", "nil",
                             "http://www.w3.org/2001/XMLSchema-instance", "true");

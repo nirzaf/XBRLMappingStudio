@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -54,6 +55,9 @@ public sealed class JsonOutputAdapter : ITargetAdapter
             }
             else if (records.Count > 0)
             {
+                if (records.Count > 1)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "A single-object JSON target cannot publish more than one record.");
                 WriteRecord(writer, records[0]);
             }
             else
@@ -72,7 +76,10 @@ public sealed class JsonOutputAdapter : ITargetAdapter
         // from the string form the source adapter recorded for them.
         var tree = new Dictionary<string, object>(StringComparer.Ordinal);
         foreach (var (key, value) in record.Fields)
+        {
+            if (value.IsMissing) continue;
             InsertPath(tree, key, value);
+        }
 
         writer.WriteStartObject();
         foreach (var (key, node) in tree)
@@ -82,22 +89,39 @@ public sealed class JsonOutputAdapter : ITargetAdapter
 
     private static void InsertPath(IDictionary<string, object> tree, string dottedPath, DataValue value)
     {
+        if (string.IsNullOrWhiteSpace(dottedPath))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "JSON field paths must contain at least one non-empty property name.");
         var parts = dottedPath.Split('.');
+        if (parts.Any(string.IsNullOrWhiteSpace))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"JSON field path '{dottedPath}' contains an empty property name.");
         var current = tree;
         for (int i = 0; i < parts.Length - 1; i++)
         {
-            if (!current.TryGetValue(parts[i], out var child) || child is not IDictionary<string, object> dict)
+            if (current.TryGetValue(parts[i], out var child))
             {
-                dict = new Dictionary<string, object>(StringComparer.Ordinal);
-                current[parts[i]] = dict;
+                if (child is not IDictionary<string, object> existing)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        $"JSON field path '{dottedPath}' conflicts with an existing scalar property.");
+                current = existing;
             }
-            current = dict;
+            else
+            {
+                var nested = new Dictionary<string, object>(StringComparer.Ordinal);
+                current[parts[i]] = nested;
+                current = nested;
+            }
         }
+        if (current.ContainsKey(parts[^1]))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"JSON field path '{dottedPath}' duplicates or conflicts with an existing property.");
         current[parts[^1]] = value;
     }
 
     private static void WriteNode(Utf8JsonWriter writer, string name, object node)
     {
+        if (node is DataValue { IsMissing: true }) return;
         writer.WritePropertyName(name);
         switch (node)
         {
@@ -106,23 +130,32 @@ public sealed class JsonOutputAdapter : ITargetAdapter
                 foreach (var (k, v) in nested) WriteNode(writer, k, v);
                 writer.WriteEndObject();
                 break;
-            case DataValue dv when dv.IsMissing:
+            case DataValue dv when dv.IsNil:
                 writer.WriteNullValue();
                 break;
             case DataValue dv when dv.Shape == PortShape.Decimal && dv.Raw is decimal dec:
                 writer.WriteNumberValue(dec);
                 break;
+            case DataValue dv when dv.Shape == PortShape.Integer:
+                writer.WriteNumberValue(Convert.ToInt64(dv.Raw, CultureInfo.InvariantCulture));
+                break;
             case DataValue dv when dv.Shape == PortShape.Boolean && dv.Raw is bool b:
                 writer.WriteBooleanValue(b);
                 break;
-            case DataValue dv when dv.Raw is string s && LooksLikeJson(s):
+            case DataValue dv when dv.Shape == PortShape.Record && dv.Raw is string s:
             {
-                // Arrays captured by the source adapter arrive as their rendered JSON text;
-                // reparse and reemit so multiplicity survives the round-trip.
+                // Opaque JSON arrays/objects carry a distinct shape, so a literal string
+                // such as "[]" remains a JSON string.
                 using var doc = JsonDocument.Parse(s);
                 doc.RootElement.WriteTo(writer);
                 break;
             }
+            case DataValue dv when dv.Shape == PortShape.Date && dv.Raw is DateOnly date:
+                writer.WriteStringValue(date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                break;
+            case DataValue dv when dv.Shape == PortShape.Instant && dv.Raw is DateTimeOffset instant:
+                writer.WriteStringValue(instant.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+                break;
             case DataValue dv:
                 writer.WriteStringValue(dv.Raw?.ToString() ?? string.Empty);
                 break;
@@ -130,13 +163,6 @@ public sealed class JsonOutputAdapter : ITargetAdapter
                 writer.WriteStringValue(node?.ToString() ?? string.Empty);
                 break;
         }
-    }
-
-    private static bool LooksLikeJson(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return false;
-        var first = s[0];
-        return first is '[' or '{';
     }
 
     public Task<string> StageArtifactAsync(SourceConnection destination, byte[] payload,
