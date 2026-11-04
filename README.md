@@ -4,11 +4,6 @@ An offline-capable desktop designer, a portable deterministic execution engine, 
 headless CLI for turning workbooks, files and databases into validated XBRL (Open
 Information Model) reports — with every emitted fact traceable to its source.
 
-> This repository is an implementation of
-> [`XBRL_Mapping_Studio_Architecture_and_Implementation_Guide.md`](./XBRL_Mapping_Studio_Architecture_and_Implementation_Guide.md),
-> which is the **authoritative, read-only** specification. The guide defines the product
-> boundary, runtime/trust boundaries, and per-ID acceptance criteria delivered here.
-
 ---
 
 ## Table of contents
@@ -44,11 +39,18 @@ Core capabilities implemented here:
   provenance recorded on every fact.
 - **XBRL generation & validation** — serialization to xBRL-JSON and xBRL 2.1 XML, taxonomy
   concept search, dimensions, compound units, multilingual labels, and filing-rule validation.
+  Filing-profile identity fails closed: a project whose `ProfileId`/`ProfileDigest` does not
+  match the resolved profile is rejected with a blocking `XBR015` diagnostic before any
+  source read or worker call.
 - **Report re-import** — an XBRL instance can be read back as records and remapped.
 - **Adapters** — Excel (read/write), CSV, JSON, XML, and XBRL report input, each behind a
   capability-gated, direction-checked interface.
 - **SQLite input** — table discovery, schema inspection, bounded preview, and shared-engine
-  execution. Transactional upsert exists as an adapter API but is not a general publishing flow.
+  execution. Provenance uses a stable SHA-256 row identity derived from declared single or
+  composite primary keys; keyless tables fall back to positional provenance with an `IO015`
+  warning. Transactional upsert exists as an adapter API but is not a general publishing flow.
+- **Local operational state** — a versioned SQLite application database holds the run
+  journal and publication receipts, with non-overwriting online-backup support.
 - **AI-assisted mapping (offline-safe)** — deterministic local retrieval proposes concept
   candidates; an analyst accepts/edits/rejects them in a draft before anything becomes
   executable. Under the `Offline` data policy the service is structurally incapable of any
@@ -125,7 +127,9 @@ graph TD
 | Excel | ClosedXML 0.104.2 | |
 | Data formats | `System.Text.Json`, `System.Xml` | XML parsed with `DtdProcessing.Prohibit` and `XmlResolver = null`. |
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
-| Tests | xUnit 2.9.3 | 181 tests across 8 projects. |
+| Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
+| XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
+| Tests | xUnit 2.9.3 | 253 tests across 8 projects. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -140,7 +144,7 @@ src/
   XBRLMappingStudio.Diagnostics/   # diagnostic contract, stable codes, run manifest
   XBRLMappingStudio.XBRL/          # taxonomy index, OIM/XML serialization, filing rules
   XBRLMappingStudio.Adapters/      # Excel/CSV/JSON/XML/XBRL adapters, PathGuard
-  XBRLMappingStudio.Application/   # MappingJobService, locking, publication, support bundle
+  XBRLMappingStudio.Application/   # MappingJobService, locking, publication, local state DB, support bundle
   XBRLMappingStudio.AI/            # policy, retrieval ranker, providers, draft validation
   XBRLMappingStudio.Worker/        # worker protocol, Arelle client, supervision
   XBRLMappingStudio.Desktop/       # Avalonia designer
@@ -148,9 +152,15 @@ src/
 tests/
   XBRLMappingStudio.*.Tests/       # per-subsystem suites
   XBRLMappingStudio.Fixtures/      # shared test fixtures (workbooks, projects)
-docs/decisions/
-  BASE01-decision-record.md        # dated decision record (synthetic column filled)
-  OPEN.md                          # owner-gated decision register
+docs/
+  implementation-status.md         # capability matrix with per-item evidence and limits
+  sqlite-state.md                  # local SQLite state, source and target behavior
+  decisions/
+    BASE01-decision-record.md      # dated decision record (synthetic column filled)
+    OPEN.md                        # owner-gated decision register
+tools/worker/
+  arelle_worker.py                 # Arelle validation worker (protocol + offline tests)
+  requirements.lock                # hash-locked Python runtime
 ```
 
 ---
@@ -219,7 +229,7 @@ Standard output carries machine-readable results; standard error carries diagnos
 | `preview <project.xmap> --binding <id>=<path> --rows <n>` | Sampled, visibly-partial execution. |
 | `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>]` | Full run producing xBRL-JSON; all source, output and manifest paths stay inside the workspace root (defaults to the project directory). |
 | `taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search. |
-| `validate-artifact <file.xbrl.json>` | Synthetic filing-rule validation of the exported artifact. Add `--arelle --python <exe> --taxonomy-root <dir>` for independent offline Arelle validation; install the pinned worker runtime from `tools/worker/requirements.lock`. |
+| `validate-artifact <file.xbrl.json>` | Filing-rule validation of the exported artifact — synthetic validator by default; add `--arelle --python <exe> --taxonomy-root <dir>` (optionally `--package <zip>`, `--plugin <name>`, `--disclosure-system <name>`) for independent offline Arelle validation. Install the pinned worker runtime from `tools/worker/requirements.lock`. |
 | `inspect-run-result <runId>` | Look up a run's journal result. |
 | `support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]` | Redacted diagnostic bundle. |
 
@@ -248,17 +258,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-181 tests across 8 xUnit projects, all green in Release:
+253 tests across 8 xUnit projects, all green in Release:
 
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 33 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
-| XBRL.Tests | 37 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience |
-| AI.Tests | 39 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, audit |
-| Adapters.Tests | 20 | XLSX output, CSV/JSON/XML round-trips and hardening |
-| Ops.Tests | 24 | Destination locking/publication/journal, worker supervision, path guard, redaction |
-| Desktop.Tests | 12 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics |
-| Integration.Tests | 10 | CLI parity (subprocess vs in-process), exit-code contract |
+| XBRL.Tests | 46 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience |
+| AI.Tests | 43 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, audit |
+| Integration.Tests | 35 | CLI parity (subprocess vs in-process), exit-code contract, fail-closed profile identity, publication gate, worker adjudication, schema drift, acceptance scenarios |
+| Adapters.Tests | 38 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, SQLite source (primary-key row identity) and target upsert |
+| Ops.Tests | 33 | Destination locking/publication/journal, local app database migrations and backup, worker supervision, path guard, redaction |
+| Desktop.Tests | 19 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, SQLite bindings and key disclosure |
 | Project.Tests | 6 | Atomic save, revision conflict, semantic digest |
 
 ```bash
@@ -272,9 +282,10 @@ dotnet test XBRLMappingStudio.slnx -c Release
 Two GitHub Actions workflows under `.github/workflows/`:
 
 - **[`ci.yml`](./.github/workflows/ci.yml)** — on pull requests and pushes to `main`:
-  Release build + full test suite on **ubuntu-latest** and **windows-latest**, plus a
-  hygiene job that rejects tracked `bin/`/`obj/` output and any edit to the read-only
-  architecture guide.
+  Release build + full test suite on **ubuntu-latest** and **windows-latest**, an
+  **Arelle worker** job that installs the hash-locked Python runtime and runs the worker's
+  protocol/offline-taxonomy tests, plus a hygiene job that rejects tracked `bin/`/`obj/`
+  output and any edit to the architecture guide.
 - **[`release.yml`](./.github/workflows/release.yml)** — on `vX.Y.Z` tags (or manual
   dispatch): gates on build + test, publishes self-contained CLI binaries
   (win/linux/mac) and portable desktop bundles, then opens a **draft GitHub Release**.
@@ -293,7 +304,8 @@ git tag v1.0.0 && git push origin v1.0.0
 
 ## Implementation status
 
-The project is organized around the guide's atomic IDs and delivery gates (G0–G5). The
+Capabilities are tracked by stable IDs and delivery gates (G0–G5; full matrix in
+[`docs/implementation-status.md`](./docs/implementation-status.md)). The
 following IDs have implementation code and repository tests; qualification limits still apply:
 
 | Area | Implemented IDs |
@@ -310,9 +322,21 @@ SQLite source discovery/read and transactional target upsert have repository tes
 The target publisher remains a callable adapter rather than an end-to-end desktop/CLI
 workflow, and mixed-destination receipt reconciliation remains incomplete (`IO07`–`IO08`, `OPS05`).
 SQLite source rows with declared single or composite primary keys receive deterministic
-hashed row identities. A table without a primary key keeps positional provenance and
+SHA-256 hashed row identities used for provenance; the schema inspector exposes
+declared primary-key order. A table without a primary key keeps positional provenance and
 produces an `IO015` warning; SQLite does not guarantee row ordering between reads. The
-run manifest records which row-identity strategy was used.
+run manifest records which row-identity strategy was used, and the desktop binding UI
+discloses the key configuration.
+
+Filing-profile identity is fail-closed: `validate`, `preview` and `execute` compare the
+project's `ProfileId`/`ProfileDigest` against the resolved profile and stop with a blocking
+`XBR015` diagnostic — before any graph compilation, source read, or worker call — on
+mismatch (`tests/XBRLMappingStudio.Integration.Tests/ProfileIdentityTests.cs`).
+
+Local operational state lives in a versioned SQLite application database (`app_settings`,
+`project_registry`, `run_journal`, `publication_receipts`, `suggestion_audit`); `.xmap`
+remains the portable source of truth for executable graphs. See
+[`docs/sqlite-state.md`](./docs/sqlite-state.md).
 
 Per-ID evidence lives in [`docs/decisions/BASE01-decision-record.md`](./docs/decisions/BASE01-decision-record.md).
 Items marked "synthetic" (e.g. the XBRL filing profile) are honestly scoped to the offline
@@ -341,8 +365,8 @@ not silently re-scoped. See [`docs/decisions/OPEN.md`](./docs/decisions/OPEN.md)
 - Signed release bundles and upgrade/backup/rollback (`OPS06`–`OPS07`), and
   regulator-mandated extensions (`EXT01`–`EXT04`).
 
-See [`docs/sqlite-state.md`](docs/sqlite-state.md) for SQLite behavior and limits, and
-[`docs/implementation-status.md`](docs/implementation-status.md) for the guide-ID status matrix.
+See [`docs/sqlite-state.md`](./docs/sqlite-state.md) for SQLite behavior and limits, and
+[`docs/implementation-status.md`](./docs/implementation-status.md) for the full status matrix.
 
 ---
 
@@ -358,7 +382,9 @@ These are held invariant across the codebase:
 - **Semantic revision is independent of layout**: moving a node on the canvas must not change
   the project's semantic digest.
 - Execution is **deterministic and cancellable**, with **provenance on every emitted fact**.
-- The architecture guide is **authoritative and read-only**; no `bin/`/`obj/` output is committed.
+- Safety gates **fail closed**: stale schemas, mismatched filing profiles, and unproven
+  output digests stop the run before any side effect.
+- No `bin/`/`obj/` output is committed.
 
 ---
 
@@ -368,8 +394,7 @@ These are held invariant across the codebase:
 2. Add or update tests before changing shared behavior — CI runs the whole suite on Linux
    and Windows.
 3. Keep the architecture boundaries and stable-diagnostic-code rules intact.
-4. Do not modify the architecture guide; propose changes through a dated entry in
-   `docs/decisions/`.
+4. Record behavior- and scope-changing decisions as dated entries in `docs/decisions/`.
 5. Open a pull request; CI must be green before review.
 
 ---
@@ -380,5 +405,5 @@ These are held invariant across the codebase:
 source should be treated as proprietary and all rights reserved by the project owner.
 
 Third-party components remain under their own licenses — notably Avalonia (MIT),
-ClosedXML (MIT), and, where used, Arelle (Apache 2.0). Consult the architecture guide's
-dependency baseline for licensing and redistribution obligations before shipping a release.
+ClosedXML (MIT), and, where used, Arelle (Apache 2.0). Consult the pinned dependency
+baseline for licensing and redistribution obligations before shipping a release.
