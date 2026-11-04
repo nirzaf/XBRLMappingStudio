@@ -10,7 +10,7 @@ The application creates `${LocalApplicationData}/XBRLMappingStudio/state.db` on 
 
 ## SQLite data source and target
 
-The adapter opens source databases read-only. It discovers user tables, inspects columns, samples rows, and streams rows with cell lineage. Table names are quoted as identifiers. Numeric values declared as binary floating point are rejected; exact financial decimals should be stored as invariant text and listed in the binding's `decimalColumns` configuration.
+The adapter opens source databases read-only. It discovers user tables, inspects columns, samples rows, and streams rows with cell lineage. Run manifests fingerprint the logical rows consumed, avoiding a raw database-file hash that can be blocked by Windows file sharing or omit active WAL contents. Table names are quoted as identifiers. Numeric values declared as binary floating point are rejected; exact financial decimals should be stored as invariant text and listed in the binding's `decimalColumns` configuration.
 
 `SqliteTargetPublisher` writes a batch in one immediate transaction using prepared values and a configured business key. It requires that key to match a primary key or unique index. The target database contains `xms_idempotency_receipts`; a replay with the same operation key and effective input intent returns the stored receipt, while changed intent returns `PUB006`. Row writes and the receipt commit together. Cancellation, constraint failures, and process exceptions roll back the transaction. This publisher is currently an adapter API; it is not yet wired as a general database destination in the CLI or desktop mapping lifecycle.
 

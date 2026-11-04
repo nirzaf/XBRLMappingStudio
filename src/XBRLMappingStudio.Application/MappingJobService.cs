@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Csv;
 using XBRLMappingStudio.Adapters.Excel;
@@ -155,6 +158,13 @@ public sealed class MappingJobService
                 if (preview && records.Count >= context.PreviewRowLimit) break;
             }
             context.LoadedSources[binding.BindingId] = records;
+            if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
+            {
+                var digest = DigestRecords(conn, records);
+                manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
+                    ? input with { Kind = "sqlite-table", Digest = digest, IsReplayable = true }
+                    : input).ToArray();
+            }
         }
 
         if (context.Diagnostics.HasBlockingErrors)
@@ -355,6 +365,11 @@ public sealed class MappingJobService
         foreach (var kv in connections)
         {
             ct.ThrowIfCancellationRequested();
+            if (StringComparer.OrdinalIgnoreCase.Equals(kv.Value.Kind, "sqlite"))
+            {
+                list.Add(new InputIdentity(kv.Key, "sqlite-table", null, IsReplayable: false, kv.Value.Path));
+                continue;
+            }
             if (kv.Value.Path is not null && File.Exists(kv.Value.Path))
             {
                 await using var fs = File.OpenRead(kv.Value.Path);
@@ -368,6 +383,39 @@ public sealed class MappingJobService
         }
         return list;
     }
+
+    private static string DigestRecords(SourceConnection connection, IReadOnlyList<DataRecord> records)
+    {
+        var builder = new StringBuilder();
+        AppendPart(builder, connection.Configuration is not null
+            && connection.Configuration.TryGetValue("table", out var table) ? table : "");
+        builder.Append(records.Count).Append(':');
+        foreach (var record in records)
+        {
+            AppendPart(builder, record.RowId);
+            builder.Append(record.Fields.Count).Append(':');
+            foreach (var field in record.Fields.OrderBy(x => x.Key, StringComparer.Ordinal))
+            {
+                AppendPart(builder, field.Key);
+                AppendPart(builder, field.Value.Shape.ToString());
+                builder.Append((int)field.Value.Presence).Append(':');
+                AppendPart(builder, field.Value.LexicalSource ?? "");
+                AppendPart(builder, field.Value.Raw switch
+                {
+                    null => "",
+                    string value => value,
+                    decimal value => value.ToString(CultureInfo.InvariantCulture),
+                    DateOnly value => value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    DateTimeOffset value => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                    IFormattable value => value.ToString(null, CultureInfo.InvariantCulture) ?? "",
+                    var value => value.ToString() ?? ""
+                });
+            }
+        }
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    private static void AppendPart(StringBuilder builder, string value) => builder.Append(value.Length).Append(':').Append(value);
 }
 
 public sealed record CompileOutcome(

@@ -165,7 +165,10 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
 
         Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
         Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
-        Assert.Equal("file", Assert.Single(result.Manifest.Inputs).Kind);
+        var input = Assert.Single(result.Manifest.Inputs);
+        Assert.Equal("sqlite-table", input.Kind);
+        Assert.True(input.IsReplayable);
+        Assert.StartsWith("sha256:", input.Digest);
     }
 
     [Fact]

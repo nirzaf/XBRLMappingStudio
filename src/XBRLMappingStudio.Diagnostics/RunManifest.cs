@@ -51,7 +51,7 @@ public sealed class RunManifest
         = new Dictionary<string, string>();
 
     /// <summary>File hash (SHA-256) or DB snapshot identifier per source.</summary>
-    public IReadOnlyList<InputIdentity> Inputs { get; init; } = Array.Empty<InputIdentity>();
+    public IReadOnlyList<InputIdentity> Inputs { get; set; } = Array.Empty<InputIdentity>();
 
     /// <summary>Digest of each artifact produced.</summary>
     public IReadOnlyList<OutputIdentity> Outputs { get; set; } = Array.Empty<OutputIdentity>();
