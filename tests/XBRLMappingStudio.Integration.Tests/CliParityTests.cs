@@ -29,26 +29,53 @@ public sealed class CliParityTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    private static string LocateCliDll()
+    // The CLI is launched as a real subprocess. We run the framework-dependent
+    // apphost the SDK emits next to xbrl-studio.dll (xbrl-studio.exe on Windows,
+    // xbrl-studio on Unix) so we never depend on locating the `dotnet` muxer —
+    // on the Windows vstest host Process.MainModule is testhost.exe, not dotnet,
+    // so invoking `dotnet <dll>` via MainModule breaks there. Falls back to
+    // `dotnet <dll>` (resolved on PATH) when no apphost is present.
+    private static (string FileName, bool IsAppHost) LocateCli()
     {
-        // Search common output paths for xbrl-studio.dll.
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                "src", "XBRLMappingStudio.CLI", "bin", "Debug", "net10.0", "xbrl-studio.dll"),
-            Path.Combine(AppContext.BaseDirectory, "xbrl-studio.dll"),
-        };
-        foreach (var c in candidates)
-        {
-            var full = Path.GetFullPath(c);
-            if (File.Exists(full)) return full;
-        }
-        // Fall back to a probe via directory listing.
-        var probeRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
             "..", "..", "..", "..", ".."));
-        var found = Directory.EnumerateFiles(probeRoot, "xbrl-studio.dll", SearchOption.AllDirectories)
-            .FirstOrDefault();
-        return found ?? throw new FileNotFoundException("xbrl-studio.dll not built.");
+        var binRoot = Path.Combine(repoRoot, "src", "XBRLMappingStudio.CLI", "bin");
+
+        string? PickDll() =>
+            Directory.EnumerateFiles(binRoot, "xbrl-studio.dll", SearchOption.AllDirectories)
+                .OrderBy(p => p.Contains("Release") ? 0 : 1)
+                .FirstOrDefault();
+
+        var dll = PickDll();
+        if (dll is null)
+            throw new FileNotFoundException("xbrl-studio.dll not built.");
+
+        var appHost = Path.Combine(Path.GetDirectoryName(dll)!,
+            OperatingSystem.IsWindows() ? "xbrl-studio.exe" : "xbrl-studio");
+        return File.Exists(appHost) ? (appHost, true) : (dll, false);
+    }
+
+    private static ProcessStartInfo BuildStartInfo(
+        (string FileName, bool IsAppHost) cli, string verb, params string[] extra)
+    {
+        var psi = new ProcessStartInfo
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        if (cli.IsAppHost)
+        {
+            psi.FileName = cli.FileName;
+        }
+        else
+        {
+            psi.FileName = "dotnet";
+            psi.ArgumentList.Add(cli.FileName);
+        }
+        psi.ArgumentList.Add(verb);
+        foreach (var a in extra) psi.ArgumentList.Add(a);
+        return psi;
     }
 
     [Fact]
@@ -59,22 +86,10 @@ public sealed class CliParityTests : IAsyncLifetime
         var pm = new ProjectManager(projectPath);
         pm.Save(project);
 
-        var cliDll = LocateCliDll();
-        var dotnet = Process.GetCurrentProcess().MainModule?.FileName ?? "dotnet";
+        var cli = LocateCli();
         var outputPath = Path.Combine(_dir, "cli-out.json");
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = dotnet,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        psi.ArgumentList.Add(cliDll);
-        psi.ArgumentList.Add("execute");
-        psi.ArgumentList.Add(projectPath);
-        psi.ArgumentList.Add("--output");
-        psi.ArgumentList.Add(outputPath);
+        var psi = BuildStartInfo(cli, "execute", projectPath, "--output", outputPath);
 
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("CLI process failed to start.");
@@ -116,18 +131,8 @@ public sealed class CliParityTests : IAsyncLifetime
         var pm = new ProjectManager(projectPath);
         pm.Save(project);
 
-        var cliDll = LocateCliDll();
-        var dotnet = Process.GetCurrentProcess().MainModule?.FileName ?? "dotnet";
-        var psi = new ProcessStartInfo
-        {
-            FileName = dotnet,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        psi.ArgumentList.Add(cliDll);
-        psi.ArgumentList.Add("validate");
-        psi.ArgumentList.Add(projectPath);
+        var cli = LocateCli();
+        var psi = BuildStartInfo(cli, "validate", projectPath);
 
         using var proc = Process.Start(psi)!;
         await proc.StandardOutput.ReadToEndAsync();

@@ -11,17 +11,21 @@ namespace XBRLMappingStudio.Ops.Tests;
 /// </summary>
 public class SupervisionTests
 {
-    private static (string Exe, string[] Args) Shell(string script) =>
+    // Two script variants per scenario: POSIX sh on Unix, PowerShell on Windows.
+    // Handing bash syntax to cmd.exe (the previous Windows branch) fails to parse
+    // loops / `; exit N` / `sleep`, producing wrong exit codes and outcomes.
+    private static (string Exe, string[] Args) Shell(string posixScript, string windowsScript) =>
         OperatingSystem.IsWindows()
-            ? ("cmd.exe", new[] { "/c", script })
-            : ("/bin/sh", new[] { "-c", script });
+            ? ("powershell.exe", new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsScript })
+            : ("/bin/sh", new[] { "-c", posixScript });
 
     [Fact]
     public async Task FloodedStdout_IsBoundedByBudget()
     {
         var supervisor = new WorkerSupervisor(maxLogBytes: 4096);
         var (exe, args) = Shell(
-            "i=0; while [ $i -lt 2000 ]; do echo \"flood-line-$i\"; i=$((i+1)); done");
+            "i=0; while [ $i -lt 2000 ]; do echo \"flood-line-$i\"; i=$((i+1)); done",
+            "1..2000 | ForEach-Object { \"flood-line-$_\" }");
 
         var result = await supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30));
 
@@ -36,7 +40,7 @@ public class SupervisionTests
     public async Task CrashingWorker_DistinctTerminalOutcome_AndExitCodePreserved()
     {
         var supervisor = new WorkerSupervisor();
-        var (exe, args) = Shell("echo dying; exit 7");
+        var (exe, args) = Shell("echo dying; exit 7", "Write-Output dying; exit 7");
 
         var result = await supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30));
 
@@ -50,7 +54,7 @@ public class SupervisionTests
     public async Task WatchdogDeadline_KillsRunawayWorker()
     {
         var supervisor = new WorkerSupervisor();
-        var (exe, args) = Shell("echo starting; sleep 30; echo never");
+        var (exe, args) = Shell("echo starting; sleep 30; echo never", "Write-Output starting; Start-Sleep 30; Write-Output never");
 
         var started = DateTimeOffset.UtcNow;
         var result = await supervisor.RunAsync(exe, args, TimeSpan.FromMilliseconds(400));
@@ -67,10 +71,10 @@ public class SupervisionTests
     public async Task NextJobStartsClean_AfterSupervisedFailure()
     {
         var supervisor = new WorkerSupervisor();
-        var (badExe, badArgs) = Shell("exit 3");
+        var (badExe, badArgs) = Shell("exit 3", "exit 3");
         await supervisor.RunAsync(badExe, badArgs, TimeSpan.FromSeconds(10));
 
-        var (okExe, okArgs) = Shell("echo healthy");
+        var (okExe, okArgs) = Shell("echo healthy", "Write-Output healthy");
         var result = await supervisor.RunAsync(okExe, okArgs, TimeSpan.FromSeconds(10));
 
         Assert.Equal(SupervisedOutcome.Completed, result.Outcome);
