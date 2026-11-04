@@ -74,10 +74,11 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 
 ## Current verification
 
-- The following verification ran on PR code revision `34554422b27bfe11ca837dde07937eda73de0173`; the subsequent status-page correction does not change executable code.
-- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed with 0 warnings and 0 errors.
-- `dotnet test XBRLMappingStudio.slnx -c Release --no-build -m:1` — passed, 244 tests, 0 failed, 0 skipped.
+- The following verification ran on PR code revision `293d72d71b8b5b8446ddb0233927b1ee5515834c`; the subsequent status-page correction does not change executable code.
+- `dotnet build XBRLMappingStudio.slnx -c Release -m:1 --no-restore` — passed with 0 warnings and 0 errors.
+- `dotnet test XBRLMappingStudio.slnx -c Release -m:1 --no-build` — passed, 244 tests, 0 failed, 0 skipped.
 - `PYTHONPATH=/tmp/xms-worker-venv/lib/python3.12/site-packages python3 -m pytest tools/worker/tests -q` — passed, 5 tests, using the exact pinned `tools/worker/requirements.lock` installed into a temporary Python 3.12 environment with hashes enforced.
+- `dotnet list XBRLMappingStudio.slnx package --vulnerable --include-transitive` — no vulnerable packages reported.
 - `git diff --check` — passed for this revision.
 
-GitHub Actions Release build and tests passed on Windows and Ubuntu for this revision. No interactive desktop UI, installer, real regulator profile, or customer-hardware performance qualification was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.
+GitHub Actions run [41825038512](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41825038512) passed on this exact revision, including Release build and tests on Windows and Ubuntu, Arelle worker integration, and repository hygiene. No interactive desktop UI, installer, real regulator profile, or customer-hardware performance qualification was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.
