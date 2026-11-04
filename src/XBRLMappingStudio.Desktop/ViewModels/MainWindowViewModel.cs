@@ -372,6 +372,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public async Task LoadSourceAsync(string path)
     {
+        if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
         IsSourceLoading = true;
         var sqliteTableLoadPending = false;

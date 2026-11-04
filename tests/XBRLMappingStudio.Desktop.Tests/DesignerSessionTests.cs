@@ -345,6 +345,25 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task SourceCannotBeLoadedBeforeProjectHasWorkspace()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-unsaved", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        File.WriteAllText(csv, "value\n1\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel(ProjectWithSource());
+            await viewModel.LoadSourceAsync(csv);
+
+            Assert.Equal("Save the project inside its workspace before adding a source.", viewModel.StatusText);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.Empty(viewModel.SourceColumns);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public async Task OpeningProjectInvalidatesPendingSourceSchemaLoad()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-open-race", Guid.NewGuid().ToString("n"));
