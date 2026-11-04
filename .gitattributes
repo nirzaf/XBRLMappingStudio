@@ -1,0 +1,2 @@
+# Taxonomy package digests bind exact file bytes and must not vary by checkout OS.
+/tools/worker/taxonomy/** -text

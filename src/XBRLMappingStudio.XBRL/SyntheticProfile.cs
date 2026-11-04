@@ -16,7 +16,7 @@ public static class SyntheticProfile
     public const string Namespace = "urn:synthetic:finance:1.0";
     public const string Prefix = "synthetic";
     public const string TaxonomyFileName = "arelle-test-taxonomy.xsd";
-    public const string TaxonomyPackageDigest = "sha256:ee6e793488d1c8b22073010d91e0a3ce5fb340ceb59c7823e2a653be4898e2b8";
+    public const string TaxonomyPackageDigest = "sha256:e898d8ef578e9e7d7015265b289b7bb63f3df8b2dadc35c11776c32a243d14c9";
 
     /// <summary>Stable, hand-authored concepts for the first vertical slice.</summary>
     public static IReadOnlyList<ConceptMetadata> Concepts { get; } = new[]

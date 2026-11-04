@@ -169,7 +169,7 @@ public sealed class XmlAdapter : ISourceAdapter
                 if (only.HasElements)
                     FlattenElement(key, only, fields, srcs, sourceId, rowIdx);
                 else
-                    SetValue(key, only.Value, fields, srcs, sourceId, rowIdx);
+                    FlattenElement(key, only, fields, srcs, sourceId, rowIdx);
             }
         }
     }

@@ -79,7 +79,6 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         Assert.Equal("1", reparsed[0].Fields["a.b"].Raw?.ToString());
         Assert.Equal("hi", reparsed[0].Fields["s"].Raw?.ToString());
         Assert.Contains("[1, 2, 3]", reparsed[0].Fields["list"].Raw as string);
-        Assert.Contains("a\\\"b", reparsed[0].Fields["strings"].Raw as string);
         Assert.Contains("[]", reparsed[0].Fields["empty"].Raw as string);
         // Explicit null and boolean survive as distinct leaves.
         Assert.True(reparsed[0].Fields["nothing"].IsNil);
@@ -88,6 +87,9 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         using var json = JsonDocument.Parse(await File.ReadAllBytesAsync(dest));
         Assert.Equal(JsonValueKind.Null, json.RootElement[0].GetProperty("nothing").ValueKind);
         Assert.False(json.RootElement[0].TryGetProperty("absent", out _));
+        var stringArray = json.RootElement[0].GetProperty("strings");
+        Assert.Equal("a\"b", stringArray[0].GetString());
+        Assert.Equal("c\\d", stringArray[1].GetString());
     }
 
     [Fact]
@@ -240,6 +242,6 @@ public sealed class JsonAndXmlOutputAdapterTests : IAsyncLifetime
         var schema = await reader.InspectSchemaAsync(conn, default);
         var roundTrip = new List<DataRecord>();
         await foreach (var r in reader.ReadFullAsync(conn, schema, default)) roundTrip.Add(r);
-        Assert.True(Assert.Single(roundTrip).Fields["Nil"].IsNil);
+        Assert.True(Assert.Single(roundTrip).Fields["row.Nil"].IsNil);
     }
 }
