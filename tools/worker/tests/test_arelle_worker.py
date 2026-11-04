@@ -83,6 +83,14 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertTrue(result["result"]["completed"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
 
+    def test_file_taxonomy_uri_passes_arelle(self):
+        value = report()
+        value["documentInfo"]["taxonomy"] = [(FIXTURES / "arelle-test-taxonomy.xsd").as_uri()]
+        result = arelle_worker.handle(self.request(value), self.args)
+        self.assertEqual("success", result["status"], result["error"])
+        self.assertTrue(result["result"]["completed"])
+        self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+
     def test_unknown_concept_is_blocking_even_if_arelle_completes(self):
         result = arelle_worker.handle(self.request(report("synthetic:Missing")), self.args)
         self.assertEqual("success", result["status"])
