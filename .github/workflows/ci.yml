@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          GUIDE="XBRL_Mapping_Studio_Architecture_and_Implementation_Guide.md"
+          GUIDE="XBRL_Mapping_Studio.md"
           git fetch --no-tags origin "${{ github.base_ref }}"
           if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -F "$GUIDE"; then
             echo "::error::$GUIDE is authoritative and read-only; revert changes to it."

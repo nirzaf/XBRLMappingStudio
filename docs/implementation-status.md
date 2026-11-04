@@ -1,6 +1,7 @@
 # Implementation status
 
-This matrix records repository evidence as of 2026-11-04 (post Wave 1 + Wave 2 gap-closure).
+This matrix records repository evidence as of 2026-11-04. The exact checkout and
+baseline verification are recorded in [`verification-baseline-2026-11-04.md`](verification-baseline-2026-11-04.md).
 “Verified” means code and tests in this checkout cover the stated subset; it does not
 imply regulator acceptance, production qualification, or a complete end-to-end feature
 where explicitly narrowed below.
@@ -75,12 +76,14 @@ where explicitly narrowed below.
 | EXT03 | Missing pending profile selection | No governed extension taxonomy authoring. |
 | EXT04 | Missing pending profile selection | No collector-specific report package assembler. |
 
-## Current verification
+## Baseline verification before pending-feature implementation
 
-- Executable source revision (Wave 1 + Wave 2 gap closure landed on top of `644c45b`) was verified locally with `dotnet build XBRLMappingStudio.slnx -c Release` — passed, 0 warnings and 0 errors.
-- `dotnet test XBRLMappingStudio.slnx -c Release` — 284 tests passed, 0 failed, 2 skipped (Windows-only Arelle subprocess fixtures deferred on this host). Suite totals: AI.Tests 47, Adapters.Tests 45, XBRL.Tests 49, Ops.Tests 47, Engine.Tests 33, Desktop.Tests 19, Integration.Tests 40 (2 skipped), Project.Tests 6.
+- Baseline checkout: `d8ac4afea3e915ce7724962a0bc4bd752fbc62b8` (`main`, 2026-11-04); worktree clean before implementation began.
+- Local Windows `dotnet test XBRLMappingStudio.slnx -c Release` — 286 passed, 0 failed, 2 skipped (the gated Arelle subprocess cases), 288 total. Suite totals: AI.Tests 47, Adapters.Tests 47, XBRL.Tests 49, Ops.Tests 47, Engine.Tests 33, Desktop.Tests 19, Integration.Tests 40 (38 passed, 2 skipped), Project.Tests 6.
+- Exact-head GitHub CI run [41892559012](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41892559012) on `d8ac4af`: Ubuntu and Windows each reported 286 passed, 0 failed, 2 skipped. The separate pinned Arelle job passed 6 Python worker tests and 2 .NET Arelle execution tests.
+- Local Python 3.12.11 virtual environment installed `tools/worker/requirements.lock` with `--require-hashes`; all 6 Python worker tests and both gated .NET Arelle tests passed.
 - Wave 1 additions: FilingRuleValidatorTests (+2 required-check completeness), WorkerAdjudicationTests (+3 timeout/crash/deadline), AuditPersistenceTests (+4 AI06 sink), SuggestionAuditStoreTests (+5 SQLite persistence + v1→v2 migration), AdapterCapabilitySurfacingTests (+9 IO01 gate).
 - Wave 2 additions: JsonAndXmlOutputAdapterTests (+7 covering IO05/IO06 staging, round-trip, mixed-content refusal, mid-write fault).
 - Local SQLite v2 schema migration adds six columns to `suggestion_audit` (method, actor, prompt_template_revision, original_proposal_json, approved_edit_json, provider_snapshot_limitation) with historical v1 rows preserved.
 
-Wave 3–5 items from the implementation plan (UI01 lifecycle, MAP07 authoring UI, MAP08 drill-down, AI05 batch review, XBR02 profile-driven worker operations, SqliteTargetPublisher end-to-end, migration drills, benchmark harness) remain open follow-up work; none is required by the P0 publication-safety gates that Wave 1 closed. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow. No real regulator profile, full desktop session, installer, immutable database snapshot, or customer-hardware performance qualification was exercised.
+The pending-features specification is being implemented on `main` in bounded groups. External decisions (filing authority, taxonomy and PDF rights, provider policy, hardware/signing and production database vendor) remain open; this status file will be updated only with evidence from the resulting changes and CI.
