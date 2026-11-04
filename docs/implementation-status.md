@@ -22,13 +22,13 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 | IO04 | Implemented and verified for the supported CSV subset | `CsvAdapter` and tests cover quoted newlines, embedded quotes, trailing empty fields, BOM policy and formula-injection handling; broader profile-specific encoding/culture qualification remains. |
 | IO05 | Partially implemented | `JsonAdapter` reads bounded top-level objects/arrays and rejects duplicate keys or out-of-budget values; generic JSON writing is not implemented. XBRL JSON is tracked under XBR05. |
 | IO06 | Partially implemented | `XmlAdapter` provides bounded, namespace-aware input and blocks DTD/external entities; generic XML writing is not implemented. XBRL XML is tracked under XBR05. |
-| IO07 | Partially implemented | SQLite discovery, read and preview paths have adapter tests; production-family qualification, least-privilege credentials and broader live-database evidence remain open. |
+| IO07 | Partially implemented | SQLite schema inspection exposes declared primary-key order; row provenance uses a SHA-256 identity derived from single or composite primary keys. Tables without a primary key keep positional IDs and emit IO015 plus a manifest strategy marker. Snapshot/immutable-extract semantics, production-family qualification and live-database evidence remain open. |
 | IO08 | Partially implemented | `SqliteTargetPublisher` provides transactional upsert and intent-bound receipts with tests; end-to-end desktop/CLI integration and production qualification remain incomplete. |
 | IO09 | Missing | No qualified SQL Server, PostgreSQL, MySQL/MariaDB, or Oracle adapter. |
 | IO10 | Missing | No PDF extraction adapter or evidence review workflow. |
 | IO11 | Blocked by native/runtime qualification | No PDF renderer or OCR path is implemented or qualified. |
 | IO12 | Missing | No PDF evidence retention, reviewer decision, and extraction-to-mapping lifecycle. |
-| XBR01 | Partially implemented | `SyntheticProfile` and `FilingProfile` record development profile metadata; no permissible customer reference taxonomy/report package with recorded hashes is approved. |
+| XBR01 | Partially implemented | `SyntheticProfile` and `FilingProfile` record development profile metadata. `MappingJobService` and `PublicationGate` reject XBR015 profile ID/digest mismatches before graph compilation or source reads; normal CLI/Desktop profile resolution still uses the synthetic profile, and no permissible customer taxonomy/report package is approved. |
 | XBR02 | Partially implemented | Versioned worker handshake and pinned Python worker tests exist; standalone Arelle validation is available, while profile-driven Arelle mapping execution is not complete. |
 | XBR03 | Partially implemented | `TaxonomyIndex` supports paged synthetic concept, label and relationship search; indexing a permitted production taxonomy at scale is not qualified. |
 | XBR04 | Partially implemented | Typed fact construction and source provenance exist for supported facts; real filing-profile aspects and source-linked rejection rules are not qualified. |
@@ -74,11 +74,11 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 
 ## Current verification
 
-- The following verification ran on PR code revision `293d72d71b8b5b8446ddb0233927b1ee5515834c`; all later PR commits are documentation-only and do not change executable code.
-- `dotnet build XBRLMappingStudio.slnx -c Release -m:1 --no-restore` — passed with 0 warnings and 0 errors.
-- `dotnet test XBRLMappingStudio.slnx -c Release -m:1 --no-build` — passed, 244 tests, 0 failed, 0 skipped.
-- `PYTHONPATH=/tmp/xms-worker-venv/lib/python3.12/site-packages python3 -m pytest tools/worker/tests -q` — passed, 5 tests, using the exact pinned `tools/worker/requirements.lock` installed into a temporary Python 3.12 environment with hashes enforced.
-- `dotnet list XBRLMappingStudio.slnx package --vulnerable --include-transitive` — no vulnerable packages reported.
-- `git diff --check` — passed for this revision.
+- Executable source revision `644c45b` was verified locally with `dotnet build XBRLMappingStudio.slnx -c Release --no-restore` — passed, 0 warnings and 0 errors.
+- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore --no-build` — passed, 253 tests, 0 failed, 0 skipped.
+- Focused SQLite adapter, integration and desktop coverage passed, including composite-key identity stability, null-key rejection, schema drift, manifest strategy reporting and UI key disclosure.
+- `dotnet list XBRLMappingStudio.slnx package --vulnerable --include-transitive` — no vulnerable NuGet packages reported.
+- `uvx --from pip-audit pip-audit --requirement tools/worker/requirements.lock` — no known Python vulnerabilities found.
+- `git diff --check` — passed.
 
-GitHub Actions run [41825038512](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41825038512) passed on this exact revision, including Release build and tests on Windows and Ubuntu, Arelle worker integration, and repository hygiene. No interactive desktop UI, installer, real regulator profile, or customer-hardware performance qualification was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.
+Before executable source revision `644c45b`, GitHub Actions run [41870212723](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41870212723) passed Release build/tests on Windows and Ubuntu, Arelle worker integration, and repository hygiene for its parent revision `23c000292b327a6c18273057f86c796e8ecfa507`. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow. No real regulator profile, full desktop session, installer, immutable database snapshot, or customer-hardware performance qualification was exercised.

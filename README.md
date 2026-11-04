@@ -309,6 +309,10 @@ following IDs have implementation code and repository tests; qualification limit
 SQLite source discovery/read and transactional target upsert have repository tests.
 The target publisher remains a callable adapter rather than an end-to-end desktop/CLI
 workflow, and mixed-destination receipt reconciliation remains incomplete (`IO07`–`IO08`, `OPS05`).
+SQLite source rows with declared single or composite primary keys receive deterministic
+hashed row identities. A table without a primary key keeps positional provenance and
+produces an `IO015` warning; SQLite does not guarantee row ordering between reads. The
+run manifest records which row-identity strategy was used.
 
 Per-ID evidence lives in [`docs/decisions/BASE01-decision-record.md`](./docs/decisions/BASE01-decision-record.md).
 Items marked "synthetic" (e.g. the XBRL filing profile) are honestly scoped to the offline
