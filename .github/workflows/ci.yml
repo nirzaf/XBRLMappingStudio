@@ -77,6 +77,17 @@ jobs:
       - name: Test protocol, offline taxonomy and validation
         run: python -m unittest discover -s tools/worker/tests -v
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Execute Excel-to-XBRL mapping through Arelle
+        env:
+          XMS_ARELLE_E2E: '1'
+          XMS_ARELLE_PYTHON: python
+        run: dotnet test tests/XBRLMappingStudio.Integration.Tests/XBRLMappingStudio.Integration.Tests.csproj -c Release --filter FullyQualifiedName~ArelleExecutionTests
+
   hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest

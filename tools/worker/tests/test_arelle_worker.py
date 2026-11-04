@@ -10,6 +10,7 @@ import arelle_worker
 
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "XBRLMappingStudio.XBRL.Tests" / "fixtures"
+TAXONOMY_ROOT = WORKER_DIR / "taxonomy"
 
 
 def report(concept="synthetic:Assets"):
@@ -41,7 +42,7 @@ def report(concept="synthetic:Assets"):
 class ArelleWorkerTests(unittest.TestCase):
     def setUp(self):
         self.args = SimpleNamespace(
-            taxonomy_root=str(FIXTURES), package=[], plugin=[], disclosure_system=None
+            taxonomy_root=str(TAXONOMY_ROOT), package=[], plugin=[], disclosure_system=None
         )
 
     def request(self, value):
@@ -85,7 +86,7 @@ class ArelleWorkerTests(unittest.TestCase):
 
     def test_file_taxonomy_uri_passes_arelle(self):
         value = report()
-        value["documentInfo"]["taxonomy"] = [(FIXTURES / "arelle-test-taxonomy.xsd").as_uri()]
+        value["documentInfo"]["taxonomy"] = [(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()]
         result = arelle_worker.handle(self.request(value), self.args)
         self.assertEqual("success", result["status"], result["error"])
         self.assertTrue(result["result"]["completed"])
@@ -100,7 +101,7 @@ class ArelleWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             arelle_worker.safe_taxonomy_urls(
                 {"documentInfo": {"taxonomy": ["../../../README.md"]}},
-                str(FIXTURES),
+                str(TAXONOMY_ROOT),
             )
 
 

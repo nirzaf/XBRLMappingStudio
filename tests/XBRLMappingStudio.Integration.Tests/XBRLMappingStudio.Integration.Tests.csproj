@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Application\XBRLMappingStudio.Application.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.CLI\XBRLMappingStudio.CLI.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
@@ -27,6 +28,11 @@
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Worker\XBRLMappingStudio.Worker.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Fixtures\XBRLMappingStudio.Fixtures.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\tools\worker\arelle_worker.py" Link="worker\arelle_worker.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\worker\taxonomy\**\*" Link="worker\taxonomy\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

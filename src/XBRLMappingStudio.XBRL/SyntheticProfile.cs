@@ -129,7 +129,7 @@ public static class SyntheticProfile
         {
             AppendPart(concepts, "concept");
             AppendPart(concepts, c.QualifiedName);
-            AppendPart(concepts, c.NamespaceUri);
+            AppendPart(concepts, c.Namespace);
             AppendPart(concepts, c.LocalName);
             AppendPart(concepts, c.Label);
             AppendPart(concepts, c.DataType);

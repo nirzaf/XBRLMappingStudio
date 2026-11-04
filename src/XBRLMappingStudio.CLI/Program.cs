@@ -50,8 +50,8 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
-    Console.Error.WriteLine("                       [--workspace-root <dir>]");
-    Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10");
+    Console.Error.WriteLine("                       [--workspace-root <dir>] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
+    Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json>");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
@@ -145,6 +145,7 @@ static async Task<int> ValidateArtifactAsync(string[] args)
             return ExitCodesLocal.IncompleteProfile;
         }
         var workerArgs = new List<string> { script };
+        taxonomyRoot ??= FindArelleTaxonomyRoot();
         if (taxonomyRoot is not null) { workerArgs.Add("--taxonomy-root"); workerArgs.Add(Path.GetFullPath(taxonomyRoot)); }
         foreach (var package in packages) { workerArgs.Add("--package"); workerArgs.Add(Path.GetFullPath(package)); }
         foreach (var plugin in plugins) { workerArgs.Add("--plugin"); workerArgs.Add(plugin); }
@@ -219,6 +220,18 @@ static string? FindArelleWorkerScript()
     {
         var candidate = Path.Combine(dir.FullName, "tools", "worker", "arelle_worker.py");
         if (File.Exists(candidate)) return candidate;
+    }
+    return null;
+}
+
+static string? FindArelleTaxonomyRoot()
+{
+    var bundled = Path.Combine(AppContext.BaseDirectory, "worker", "taxonomy");
+    if (File.Exists(Path.Combine(bundled, SyntheticProfile.TaxonomyFileName))) return bundled;
+    for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+    {
+        var candidate = Path.Combine(dir.FullName, "tools", "worker", "taxonomy");
+        if (File.Exists(Path.Combine(candidate, SyntheticProfile.TaxonomyFileName))) return candidate;
     }
     return null;
 }
@@ -323,6 +336,9 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     string? workspaceRootArg = null;
     int rows = 10;
     bool allowSyntheticProfile = false;
+    bool useArelle = false;
+    string? python = null;
+    string? taxonomyRoot = null;
 
     for (int i = 1; i < args.Length; i++)
     {
@@ -357,10 +373,27 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             case "--allow-synthetic-profile":
                 allowSyntheticProfile = true;
                 break;
+            case "--arelle":
+                useArelle = true;
+                break;
+            case "--python":
+                if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
+                python = args[++i];
+                break;
+            case "--taxonomy-root":
+                if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
+                taxonomyRoot = args[++i];
+                break;
             default:
                 Console.Error.WriteLine($"Unrecognized option: {args[i]}");
                 return ExitCodesLocal.IncompleteProfile;
         }
+    }
+
+    if (!useArelle && (python is not null || taxonomyRoot is not null))
+    {
+        Console.Error.WriteLine("--python and --taxonomy-root require --arelle.");
+        return ExitCodesLocal.IncompleteProfile;
     }
 
     try
@@ -417,7 +450,24 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             }
         }
 
-        await using var worker = new LocalSyntheticWorker(profile);
+        IWorkerClient worker;
+        if (useArelle)
+        {
+            var script = FindArelleWorkerScript();
+            var root = taxonomyRoot ?? FindArelleTaxonomyRoot();
+            if (script is null || root is null)
+            {
+                Console.Error.WriteLine("Arelle worker or taxonomy package was not found; provide --taxonomy-root and run from a checkout or packaged CLI.");
+                return ExitCodesLocal.IncompleteProfile;
+            }
+            worker = new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"),
+                new[] { script, "--taxonomy-root", Path.GetFullPath(root) });
+        }
+        else
+        {
+            worker = new LocalSyntheticWorker(profile);
+        }
+        await using var workerLifetime = worker;
         var service = new MappingJobService(profile, worker);
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
