@@ -274,7 +274,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            await DeleteDirectoryWhenReleasedAsync(dir);
         }
     }
 
@@ -308,7 +308,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            await DeleteDirectoryWhenReleasedAsync(dir);
         }
     }
 
@@ -343,7 +343,17 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            await DeleteDirectoryWhenReleasedAsync(dir);
         }
+    }
+
+    private static async Task DeleteDirectoryWhenReleasedAsync(string path)
+    {
+        for (var attempt = 0; Directory.Exists(path) && attempt < 50; attempt++)
+        {
+            try { Directory.Delete(path, recursive: true); return; }
+            catch (IOException) { await Task.Delay(100); }
+        }
+        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
     }
 }
