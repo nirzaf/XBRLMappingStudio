@@ -98,6 +98,13 @@ public sealed class FilingRuleValidator
             else
                 outcomes.Add(Pass("synthetic:unit-allowed"));
 
+            if (!f.ValidateValueAgainst(concept, out var valueReason)
+                && !valueReason.EndsWith("is monetary and requires a unit.", StringComparison.Ordinal))
+                outcomes.Add(Fail("synthetic:fact-value-contract", DiagnosticCodes.XbrUnsupportedConstruct,
+                    valueReason, op));
+            else
+                outcomes.Add(Pass("synthetic:fact-value-contract"));
+
             // Rule: period-type-match.
             var periodOk =
                 (concept.PeriodType == "instant" && f.Period.Kind == PeriodKind.Instant) ||

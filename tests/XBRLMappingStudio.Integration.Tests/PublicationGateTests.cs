@@ -1,6 +1,7 @@
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Fixtures;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
 
@@ -86,6 +87,52 @@ public sealed class PublicationGateTests
         Assert.Contains(
             PublicationGate.Evaluate(projectWithStaleDigest, Synthetic, allowSyntheticProfile: true).Items,
             d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+    }
+
+    [Fact]
+    public void ApprovalForSameRevisionButDifferentGraphDigest_DoesNotSatisfyTheGate()
+    {
+        var project = Project();
+        var approval = project.Approvals.Single();
+        var changed = CloneWithApprovals(project, approval);
+        changed.Nodes[0].Parameters["displayOnly-test-change"] = "changed executable graph";
+
+        var diagnostics = PublicationGate.Evaluate(changed, Synthetic, allowSyntheticProfile: true);
+
+        Assert.Contains(diagnostics.Items, d => d.Code == DiagnosticCodes.XbrApprovalRequired);
+    }
+
+    [Fact]
+    public void FinalPublisherRejectsGraphChangedAfterTheRun()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xms-publish-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var project = Project();
+            const string json = "{}";
+            var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+            var manifest = new RunManifest
+            {
+                RunId = "run-test",
+                OperationId = "op-test",
+                ProjectId = project.ProjectId,
+                SemanticRevision = project.SemanticRevision,
+                ProjectSemanticDigest = project.ComputeSemanticDigest(),
+                ProfileDigest = Synthetic.Digest,
+                EngineVersion = "test",
+                Outcome = RunOutcome.Success,
+                Outputs = new[] { new OutputIdentity("<memory>", RunManifest.ComputeSha256(bytes), bytes.Length, "xbrl-json") }
+            };
+            var result = new JobResult(manifest, Array.Empty<XbrlFact>(), json,
+                new DiagnosticBag(), Array.Empty<SampledTotal>());
+            project.Nodes[0].Parameters["changed-after-run"] = true;
+
+            Assert.Throws<PublicationException>(() => new PublicationService(new RunJournal(root))
+                .PublishAuthorized("report.json", bytes, root, project, Synthetic, true, result));
+            Assert.False(File.Exists(Path.Combine(root, "report.json")));
+        }
+        finally { Directory.Delete(root, recursive: true); }
     }
 
     private static MappingProject CloneWithApprovals(MappingProject source, ApprovalRecord approval)

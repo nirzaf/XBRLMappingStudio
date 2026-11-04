@@ -19,7 +19,7 @@ namespace XBRLMappingStudio.Application;
 ///      <see cref="SyntheticProfile"/>; using it for a production publication is a
 ///      deliberate, caller-asserted decision and must be requested explicitly.
 ///   3. Approval (XBR016): an unattended publication requires an <see cref="ApprovalRecord"/>
-///      on the project covering the current semantic revision under the same profile digest.
+///      on the project covering the current semantic revision, semantic graph digest and profile digest.
 ///
 /// Callers treat a non-empty <see cref="DiagnosticBag.HasBlockingErrors"/> as "do not
 /// publish"; the previously accepted destination, if any, must be left untouched.
@@ -67,8 +67,10 @@ public static class PublicationGate
                 operationId: operationId);
         }
 
+        var semanticDigest = project.ComputeSemanticDigest();
         var approval = project.Approvals.FirstOrDefault(a =>
             a.SemanticRevision == project.SemanticRevision
+            && string.Equals(a.SemanticDigest, semanticDigest, StringComparison.Ordinal)
             && string.Equals(a.ProfileDigest, profile.Digest, StringComparison.Ordinal));
 
         if (approval is null)
@@ -77,9 +79,9 @@ public static class PublicationGate
                 DiagnosticCodes.XbrApprovalRequired,
                 DiagnosticSubsystem.XBRL,
                 DiagnosticStage.Publication,
-                $"No approval record covers semantic revision {project.SemanticRevision} under "
-                + $"profile digest {profile.Digest}. An unattended publication requires a prior, "
-                + "explicit approval of the exact revision being run.",
+                $"No approval record covers semantic revision {project.SemanticRevision}, graph digest "
+                + $"{semanticDigest} and profile digest {profile.Digest}. An unattended publication "
+                + "requires approval of the exact executable graph and profile being run.",
                 operationId: operationId);
         }
 

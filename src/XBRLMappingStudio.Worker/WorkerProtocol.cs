@@ -56,6 +56,7 @@ public enum WorkerStatus
     DomainFailure,
     IncompleteValidation,
     Cancelled,
+    TimedOut,
     Crash
 }
 

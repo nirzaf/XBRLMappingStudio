@@ -22,14 +22,14 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     private static readonly string[] Columns =
     {
         "concept", "entityScheme", "entityIdentifier", "period",
-        "unit", "compoundUnit", "value", "decimals", "lang", "nil", "dimensions"
+        "unit", "compoundUnit", "value", "textValue", "decimals", "lang", "nil", "dimensions"
     };
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
         var cols = new List<ColumnSchema>();
         for (int i = 0; i < Columns.Length; i++)
-            cols.Add(new ColumnSchema(Columns[i], PortShape.String, i, Columns[i]));
+            cols.Add(new ColumnSchema(Columns[i], Columns[i] == "value" ? PortShape.Decimal : PortShape.String, i, Columns[i]));
         ISourceSchema schema = TabularSchema.FromSource(connection.SourceId, cols);
         return Task.FromResult(schema);
     }
@@ -95,6 +95,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             ["value"] = f.IsNil || f.Value is null
                 ? DataValue.Missing(PortShape.Decimal)
                 : DataValue.DecimalValue(f.Value.Value, src, f.Value.Value.ToString(CultureInfo.InvariantCulture)),
+            ["textValue"] = f.TextValue is null
+                ? DataValue.Missing(PortShape.String)
+                : DataValue.StringValue(f.TextValue, src),
             ["decimals"] = f.Decimals is not null
                 ? DataValue.IntegerValue(f.Decimals.Value)
                 : DataValue.StringValue("INF", src),

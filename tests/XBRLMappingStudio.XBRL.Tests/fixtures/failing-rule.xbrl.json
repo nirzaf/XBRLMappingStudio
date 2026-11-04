@@ -1,15 +1,23 @@
 {
-  "$schema": "https://xbrl.org/2021/json/xbrl-json-1.0.json",
-  "report": { "pii": "synthetic-oim-v1" },
+  "documentInfo": {
+    "documentType": "https://xbrl.org/2021/xbrl-json",
+    "namespaces": {
+      "entity": "http://xbrl.org/entity/",
+      "iso4217": "http://www.xbrl.org/2003/iso4217",
+      "synthetic": "urn:synthetic:finance:1.0"
+    },
+    "taxonomy": []
+  },
   "facts": {
     "f1": {
-      "value": 5000000,
-      "concept": "synthetic:Assets",
-      "entity": { "scheme": "http://xbrl.org/entity/", "identifier": "ABC-Corp" },
-      "period": { "start": "2025-01-01", "end": "2026-01-01" },
-      "unit": "JPY",
-      "decimals": -3,
-      "dimensions": {}
+      "value": "100",
+      "decimals": 0,
+      "dimensions": {
+        "concept": "synthetic:Assets",
+        "entity": "entity:ABC-Corp",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:JPY"
+      }
     }
   }
 }

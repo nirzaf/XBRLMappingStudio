@@ -290,6 +290,7 @@ public static class TestFixtures
             project.Approvals.Add(new ApprovalRecord
             {
                 SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
                 ApprovedBy = "fixture-approver",
                 ApprovedUtc = DateTimeOffset.UtcNow,
                 ProfileDigest = profile.Digest,

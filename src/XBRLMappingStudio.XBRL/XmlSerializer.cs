@@ -18,10 +18,21 @@ public static class XmlSerializer
 {
     private static readonly XNamespace Xbrli = "http://www.xbrl.org/2003/instance";
     private static readonly XNamespace Link = "http://www.xbrl.org/2003/linkbase";
+    private static readonly XNamespace Xbrldi = "http://xbrl.org/2006/xbrldi";
+    private static readonly XNamespace Xlink = "http://www.w3.org/1999/xlink";
+    private static readonly XNamespace Iso4217 = "http://www.xbrl.org/2003/iso4217";
 
     public static string Serialize(FilingProfile profile, IReadOnlyList<XbrlFact> facts)
     {
-        foreach (var f in facts) AssertSupported(f);
+        foreach (var f in facts)
+        {
+            AssertSupported(f);
+            var concept = profile.FindConcept(f.ConceptName)
+                ?? throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                    $"Concept '{f.ConceptName}' is not defined in the filing profile.");
+            if (!f.ValidateAgainst(concept, out var reason))
+                throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct, reason);
+        }
 
         // Deterministic aspect -> id assignment by first appearance in fact order.
         var contextIds = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -50,48 +61,87 @@ public static class XmlSerializer
             }
         }
 
-        // Namespace prefix map discovered from fact concept names.
-        var prefixes = new Dictionary<string, string>(StringComparer.Ordinal); // namespace -> prefix
+        var namespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["xbrli"] = Xbrli.NamespaceName,
+            ["link"] = Link.NamespaceName,
+            ["xbrldi"] = Xbrldi.NamespaceName,
+            ["xlink"] = Xlink.NamespaceName,
+            ["iso4217"] = Iso4217.NamespaceName
+        };
+        foreach (var (prefix, uri) in profile.NamespaceUris) AddNamespace(prefix, uri);
+        foreach (var c in profile.Concepts)
+            AddNamespace(SplitQName(c.QualifiedName).prefix!, c.Namespace);
         foreach (var f in facts)
         {
-            var meta = profile.FindConcept(f.ConceptName);
-            var ns = meta?.Namespace ?? SyntheticProfile.Namespace;
-            var pfx = meta is not null ? SyntheticProfile.Prefix : PrefixFor(f.ConceptName);
-            prefixes[ns] = pfx;
+            _ = ResolveQName(f.ConceptName);
+            foreach (var d in f.Dimensions)
+            {
+                if (!d.IsExplicit)
+                    throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                        $"Typed dimension '{d.Name}' requires taxonomy domain metadata and is not exportable in this profile.");
+                _ = ResolveQName(d.Name);
+                _ = ResolveQName(d.MemberName);
+            }
+            foreach (var measure in (f.Unit is null ? Enumerable.Empty<string>() : new[] { f.Unit.Measure })
+                         .Concat(f.CompoundUnit?.Numerators ?? Array.Empty<string>())
+                         .Concat(f.CompoundUnit?.DenominatorList ?? Array.Empty<string>()))
+                _ = ResolveQName(MeasureQName(measure, profile));
         }
 
-        var root = new XElement(Xbrli + "xbrl",
-            new XAttribute(XNamespace.Xmlns + "xbrli", Xbrli.NamespaceName),
-            new XAttribute(XNamespace.Xmlns + "link", Link.NamespaceName));
-        foreach (var (ns, pfx) in prefixes.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        var root = new XElement(Xbrli + "xbrl");
+        foreach (var (pfx, ns) in namespaceUris.OrderBy(kv => kv.Key, StringComparer.Ordinal))
             root.Add(new XAttribute(XNamespace.Xmlns + pfx, ns));
+        foreach (var url in profile.TaxonomyUrls)
+            root.Add(new XElement(Link + "schemaRef",
+                new XAttribute(Xlink + "type", "simple"), new XAttribute(Xlink + "href", url)));
 
         foreach (var (id, f) in contextOrder)
-            root.Add(BuildContext(id, f));
+            root.Add(BuildContext(id, f, ResolveQName));
         foreach (var (id, f) in unitOrder)
-            root.Add(BuildUnit(id, f));
+            root.Add(BuildUnit(id, f, profile, ResolveQName));
 
         foreach (var f in facts)
-            root.Add(BuildFact(f, prefixes, contextIds, unitIds));
+            root.Add(BuildFact(f, namespaceUris, ResolveQName, contextIds, unitIds));
 
         var doc = new XDocument(new XDeclaration("1.0", "utf-8", null), root);
         var sb = new StringBuilder();
         using (var w = XmlWriter.Create(sb, new XmlWriterSettings { Indent = true, OmitXmlDeclaration = false }))
             doc.Save(w);
         return sb.ToString();
+
+        void AddNamespace(string prefix, string uri)
+        {
+            if (namespaceUris.TryGetValue(prefix, out var prior) && prior != uri)
+                throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                    $"Namespace prefix '{prefix}' has conflicting URIs.");
+            namespaceUris[prefix] = uri;
+        }
+
+        string ResolveQName(string qname)
+        {
+            var (prefix, local) = SplitQName(qname);
+            if (prefix is null || !namespaceUris.ContainsKey(prefix))
+                throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                    $"QName '{qname}' has no namespace URI in the filing profile.");
+            try { XmlConvert.VerifyNCName(local); }
+            catch (XmlException ex)
+            {
+                throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct, ex.Message);
+            }
+            return qname;
+        }
     }
 
-    private static XElement BuildContext(string id, XbrlFact f)
+    private static XElement BuildContext(string id, XbrlFact f, Func<string, string> qname)
     {
         var entity = new XElement(Xbrli + "entity",
             new XElement(Xbrli + "identifier",
                 new XAttribute("scheme", f.EntityScheme), f.EntityIdentifier));
-        foreach (var d in f.Dimensions.OrderBy(d => d.Name, StringComparer.Ordinal))
-        {
-            entity.Add(new XElement(Xbrli + "explicitDimension",
-                new XElement(DimensionName(d.Name),
-                    new XElement(Xbrli + "member", d.MemberName))));
-        }
+        if (f.Dimensions.Count > 0)
+            entity.Add(new XElement(Xbrli + "segment", f.Dimensions.OrderBy(d => d.Name, StringComparer.Ordinal)
+                .Select(d => new XElement(Xbrldi + "explicitMember",
+                    new XAttribute("dimension", qname(d.Name)), qname(d.MemberName)))));
 
         var period = f.Period.Kind == PeriodKind.Instant
             ? new XElement(Xbrli + "period", new XElement(Xbrli + "instant", Iso(f.Period.Instant)))
@@ -103,43 +153,43 @@ public static class XmlSerializer
             new XAttribute("id", id), entity, period);
     }
 
-    private static XElement BuildUnit(string id, XbrlFact f)
+    private static XElement BuildUnit(string id, XbrlFact f, FilingProfile profile, Func<string, string> qname)
     {
         if (f.CompoundUnit is not null)
         {
             var num = new XElement(Xbrli + "unitNumerator");
             foreach (var m in f.CompoundUnit.Numerators)
-                num.Add(new XElement(Xbrli + "measure", m));
+                num.Add(new XElement(Xbrli + "measure", qname(MeasureQName(m, profile))));
             var den = new XElement(Xbrli + "unitDenominator");
             foreach (var m in f.CompoundUnit.DenominatorList)
-                den.Add(new XElement(Xbrli + "measure", m));
+                den.Add(new XElement(Xbrli + "measure", qname(MeasureQName(m, profile))));
             return new XElement(Xbrli + "unit", new XAttribute("id", id),
                 new XElement(Xbrli + "divide", num, den));
         }
         var unit = new XElement(Xbrli + "unit", new XAttribute("id", id),
-            new XElement(Xbrli + "measure", f.Unit!.Measure));
+            new XElement(Xbrli + "measure", qname(MeasureQName(f.Unit!.Measure, profile))));
         if (f.Unit.Power != 1)
             unit.Element(Xbrli + "measure")!.Add(new XAttribute("power", f.Unit.Power));
         return unit;
     }
 
-    private static XElement BuildFact(XbrlFact f, Dictionary<string, string> prefixes,
+    private static XElement BuildFact(XbrlFact f, Dictionary<string, string> namespaces, Func<string, string> qname,
         Dictionary<string, string> contextIds, Dictionary<string, string> unitIds)
     {
-        var (pfx, local) = SplitQName(f.ConceptName);
-        var ns = prefixes.FirstOrDefault(kv => kv.Value == pfx).Key;
-        if (string.IsNullOrEmpty(ns)) ns = SyntheticProfile.Namespace;
-        var el = new XElement(XNamespace.Get(ns) + local,
+        var (pfx, local) = SplitQName(qname(f.ConceptName));
+        var el = new XElement(XNamespace.Get(namespaces[pfx!]) + local,
             new XAttribute("contextRef", contextIds[ContextKey(f)]));
         if (UnitPresent(f))
             el.Add(new XAttribute("unitRef", unitIds[UnitKey(f)]));
-        el.Add(new XAttribute("decimals", f.Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF"));
+        if (f.Decimals.HasValue) el.Add(new XAttribute("decimals", f.Decimals.Value.ToString(CultureInfo.InvariantCulture)));
         if (!string.IsNullOrEmpty(f.Language))
-            el.Add(new XAttribute(XNamespace.Xml + "lang", f.Language));
+            el.Add(new XAttribute(XNamespace.Xml + "lang", f.Language.ToLowerInvariant()));
         if (f.IsNil)
             el.Add(new XAttribute(Xbrli + "nil", "true"));
         else if (f.Value is not null)
             el.Value = f.Value.Value.ToString(CultureInfo.InvariantCulture);
+        else if (f.TextValue is not null)
+            el.Value = f.TextValue;
         return el;
     }
 
@@ -196,13 +246,13 @@ public static class XmlSerializer
 
         var dims = new List<Dimension>();
         var entity = ctx.Element(Xbrli + "entity");
-        foreach (var ed in entity?.Elements(Xbrli + "explicitDimension") ?? Enumerable.Empty<XElement>())
+        if (entity?.Descendants(Xbrldi + "typedMember").Any() == true)
+            throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                "Typed dimensions are not supported by this report model.");
+        foreach (var ed in entity?.Elements(Xbrli + "segment").Elements(Xbrldi + "explicitMember") ?? Enumerable.Empty<XElement>())
         {
-            var dimEl = ed.Elements().FirstOrDefault();
-            if (dimEl is null) continue;
-            var member = (string?)dimEl.Element(Xbrli + "member") ?? "";
-            var dimName = QualifiedFromElement(dimEl);
-            dims.Add(new Dimension(dimName, member));
+            var dimName = (string?)ed.Attribute("dimension") ?? "";
+            dims.Add(new Dimension(dimName, ed.Value));
         }
 
         var periodEl = ctx.Element(Xbrli + "period");
@@ -227,16 +277,16 @@ public static class XmlSerializer
             if (divide is not null)
             {
                 var nums = divide.Element(Xbrli + "unitNumerator")?.Elements(Xbrli + "measure")
-                    .Select(m => m.Value).ToList() ?? new();
+                    .Select(InternalMeasure).ToList() ?? new();
                 var dens = divide.Element(Xbrli + "unitDenominator")?.Elements(Xbrli + "measure")
-                    .Select(m => m.Value).ToList() ?? new();
+                    .Select(InternalMeasure).ToList() ?? new();
                 compound = new CompoundUnit(nums, dens);
             }
             else
             {
                 var m = unitEl.Element(Xbrli + "measure");
                 var power = (int?)m?.Attribute("power") ?? 1;
-                unit = new XbrlUnit(m?.Value ?? "", power);
+                unit = new XbrlUnit(m is null ? "" : InternalMeasure(m), power);
             }
         }
 
@@ -245,8 +295,13 @@ public static class XmlSerializer
         var decimalsStr = (string?)el.Attribute("decimals");
         int? decimals = decimalsStr is null || decimalsStr == "INF" ? null : int.Parse(decimalsStr, CultureInfo.InvariantCulture);
         var lang = (string?)el.Attribute(XNamespace.Xml + "lang");
-        decimal? value = isNil || string.IsNullOrWhiteSpace(el.Value)
-            ? null : decimal.Parse(el.Value, CultureInfo.InvariantCulture);
+        decimal? value = null;
+        string? textValue = null;
+        if (!isNil)
+        {
+            if (decimal.TryParse(el.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) value = parsed;
+            else textValue = el.Value;
+        }
 
         return new XbrlFact
         {
@@ -258,6 +313,7 @@ public static class XmlSerializer
             CompoundUnit = compound,
             Dimensions = dims,
             Value = value,
+            TextValue = textValue,
             IsNil = isNil,
             Decimals = decimals,
             Language = lang,
@@ -300,16 +356,25 @@ public static class XmlSerializer
 
     private static string PrefixFor(string qname) => SplitQName(qname).prefix ?? "x";
 
-    private static XName DimensionName(string dimensionQName)
+    private static string MeasureQName(string measure, FilingProfile profile)
     {
-        var (_, local) = SplitQName(dimensionQName);
-        return XNamespace.Get(SyntheticProfile.Namespace) + local;
+        if (measure.Contains(':')) return measure;
+        if (profile.SupportedUnits.Contains(measure)) return "iso4217:" + measure;
+        if (measure is "shares" or "pure" or "monetary" or "integer" or "percent") return "xbrli:" + measure;
+        throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+            $"Unit measure '{measure}' is not qualified by the filing profile.");
     }
 
-    private static string QualifiedFromElement(XElement dimEl)
+    private static string InternalMeasure(XElement element)
     {
-        var pfx = dimEl.GetPrefixOfNamespace(dimEl.Name.Namespace) ?? dimEl.Name.NamespaceName;
-        return $"{pfx}:{dimEl.Name.LocalName}";
+        var value = element.Value;
+        var separator = value.IndexOf(':');
+        if (separator < 1) return value;
+        var prefix = value[..separator];
+        var ns = element.GetNamespaceOfPrefix(prefix)?.NamespaceName;
+        return ns == Iso4217.NamespaceName || ns == Xbrli.NamespaceName
+            ? value[(separator + 1)..]
+            : value;
     }
 
     private static string? Iso(DateOnly? d) => d?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);

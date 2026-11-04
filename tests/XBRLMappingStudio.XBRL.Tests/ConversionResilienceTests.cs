@@ -127,24 +127,13 @@ public sealed class ConversionResilienceTests : IDisposable
     [Fact]
     public async Task WorkerRejectsUnknownConcept_WithBlockingDiagnostic()
     {
-        var bad = new[]
-        {
-            new XbrlFact
-            {
-                ConceptName = SyntheticProfile.Qualified("Nonexistent"),
-                EntityScheme = "http://xbrl.org/entity/",
-                EntityIdentifier = "ABC-Corp",
-                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
-                Unit = new XbrlUnit("QAR"),
-                Value = 1m,
-                Decimals = 0
-            }
-        };
         await using var worker = new LocalSyntheticWorker(Profile);
+        var payload = OimSerializer.Serialize(Profile, Facts())
+            .Replace("synthetic:Revenue", "synthetic:Nonexistent", StringComparison.Ordinal);
         var request = new WorkerRequest(
             WorkerOperations.ValidateReport, "op", "job", Profile.Digest,
             DateTimeOffset.UtcNow.AddSeconds(30),
-            JsonSerializer.SerializeToElement(OimSerializer.Serialize(Profile, bad)));
+            JsonSerializer.SerializeToElement(payload));
 
         var response = await worker.RequestAsync(request, CancellationToken.None);
         Assert.Equal(WorkerStatus.DomainFailure, response.Status);

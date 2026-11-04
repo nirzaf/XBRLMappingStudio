@@ -69,6 +69,7 @@ public sealed class XbrlFact
     /// Exactly one of <see cref="Unit"/> or <see cref="CompoundUnit"/> is set for a monetary fact.</summary>
     public CompoundUnit? CompoundUnit { get; init; }
     public decimal? Value { get; init; }
+    public string? TextValue { get; init; }
     public bool IsNil { get; init; }
     public int? Decimals { get; init; }
     public string? Language { get; init; }
@@ -80,9 +81,87 @@ public sealed class XbrlFact
     public IReadOnlyList<SourceReference> ContributingSources { get; init; }
         = Array.Empty<SourceReference>();
 
-    /// <summary>Verify period kind matches concept constraint. Returns false and populates reason.</summary>
+    public bool ValidateValueAgainst(ConceptMetadata meta, out string reason)
+    {
+        if (Value is not null && TextValue is not null)
+        {
+            reason = "A fact cannot have both a numeric and text value.";
+            return false;
+        }
+        if (IsNil && (Value is not null || TextValue is not null))
+        {
+            reason = "A nil fact cannot also carry a value.";
+            return false;
+        }
+        if (!IsNil && Value is null && TextValue is null)
+        {
+            reason = "A non-nil fact must carry a value.";
+            return false;
+        }
+        if (Unit is not null && CompoundUnit is not null)
+        {
+            reason = "A fact cannot have both a simple and compound unit.";
+            return false;
+        }
+        if (Decimals is not null && (IsNil || Value is null))
+        {
+            reason = "Decimals are only valid for a non-nil numeric fact.";
+            return false;
+        }
+        if (Value is not null && Language is not null)
+        {
+            reason = "A numeric fact cannot carry a language tag.";
+            return false;
+        }
+        if (Value is not null && Unit is null && CompoundUnit is null)
+        {
+            reason = "A numeric fact must carry a unit.";
+            return false;
+        }
+        if (TextValue is not null && (Unit is not null || CompoundUnit is not null || Decimals is not null))
+        {
+            reason = "A text fact cannot carry a unit or decimals.";
+            return false;
+        }
+        if (meta.DataType == "monetary" && Unit is null && CompoundUnit is null)
+        {
+            reason = $"Concept '{ConceptName}' is monetary and requires a unit.";
+            return false;
+        }
+        if (meta.DataType == "monetary" && TextValue is not null)
+        {
+            reason = $"Monetary concept '{ConceptName}' requires a numeric value.";
+            return false;
+        }
+        if (meta.DataType == "string" && (Value is not null || Unit is not null || CompoundUnit is not null || Decimals is not null))
+        {
+            reason = $"String concept '{ConceptName}' cannot carry a numeric value, unit, or decimals.";
+            return false;
+        }
+        if (meta.DataType == "string" && !IsNil && TextValue is null)
+        {
+            reason = $"String concept '{ConceptName}' requires a text value.";
+            return false;
+        }
+        if (Language is not null && meta.SupportedLanguages.Count > 0
+            && !meta.SupportedLanguages.Contains(Language.ToLowerInvariant(), StringComparer.Ordinal))
+        {
+            reason = $"Language '{Language}' is not supported by concept '{ConceptName}'.";
+            return false;
+        }
+        reason = "";
+        return true;
+    }
+
+    /// <summary>Verify the fact value and period against a taxonomy concept.</summary>
     public bool ValidateAgainst(ConceptMetadata meta, out string reason)
     {
+        if (!ValidateValueAgainst(meta, out reason)) return false;
+        if (meta.IsAbstract)
+        {
+            reason = $"Concept '{ConceptName}' is abstract and cannot carry a fact value.";
+            return false;
+        }
         if (meta.PeriodType == "instant" && Period.Kind != PeriodKind.Instant)
         {
             reason = $"Concept '{ConceptName}' requires an instant period.";
@@ -91,11 +170,6 @@ public sealed class XbrlFact
         if (meta.PeriodType == "duration" && Period.Kind != PeriodKind.Duration)
         {
             reason = $"Concept '{ConceptName}' requires a duration period (start..end).";
-            return false;
-        }
-        if (meta.DataType == "monetary" && Unit is null)
-        {
-            reason = $"Concept '{ConceptName}' is monetary and requires a unit.";
             return false;
         }
         reason = "";
@@ -114,8 +188,11 @@ public sealed class XbrlFact
             : Unit is not null ? "u:" + Unit.Measure + (Unit.Power != 1 ? $"^{Unit.Power}" : "") : "-";
         var dims = string.Join(",", Dimensions
             .OrderBy(d => d.Name, System.StringComparer.Ordinal)
-            .Select(d => $"{d.Name}={d.MemberName}"));
-        var val = IsNil ? "nil" : Value?.ToString(CultureInfo.InvariantCulture) ?? "(none)";
+            .Select(d => $"{d.Name}={d.MemberName}:{d.IsExplicit}"));
+        var val = IsNil ? "nil"
+            : Value is not null ? "n:" + Value.Value.ToString(CultureInfo.InvariantCulture)
+            : TextValue is not null ? "s:" + TextValue
+            : "(none)";
         var dec = Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF";
         return string.Join('|',
             ConceptName,
@@ -123,7 +200,7 @@ public sealed class XbrlFact
             Period.ToIsoString(),
             unit,
             dims,
-            Language ?? "",
+            Language?.ToLowerInvariant() ?? "",
             val,
             dec);
     }
@@ -176,6 +253,9 @@ public sealed class FilingProfile
     public required IReadOnlyList<ConceptMetadata> Concepts { get; init; }
     public required IReadOnlySet<string> SupportedUnits { get; init; }
     public string OutputFormat { get; init; } = "xbrl-json";
+    public IReadOnlyDictionary<string, string> NamespaceUris { get; init; }
+        = new Dictionary<string, string>();
+    public IReadOnlyList<string> TaxonomyUrls { get; init; } = Array.Empty<string>();
     public IReadOnlyDictionary<string, string> PackageHashes { get; init; }
         = new Dictionary<string, string>();
 

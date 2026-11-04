@@ -3,6 +3,7 @@ using System.Text.Json;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
@@ -39,7 +40,9 @@ public sealed class CliParityTests : IAsyncLifetime
     {
         var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
             "..", "..", "..", "..", ".."));
-        var binRoot = Path.Combine(repoRoot, "src", "XBRLMappingStudio.CLI", "bin");
+        var configuration = Directory.GetParent(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))?.Name
+            ?? throw new InvalidOperationException("Unable to determine the active test build configuration.");
+        var binRoot = Path.Combine(repoRoot, "src", "XBRLMappingStudio.CLI", "bin", configuration);
 
         string? PickDll() =>
             Directory.EnumerateFiles(binRoot, "xbrl-studio.dll", SearchOption.AllDirectories)
@@ -112,9 +115,10 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.True(doc.RootElement.TryGetProperty("facts", out var facts));
         var first = facts.EnumerateObject().First();
         var actual = first.Value;
-        Assert.Equal("synthetic:Revenue", actual.GetProperty("concept").GetString());
-        Assert.Equal(1_250_000, actual.GetProperty("value").GetInt64());
-        Assert.Equal("QAR", actual.GetProperty("unit").GetString());
+        var dimensions = actual.GetProperty("dimensions");
+        Assert.Equal("synthetic:Revenue", dimensions.GetProperty("concept").GetString());
+        Assert.Equal("1250000", actual.GetProperty("value").GetString());
+        Assert.Equal("iso4217:QAR", dimensions.GetProperty("unit").GetString());
         Assert.Equal(-3, actual.GetProperty("decimals").GetInt32());
     }
 
@@ -130,7 +134,6 @@ public sealed class CliParityTests : IAsyncLifetime
             NodeType = "quantumFlanger",
             DisplayName = "Unknown"
         });
-
         var projectPath = Path.Combine(_dir, "bad.xmap");
         var pm = new ProjectManager(projectPath);
         pm.Save(project);
@@ -213,6 +216,17 @@ public sealed class CliParityTests : IAsyncLifetime
             NodeId = Id.New(),
             NodeType = "quantumFlanger",
             DisplayName = "Unknown"
+        });
+        project.Approvals.Clear();
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-approver",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest,
+            Authority = "fixture-harness",
+            Notes = "Adversarial fixture to prove invalid mappings still fail after publication authorization."
         });
         var projectPath = Path.Combine(_dir, "fail-closed.xmap");
         new ProjectManager(projectPath).Save(project);

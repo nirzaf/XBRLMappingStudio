@@ -25,7 +25,7 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { "synthetic:Revenue" }, Refused: false, Truncated: false)
+            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, Refused: false, Truncated: false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -35,6 +35,79 @@ public class ProviderContractTests
         Assert.True(batch.UsedProvider);
         Assert.Single(batch.Suggestions);
         Assert.Equal("synthetic:Revenue", batch.Suggestions[0].Draft.Concept);
+        Assert.Equal("revenue", batch.Suggestions[0].Draft.SourceField);
+        Assert.Null(batch.Suggestions[0].Draft.Unit);
+    }
+
+    [Fact]
+    public async Task CloudProposal_PreservesStableFieldIdentityAndDeclaredCurrency()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = _ => new ChatResponse(
+                new[] { new ProposedMapping("column-17", "synthetic:Revenue") }, false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        var batch = await service.SuggestAsync(
+            new[] { new SourceFieldDescriptor("column-17", "Turnover", "QAR") }, default);
+
+        var suggestion = Assert.Single(batch.Suggestions);
+        Assert.Equal("Turnover", suggestion.SourceField);
+        Assert.Equal("Turnover", suggestion.Draft.SourceField);
+        Assert.Equal("QAR", suggestion.Draft.Unit);
+        Assert.StartsWith("prv-", suggestion.SuggestionId);
+    }
+
+    [Fact]
+    public async Task ManagedRequest_OnlySendsLocallyRankedConceptCandidates()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = _ => new ChatResponse(Array.Empty<ProposedMapping>(), false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        await service.SuggestAsync(new[] { new SourceFieldDescriptor("f1", "Revenue") }, default);
+
+        Assert.NotNull(provider.LastRequest);
+        Assert.NotEmpty(provider.LastRequest!.AllowedConcepts);
+        Assert.All(provider.LastRequest.AllowedConcepts, name =>
+            Assert.Contains(name, new[] { "synthetic:Revenue" }));
+        Assert.Equal(1000, provider.LastRequest.MaxOutputTokens);
+    }
+
+    [Fact]
+    public async Task MalformedNullProposal_IsDiscardedWithoutThrowing()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = _ => new ChatResponse(
+                new ProposedMapping[] { new(null!, null!), new("f1", "synthetic:Revenue") }, false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        var batch = await service.SuggestAsync(new[] { new SourceFieldDescriptor("f1", "Revenue") }, default);
+
+        Assert.Single(batch.Suggestions);
+        Assert.Contains(batch.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.AiInvalidDraft);
+    }
+
+    [Fact]
+    public async Task CloudProposalForUnknownFieldId_IsDiscarded()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = _ => new ChatResponse(
+                new[] { new ProposedMapping("invented-column", "synthetic:Revenue") }, false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        var batch = await service.SuggestAsync(
+            new[] { new SourceFieldDescriptor("column-17", "Turnover", "QAR") }, default);
+
+        Assert.Empty(batch.Suggestions);
+        Assert.Contains(batch.Diagnostics, d => d.Code == DiagnosticCodes.AiInvalidDraft);
     }
 
     [Fact]
@@ -43,12 +116,24 @@ public class ProviderContractTests
         var provider = new FakeProvider
         {
             Completer = _ => new ChatResponse(
-                new[] { "synthetic:DoesNotExist", "synthetic:FinancialStatements", "synthetic:Revenue" },
+                new[]
+                {
+                    new ProposedMapping("f1", "synthetic:DoesNotExist"),
+                    new ProposedMapping("f2", "synthetic:FinancialStatements"),
+                    new ProposedMapping("f3", "synthetic:Revenue"),
+                    new ProposedMapping("f4", "synthetic:Assets")
+                },
                 Refused: false, Truncated: false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
-        var batch = await service.SuggestAsync(new[] { "revenue" }, default);
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("f1", "revenue"),
+            new SourceFieldDescriptor("f2", "gross revenue"),
+            new SourceFieldDescriptor("f3", "net revenue"),
+            new SourceFieldDescriptor("f4", "revenue")
+        }, default);
 
         // Invented id + abstract id dropped; only the valid one survives.
         Assert.Single(batch.Suggestions);
@@ -60,7 +145,7 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(Array.Empty<string>(), Refused: true, Truncated: false)
+            Completer = _ => new ChatResponse(Array.Empty<ProposedMapping>(), Refused: true, Truncated: false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -72,17 +157,17 @@ public class ProviderContractTests
     }
 
     [Fact]
-    public async Task TruncatedOversizedResponse_IsDiscardedEntirely()
+    public async Task TruncatedOversizedResponse_FallsBackToLocalCandidates()
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { "synthetic:Revenue" }, Refused: false, Truncated: true)
+            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, Refused: false, Truncated: true)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
         var batch = await service.SuggestAsync(new[] { "revenue" }, default);
 
-        Assert.Empty(batch.Suggestions);
+        Assert.Contains(batch.Suggestions, s => s.Draft.Concept == "synthetic:Revenue");
         Assert.Contains(batch.Diagnostics, d => d.Code == DiagnosticCodes.AiInvalidDraft);
     }
 
@@ -105,7 +190,7 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { "synthetic:Revenue" }, false, false)
+            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
         using var cts = new CancellationTokenSource();

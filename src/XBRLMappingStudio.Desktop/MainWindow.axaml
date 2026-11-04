@@ -13,6 +13,8 @@
   </Design.DataContext>
 
   <Window.KeyBindings>
+    <KeyBinding Gesture="Ctrl+O" Command="{Binding OpenProjectCommand}" />
+    <KeyBinding Gesture="Ctrl+S" Command="{Binding SaveProjectCommand}" />
     <KeyBinding Gesture="Ctrl+Z" Command="{Binding UndoCommand}" />
     <KeyBinding Gesture="Ctrl+Y" Command="{Binding RedoCommand}" />
     <KeyBinding Gesture="Delete" Command="{Binding DeleteSelectedCommand}" />
@@ -37,11 +39,18 @@
         <MenuItem Header="_Validate" Command="{Binding ValidateCommand}" />
         <MenuItem Header="_Preview Sample" Command="{Binding PreviewCommand}" />
         <MenuItem Header="E_xecute" Command="{Binding ExecuteCommand}" />
+        <Separator />
+        <MenuItem Header="Allow synthetic profile (development only)"
+                  ToggleType="CheckBox" IsChecked="{Binding AllowSyntheticProfile}" />
       </MenuItem>
     </Menu>
 
     <Border Height="26" Background="#EFEFEF" DockPanel.Dock="Bottom" Padding="8,4">
-      <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <ProgressBar Width="90" Height="8" IsIndeterminate="True" IsVisible="{Binding IsBusy}"
+                     AutomationProperties.Name="Operation in progress" />
+        <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
+      </StackPanel>
     </Border>
 
     <Grid ColumnDefinitions="280,*,340">
@@ -49,9 +58,29 @@
       <Border Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
         <DockPanel>
           <TextBlock DockPanel.Dock="Top" Text="Source" FontWeight="Bold" />
+          <Button DockPanel.Dock="Top" Content="Choose source file…" Command="{Binding ChooseSourceCommand}"
+                  AutomationProperties.Name="Choose source file" />
           <ListBox DockPanel.Dock="Top" ItemsSource="{Binding SourceColumns}"
+                   SelectedItem="{Binding SelectedSourceColumn}"
                    MaxHeight="180"
                    AutomationProperties.Name="Source columns" />
+          <Button DockPanel.Dock="Top" Content="Bind field to selected Excel Field node"
+                  Command="{Binding BindSourceColumnCommand}" />
+          <Button DockPanel.Dock="Top" Content="Suggest concepts offline"
+                  Command="{Binding SuggestMappingsCommand}"
+                  AutomationProperties.Name="Suggest concepts offline" />
+          <ListBox DockPanel.Dock="Top" ItemsSource="{Binding AiSuggestions}"
+                   SelectedItem="{Binding SelectedSuggestion}" MaxHeight="110"
+                   AutomationProperties.Name="Offline concept suggestions">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:SuggestionRow">
+                <TextBlock Text="{Binding Display}" TextWrapping="Wrap"
+                           AutomationProperties.Name="{Binding Display}" />
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <Button DockPanel.Dock="Top" Content="Apply selected suggestion"
+                  Command="{Binding ApplySuggestedMappingCommand}" />
 
           <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,10,0,0">
             <TextBlock Text="Taxonomy explorer" FontWeight="Bold" />
@@ -69,7 +98,9 @@
             </StackPanel>
           </StackPanel>
 
-          <ListBox ItemsSource="{Binding ConceptResults}"
+          <Button DockPanel.Dock="Bottom" Content="Use selected concept on fact node"
+                  Command="{Binding SetConceptCommand}" />
+          <ListBox ItemsSource="{Binding ConceptResults}" SelectedItem="{Binding SelectedConcept}"
                    AutomationProperties.Name="Concept results">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:ConceptRow">
@@ -111,6 +142,16 @@
           <StackPanel DockPanel.Dock="Top" Spacing="6">
             <TextBlock Text="Properties" FontWeight="Bold" />
             <TextBlock Text="{Binding SelectedNodeDisplayName}" />
+            <StackPanel IsVisible="{Binding CanEditSelectedFact}" Spacing="4">
+              <TextBlock Text="Fact target properties" FontWeight="SemiBold" />
+              <TextBox Text="{Binding SelectedFactUnit}" Watermark="Unit (for example USD)"
+                       AutomationProperties.Name="Fact unit" />
+              <ComboBox ItemsSource="{Binding FactPeriodTypes}" SelectedItem="{Binding SelectedFactPeriodType}"
+                        AutomationProperties.Name="Fact period type" />
+              <TextBox Text="{Binding SelectedFactDecimals}" Watermark="Decimals or INF"
+                       AutomationProperties.Name="Fact decimals" />
+              <Button Content="Apply fact properties" Command="{Binding ApplyFactPropertiesCommand}" />
+            </StackPanel>
             <TextBlock Text="Diagnostics" FontWeight="Bold" Margin="0,10,0,0" />
           </StackPanel>
           <ListBox x:Name="DiagnosticList" ItemsSource="{Binding Diagnostics}"

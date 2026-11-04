@@ -14,10 +14,9 @@ public partial class App : AvaloniaApplication
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow = new MainWindow
-            {
-                DataContext = new MainWindowViewModel()
-            };
+            var window = new MainWindow();
+            window.DataContext = new MainWindowViewModel(new AvaloniaProjectFileDialog(window));
+            desktop.MainWindow = window;
         }
         base.OnFrameworkInitializationCompleted();
     }

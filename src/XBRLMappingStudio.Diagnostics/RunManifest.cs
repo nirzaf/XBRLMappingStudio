@@ -42,6 +42,7 @@ public sealed class RunManifest
 
     public required string ProjectId { get; init; }
     public int SemanticRevision { get; init; }
+    public string ProjectSemanticDigest { get; init; } = "";
     public required string ProfileDigest { get; init; }
     public required string EngineVersion { get; init; }
 

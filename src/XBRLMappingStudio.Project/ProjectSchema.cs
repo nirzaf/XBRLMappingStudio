@@ -144,6 +144,8 @@ public sealed record FunctionDefinition
 public sealed record ApprovalRecord
 {
     public required int SemanticRevision { get; init; }
+    /// <summary>Immutable executable graph digest approved with this revision.</summary>
+    public string? SemanticDigest { get; init; }
     public required string ApprovedBy { get; init; }
     public required DateTimeOffset ApprovedUtc { get; init; }
     public required string ProfileDigest { get; init; }

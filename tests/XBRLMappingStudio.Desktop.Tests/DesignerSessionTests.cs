@@ -204,4 +204,76 @@ public sealed class DesignerSessionTests
         Assert.Equal(220, session.Project.Nodes.Single(n => n.NodeId == "n1").Layout!.X);
         Assert.Equal(660, session.Project.Nodes.Single(n => n.NodeId == "n3").Layout!.X);
     }
+
+    [Fact]
+    public void DefaultDesktopProject_ValidatesThroughSharedJobService()
+    {
+        var viewModel = new MainWindowViewModel();
+
+        viewModel.ValidateCommand.Execute(null);
+
+        Assert.Equal("Validation complete.", viewModel.StatusText);
+        Assert.DoesNotContain(viewModel.Diagnostics, row => row.Severity == "error");
+    }
+
+    [Fact]
+    public void FactPropertyEdit_IsOneUndoableChange()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactUnit = "EUR";
+        viewModel.SelectedFactPeriodType = "instant";
+        viewModel.SelectedFactDecimals = "-2";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        Assert.Equal("EUR", fact.Parameters["unit"]);
+        Assert.Equal("instant", fact.Parameters["periodType"]);
+        Assert.Equal("-2", fact.Parameters["decimals"]);
+        viewModel.Session.Undo();
+        fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        Assert.Equal("USD", fact.Parameters["unit"]?.ToString());
+        Assert.Equal("duration", fact.Parameters["periodType"]?.ToString());
+        Assert.Equal("0", fact.Parameters["decimals"]?.ToString());
+    }
+
+    [Fact]
+    public async Task DesktopOfflineSuggestion_ValidatesAndAppliesSourceAndFactTogether()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-ai", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        File.WriteAllText(csv, "Revenue\n1250\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            viewModel.Session.SetNodeParameter("sample-value", "column", "OldColumn");
+            await viewModel.LoadSourceAsync(csv);
+            Assert.Contains("Revenue", viewModel.SourceColumns);
+            viewModel.SelectedSourceColumn = "Revenue";
+
+            await viewModel.SuggestMappingsAsync();
+
+            var suggestion = Assert.Single(viewModel.AiSuggestions,
+                row => row.Concept == "synthetic:Revenue");
+            viewModel.SelectedSuggestion = suggestion;
+            viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+            var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
+            viewModel.ApplySuggestedMappingCommand.Execute(null);
+
+            Assert.Contains("Applied", viewModel.StatusText);
+            var source = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-value");
+            var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+            Assert.Equal("Revenue", source.Parameters["column"]?.ToString());
+            Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
+            viewModel.Session.Undo();
+            Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
 }

@@ -8,6 +8,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="XBRLMappingStudio.Ops.Tests" />
+    <InternalsVisibleTo Include="XBRLMappingStudio.Integration.Tests" />
     <ProjectReference Include="..\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.AI\XBRLMappingStudio.AI.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />

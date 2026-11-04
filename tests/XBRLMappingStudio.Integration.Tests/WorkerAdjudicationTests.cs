@@ -132,7 +132,8 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         public FakeWorker(Func<WorkerRequest, WorkerResponse> responder) => _responder = responder;
 
         public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
-            => Task.FromResult(new WorkerHandshake(WorkerProtocol.CurrentVersion, "fake/1.0", Array.Empty<string>()));
+            => Task.FromResult(new WorkerHandshake(WorkerProtocol.CurrentVersion, "fake/1.0",
+                new[] { WorkerOperations.ValidateReport }));
 
         public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
         {

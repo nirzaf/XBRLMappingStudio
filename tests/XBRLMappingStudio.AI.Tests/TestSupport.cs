@@ -30,6 +30,7 @@ internal sealed class FakeProvider : IChatClientProvider
 {
     public ProbeResult Probe { get; set; } = new(true, "ok");
     public Func<ChatRequest, ChatResponse>? Completer { get; set; }
+    public ChatRequest? LastRequest { get; private set; }
     public int ProbeCalls;
     public int CompleteCalls;
     public string Name => "fake";
@@ -44,9 +45,10 @@ internal sealed class FakeProvider : IChatClientProvider
     public Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken)
     {
         CompleteCalls++;
+        LastRequest = request;
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(Completer?.Invoke(request)
-            ?? new ChatResponse(Array.Empty<string>(), Refused: true, Truncated: false));
+            ?? new ChatResponse(Array.Empty<ProposedMapping>(), Refused: true, Truncated: false));
     }
 }
 

@@ -11,6 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\..\tools\worker\arelle_worker.py" Link="worker\arelle_worker.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="..\XBRLMappingStudio.Application\XBRLMappingStudio.Application.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />

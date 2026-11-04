@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
 namespace XBRLMappingStudio.XBRL.Tests;
 
 /// <summary>
@@ -58,13 +61,11 @@ public sealed class FactSerializationTests
         // Language-tagged fact.
         new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ABC-Corp",
             Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
-            Unit = new XbrlUnit("USD"),
-            Value = 99m,
-            Decimals = 0,
+            TextValue = "Revenue reported in English",
             Language = "en"
         },
         // Explicit dimension.
@@ -133,9 +134,9 @@ public sealed class FactSerializationTests
             Decimals = 1
         };
         var json = OimSerializer.Serialize(Profile, new[] { cu });
-        Assert.Contains("\"divide\"", json);
-        Assert.Contains("numerators", json);
-        Assert.Contains("denominators", json);
+        using var document = JsonDocument.Parse(json);
+        var fact = document.RootElement.GetProperty("facts").EnumerateObject().Single().Value;
+        Assert.Equal("iso4217:USD/xbrli:shares", fact.GetProperty("dimensions").GetProperty("unit").GetString());
 
         var read = OimSerializer.ReadFacts(json).Single();
         Assert.NotNull(read.CompoundUnit);
@@ -184,6 +185,154 @@ public sealed class FactSerializationTests
         Assert.Null(xml.Value);
         // nil is distinguishable from a zero value by the semantic key.
         Assert.Contains("|nil|", nil.SemanticKey());
+    }
+
+    [Fact]
+    public void OimJson_UsesStandardEnvelopeLexicalValuesAndBoundaryDates()
+    {
+        var fact = GoldenFacts()[0];
+        using var document = JsonDocument.Parse(OimSerializer.Serialize(Profile, new[] { fact }));
+        var root = document.RootElement;
+        Assert.Equal("https://xbrl.org/2021/xbrl-json",
+            root.GetProperty("documentInfo").GetProperty("documentType").GetString());
+        var output = root.GetProperty("facts").EnumerateObject().Single().Value;
+        Assert.Equal("1250000", output.GetProperty("value").GetString());
+        Assert.Equal(-3, output.GetProperty("decimals").GetInt32());
+        Assert.Equal("2025-01-01T00:00:00/2026-01-01T00:00:00",
+            output.GetProperty("dimensions").GetProperty("period").GetString());
+        Assert.Equal("iso4217:QAR", output.GetProperty("dimensions").GetProperty("unit").GetString());
+        Assert.Equal("synthetic:Revenue", output.GetProperty("dimensions").GetProperty("concept").GetString());
+        Assert.DoesNotContain("$schema", root.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("report", root.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OimJson_FactIdsAreContentDerivedAndRepeatedFactsRemainDistinct()
+    {
+        var facts = new[] { GoldenFacts()[0], GoldenFacts()[1], GoldenFacts()[0] };
+        using var first = JsonDocument.Parse(OimSerializer.Serialize(Profile, facts));
+        using var reordered = JsonDocument.Parse(OimSerializer.Serialize(Profile, facts.Reverse().ToArray()));
+        var firstIds = first.RootElement.GetProperty("facts").EnumerateObject().Select(p => p.Name).Order().ToArray();
+        var reorderedIds = reordered.RootElement.GetProperty("facts").EnumerateObject().Select(p => p.Name).Order().ToArray();
+        Assert.Equal(firstIds, reorderedIds);
+        Assert.Equal(3, firstIds.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void OimJson_RejectsLegacyEnvelopeAndDuplicateKeys()
+    {
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts("""
+            { "$schema": "https://xbrl.org/2021/json/xbrl-json-1.0.json", "facts": {} }
+            """));
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts("""
+            { "documentInfo": { "documentType": "https://xbrl.org/2021/xbrl-json", "documentType": "bad", "namespaces": {}, "taxonomy": [] }, "facts": {} }
+            """));
+    }
+
+    [Fact]
+    public void OimJson_ReadsXbrlInternationalExampleIncludingTextFact()
+    {
+        var facts = OimSerializer.ReadFacts(FixturePaths.Read("xbrl-international-simple-report.json"));
+        Assert.Equal(2, facts.Count);
+        Assert.Equal(1_230_000m, facts[0].Value);
+        Assert.Equal(new DateOnly(2019, 12, 31), facts[0].Period.Instant);
+        Assert.Equal("ABC INC", facts[1].TextValue);
+        Assert.Equal("en", facts[1].Language);
+        Assert.Equal(XbrlPeriod.OfDuration(new DateOnly(2019, 1, 1), new DateOnly(2020, 1, 1)), facts[1].Period);
+    }
+
+    [Fact]
+    public void OimJson_PreservesTextAndLanguageWithoutInventingDecimals()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            TextValue = "for year ended",
+            Language = "EN"
+        };
+        var json = OimSerializer.Serialize(Profile, new[] { fact });
+        using var document = JsonDocument.Parse(json);
+        var output = document.RootElement.GetProperty("facts").EnumerateObject().Single().Value;
+        Assert.Equal("for year ended", output.GetProperty("value").GetString());
+        Assert.False(output.TryGetProperty("decimals", out _));
+        Assert.Equal("en", output.GetProperty("dimensions").GetProperty("language").GetString());
+        Assert.Equal(fact.SemanticKey(), OimSerializer.ReadFacts(json).Single().SemanticKey());
+    }
+
+    [Fact]
+    public void OimJson_MatchesProductFixtureValidatedIndependentlyByArelle()
+    {
+        var basis = Profile;
+        var profile = new FilingProfile
+        {
+            ProfileId = basis.ProfileId,
+            Digest = basis.Digest,
+            Concepts = basis.Concepts,
+            SupportedUnits = basis.SupportedUnits,
+            NamespaceUris = basis.NamespaceUris,
+            TaxonomyUrls = new[] { "arelle-test-taxonomy.xsd" },
+            PackageHashes = basis.PackageHashes
+        };
+        var facts = new[]
+        {
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Unit = new XbrlUnit("USD"),
+                Value = 123.45m,
+                Decimals = 2
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                TextValue = "ABC INC",
+                Language = "en"
+            }
+        };
+
+        var expected = JsonNode.Parse(FixturePaths.Read("product-generated-pass.xbrl.json"));
+        var actual = JsonNode.Parse(OimSerializer.Serialize(profile, facts));
+        Assert.True(JsonNode.DeepEquals(expected, actual), "C# serializer output changed from the Arelle-validated fixture.");
+    }
+
+    [Fact]
+    public void OimJson_TextThatLooksNumeric_RemainsTextWithoutAUnit()
+    {
+        var report = """
+            {"documentInfo":{"documentType":"https://xbrl.org/2021/xbrl-json","namespaces":{"synthetic":"urn:synthetic:finance:1.0","entity":"urn:entity"},"taxonomy":[]},"facts":{"f1":{"value":"123","dimensions":{"concept":"synthetic:EntityRegistrantName","entity":"entity:ABC","period":"2025-01-01T00:00:00/2026-01-01T00:00:00"}}}}
+            """;
+
+        var fact = Assert.Single(OimSerializer.ReadFacts(report));
+
+        Assert.Null(fact.Value);
+        Assert.Equal("123", fact.TextValue);
+    }
+
+    [Fact]
+    public void Serializers_RejectNilFactsThatAlsoCarryAValue()
+    {
+        var malformed = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("USD"),
+            Value = 1m,
+            IsNil = true
+        };
+
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { malformed }));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.Serialize(Profile, new[] { malformed }));
     }
 
     private static void AssertMultisetEquivalent(IReadOnlyList<XbrlFact> expected, IReadOnlyList<XbrlFact> actual)

@@ -1,5 +1,7 @@
-using System.Text.Json;
+using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Application;
 
@@ -26,13 +28,54 @@ public sealed class PublicationService
 
     public PublicationService(RunJournal journal) => _journal = journal;
 
+    /// <summary>Authorize, scope and publish one completed report at the final write boundary.</summary>
+    public PublicationReceipt PublishAuthorized(
+        string destinationPath,
+        byte[] payload,
+        string workspaceRoot,
+        MappingProject project,
+        FilingProfile profile,
+        bool allowSyntheticProfile,
+        JobResult result)
+    {
+        var manifest = result.Manifest;
+        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
+        if (gate.HasBlockingErrors)
+        {
+            var first = gate.Items.First(d => d.IsBlocking);
+            throw PublicationFailed(first.Code, string.Join(Environment.NewLine, gate.Items.Select(d => d.Message)),
+                manifest.RunId, destinationPath);
+        }
+
+        var graphDigest = project.ComputeSemanticDigest();
+        if (manifest.ProjectId != project.ProjectId
+            || manifest.SemanticRevision != project.SemanticRevision
+            || manifest.ProjectSemanticDigest != graphDigest
+            || manifest.ProfileDigest != profile.Digest
+            || manifest.IsPreview
+            || manifest.Outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+            throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
+                "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
+                manifest.RunId, destinationPath);
+
+        var expectedDigest = RunManifest.ComputeSha256(payload);
+        if (!manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+                && output.Digest == expectedDigest && output.Bytes == payload.Length))
+            throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                "Publication bytes do not match the report artifact recorded by the run.",
+                manifest.RunId, destinationPath);
+
+        var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
+        return Publish(safeDestination, payload, manifest.RunId);
+    }
+
     /// <summary>
     /// Publish <paramref name="payload"/> to <paramref name="destinationPath"/>.
     /// <paramref name="beforeReplaceFault"/> exists for fault-injection tests that must
     /// prove the prior accepted output survives a mid-replace failure; production callers
     /// pass null.
     /// </summary>
-    public PublicationReceipt Publish(
+    internal PublicationReceipt Publish(
         string destinationPath,
         byte[] payload,
         string? runId = null,

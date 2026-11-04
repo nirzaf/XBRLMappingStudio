@@ -27,13 +27,14 @@ public sealed class ReportImportTests : IDisposable
 
     private static IReadOnlyList<XbrlFact> Report() => new[]
     {
-        Revenue("QAR", 1_000_000m, lang: "en"),
-        Revenue("USD", 300_000m, lang: "fr"),   // two units
-        Revenue("QAR", 1_000_000m, lang: "ar"), // multiple languages
-        Revenue("QAR", 250_000m, lang: "en")    // repeated concept, different period
+        Revenue("QAR", 1_000_000m),
+        Revenue("USD", 300_000m),
+        Text("ABC Corp", "en"),
+        Text("ABC Corp", "fr"),
+        Text("شركة ABC", "ar")
     };
 
-    private static XbrlFact Revenue(string unit, decimal value, string lang) => new()
+    private static XbrlFact Revenue(string unit, decimal value) => new()
     {
         ConceptName = SyntheticProfile.Qualified("Revenue"),
         EntityScheme = "http://xbrl.org/entity/",
@@ -41,8 +42,17 @@ public sealed class ReportImportTests : IDisposable
         Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
         Unit = new XbrlUnit(unit),
         Value = value,
-        Decimals = -3,
-        Language = lang
+        Decimals = -3
+    };
+
+    private static XbrlFact Text(string value, string language) => new()
+    {
+        ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+        EntityScheme = "http://xbrl.org/entity/",
+        EntityIdentifier = "ABC-Corp",
+        Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+        TextValue = value,
+        Language = language
     };
 
     private string Write(string name, string content)
@@ -69,8 +79,9 @@ public sealed class ReportImportTests : IDisposable
         var conn = new SourceConnection("src", adapter.Kind, path);
         var rows = await Drain(adapter, conn);
 
-        Assert.Equal(4, rows.Count);
-        Assert.All(rows, r => Assert.Equal(SyntheticProfile.Qualified("Revenue"), r.Fields["concept"].AsString()));
+        Assert.Equal(5, rows.Count);
+        Assert.Equal(2, rows.Count(r => r.Fields["concept"].AsString() == SyntheticProfile.Qualified("Revenue")));
+        Assert.Equal(3, rows.Count(r => r.Fields["concept"].AsString() == SyntheticProfile.Qualified("EntityRegistrantName")));
 
         // Two distinct units preserved across records.
         Assert.Contains(rows, r => r.Fields["unit"].AsString() == "QAR");
@@ -96,7 +107,9 @@ public sealed class ReportImportTests : IDisposable
 
         // Same multiset of facts regardless of encoding (compare on the value+unit+lang projection).
         static string[] Proj(IEnumerable<DataRecord> rs) => rs
-            .Select(r => $"{r.Fields["unit"].AsString()}|{r.Fields["value"].AsDecimal()}|{r.Fields["lang"].AsString()}")
+            .Select(r => $"{r.Fields["concept"].AsString()}|{r.Fields["unit"].AsString()}|" +
+                $"{(r.Fields["value"].IsMissing ? "" : r.Fields["value"].AsDecimal().ToString(System.Globalization.CultureInfo.InvariantCulture))}|" +
+                $"{r.Fields["textValue"].AsString()}|{r.Fields["lang"].AsString()}")
             .OrderBy(x => x, StringComparer.Ordinal).ToArray();
 
         Assert.Equal(Proj(jsonRows), Proj(xmlRows));
@@ -106,12 +119,23 @@ public sealed class ReportImportTests : IDisposable
     public async Task RepeatedFact_PreservedAsDistinctRows()
     {
         // Two identical facts (same aspects) remain two records — report import is lossless.
-        var facts = new[] { Revenue("QAR", 1_000_000m, "en"), Revenue("QAR", 1_000_000m, "en") };
+        var facts = new[] { Revenue("QAR", 1_000_000m), Revenue("QAR", 1_000_000m) };
         var path = Write("dup.json", OimSerializer.Serialize(Profile, facts));
         var adapter = new XbrlReportAdapter();
         var rows = await Drain(adapter, new SourceConnection("src", adapter.Kind, path));
         Assert.Equal(2, rows.Count);
         Assert.Equal(rows[0].Fields["value"].AsDecimal(), rows[1].Fields["value"].AsDecimal());
+    }
+
+    [Fact]
+    public async Task TextFact_ImportsWithoutChangingItToNumericOrBlank()
+    {
+        var path = Write("text-report.json", FixturePaths.Read("xbrl-international-simple-report.json"));
+        var adapter = new XbrlReportAdapter();
+        var rows = await Drain(adapter, new SourceConnection("src", adapter.Kind, path));
+        var row = Assert.Single(rows, r => r.Fields["textValue"].AsString() == "ABC INC");
+        Assert.True(row.Fields["value"].IsMissing);
+        Assert.Equal("en", row.Fields["lang"].AsString());
     }
 
     [Fact]

@@ -27,6 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\XBRLMappingStudio.AI\XBRLMappingStudio.AI.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Application\XBRLMappingStudio.Application.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
     <ProjectReference Include="..\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />

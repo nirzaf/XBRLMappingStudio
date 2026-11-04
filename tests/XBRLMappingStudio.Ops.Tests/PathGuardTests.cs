@@ -68,6 +68,19 @@ public class PathGuardTests : IDisposable
     }
 
     [Fact]
+    public void InternalSymlinkParentForNewFile_IsRejected()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        Directory.CreateSymbolicLink(Path.Combine(_root, "external"), _outside);
+
+        var ex = Assert.Throws<AdapterException>(() =>
+            PathGuard.EnsureWithin(_root, "external/new-report.json"));
+
+        Assert.Equal(DiagnosticCodes.IoPathEscapesWorkspace, ex.Code);
+        Assert.False(File.Exists(Path.Combine(_outside, "new-report.json")));
+    }
+
+    [Fact]
     public void IsWithin_ProbeDoesNotThrow()
     {
         Assert.True(PathGuard.IsWithin(_root, "ok.txt"));

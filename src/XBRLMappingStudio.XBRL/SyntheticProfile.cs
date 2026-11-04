@@ -72,6 +72,22 @@ public static class SyntheticProfile
             IsAbstract: false),
 
         new ConceptMetadata(
+            Qualified("EntityRegistrantName"), Namespace, "EntityRegistrantName",
+            Label: "Entity Registrant Name",
+            DataType: "string",
+            PeriodType: "duration",
+            IsAbstract: false)
+        {
+            SupportedLanguages = new[] { "en", "fr", "ar" },
+            LabelsByLanguage = new Dictionary<string, string>
+            {
+                ["en"] = "Entity Registrant Name",
+                ["fr"] = "Nom du titulaire de l'entité",
+                ["ar"] = "اسم الكيان"
+            }
+        },
+
+        new ConceptMetadata(
             Qualified("FinancialStatements"), Namespace, "FinancialStatements",
             Label: "Financial Statements",
             DataType: "non-float",
@@ -129,6 +145,10 @@ public static class SyntheticProfile
             Digest = digest,
             Concepts = Concepts,
             SupportedUnits = SupportedUnits,
+            NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [Prefix] = Namespace
+            },
             OutputFormat = "xbrl-json",
             PackageHashes = new Dictionary<string, string>
             {

@@ -1,0 +1,37 @@
+{
+  "documentInfo": {
+    "documentType": "https://xbrl.org/2021/xbrl-json",
+    "namespaces": {
+      "entity": "http://standards.iso.org/iso/17442",
+      "iso4217": "http://www.xbrl.org/2003/iso4217",
+      "synthetic": "urn:synthetic:finance:1.0",
+      "xbrl": "https://xbrl.org/2021",
+      "xbrli": "http://www.xbrl.org/2003/instance",
+      "xs": "http://www.w3.org/2001/XMLSchema"
+    },
+    "taxonomy": [
+      "arelle-test-taxonomy.xsd"
+    ]
+  },
+  "facts": {
+    "f8f947a08b66c0eb7d5b36ecbe76c68eedd7a032c29ff0b2019aca468f8a82d19": {
+      "value": "ABC INC",
+      "dimensions": {
+        "concept": "synthetic:EntityRegistrantName",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "language": "en"
+      }
+    },
+    "fe56e4e0cfbd0136aca48789ec6f0a6ab904f81a72375398a32eb937ab1ca456c": {
+      "value": "123.45",
+      "dimensions": {
+        "concept": "synthetic:Revenue",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:USD"
+      },
+      "decimals": 2
+    }
+  }
+}

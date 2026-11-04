@@ -4,8 +4,8 @@ namespace XBRLMappingStudio.Adapters;
 
 /// <summary>
 /// Canonicalizes candidate paths and rejects any that escape the approved workspace
-/// root (OPS04). Symlinks are resolved when the target exists so a link planted inside
-/// the root but pointing outside it cannot smuggle writes out of the sandbox.
+/// root (OPS04). Symlinks in every existing path component are resolved, including a
+/// parent of a not-yet-created output, so an internal link cannot redirect a write.
 /// Adapters must route every user- or project-supplied path through this gate.
 /// </summary>
 public static class PathGuard
@@ -20,22 +20,11 @@ public static class PathGuard
         if (string.IsNullOrWhiteSpace(candidatePath))
             throw Escape(workspaceRoot, candidatePath, "empty path");
 
-        var root = CanonicalizeFull(Full(workspaceRoot, null));
-        var candidate = CanonicalizeFull(Full(candidatePath, root));
+        var root = ResolveLinks(CanonicalizeFull(Full(workspaceRoot, null)), workspaceRoot, candidatePath);
+        var candidate = ResolveLinks(CanonicalizeFull(Full(candidatePath, root)), workspaceRoot, candidatePath);
 
         if (!IsUnder(root, candidate))
             throw Escape(workspaceRoot, candidatePath, candidate);
-
-        // If the candidate exists (possibly via symlinks), its *final* target must also
-        // live under the root — a mid-tree symlink can rewrite an external destination.
-        var realTarget = ResolveFinalLinkTarget(candidate);
-        if (realTarget is not null)
-        {
-            var realCanonical = CanonicalizeFull(realTarget);
-            if (!IsUnder(root, realCanonical))
-                throw Escape(workspaceRoot, candidatePath,
-                    $"symlink resolves outside workspace to '{realCanonical}'");
-        }
 
         return candidate;
     }
@@ -72,17 +61,38 @@ public static class PathGuard
             && candidate.StartsWith(root + Path.DirectorySeparatorChar, comparer);
     }
 
-    private static string? ResolveFinalLinkTarget(string path)
+    private static string ResolveLinks(string path, string workspaceRoot, string candidatePath)
     {
-        try
+        var full = Path.GetFullPath(path);
+        var current = Path.GetPathRoot(full)!;
+        foreach (var part in full[current.Length..].Split(
+                     new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                     StringSplitOptions.RemoveEmptyEntries))
         {
-            if (File.Exists(path))
-                return new FileInfo(path).ResolveLinkTarget(true)?.FullName;
-            if (Directory.Exists(path))
-                return new DirectoryInfo(path).ResolveLinkTarget(true)?.FullName;
+            current = Path.Combine(current, part);
+            foreach (FileSystemInfo info in new FileSystemInfo[] { new DirectoryInfo(current), new FileInfo(current) })
+            {
+                try
+                {
+                    if (info.LinkTarget is null) continue;
+                    var target = info.ResolveLinkTarget(true)
+                        ?? throw new IOException("Symbolic link has no resolvable target.");
+                    current = Path.GetFullPath(target.FullName);
+                    break;
+                }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+                catch (IOException ex)
+                {
+                    throw Escape(workspaceRoot, candidatePath, $"symlink target cannot be resolved ({ex.Message})");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    throw Escape(workspaceRoot, candidatePath, $"symlink target cannot be inspected ({ex.Message})");
+                }
+            }
         }
-        catch (IOException) { /* treat unresolvable as non-link */ }
-        return null;
+        return CanonicalizeFull(current);
     }
 
     private static AdapterException Escape(string root, string candidate, string detail) =>

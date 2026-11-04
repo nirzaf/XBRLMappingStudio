@@ -1,0 +1,2 @@
+# Supported Arelle Python API used by arelle_worker.py.
+arelle-release==2.47.4

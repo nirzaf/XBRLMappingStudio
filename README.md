@@ -215,9 +215,9 @@ Standard output carries machine-readable results; standard error carries diagnos
 | `inspect <project.xmap>` | Print the project's bound sources and schemas. |
 | `validate <project.xmap>` | Run graph validation; non-zero exit on blocking diagnostics. |
 | `preview <project.xmap> --binding <id>=<path> --rows <n>` | Sampled, visibly-partial execution. |
-| `execute <project.xmap> --binding <id>=<path> --output <path>` | Full run producing xBRL-JSON. |
+| `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>]` | Full run producing xBRL-JSON; all source, output and manifest paths stay inside the workspace root (defaults to the project directory). |
 | `taxonomy-search [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search. |
-| `validate-artifact <file.xbrl.json>` | Filing-rule validation of exact exported bytes. |
+| `validate-artifact <file.xbrl.json>` | Synthetic filing-rule validation of the exported artifact. Add `--arelle --python <exe> --taxonomy-root <dir>` for independent offline Arelle validation; install the pinned worker runtime from `tools/worker/requirements.lock`. |
 | `inspect-run-result <runId>` | Look up a run's journal result. |
 | `support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]` | Redacted diagnostic bundle. |
 
@@ -292,21 +292,27 @@ git tag v1.0.0 && git push origin v1.0.0
 ## Implementation status
 
 The project is organized around the guide's atomic IDs and delivery gates (G0–G5). The
-following IDs are implemented and covered by tests:
+following IDs have implementation code and repository tests; qualification limits still apply:
 
 | Area | Implemented IDs |
 |---|---|
 | Foundation | `BASE02`–`BASE04`, `BASE01` (synthetic column) |
 | Mapping engine | `MAP01`–`MAP08` |
 | Adapters | `IO01`–`IO06` |
-| XBRL | `XBR01`–`XBR08` (synthetic profile) |
-| Desktop | `UI01`–`UI06` |
-| AI baseline | `AI01`–`AI06` |
+| XBRL | `XBR01`–`XBR08` (synthetic profile; Arelle `validate-artifact` path) |
+| Desktop | `UI01` (development build), `UI02` (canvas prototype), `UI03`–`UI04`, `UI06` (headless workflow tests) |
+| AI baseline | `AI01`–`AI04`, `AI06` (offline baseline); `AI05` (single-suggestion apply/undo path) |
 | Operations | `OPS01`–`OPS04`, `OPS08` (partial) |
 
 Per-ID evidence lives in [`docs/decisions/BASE01-decision-record.md`](./docs/decisions/BASE01-decision-record.md).
 Items marked "synthetic" (e.g. the XBRL filing profile) are honestly scoped to the offline
 synthetic OIM profile — they are **not** qualified against a real regulator package.
+Independent Arelle validation is available for existing artifacts through the CLI;
+desktop and full `execute` runs still use the local synthetic validation worker.
+Desktop tests exercise the view model and canvas session without a native Windows session;
+keyboard-only use, screen-reader behavior, native dialogs and installer behavior remain
+unqualified. AI review does not yet persist a governed reviewer identity and complete
+accept/edit/reject/batch audit trail.
 
 ---
 
@@ -320,7 +326,8 @@ not silently re-scoped. See [`docs/decisions/OPEN.md`](./docs/decisions/OPEN.md)
 - Production database family (`IO07`–`IO09`) and PDF/OCR ingestion (`IO10`–`IO12`).
 - Real regulator profile + taxonomy upgrade simulation (`XBR09`).
 - Model-provider qualification and rollout (`AI07`–`AI08`).
-- Signed Windows installer (`UI07`) and Windows performance benchmarks (`PERF01`–`PERF07`).
+- Keyboard/screen-reader qualification (`UI05`), signed Windows installer (`UI07`) and
+  real Windows performance benchmarks (`PERF01`–`PERF07`).
 - Signed release bundles and upgrade/backup/rollback (`OPS06`–`OPS07`), DB receipt lookup
   (`OPS05`), and regulator-mandated extensions (`EXT01`–`EXT04`).
 

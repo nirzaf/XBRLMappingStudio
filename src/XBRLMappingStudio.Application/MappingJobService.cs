@@ -69,6 +69,7 @@ public sealed class MappingJobService
                 OperationId = opId,
                 ProjectId = project.ProjectId,
                 SemanticRevision = project.SemanticRevision,
+                ProjectSemanticDigest = project.ComputeSemanticDigest(),
                 ProfileDigest = _profile.Digest,
                 EngineVersion = "1.0.0",
                 StartedUtc = DateTimeOffset.UtcNow,
@@ -85,6 +86,7 @@ public sealed class MappingJobService
                 OperationId = opId,
                 ProjectId = project.ProjectId,
                 SemanticRevision = project.SemanticRevision,
+                ProjectSemanticDigest = project.ComputeSemanticDigest(),
                 ProfileDigest = _profile.Digest,
                 EngineVersion = "1.0.0",
                 StartedUtc = DateTimeOffset.UtcNow,
@@ -192,7 +194,20 @@ public sealed class MappingJobService
             });
         }
 
-        var json = OimSerializer.Serialize(_profile, facts);
+        string json;
+        try
+        {
+            json = OimSerializer.Serialize(_profile, facts);
+        }
+        catch (XbrlExportException ex)
+        {
+            context.Diagnostics.Error(ex.Code, DiagnosticSubsystem.XBRL, DiagnosticStage.Serialization,
+                ex.Message, operationId: opId);
+            manifest.Outcome = RunOutcome.InvalidMapping;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            return JobResult.FromManifest(manifest, facts, "");
+        }
 
         if (context.Diagnostics.HasBlockingErrors || exec.Outcome != RunOutcome.Success)
         {
@@ -204,6 +219,40 @@ public sealed class MappingJobService
         }
 
         // Validate through the worker (XBR05 acceptance).
+        WorkerHandshake handshake;
+        try
+        {
+            handshake = await _worker.HandshakeAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (Exception ex)
+        {
+            context.Diagnostics.Error(DiagnosticCodes.WkrHandshakeFailed,
+                DiagnosticSubsystem.Worker, DiagnosticStage.Worker,
+                $"Validation worker handshake failed: {ex.Message}", operationId: opId);
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        if (handshake.ProtocolVersion < WorkerProtocol.MinimumVersion
+            || handshake.ProtocolVersion > WorkerProtocol.CurrentVersion
+            || !handshake.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
+        {
+            context.Diagnostics.Error(DiagnosticCodes.WkrProtocolVersionMismatch,
+                DiagnosticSubsystem.Worker, DiagnosticStage.Worker,
+                $"Validation worker '{handshake.EngineVersion}' has an incompatible protocol or lacks report validation.",
+                operationId: opId);
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
         var validateReq = new WorkerRequest(
             WorkerOperations.ValidateReport,
             OperationId: opId + "-validate",
@@ -227,6 +276,7 @@ public sealed class MappingJobService
                 => preview ? RunOutcome.SuccessWithWarnings : RunOutcome.Success,
             WorkerStatus.Cancelled => RunOutcome.Cancelled,
             WorkerStatus.IncompleteValidation => RunOutcome.IncompleteConfiguration,
+            WorkerStatus.TimedOut => RunOutcome.OperationalFailure,
             WorkerStatus.Crash => RunOutcome.OperationalFailure,
             // DomainFailure, and Success-with-blocking-diagnostics, are invalid results.
             _ => RunOutcome.InvalidMapping,

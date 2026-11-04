@@ -184,6 +184,53 @@ public sealed class DesignerSession
         return nodeId;
     }
 
+    public bool SetNodeParameter(string nodeId, string name, object? value)
+    {
+        var node = _project.Nodes.FirstOrDefault(n => n.NodeId == nodeId);
+        if (node is null || (node.Parameters.TryGetValue(name, out var existing) && Equals(existing, value))) return false;
+        PushUndo();
+        node.Parameters[name] = value;
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
+    public bool SetNodeParameters(string nodeId, IReadOnlyDictionary<string, object?> values)
+    {
+        return SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+        {
+            [nodeId] = values
+        });
+    }
+
+    public bool SetNodeParameterValues(
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, object?>> updates)
+    {
+        var nodes = updates.ToDictionary(
+            pair => pair.Key,
+            pair => _project.Nodes.FirstOrDefault(node => node.NodeId == pair.Key),
+            StringComparer.Ordinal);
+        if (nodes.Values.Any(node => node is null)
+            || updates.All(update => update.Value.All(pair =>
+                nodes[update.Key]!.Parameters.TryGetValue(pair.Key, out var current)
+                && Equals(current, pair.Value)))) return false;
+        PushUndo();
+        foreach (var (nodeId, values) in updates)
+            foreach (var pair in values)
+                nodes[nodeId]!.Parameters[pair.Key] = pair.Value;
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
+    public bool SetBinding(SourceBinding binding)
+    {
+        var index = _project.Bindings.FindIndex(current => current.BindingId == binding.BindingId);
+        if (index < 0 || Equals(_project.Bindings[index], binding)) return false;
+        PushUndo();
+        _project.Bindings[index] = binding;
+        Changed?.Invoke();
+        return true;
+    }
+
     // ---- undo / redo ------------------------------------------------------------
 
     public void Undo()

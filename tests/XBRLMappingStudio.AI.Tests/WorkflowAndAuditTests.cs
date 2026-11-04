@@ -34,7 +34,7 @@ public class AnalystWorkflowTests
         var session = new SuggestionSession(
             original,
             new DraftValidator(taxonomy, TestProjects.Profile()));
-        var batch = await service.SuggestAsync(new[] { "Sales" }, default);
+        var batch = await service.SuggestAsync(new[] { new SourceFieldDescriptor("sales-id", "Sales", "USD") }, default);
         session.LoadSuggestions(batch.Suggestions);
         var target = batch.Suggestions.First(s => s.Draft.Concept == "synthetic:Revenue");
 
@@ -164,7 +164,7 @@ public class AnalystWorkflowTests
         // "Approved graph round-trips through the CLI with AiPolicy.Offline": the draft
         // must survive serialization byte-identically in semantic content.
         var (session, service) = CreateSession();
-        var batch = await service.SuggestAsync(new[] { "Sales" }, default);
+        var batch = await service.SuggestAsync(new[] { new SourceFieldDescriptor("sales-id", "Sales", "USD") }, default);
         session.LoadSuggestions(batch.Suggestions);
         foreach (var s in batch.Suggestions)
             session.Accept(s.SuggestionId);
