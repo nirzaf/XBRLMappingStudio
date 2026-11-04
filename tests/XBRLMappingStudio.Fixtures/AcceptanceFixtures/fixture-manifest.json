@@ -1,0 +1,36 @@
+{
+  "fixtureId": "xms-cross-format-synthetic-v1",
+  "authorship": "Hand-authored synthetic acceptance inputs and expected facts; no external taxonomy or customer data.",
+  "profileId": "synthetic-oim-v1",
+  "profileDigest": "sha256:e0a3794faafcfbddca4e6fa07ed81c532d4f460822f715880398f88885ee4197",
+  "taxonomyFile": "arelle-test-taxonomy.xsd",
+  "taxonomyDigest": "sha256:e898d8ef578e9e7d7015265b289b7bb63f3df8b2dadc35c11776c32a243d14c9",
+  "expectedRowOccurrences": 2,
+  "expectedNamespaceFields": ["[urn:xms:acceptance:v1]namespaced.[urn:xms:acceptance:a]value", "[urn:xms:acceptance:v1]namespaced.[urn:xms:acceptance:b]value"],
+  "expectedFacts": [
+    {
+      "concept": "synthetic:Revenue",
+      "entityScheme": "http://xbrl.org/entity/",
+      "entityIdentifier": "ABC123",
+      "period": "2025-01-01/2026-01-01",
+      "unit": "QAR",
+      "valueLexical": "1250000.0000",
+      "decimals": -3,
+      "source": "Financials!B4"
+    }
+  ],
+  "negativeCases": [
+    { "file": "duplicate-key.json", "diagnostic": "IO007" }
+  ],
+  "files": {
+    "source.csv": "sha256:a5bd3c5f9f3c82e8a503269dd9e381b5e11ed8be0ee2f07cda67a3edd7d63a01",
+    "nested.json": "sha256:d74ec835e3c76af7f580ba812e01db7d3d25eea71f8532c47b6509de5dbb3071",
+    "duplicate-key.json": "sha256:deae21701e4451d8e33f6d710ff78bca6f9777ad3db93e1bfa03d754d65794f8",
+    "nested.xml": "sha256:9182f8c3ebbcd843b3e68bb9c0c764c58a5ae30b4741c1735088c16b3a73b8b8",
+    "sqlite-source.sql": "sha256:c249fcdd770ef79bb08e7643ffe54ef5be5fddac5297c37548dd4c01180aa613",
+    "revenue-report.json": "sha256:c54a44de602c05ad1829e6908c3d1fba35e625312effba1c78c4ec5c592c9e30",
+    "revenue-report.xml": "sha256:6ba8e09354ab5e3f208320977a3e8f31dae83c82084bdc99dcce58ad180d4ba3",
+    "revenue.xlsx": "sha256:cc7250e9397a6147f76a7d2e20a14f6ff869c59450266d728ba0cfca62dfacb7",
+    "arelle-test-taxonomy.xsd": "sha256:e898d8ef578e9e7d7015265b289b7bb63f3df8b2dadc35c11776c32a243d14c9"
+  }
+}

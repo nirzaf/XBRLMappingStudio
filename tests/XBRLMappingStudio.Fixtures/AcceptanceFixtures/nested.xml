@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<report xmlns="urn:xms:acceptance:v1">
+  <entity>
+    <identifier>ABC123</identifier>
+    <scheme>http://xbrl.org/entity/</scheme>
+  </entity>
+  <period>
+    <start>2025-01-01</start>
+    <end>2026-01-01</end>
+  </period>
+  <amount>
+    <concept>synthetic:Revenue</concept>
+    <lexical>1250000.0000</lexical>
+    <currency>QAR</currency>
+  </amount>
+  <namespaced xmlns:a="urn:xms:acceptance:a" xmlns:b="urn:xms:acceptance:b">
+    <a:value>1</a:value>
+    <b:value>2</b:value>
+  </namespaced>
+</report>

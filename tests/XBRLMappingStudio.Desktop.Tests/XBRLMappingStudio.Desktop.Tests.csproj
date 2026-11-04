@@ -18,6 +18,7 @@
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Desktop\XBRLMappingStudio.Desktop.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.Fixtures\XBRLMappingStudio.Fixtures.csproj" />
   </ItemGroup>
 
   <ItemGroup>

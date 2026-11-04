@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+             xmlns:link="http://www.xbrl.org/2003/linkbase"
+             xmlns:xlink="http://www.w3.org/1999/xlink"
+             xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+             xmlns:synthetic="urn:synthetic:finance:1.0">
+  <link:schemaRef xlink:type="simple" xlink:href="urn:synthetic:finance:1.0" />
+  <xbrli:context id="c1">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://xbrl.org/entity/">ABC123</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2026-01-01</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:unit id="u1">
+    <xbrli:measure>iso4217:QAR</xbrli:measure>
+  </xbrli:unit>
+  <synthetic:Revenue contextRef="c1" unitRef="u1" decimals="-3">1250000.0000</synthetic:Revenue>
+</xbrli:xbrl>

@@ -28,7 +28,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
     public async Task InitializeAsync()
     {
         _dir = Path.Combine(Path.GetTempPath(), "xbrl-g1-int-" + Guid.NewGuid().ToString("N"));
-        _workbookPath = TestFixtures.MaterializeWorkbook(_dir);
+        _workbookPath = IndependentAcceptanceFixtures.Materialize(_dir, "revenue.xlsx");
         await Task.CompletedTask;
     }
 

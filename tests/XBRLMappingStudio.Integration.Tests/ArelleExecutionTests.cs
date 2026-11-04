@@ -24,7 +24,7 @@ public sealed class ArelleExecutionTests
         Directory.CreateDirectory(workspace);
         try
         {
-            var workbook = TestFixtures.MaterializeWorkbook(workspace);
+            var workbook = IndependentAcceptanceFixtures.Materialize(workspace, "revenue.xlsx");
             var project = TestFixtures.BuildRevenueMappingProject(workbook);
             var projectPath = Path.Combine(workspace, "mapping.xmap");
             await File.WriteAllTextAsync(projectPath, ProjectSerializer.Serialize(project));
@@ -84,7 +84,7 @@ public sealed class ArelleExecutionTests
         Directory.CreateDirectory(workspace);
         try
         {
-            var workbook = TestFixtures.MaterializeWorkbook(workspace);
+            var workbook = IndependentAcceptanceFixtures.Materialize(workspace, "revenue.xlsx");
             var project = TestFixtures.BuildRevenueMappingProject(workbook);
             var binding = Assert.Single(project.Bindings);
             var configuration = binding.Configuration.ToDictionary(

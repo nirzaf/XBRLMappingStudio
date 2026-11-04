@@ -2,6 +2,7 @@ using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
 using Microsoft.Data.Sqlite;
+using XBRLMappingStudio.Fixtures;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -296,6 +297,35 @@ public sealed class DesignerSessionTests
             Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
             viewModel.Session.Undo();
             Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopLoadsPinnedAcceptanceWorkbookAndShowsSourceColumns()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-fixture", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = IndependentAcceptanceFixtures.Materialize(dir, "revenue.xlsx");
+            var viewModel = new MainWindowViewModel();
+            viewModel.AllowSyntheticProfile = true;
+            var binding = Assert.Single(viewModel.Session.Project.Bindings);
+            viewModel.Session.SetBinding(binding with
+            {
+                Configuration = new Dictionary<string, object?> { ["sheet"] = "Financials", ["headerRow"] = "3" }
+            });
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+
+            await viewModel.LoadSourceAsync(workbook);
+
+            Assert.Contains("Current", viewModel.SourceColumns);
+            Assert.Contains("Prior", viewModel.SourceColumns);
+            Assert.Equal("Loaded 4 fields from revenue.xlsx.", viewModel.StatusText);
         }
         finally
         {

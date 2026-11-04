@@ -19,4 +19,9 @@
     <PackageReference Include="ClosedXML" Version="0.104.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="AcceptanceFixtures\**\*"
+                      LogicalName="XBRLMappingStudio.Fixtures.AcceptanceFixtures.%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

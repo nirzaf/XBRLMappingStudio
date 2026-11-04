@@ -1,0 +1,15 @@
+{
+  "entity": {
+    "identifier": "ABC123",
+    "scheme": "http://xbrl.org/entity/"
+  },
+  "period": {
+    "start": "2025-01-01",
+    "end": "2026-01-01"
+  },
+  "amount": {
+    "concept": "synthetic:Revenue",
+    "lexical": "1250000.0000",
+    "currency": "QAR"
+  }
+}

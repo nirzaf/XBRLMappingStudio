@@ -1,0 +1,23 @@
+{
+  "documentInfo": {
+    "documentType": "https://xbrl.org/2021/xbrl-json",
+    "namespaces": {
+      "synthetic": "urn:synthetic:finance:1.0",
+      "entity": "http://xbrl.org/entity/",
+      "iso4217": "http://www.xbrl.org/2003/iso4217"
+    },
+    "taxonomy": ["urn:synthetic:finance:1.0"]
+  },
+  "facts": {
+    "revenue-2025": {
+      "value": "1250000.0000",
+      "decimals": -3,
+      "dimensions": {
+        "concept": "synthetic:Revenue",
+        "entity": "entity:ABC123",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:QAR"
+      }
+    }
+  }
+}
