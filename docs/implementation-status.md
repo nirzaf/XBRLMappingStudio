@@ -74,9 +74,10 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 
 ## Current verification
 
-- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed with 0 warnings and 0 errors for this revision.
-- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed, 241 tests, 0 failed, 0 skipped for this revision.
+- The following verification ran on PR code revision `34554422b27bfe11ca837dde07937eda73de0173`; the subsequent status-page correction does not change executable code.
+- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed with 0 warnings and 0 errors.
+- `dotnet test XBRLMappingStudio.slnx -c Release --no-build -m:1` — passed, 244 tests, 0 failed, 0 skipped.
 - `PYTHONPATH=/tmp/xms-worker-venv/lib/python3.12/site-packages python3 -m pytest tools/worker/tests -q` — passed, 5 tests, using the exact pinned `tools/worker/requirements.lock` installed into a temporary Python 3.12 environment with hashes enforced.
 - `git diff --check` — passed for this revision.
 
-No performance result is claimed. No interactive desktop, Windows, installer, or real regulator profile was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.
+GitHub Actions Release build and tests passed on Windows and Ubuntu for this revision. No interactive desktop UI, installer, real regulator profile, or customer-hardware performance qualification was exercised. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow.
