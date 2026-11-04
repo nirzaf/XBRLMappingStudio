@@ -274,7 +274,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            await DeleteDirectoryWhenReleasedAsync(dir);
+            Directory.Delete(dir, recursive: true);
         }
     }
 
@@ -285,7 +285,7 @@ public sealed class DesignerSessionTests
         Directory.CreateDirectory(dir);
         var database = System.IO.Path.Combine(dir, "wide.sqlite");
         var csv = System.IO.Path.Combine(dir, "current.csv");
-        await using (var db = new SqliteConnection($"Data Source={database}"))
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -315,7 +315,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            await DeleteDirectoryWhenReleasedAsync(dir);
+            Directory.Delete(dir, recursive: true);
         }
     }
 
@@ -326,7 +326,7 @@ public sealed class DesignerSessionTests
         Directory.CreateDirectory(dir);
         var database = System.IO.Path.Combine(dir, "wide.sqlite");
         var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
-        await using (var db = new SqliteConnection($"Data Source={database}"))
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -357,17 +357,7 @@ public sealed class DesignerSessionTests
         }
         finally
         {
-            await DeleteDirectoryWhenReleasedAsync(dir);
+            Directory.Delete(dir, recursive: true);
         }
-    }
-
-    private static async Task DeleteDirectoryWhenReleasedAsync(string path)
-    {
-        for (var attempt = 0; Directory.Exists(path) && attempt < 50; attempt++)
-        {
-            try { Directory.Delete(path, recursive: true); return; }
-            catch (IOException) { await Task.Delay(100); }
-        }
-        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
     }
 }
