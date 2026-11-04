@@ -15,6 +15,8 @@ public static class SyntheticProfile
     public const string ProfileId = "synthetic-oim-v1";
     public const string Namespace = "urn:synthetic:finance:1.0";
     public const string Prefix = "synthetic";
+    public const string TaxonomyFileName = "arelle-test-taxonomy.xsd";
+    public const string TaxonomyPackageDigest = "sha256:ee6e793488d1c8b22073010d91e0a3ce5fb340ceb59c7823e2a653be4898e2b8";
 
     /// <summary>Stable, hand-authored concepts for the first vertical slice.</summary>
     public static IReadOnlyList<ConceptMetadata> Concepts { get; } = new[]
@@ -120,24 +122,51 @@ public static class SyntheticProfile
 
     public static FilingProfile Build()
     {
-        // Digest depends only on stable concept and unit content; independent of order.
-        var sb = new StringBuilder();
-        sb.Append(ProfileId).Append('|');
+        // Profile identity binds the complete concept metadata, units and the exact
+        // offline taxonomy bytes. Reordering concepts, labels or units does not change it.
+        var concepts = new StringBuilder();
         foreach (var c in Concepts.OrderBy(c => c.QualifiedName, StringComparer.Ordinal))
         {
-            sb.Append(c.QualifiedName).Append('/')
-              .Append(c.DataType).Append('/')
-              .Append(c.PeriodType).Append('/')
-              .Append(c.IsAbstract ? "A" : "C").Append(';');
+            AppendPart(concepts, "concept");
+            AppendPart(concepts, c.QualifiedName);
+            AppendPart(concepts, c.NamespaceUri);
+            AppendPart(concepts, c.LocalName);
+            AppendPart(concepts, c.Label);
+            AppendPart(concepts, c.DataType);
+            AppendPart(concepts, c.PeriodType);
+            AppendPart(concepts, c.IsAbstract ? "abstract" : "concrete");
+            var languages = c.SupportedLanguages.Order(StringComparer.Ordinal).ToArray();
+            concepts.Append("languages:").Append(languages.Length).Append(':');
+            foreach (var language in languages)
+                AppendPart(concepts, language);
+            var labels = c.LabelsByLanguage.OrderBy(kv => kv.Key, StringComparer.Ordinal).ToArray();
+            concepts.Append("labels:").Append(labels.Length).Append(':');
+            foreach (var (language, label) in labels)
+            {
+                AppendPart(concepts, language);
+                AppendPart(concepts, label);
+            }
+            concepts.Append(';');
         }
-        sb.Append('|');
-        foreach (var u in SupportedUnits.OrderBy(u => u, StringComparer.Ordinal))
+        var conceptDigest = Hash(concepts.ToString());
+
+        var packageHashes = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            sb.Append(u).Append(',');
-        }
-        var bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        var hash = SHA256.HashData(bytes);
-        var digest = "sha256:" + Convert.ToHexString(hash).ToLowerInvariant();
+            ["profile-concept-table"] = conceptDigest,
+            [TaxonomyFileName] = TaxonomyPackageDigest
+        };
+
+        var identity = new StringBuilder();
+        AppendPart(identity, ProfileId);
+        AppendPart(identity, Namespace);
+        AppendPart(identity, TaxonomyFileName);
+        AppendPart(identity, TaxonomyPackageDigest);
+        AppendPart(identity, conceptDigest);
+        var units = SupportedUnits.OrderBy(u => u, StringComparer.Ordinal).ToArray();
+        identity.Append("units:").Append(units.Length).Append(':');
+        foreach (var u in units)
+            AppendPart(identity, u);
+        var digest = Hash(identity.ToString());
 
         return new FilingProfile
         {
@@ -145,15 +174,19 @@ public static class SyntheticProfile
             Digest = digest,
             Concepts = Concepts,
             SupportedUnits = SupportedUnits,
+            TaxonomyUrls = new[] { TaxonomyFileName },
             NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [Prefix] = Namespace
             },
             OutputFormat = "xbrl-json",
-            PackageHashes = new Dictionary<string, string>
-            {
-                ["profile-concept-table"] = digest
-            }
+            PackageHashes = packageHashes
         };
     }
+
+    private static void AppendPart(StringBuilder builder, string value)
+        => builder.Append(value.Length).Append(':').Append(value);
+
+    private static string Hash(string value)
+        => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 }

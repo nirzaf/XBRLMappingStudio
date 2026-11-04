@@ -8,8 +8,16 @@
              schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
   <xs:element name="Assets" id="Assets" type="xbrli:monetaryItemType"
               substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
+  <xs:element name="Liabilities" id="Liabilities" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
   <xs:element name="Revenue" id="Revenue" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="Expenses" id="Expenses" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="NetIncome" id="NetIncome" type="xbrli:monetaryItemType"
               substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
   <xs:element name="EntityRegistrantName" id="EntityRegistrantName" type="xbrli:stringItemType"
               substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="FinancialStatements" id="FinancialStatements" type="xbrli:stringItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
 </xs:schema>
