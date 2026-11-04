@@ -133,6 +133,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _selectedSourceTable;
     private string? _sqliteSourcePath;
     private int _sourceLoadGeneration;
+    private bool _isSourceLoading;
+    private Task _sqliteTableLoadTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _selectedFactUnit = "USD";
@@ -146,7 +148,30 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public string Title { get => _title; set => Set(ref _title, value); }
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
-    public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (Set(ref _isBusy, value))
+            {
+                PreviewCommand?.NotifyCanExecuteChanged();
+                ExecuteCommand?.NotifyCanExecuteChanged();
+            }
+        }
+    }
+    public bool IsSourceLoading
+    {
+        get => _isSourceLoading;
+        private set
+        {
+            if (Set(ref _isSourceLoading, value))
+            {
+                PreviewCommand?.NotifyCanExecuteChanged();
+                ExecuteCommand?.NotifyCanExecuteChanged();
+            }
+        }
+    }
     public bool AllowSyntheticProfile { get => _allowSyntheticProfile; set => Set(ref _allowSyntheticProfile, value); }
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
@@ -157,7 +182,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (Set(ref _selectedSourceTable, value) && value is not null && _sqliteSourcePath is not null)
-                _ = LoadSqliteTableAsync(value, _sourceLoadGeneration);
+            {
+                var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+                IsSourceLoading = true;
+                _sqliteTableLoadTask = LoadSqliteTableAsync(value, generation);
+            }
         }
     }
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
@@ -255,8 +284,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                 d.MainWindow?.Close();
         });
         ValidateCommand = new RelayCommand(_ => Validate());
-        PreviewCommand = new RelayCommand(async _ => await PreviewAsync());
-        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync());
+        PreviewCommand = new RelayCommand(async _ => await PreviewAsync(), _ => !IsBusy && !IsSourceLoading);
+        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(), _ => !IsBusy && !IsSourceLoading);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
         UndoCommand = new RelayCommand(_ => { if (Session.CanUndo) { Session.Undo(); RefreshUndoState(); } });
         RedoCommand = new RelayCommand(_ => { if (Session.CanRedo) { Session.Redo(); RefreshUndoState(); } });
@@ -336,7 +365,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public async Task LoadSourceAsync(string path)
     {
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
-        if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
+        IsSourceLoading = true;
+        var sqliteTableLoadPending = false;
         try
         {
             var root = WorkspaceRoot();
@@ -382,6 +412,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                     StatusText = "Choose a SQLite table to inspect its columns.";
                     return;
                 }
+                sqliteTableLoadPending = true;
+                await _sqliteTableLoadTask;
                 return;
             }
             var adapter = BuildSourceAdapter(connection);
@@ -395,13 +427,17 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
         }
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
+        finally
+        {
+            if (!sqliteTableLoadPending && generation == _sourceLoadGeneration) IsSourceLoading = false;
+        }
     }
 
     private async Task LoadSqliteTableAsync(string table, int generation)
     {
-        if (_sqliteSourcePath is null) return;
         try
         {
+            if (_sqliteSourcePath is null) return;
             var binding = Session.Project.Bindings.FirstOrDefault(b => b.BindingId == SelectedSourceBindingId)
                 ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
             if (binding is null) return;
@@ -421,6 +457,10 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = $"Loaded {schema.Columns.Count} fields from {table}.";
         }
         catch (Exception ex) { StatusText = $"SQLite table load failed: {ex.Message}"; }
+        finally
+        {
+            if (generation == _sourceLoadGeneration) IsSourceLoading = false;
+        }
     }
 
     private void BindSelectedSourceColumn()
@@ -628,6 +668,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ClearSourceAndRunResults()
     {
         Interlocked.Increment(ref _sourceLoadGeneration);
+        IsSourceLoading = false;
         _sqliteSourcePath = null;
         _selectedSourceTable = null;
         SelectedSourceBindingId = null;
@@ -687,6 +728,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task PreviewAsync()
     {
+        if (IsSourceLoading) { StatusText = "Wait for source loading to finish before previewing."; return; }
         if (IsBusy) return;
         IsBusy = true;
         StatusText = "Running bounded preview…";
@@ -712,6 +754,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private async Task ExecuteAsync()
     {
+        if (IsSourceLoading) { StatusText = "Wait for source loading to finish before executing."; return; }
         if (IsBusy) return;
         var gate = PublicationGate.Evaluate(Session.Project, _profile, AllowSyntheticProfile);
         if (gate.HasBlockingErrors)
@@ -967,12 +1010,13 @@ public sealed class MainWindowViewModel : ViewModelBase
 public sealed class RelayCommand : System.Windows.Input.ICommand
 {
     private readonly Action<object?> _execute;
-    public RelayCommand(Action<object?> execute) => _execute = execute;
+    private readonly Predicate<object?>? _canExecute;
+    public RelayCommand(Action<object?> execute, Predicate<object?>? canExecute = null)
+        => (_execute, _canExecute) = (execute, canExecute);
 
-#pragma warning disable CS0067
     public event EventHandler? CanExecuteChanged;
-#pragma warning restore CS0067
 
-    public bool CanExecute(object? parameter) => true;
+    public bool CanExecute(object? parameter) => _canExecute?.Invoke(parameter) ?? true;
     public void Execute(object? parameter) => _execute(parameter);
+    public void NotifyCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

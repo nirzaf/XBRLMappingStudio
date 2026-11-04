@@ -298,13 +298,20 @@ public sealed class DesignerSessionTests
         {
             var viewModel = new MainWindowViewModel();
             viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            var executeDisabledDuringLoad = false;
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(viewModel.IsSourceLoading) && viewModel.IsSourceLoading)
+                    executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
+            };
             var staleLoad = viewModel.LoadSourceAsync(database);
             await viewModel.LoadSourceAsync(csv);
             await staleLoad;
-            await Task.Delay(100);
             Assert.Contains("currentField", viewModel.SourceColumns);
             Assert.DoesNotContain("c0", viewModel.SourceColumns);
             Assert.Equal("csv", viewModel.Session.Project.Bindings[0].Kind);
+            Assert.True(executeDisabledDuringLoad);
+            Assert.False(viewModel.IsSourceLoading);
         }
         finally
         {
@@ -332,14 +339,21 @@ public sealed class DesignerSessionTests
             var viewModel = new MainWindowViewModel();
             viewModel.SaveProjectTo(projectPath);
             var originalKind = viewModel.Session.Project.Bindings[0].Kind;
+            var executeDisabledDuringLoad = false;
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(viewModel.IsSourceLoading) && viewModel.IsSourceLoading)
+                    executeDisabledDuringLoad = !viewModel.ExecuteCommand.CanExecute(null);
+            };
             var staleLoad = viewModel.LoadSourceAsync(database);
             viewModel.LoadProject(projectPath);
             await staleLoad;
-            await Task.Delay(100);
             Assert.Empty(viewModel.SourceTables);
             Assert.Empty(viewModel.SourceColumns);
             Assert.Equal(originalKind, viewModel.Session.Project.Bindings[0].Kind);
             Assert.Null(viewModel.Session.Project.Bindings[0].SchemaFingerprint);
+            Assert.True(executeDisabledDuringLoad);
+            Assert.False(viewModel.IsSourceLoading);
         }
         finally
         {
