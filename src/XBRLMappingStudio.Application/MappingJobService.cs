@@ -213,17 +213,24 @@ public sealed class MappingJobService
             Payload: JsonSerializer.SerializeToElement(json));
         var workerResp = await _worker.RequestAsync(validateReq, cancellationToken);
 
-        if (workerResp.Status is WorkerStatus.DomainFailure or WorkerStatus.Crash
-            or WorkerStatus.IncompleteValidation)
+        // XBR05 fail-closed worker adjudication: a run may be labelled successful only
+        // when the worker explicitly reports Success AND returns no blocking diagnostics.
+        // Every other terminal state — cancellation, incomplete validation, a domain
+        // failure, a crash, or a nominal Success that still carries blocking findings —
+        // must prevent publication. A real Arelle backend can exit "success" while its
+        // report contains errors, so the status alone is not sufficient evidence of a
+        // compliant filing; this guard makes the run's publishability depend on content.
+        var workerBlocking = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).Any(d => d.IsBlocking);
+        manifest.Outcome = workerResp.Status switch
         {
-            manifest.Outcome = workerResp.Status == WorkerStatus.IncompleteValidation
-                ? RunOutcome.IncompleteConfiguration
-                : RunOutcome.InvalidMapping;
-        }
-        else
-        {
-            manifest.Outcome = preview ? RunOutcome.SuccessWithWarnings : RunOutcome.Success;
-        }
+            WorkerStatus.Success when !workerBlocking
+                => preview ? RunOutcome.SuccessWithWarnings : RunOutcome.Success,
+            WorkerStatus.Cancelled => RunOutcome.Cancelled,
+            WorkerStatus.IncompleteValidation => RunOutcome.IncompleteConfiguration,
+            WorkerStatus.Crash => RunOutcome.OperationalFailure,
+            // DomainFailure, and Success-with-blocking-diagnostics, are invalid results.
+            _ => RunOutcome.InvalidMapping,
+        };
 
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
         manifest.Diagnostics = context.Diagnostics.Items

@@ -281,7 +281,16 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             conns[b.BindingId] = new SourceConnection(b.BindingId, b.Kind, b.Locator, cfg);
         }
         foreach (var (id, path) in bindings)
-            conns[id] = new SourceConnection(id, "excel", path);
+        {
+            // A command-line override replaces only the locator. When the id matches a
+            // project binding, preserve its declared adapter kind and configuration so
+            // that overriding a JSON/CSV/XML/XBRL source path does not silently force it
+            // to the Excel reader (or drop its adapter settings).
+            if (conns.TryGetValue(id, out var existing))
+                conns[id] = existing with { Path = path };
+            else
+                conns[id] = new SourceConnection(id, "excel", path); // ad-hoc locator for an unknown binding
+        }
 
         var profile = SyntheticProfile.Build();
 

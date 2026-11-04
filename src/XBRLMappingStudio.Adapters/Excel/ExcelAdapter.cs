@@ -181,11 +181,20 @@ public sealed class ExcelAdapter : ISourceAdapter
     private static IXLWorksheet SelectSheet(XLWorkbook wb, SourceConnection conn)
     {
         if (conn.Configuration is not null
-            && conn.Configuration.TryGetValue("sheet", out var name))
+            && conn.Configuration.TryGetValue("sheet", out var name)
+            && !string.IsNullOrWhiteSpace(name))
         {
+            // An explicitly configured worksheet must exist. Silently reading the first
+            // sheet when the operator named a specific one would import the wrong data
+            // without warning (section 6: reject an unsupported input rather than lose
+            // information), so this is a blocking introspection error.
             var ws = wb.Worksheets.FirstOrDefault(w => w.Name == name);
-            if (ws is not null) return ws;
+            if (ws is null)
+                throw new AdapterException(DiagnosticCodes.IoSheetMissing,
+                    $"Configured worksheet '{name}' was not found in workbook '{conn.Path}'.", DiagnosticStage.Introspection);
+            return ws;
         }
+        // No worksheet requested: the first sheet is a defined, documented default.
         return wb.Worksheets.First();
     }
 
