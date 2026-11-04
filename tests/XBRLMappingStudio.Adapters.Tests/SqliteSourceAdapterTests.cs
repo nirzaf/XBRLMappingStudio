@@ -135,7 +135,7 @@ public sealed class SqliteSourceAdapterTests
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("integer-primary-key.db");
-        await using (var db = new SqliteConnection($"Data Source={path}"))
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
