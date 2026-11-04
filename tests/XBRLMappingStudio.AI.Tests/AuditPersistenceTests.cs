@@ -1,0 +1,135 @@
+using XBRLMappingStudio.AI;
+using XBRLMappingStudio.Project;
+
+namespace XBRLMappingStudio.AI.Tests;
+
+/// <summary>
+/// AI06 audit persistence hook. Every analyst decision — accept, reject, edit,
+/// batch-accept, undo — must reach the injected sink with the governed actor,
+/// method, prompt-template revision and a bounded rendering of the reviewed
+/// payload. A sink that throws records a PersistenceFault on the log and never
+/// blocks the analyst's session (fail-open at the session, fail-closed at the
+/// report surface).
+/// </summary>
+public sealed class AuditPersistenceTests
+{
+    private sealed class RecordingSink : IAuditSink
+    {
+        public List<(AuditRecord Record, AuditContext Context)> Rows { get; } = new();
+        public bool Throw;
+        public void Append(AuditRecord record, AuditContext context)
+        {
+            if (Throw) throw new IOException("simulated sink failure");
+            Rows.Add((record, context));
+        }
+    }
+
+    private static SuggestionSession NewSession(IAuditSink sink, SuggestionSessionContext? ctx = null)
+    {
+        var taxonomy = TestProjects.Taxonomy();
+        return new SuggestionSession(
+            TestProjects.Empty(),
+            new DraftValidator(taxonomy, TestProjects.Profile()),
+            sink, ctx);
+    }
+
+    [Fact]
+    public void Accept_PersistsOneRow_WithActorMethodAndTemplate()
+    {
+        var sink = new RecordingSink();
+        var session = NewSession(sink, new SuggestionSessionContext(
+            Actor: "analyst-1",
+            Method: "retrieval+provider",
+            ProviderConfigId: "local-retrieval",
+            PromptTemplateRevision: "pt-v3",
+            ProviderSnapshotLimitation: "provider alias 'default' has no immutable snapshot"));
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+
+        var outcome = session.Accept("s1");
+
+        Assert.True(outcome.Applied, outcome.Reason);
+        var row = Assert.Single(sink.Rows);
+        Assert.Equal("accept", row.Record.Action);
+        Assert.Equal("analyst-1", row.Context.Actor);
+        Assert.Equal("retrieval+provider", row.Context.Method);
+        Assert.Equal("pt-v3", row.Context.PromptTemplateRevision);
+        Assert.Equal(new[] { "s1" }, row.Context.CandidateIds);
+        Assert.Contains("provider alias", row.Context.ProviderSnapshotLimitation);
+        Assert.Contains("synthetic:Revenue", row.Context.ApprovedEditJson);
+        Assert.Equal(TestProjects.Empty().ProjectId, row.Context.ProjectId);
+    }
+
+    [Fact]
+    public void Edit_Reject_Undo_EachPersistOneRow()
+    {
+        var sink = new RecordingSink();
+        var session = NewSession(sink, new SuggestionSessionContext(Actor: "analyst-2"));
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+            new Suggestion("s2", "Cost",
+                new DraftMapping("s2", "Cost", "synthetic:Expenses", "USD", "duration"), "t", 7),
+        });
+
+        session.Edit("s1", new DraftMapping("s1", "Sales", "synthetic:NetIncome", "USD", "duration"));
+        session.Reject("s2");
+        session.Accept("s1");
+        session.Undo();
+
+        var decisions = sink.Rows.Select(r => r.Record.Action).ToList();
+        Assert.Contains("edit", decisions);
+        Assert.Contains("reject", decisions);
+        Assert.Contains("accept", decisions);
+        Assert.Contains("undo", decisions);
+        // Edit row's ApprovedEditJson differs from OriginalProposalJson so a reviewer
+        // can see exactly what the analyst changed before accepting.
+        var edit = sink.Rows.First(r => r.Record.Action == "edit").Context;
+        Assert.Contains("synthetic:Revenue", edit.OriginalProposalJson);
+        Assert.Contains("synthetic:NetIncome", edit.ApprovedEditJson);
+    }
+
+    [Fact]
+    public void SinkFault_IsCapturedOnLog_AndDoesNotBlockTheSession()
+    {
+        var sink = new RecordingSink { Throw = true };
+        var session = NewSession(sink);
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+
+        var outcome = session.Accept("s1");
+
+        // AI06 fail-open at the session: the in-memory log stays authoritative and
+        // the analyst's action is not rolled back by a broken durable store, but
+        // PersistenceFaults must be non-empty so the run manifest can report it.
+        Assert.True(outcome.Applied);
+        Assert.Single(session.Audit.PersistenceFaults);
+        Assert.Contains("simulated sink failure", session.Audit.PersistenceFaults[0]);
+    }
+
+    [Fact]
+    public void NoSink_SessionPreservesInMemoryBehaviour()
+    {
+        // Existing analyst tests rely on the default (no-sink) path; guard against
+        // regressions in the optional sink wiring.
+        var taxonomy = TestProjects.Taxonomy();
+        var session = new SuggestionSession(
+            TestProjects.Empty(),
+            new DraftValidator(taxonomy, TestProjects.Profile()));
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+        Assert.True(session.Accept("s1").Applied);
+        Assert.Empty(session.Audit.PersistenceFaults);
+        Assert.Contains(session.Audit.Records, r => r.Action == "accept");
+    }
+}

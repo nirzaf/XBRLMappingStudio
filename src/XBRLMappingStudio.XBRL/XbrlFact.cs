@@ -259,6 +259,17 @@ public sealed class FilingProfile
     public IReadOnlyDictionary<string, string> PackageHashes { get; init; }
         = new Dictionary<string, string>();
 
+    /// <summary>XBR07 check-completeness: rule identifiers the profile declares as
+    /// mandatory. A full-file validation must produce at least one outcome for every
+    /// declared required check; if a rule never fires (for example, an empty fact set
+    /// cannot exercise per-fact rules), <see cref="FilingRuleValidator"/> records an
+    /// <see cref="RuleStatus.Incomplete"/> outcome with <c>XBR014</c> so the run
+    /// resolves to <see cref="RunOutcome.IncompleteConfiguration"/> instead of a
+    /// silent pass. Conditional rules such as <c>dimension-member-valid</c> are
+    /// intentionally omitted because they apply only when facts exercise them.</summary>
+    public IReadOnlySet<string> RequiredChecks { get; init; }
+        = new HashSet<string>(StringComparer.Ordinal);
+
     public ConceptMetadata? FindConcept(string qualifiedName)
         => Concepts.FirstOrDefault(c => c.QualifiedName == qualifiedName);
 }

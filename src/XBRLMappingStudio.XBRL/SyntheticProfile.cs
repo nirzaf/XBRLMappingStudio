@@ -104,6 +104,21 @@ public static class SyntheticProfile
     public const string PresentationRole =
         "http://xbrl.info/xbrl/synthetic/role/presentation";
 
+    /// <summary>XBR07: unconditional rules that every non-empty filing validation must
+    /// exercise. If a rule never fires (empty fact set, or a filtered-out concept class),
+    /// <see cref="FilingRuleValidator"/> records an <c>Incomplete</c> outcome so the run
+    /// maps to <see cref="Diagnostics.RunOutcome.IncompleteConfiguration"/>.</summary>
+    public static IReadOnlySet<string> RequiredChecks { get; } = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "synthetic:concept-exists",
+        "synthetic:abstract-concept-not-used",
+        "synthetic:monetary-unit-required",
+        "synthetic:unit-allowed",
+        "synthetic:fact-value-contract",
+        "synthetic:period-type-match",
+        "synthetic:no-duplicate-facts",
+    };
+
     /// <summary>Financial-statement hierarchy used to build the presentation network (XBR03).
     /// The instant and duration children both hang under the abstract FinancialStatements
     /// concept so a concept appears across roles.</summary>
@@ -180,7 +195,8 @@ public static class SyntheticProfile
                 [Prefix] = Namespace
             },
             OutputFormat = "xbrl-json",
-            PackageHashes = packageHashes
+            PackageHashes = packageHashes,
+            RequiredChecks = SyntheticProfile.RequiredChecks
         };
     }
 

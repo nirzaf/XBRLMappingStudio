@@ -134,7 +134,35 @@ public sealed class FilingRuleValidator
             outcomes.Add(Pass("synthetic:no-duplicate-facts"));
         }
 
-        return new FilingValidationResult(Collapse(outcomes));
+        var collapsed = Collapse(outcomes);
+        // XBR07 check-completeness: any profile-declared required rule that never
+        // produced an outcome (empty fact set, or the fact set did not exercise the
+        // rule) must appear as an Incomplete outcome so the run cannot resolve to a
+        // silent pass. Conditional rules like dimension-member-valid are excluded
+        // from RequiredChecks by profile contract, so absence of their outcome is fine.
+        var emitted = new HashSet<string>(collapsed.Select(o => o.RuleId), StringComparer.Ordinal);
+        foreach (var required in _profile.RequiredChecks.OrderBy(r => r, StringComparer.Ordinal))
+        {
+            if (emitted.Contains(required)) continue;
+            collapsed = collapsed.Append(new RuleOutcome(
+                required,
+                RuleStatus.Incomplete,
+                $"Required check '{required}' declared by profile '{_profile.ProfileId}' did not run; "
+                + "the filing cannot be certified complete.",
+                new Diagnostic
+                {
+                    Code = DiagnosticCodes.XbrRequiredCheckMissing,
+                    Subsystem = DiagnosticSubsystem.XBRL,
+                    Severity = DiagnosticSeverity.Warning,
+                    Stage = DiagnosticStage.Validation,
+                    IsBlocking = false,
+                    Message = $"Required filing check '{required}' was not executed.",
+                    OperationId = op,
+                    RuleIdentifier = required
+                })).ToList();
+        }
+
+        return new FilingValidationResult(collapsed);
     }
 
     private RuleOutcome CompoundUnitRule(XbrlFact f)
@@ -190,7 +218,7 @@ public sealed class FilingRuleValidator
         });
 
     /// <summary>Keep one instance of each failing/incomplete rule; pass outcomes dedupe too.</summary>
-    private static IReadOnlyList<RuleOutcome> Collapse(List<RuleOutcome> outcomes)
+    private static List<RuleOutcome> Collapse(List<RuleOutcome> outcomes)
         => outcomes
             .GroupBy(o => (o.RuleId, o.Status))
             .Select(g => g.First())

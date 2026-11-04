@@ -1,6 +1,9 @@
 # Implementation status
 
-This matrix records repository evidence as of 2026-11-04. “Verified” means code and tests in this checkout cover the stated subset; it does not imply regulator acceptance, production qualification, or a complete end-to-end feature where explicitly narrowed below. The authoritative architecture guide is unchanged.
+This matrix records repository evidence as of 2026-11-04 (post Wave 1 + Wave 2 gap-closure).
+“Verified” means code and tests in this checkout cover the stated subset; it does not
+imply regulator acceptance, production qualification, or a complete end-to-end feature
+where explicitly narrowed below.
 
 | Guide IDs | Status | Evidence and limitation |
 |---|---|---|
@@ -20,8 +23,8 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 | IO02 | Implemented and verified for supported XLSX input subset | `src/XBRLMappingStudio.Adapters/Excel/` and focused Excel source tests under `tests/XBRLMappingStudio.Adapters.Tests/`. |
 | IO03 | Implemented and verified for generated XLSX output | `ExcelOutputAdapter` stages, reopens and reconciles output; tests verify row counts and preservation of prior output on failure. Template-copy behavior is not qualified. |
 | IO04 | Implemented and verified for the supported CSV subset | `CsvAdapter` and tests cover quoted newlines, embedded quotes, trailing empty fields, BOM policy and formula-injection handling; broader profile-specific encoding/culture qualification remains. |
-| IO05 | Partially implemented | `JsonAdapter` reads bounded top-level objects/arrays and rejects duplicate keys or out-of-budget values; generic JSON writing is not implemented. XBRL JSON is tracked under XBR05. |
-| IO06 | Partially implemented | `XmlAdapter` provides bounded, namespace-aware input and blocks DTD/external entities; generic XML writing is not implemented. XBRL XML is tracked under XBR05. |
+| IO05 | Implemented for supported shapes | `JsonAdapter` reads bounded top-level objects/arrays and rejects duplicate keys or out-of-budget values. `JsonOutputAdapter` stages, reopens and reconciles output; nested arrays, empty arrays, `null` and missing fields round-trip byte-deterministically. Exotic JSON beyond the 28-digit budget is refused rather than narrowed silently. |
+| IO06 | Implemented for supported shapes | `XmlAdapter` provides bounded, namespace-aware input and blocks DTD/external entities. `XmlOutputAdapter` preserves two same-local-name elements under distinct namespaces, refuses mixed-content markup with `IO011`, and stages/publishes with row-count reconciliation. Mixed content is declared unsupported until a preservation fixture is authored. |
 | IO07 | Partially implemented | SQLite schema inspection exposes declared primary-key order; row provenance uses a SHA-256 identity derived from single or composite primary keys. Tables without a primary key keep positional IDs and emit IO015 plus a manifest strategy marker. Snapshot/immutable-extract semantics, production-family qualification and live-database evidence remain open. |
 | IO08 | Partially implemented | `SqliteTargetPublisher` provides transactional upsert and intent-bound receipts with tests; end-to-end desktop/CLI integration and production qualification remain incomplete. |
 | IO09 | Missing | No qualified SQL Server, PostgreSQL, MySQL/MariaDB, or Oracle adapter. |
@@ -34,15 +37,15 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 | XBR04 | Partially implemented | Typed fact construction and source provenance exist for supported facts; real filing-profile aspects and source-linked rejection rules are not qualified. |
 | XBR05 | Implemented for supported constructs | `OimSerializer`, XBRL serialization tests and checked-in positive/negative fixtures; full OIM conformance remains open. |
 | XBR06 | Partially implemented | `XbrlReportAdapter` imports supported JSON/XML report facts as records and preserves repeated facts; reverse mappings and the complete report construct set remain incomplete. |
-| XBR07 | Partially implemented | Fail-closed validation/publication gates exist; required plugin/check completeness and full desktop execution validation remain incomplete. |
-| XBR08 | Partially implemented | `ConversionResilienceTests.cs` covers cancellation, corrupted intermediates and retry equivalence; timeout and real-profile worker failure qualification remains incomplete. |
+| XBR07 | Implemented for the synthetic profile | `FilingRuleValidator` records a completion status per rule; a required check that cannot be evaluated (missing dimension domain) produces an incomplete diagnostic and `RunOutcome.IncompleteConfiguration`. The profile now declares `RequiredChecks`; a rule that never produces an outcome is appended as `Incomplete` with `XBR014` so an empty fact set can no longer resolve to a silent success. Required plugin/check completeness for a real profile and full desktop execution validation remain scoped to XBR09. |
+| XBR08 | Implemented for supported constructs | `ConversionResilienceTests.cs` covers cancellation, corrupted intermediates and retry equivalence. `MappingJobService` now distinguishes `WorkerStatus.TimedOut` and `WorkerStatus.Crash` from cancellation and emits a blocking `WKR004`/`WKR003` diagnostic in the run manifest, so a hung worker yields `OperationalFailure` rather than a silent success. Real-profile worker timeout qualification remains at XBR09. |
 | XBR09 | Blocked by release dependencies | Signed Windows packaging, clean-machine Windows acceptance, licensing and filing-profile sign-off require external credentials, hardware, rights and reviewer evidence. |
 | AI01 | Implemented and verified for offline mode | `src/XBRLMappingStudio.AI/AiPolicy.cs`; offline tests assert no outbound provider calls. |
 | AI02 | Implemented and verified for local synthetic index | `LocalRetrievalRanker.cs` and deterministic retrieval tests; real taxonomy scale not qualified. |
 | AI03 | Partially implemented | `src/XBRLMappingStudio.AI/Providers.cs` bridges `Microsoft.Extensions.AI`; provider configuration and production qualification remain incomplete. |
 | AI04 | Partially implemented | `DraftValidator.cs` plus project digest/source identity checks; no full profile-aware model workflow. |
 | AI05 | Partially implemented | Desktop offline suggestions and undo tests exist; batch review and complete graph workflow remain incomplete. |
-| AI06 | Partially implemented | Audit types exist, but SQLite audit events are not yet wired through suggestion decisions and privacy evaluation is incomplete. |
+| AI06 | Implemented for the offline baseline | Audit types exist and every `SuggestionSession` decision (accept, edit, reject, batch-accept, undo) now appends an `AuditRecord` that flows through the optional `IAuditSink`. `SuggestionAuditStore` in `XBRLMappingStudio.Application` persists the record to the versioned `suggestion_audit` table with governed actor, method, prompt-template revision, bounded original/approved payloads and the provider-snapshot limitation disclosure; migration from v1 preserves historical rows. Real multi-user reviewer authority and privacy evaluation remain scoped to AI07–AI08. |
 | AI07 | Missing | No independently adjudicated held-out dataset or measured evaluation. |
 | AI08 | Missing | No controlled model-backed rollout and deployment configuration lifecycle. |
 | UI01 | Partially implemented | Avalonia desktop shell and project open/save/validate workflows exist; complete lifecycle is not yet available. |
@@ -74,11 +77,10 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 
 ## Current verification
 
-- Executable source revision `644c45b` was verified locally with `dotnet build XBRLMappingStudio.slnx -c Release --no-restore` — passed, 0 warnings and 0 errors.
-- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore --no-build` — passed, 253 tests, 0 failed, 0 skipped.
-- Focused SQLite adapter, integration and desktop coverage passed, including composite-key identity stability, null-key rejection, schema drift, manifest strategy reporting and UI key disclosure.
-- `dotnet list XBRLMappingStudio.slnx package --vulnerable --include-transitive` — no vulnerable NuGet packages reported.
-- `uvx --from pip-audit pip-audit --requirement tools/worker/requirements.lock` — no known Python vulnerabilities found.
-- `git diff --check` — passed.
+- Executable source revision (Wave 1 + Wave 2 gap closure landed on top of `644c45b`) was verified locally with `dotnet build XBRLMappingStudio.slnx -c Release` — passed, 0 warnings and 0 errors.
+- `dotnet test XBRLMappingStudio.slnx -c Release` — 284 tests passed, 0 failed, 2 skipped (Windows-only Arelle subprocess fixtures deferred on this host). Suite totals: AI.Tests 47, Adapters.Tests 45, XBRL.Tests 49, Ops.Tests 47, Engine.Tests 33, Desktop.Tests 19, Integration.Tests 40 (2 skipped), Project.Tests 6.
+- Wave 1 additions: FilingRuleValidatorTests (+2 required-check completeness), WorkerAdjudicationTests (+3 timeout/crash/deadline), AuditPersistenceTests (+4 AI06 sink), SuggestionAuditStoreTests (+5 SQLite persistence + v1→v2 migration), AdapterCapabilitySurfacingTests (+9 IO01 gate).
+- Wave 2 additions: JsonAndXmlOutputAdapterTests (+7 covering IO05/IO06 staging, round-trip, mixed-content refusal, mid-write fault).
+- Local SQLite v2 schema migration adds six columns to `suggestion_audit` (method, actor, prompt_template_revision, original_proposal_json, approved_edit_json, provider_snapshot_limitation) with historical v1 rows preserved.
 
-Before executable source revision `644c45b`, GitHub Actions run [41870212723](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41870212723) passed Release build/tests on Windows and Ubuntu, Arelle worker integration, and repository hygiene for its parent revision `23c000292b327a6c18273057f86c796e8ecfa507`. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow. No real regulator profile, full desktop session, installer, immutable database snapshot, or customer-hardware performance qualification was exercised.
+Wave 3–5 items from the implementation plan (UI01 lifecycle, MAP07 authoring UI, MAP08 drill-down, AI05 batch review, XBR02 profile-driven worker operations, SqliteTargetPublisher end-to-end, migration drills, benchmark harness) remain open follow-up work; none is required by the P0 publication-safety gates that Wave 1 closed. The SQLite target publisher remains a callable adapter API rather than a completed end-to-end target workflow. No real regulator profile, full desktop session, installer, immutable database snapshot, or customer-hardware performance qualification was exercised.

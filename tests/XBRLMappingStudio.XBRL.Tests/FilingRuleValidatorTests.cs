@@ -120,4 +120,35 @@ public sealed class FilingRuleValidatorTests
         Assert.Contains(result.Outcomes, o =>
             o.RuleId == "synthetic:abstract-concept-not-used" && o.Status == RuleStatus.Fail);
     }
+
+    // XBR07 check-completeness: an empty fact set cannot exercise per-fact required
+    // rules, so every declared RequiredCheck without an outcome is recorded as
+    // Incomplete. The run maps to IncompleteConfiguration rather than a silent Success.
+    [Fact]
+    public void EmptyFactSet_RecordsIncompleteForEveryUnconditionalRequiredCheck()
+    {
+        var result = new FilingRuleValidator(Profile).Validate(Array.Empty<XbrlFact>());
+        Assert.True(result.HasIncomplete);
+        Assert.False(result.IsClean);
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.MapToRunOutcome());
+        // Only the set-level no-duplicate-facts rule can pass without any fact.
+        foreach (var required in SyntheticProfile.RequiredChecks)
+        {
+            if (required == "synthetic:no-duplicate-facts") continue;
+            var outcome = Assert.Single(result.Outcomes, o => o.RuleId == required);
+            Assert.Equal(RuleStatus.Incomplete, outcome.Status);
+            Assert.Equal(DiagnosticCodes.XbrRequiredCheckMissing, outcome.Diagnostic!.Code);
+        }
+    }
+
+    // A full pass run exercises every declared required check; nothing is added.
+    [Fact]
+    public void ExpectedPass_RecordsEveryRequiredCheck_NoIncompleteAppended()
+    {
+        var result = new FilingRuleValidator(Profile).Validate(Load("expected-pass.xbrl.json"));
+        var emitted = result.Outcomes.Select(o => o.RuleId).ToHashSet(StringComparer.Ordinal);
+        foreach (var required in SyntheticProfile.RequiredChecks)
+            Assert.Contains(required, emitted);
+        Assert.DoesNotContain(result.Outcomes, o => o.Status == RuleStatus.Incomplete);
+    }
 }

@@ -15,6 +15,21 @@ public enum SuggestionState
 public sealed record SessionOutcome(bool Applied, string? Reason, DraftValidationResult? Validation);
 
 /// <summary>
+/// AI06 governed-actor context applied to every persisted audit row from one session.
+/// In the local, single-workspace build the actor is captured from the desktop
+/// credentials and is explicitly not an immutable trusted reviewer; the multi-user
+/// requirement in section 9 is deferred. When <see cref="ProviderSnapshotLimitation"/>
+/// is non-empty it is stored verbatim so a downstream reviewer sees the disclosure
+/// required by spec §6.2 step 5 for a provider alias without a pinned deployment.
+/// </summary>
+public sealed record SuggestionSessionContext(
+    string Actor,
+    string Method = "retrieval",
+    string ProviderConfigId = "local-retrieval",
+    string PromptTemplateRevision = "",
+    string ProviderSnapshotLimitation = "");
+
+/// <summary>
 /// The analyst-facing workflow (AI05): suggestions are applied to a *draft* project
 /// only after <see cref="DraftValidator"/> accepts them. Accept / Edit / Reject /
 /// batch accept are recorded in the audit log; Undo restores the full prior draft
@@ -28,10 +43,14 @@ public sealed class SuggestionSession
     private readonly List<Suggestion> _suggestions = new();
     private readonly Dictionary<string, SuggestionState> _states = new(StringComparer.Ordinal);
     private readonly Stack<(string Project, Dictionary<string, SuggestionState> States)> _undoSnapshots = new();
+    // AI06: keyed by AuditRecord.Sequence so the sink's context factory can pair the
+    // durable row with the exact proposal that was on screen when the analyst decided.
+    private readonly Dictionary<int, (string Original, string Approved, IReadOnlyList<string> CandidateIds)> _pendingPayloads = new();
+    private readonly SuggestionSessionContext _sessionContext;
 
     private MappingProject _draft;
 
-    public AuditLog Audit { get; } = new();
+    public AuditLog Audit { get; }
 
     /// <summary>The working draft that accepted suggestions mutate. Not the original project.</summary>
     public MappingProject Draft => _draft;
@@ -41,12 +60,49 @@ public sealed class SuggestionSession
     public SuggestionState StateOf(string suggestionId) =>
         _states.TryGetValue(suggestionId, out var s) ? s : SuggestionState.Pending;
 
-    public SuggestionSession(MappingProject project, DraftValidator validator)
+    public SuggestionSession(MappingProject project, DraftValidator validator,
+        IAuditSink? auditSink = null, SuggestionSessionContext? sessionContext = null)
     {
         // Clone the project through the serializer so the original is structurally immutable.
         _draft = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(project));
         _validator = validator;
+        _sessionContext = sessionContext ?? new SuggestionSessionContext(Actor: Environment.UserName);
+        // Wire the sink when one is supplied so every recorded decision is durable.
+        // The contextFactory reads the same DraftValidator view the UI saw and never
+        // includes raw workbook content: candidate ids, source field, and concept only.
+        Audit = auditSink is null
+            ? new AuditLog()
+            : new AuditLog(auditSink, record => BuildAuditContext(record));
     }
+
+    private AuditContext? BuildAuditContext(AuditRecord record)
+    {
+        // Records without a paired payload (accept-blocked) still describe an action on
+        // the current draft, so we emit a context; only pure-noise records are dropped.
+        var payload = _pendingPayloads.TryGetValue(record.Sequence, out var p)
+            ? p : (Original: "", Approved: "", CandidateIds: Array.Empty<string>());
+        return new AuditContext(
+            ProjectId: _draft.ProjectId,
+            SemanticRevision: _draft.SemanticRevision,
+            CandidateIds: payload.CandidateIds,
+            ProviderConfigId: _sessionContext.ProviderConfigId,
+            Method: _sessionContext.Method,
+            Actor: _sessionContext.Actor,
+            PromptTemplateRevision: _sessionContext.PromptTemplateRevision,
+            OriginalProposalJson: payload.Original,
+            ApprovedEditJson: payload.Approved,
+            ProviderSnapshotLimitation: _sessionContext.ProviderSnapshotLimitation);
+    }
+
+    private static string SerializeDraft(DraftMapping draft) => System.Text.Json.JsonSerializer.Serialize(new
+    {
+        concept = draft.Concept,
+        unit = draft.Unit,
+        periodType = draft.PeriodType,
+        decimals = draft.Decimals,
+        language = draft.Language,
+        sourceField = draft.SourceField,
+    });
 
     /// <summary>Load a batch of suggestions produced by <see cref="AiSuggestionService"/>.</summary>
     public void LoadSuggestions(IEnumerable<Suggestion> suggestions)
@@ -80,8 +136,13 @@ public sealed class SuggestionSession
         PushSnapshot();
         ApplyDraftToProject(suggestion.Draft);
         _states[suggestionId] = SuggestionState.Accepted;
+        // AI06: pre-register the payload the sink will pick up on this sequence so the
+        // durable row can reconstruct what was proposed and what was approved.
+        var seq = Audit.NextSequence;
+        _pendingPayloads[seq] = (SerializeDraft(suggestion.Draft), SerializeDraft(suggestion.Draft),
+            new[] { suggestion.SuggestionId });
         Audit.Record(new AuditRecord(
-            Audit.NextSequence, "accept", suggestion.SourceField,
+            seq, "accept", suggestion.SourceField,
             suggestion.Draft.Concept ?? "(none)", 0, Array.Empty<string>()));
         return new SessionOutcome(true, null, validation);
     }
@@ -97,8 +158,11 @@ public sealed class SuggestionSession
         var old = _suggestions[index];
         var updated = old with { Draft = edited };
         _suggestions[index] = updated;
+        var seq = Audit.NextSequence;
+        _pendingPayloads[seq] = (SerializeDraft(old.Draft), SerializeDraft(edited),
+            new[] { old.SuggestionId });
         Audit.Record(new AuditRecord(
-            Audit.NextSequence, "edit", edited.SourceField, edited.Concept ?? "(none)",
+            seq, "edit", edited.SourceField, edited.Concept ?? "(none)",
             0, Array.Empty<string>()));
         return new SessionOutcome(true, null, null);
     }
@@ -111,8 +175,10 @@ public sealed class SuggestionSession
             return new SessionOutcome(false, "Only pending suggestions can be rejected.", null);
 
         _states[suggestionId] = SuggestionState.Rejected;
+        var seq = Audit.NextSequence;
+        _pendingPayloads[seq] = (SerializeDraft(suggestion.Draft), "", new[] { suggestion.SuggestionId });
         Audit.Record(new AuditRecord(
-            Audit.NextSequence, "reject", suggestion.SourceField,
+            seq, "reject", suggestion.SourceField,
             suggestion.Draft.Concept ?? "(none)", 0, Array.Empty<string>()));
         return new SessionOutcome(true, null, null);
     }
@@ -136,8 +202,13 @@ public sealed class SuggestionSession
             ApplyDraftToProject(s.Draft);
             _states[s.SuggestionId] = SuggestionState.Accepted;
         }
+        var batchSeq = Audit.NextSequence;
+        _pendingPayloads[batchSeq] = (
+            System.Text.Json.JsonSerializer.Serialize(pending.Select(s => s.Draft).Select(SerializeDraft).ToArray()),
+            System.Text.Json.JsonSerializer.Serialize(pending.Select(s => s.Draft).Select(SerializeDraft).ToArray()),
+            pending.Select(s => s.SuggestionId).ToArray());
         Audit.Record(new AuditRecord(
-            Audit.NextSequence, "batch-accept", "(multiple)", "(multiple)",
+            batchSeq, "batch-accept", "(multiple)", "(multiple)",
             0, Array.Empty<string>()));
         return new SessionOutcome(true, null, validation);
     }
@@ -152,8 +223,10 @@ public sealed class SuggestionSession
         _draft = ProjectSerializer.Deserialize(payload);
         foreach (var (id, state) in states)
             _states[id] = state;
+        var undoSeq = Audit.NextSequence;
+        _pendingPayloads[undoSeq] = ("", "", Array.Empty<string>());
         Audit.Record(new AuditRecord(
-            Audit.NextSequence, "undo", "(project)", "(snapshot)", 0, Array.Empty<string>()));
+            undoSeq, "undo", "(project)", "(snapshot)", 0, Array.Empty<string>()));
         return new SessionOutcome(true, null, null);
     }
 

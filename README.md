@@ -41,10 +41,18 @@ Core capabilities implemented here:
   concept search, dimensions, compound units, multilingual labels, and filing-rule validation.
   Filing-profile identity fails closed: a project whose `ProfileId`/`ProfileDigest` does not
   match the resolved profile is rejected with a blocking `XBR015` diagnostic before any
-  source read or worker call.
+  source read or worker call. Each profile declares its required checks; a check that never
+  fires (for example, an empty fact set) is recorded as `XBR014` and resolves the run to
+  incomplete rather than a silent success.
+- **Durable AI06 audit trail** — every accept/edit/reject/batch/undo decision persists to
+  the versioned `suggestion_audit` table with governed actor, method, prompt-template
+  revision and bounded original/approved payloads; a broken sink is captured on
+  `AuditLog.PersistenceFaults` and cannot block the analyst.
 - **Report re-import** — an XBRL instance can be read back as records and remapped.
-- **Adapters** — Excel (read/write), CSV, JSON, XML, and XBRL report input, each behind a
-  capability-gated, direction-checked interface.
+- **Adapters** — Excel (read/write), CSV, JSON (read/write), XML (read/write), and XBRL
+  report input, each behind a capability-gated, direction-checked interface. `MappingJobService`
+  surfaces target and source suitability (IO01) so the designer can disable a read-only
+  connector before a user starts mapping.
 - **SQLite input** — table discovery, schema inspection, bounded preview, and shared-engine
   execution. Provenance uses a stable SHA-256 row identity derived from declared single or
   composite primary keys; keyless tables fall back to positional provenance with an `IO015`
@@ -57,7 +65,8 @@ Core capabilities implemented here:
   outbound network call.
 - **Unattended operations** — destination locking with atomic replace, private staging, run
   journal with crash recovery, worker supervision (flood bounding, watchdog kill, orphan
-  check), workspace path guard, and redacted support bundles.
+  check) with distinct terminal outcomes for cancellation, timeout and crash (`WKR004` /
+  `WKR003`), workspace path guard, and redacted support bundles.
 
 ---
 
@@ -129,7 +138,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | 253 tests across 8 projects. |
+| Tests | xUnit 2.9.3 | 284 tests across 8 projects. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -258,16 +267,16 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-253 tests across 8 xUnit projects, all green in Release:
+284 tests across 8 xUnit projects, all green in Release:
 
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 33 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
-| XBRL.Tests | 46 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience |
-| AI.Tests | 43 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, audit |
-| Integration.Tests | 35 | CLI parity (subprocess vs in-process), exit-code contract, fail-closed profile identity, publication gate, worker adjudication, schema drift, acceptance scenarios |
-| Adapters.Tests | 38 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, SQLite source (primary-key row identity) and target upsert |
-| Ops.Tests | 33 | Destination locking/publication/journal, local app database migrations and backup, worker supervision, path guard, redaction |
+| XBRL.Tests | 49 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
+| AI.Tests | 47 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
+| Adapters.Tests | 45 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, JSON and XML writers with staging/reconciliation, SQLite source (primary-key row identity) and target upsert |
+| Ops.Tests | 47 | Destination locking/publication/journal, local app database migrations and backup, SuggestionAuditStore v1→v2, IO01 capability surfacing, worker supervision, path guard, redaction |
+| Integration.Tests | 40 | CLI parity, exit-code contract, fail-closed profile identity, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
 | Desktop.Tests | 19 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, SQLite bindings and key disclosure |
 | Project.Tests | 6 | Atomic save, revision conflict, semantic digest |
 
@@ -312,10 +321,10 @@ following IDs have implementation code and repository tests; qualification limit
 |---|---|
 | Foundation | `BASE02`–`BASE04`, `BASE01` (synthetic column) |
 | Mapping engine | `MAP01`–`MAP08` |
-| Adapters | `IO01`–`IO06`, `IO07`–`IO08` (SQLite source and target, partial) |
-| XBRL | `XBR01`–`XBR08` (synthetic profile; Arelle `validate-artifact` path) |
+| Adapters | `IO01`–`IO06` (JSON/XML writers closed Wave 2), `IO07`–`IO08` (SQLite source and target, partial) |
+| XBRL | `XBR01`–`XBR08` (synthetic profile; Arelle `validate-artifact` path; `XBR07` required-check completeness; `XBR08` distinct timeout/crash terminal outcomes) |
 | Desktop | `UI01` (development build), `UI02` (canvas prototype), `UI03`–`UI04`, `UI06` (headless workflow tests) |
-| AI baseline | `AI01`–`AI04`, `AI06` (offline baseline); `AI05` (single-suggestion apply/undo path) |
+| AI baseline | `AI01`–`AI04`, `AI06` (offline baseline with durable `suggestion_audit` persistence); `AI05` (single-suggestion apply/undo path) |
 | Operations | `OPS01`–`OPS05`, `OPS08` (`OPS05` partial) |
 
 SQLite source discovery/read and transactional target upsert have repository tests.

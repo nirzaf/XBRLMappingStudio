@@ -125,6 +125,77 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.True(result.IsPublishable);
     }
 
+    // XBR08 timeout path: a per-request deadline that elapses without any response
+    // must yield a distinct terminal outcome (OperationalFailure), a blocking WKR004
+    // diagnostic, and no publication. This is not cancellation and not a crash.
+    [Fact]
+    public async Task WorkerTimedOut_IsOperationalFailure_WithWkrTimeoutDiagnostic_AndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(req => new WorkerResponse(
+            req.OperationId, WorkerStatus.TimedOut, Result: null,
+            // Simulates a hung worker that never dies and returns no diagnostics of its own.
+            Array.Empty<Diagnostic>(),
+            Error: "Per-request deadline elapsed."));
+
+        var svc = new MappingJobService(SyntheticProfile.Build(), worker);
+        var result = await svc.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.OperationalFailure, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        var timeout = Assert.Single(result.Manifest.Diagnostics,
+            d => d.Code == DiagnosticCodes.WkrTimeout);
+        Assert.True(timeout.IsBlocking);
+        Assert.Equal(DiagnosticStage.Worker, timeout.Stage);
+    }
+
+    // XBR08 crash path: a worker that terminated unexpectedly yields WKR003 and is
+    // never publishable, distinct from the timeout path above.
+    [Fact]
+    public async Task WorkerCrash_IsOperationalFailure_WithWkrCrashDiagnostic_AndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(req => new WorkerResponse(
+            req.OperationId, WorkerStatus.Crash, Result: null,
+            Array.Empty<Diagnostic>(),
+            Error: "Worker terminated without a response."));
+
+        var svc = new MappingJobService(SyntheticProfile.Build(), worker);
+        var result = await svc.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.OperationalFailure, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics,
+            d => d.Code == DiagnosticCodes.WkrCrash && d.IsBlocking);
+    }
+
+    // Deadline is propagated on the request sent by MappingJobService (XBR08).
+    [Fact]
+    public async Task RequestDeadline_IsInTheFutureAndCarriesProfileDigest()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        WorkerRequest? captured = null;
+        var worker = new FakeWorker(req =>
+        {
+            captured = req;
+            return new WorkerResponse(req.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null);
+        });
+        var profile = SyntheticProfile.Build();
+
+        var svc = new MappingJobService(profile, worker);
+        await svc.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal(WorkerOperations.ValidateReport, captured!.Operation);
+        Assert.Equal(profile.Digest, captured.ProfileDigest);
+        Assert.True(captured.DeadlineUtc > DateTimeOffset.UtcNow,
+            "Validate-report deadline must be in the future so a hung worker is bounded (XBR08).");
+    }
+
     /// <summary>Configurable in-process worker: answers every request via <paramref name="responder"/>.</summary>
     private sealed class FakeWorker : IWorkerClient
     {

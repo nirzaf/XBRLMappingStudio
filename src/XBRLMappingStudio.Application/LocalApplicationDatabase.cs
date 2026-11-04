@@ -7,7 +7,13 @@ namespace XBRLMappingStudio.Application;
 /// <summary>Versioned local application state. Mapping graphs remain in portable .xmap files.</summary>
 public sealed class LocalApplicationDatabase
 {
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// AI06: v2 widens <c>suggestion_audit</c> with the governed-actor and prompt-
+    /// template columns required to reconstruct a reviewed change without leaking
+    /// raw payloads. Migration is non-destructive and forward-only; a v3 column set
+    /// is added the same way when the next contract needs it.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -168,6 +174,23 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=1;
                 """;
             migration.ExecuteNonQuery();
+        }
+        if (version < 2)
+        {
+            // v2: AI06 governed-actor + prompt-template revision + optional payloads.
+            // Each ADD COLUMN is a no-op default so historical v1 rows remain readable.
+            using var migration2 = connection.CreateCommand();
+            migration2.Transaction = transaction;
+            migration2.CommandText = """
+                ALTER TABLE suggestion_audit ADD COLUMN method TEXT NOT NULL DEFAULT 'retrieval';
+                ALTER TABLE suggestion_audit ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+                ALTER TABLE suggestion_audit ADD COLUMN prompt_template_revision TEXT NOT NULL DEFAULT '';
+                ALTER TABLE suggestion_audit ADD COLUMN original_proposal_json TEXT NOT NULL DEFAULT '';
+                ALTER TABLE suggestion_audit ADD COLUMN approved_edit_json TEXT NOT NULL DEFAULT '';
+                ALTER TABLE suggestion_audit ADD COLUMN provider_snapshot_limitation TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version=2;
+                """;
+            migration2.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

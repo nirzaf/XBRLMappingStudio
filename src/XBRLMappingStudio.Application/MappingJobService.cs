@@ -304,6 +304,10 @@ public sealed class MappingJobService
         // must prevent publication. A real Arelle backend can exit "success" while its
         // report contains errors, so the status alone is not sufficient evidence of a
         // compliant filing; this guard makes the run's publishability depend on content.
+        // XBR08 additionally distinguishes a per-request timeout from a crash and from
+        // cancellation so the run manifest carries an unambiguous terminal cause: an
+        // unresponsive worker that never dies must surface as WKR004 with the run
+        // outcome OperationalFailure, never as Success-with-warnings or a silent pass.
         var workerBlocking = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).Any(d => d.IsBlocking);
         manifest.Outcome = workerResp.Status switch
         {
@@ -319,9 +323,33 @@ public sealed class MappingJobService
             _ => RunOutcome.InvalidMapping,
         };
 
+        // Attach a WKR diagnostic for a terminal timeout or crash so downstream consumers
+        // (support bundle, inspect-run-result, scheduler alerting) see the specific cause
+        // even when the worker returned no diagnostics of its own (fake or truncated pipe).
+        var workerDiags = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+        if (workerResp.Status is WorkerStatus.TimedOut or WorkerStatus.Crash
+            && !workerDiags.Any(d => d.Code is DiagnosticCodes.WkrTimeout or DiagnosticCodes.WkrCrash))
+        {
+            var code = workerResp.Status == WorkerStatus.TimedOut
+                ? DiagnosticCodes.WkrTimeout
+                : DiagnosticCodes.WkrCrash;
+            var reason = workerResp.Status == WorkerStatus.TimedOut
+                ? "Worker exceeded its per-request deadline and did not respond."
+                : "Worker terminated unexpectedly; no response was received.";
+            workerDiags.Add(new Diagnostic
+            {
+                Code = code,
+                Subsystem = DiagnosticSubsystem.Worker,
+                Severity = DiagnosticSeverity.Error,
+                Stage = DiagnosticStage.Worker,
+                IsBlocking = true,
+                Message = workerResp.Error is null ? reason : $"{reason} Worker message: {workerResp.Error}",
+                OperationId = opId,
+            });
+        }
+
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
-        manifest.Diagnostics = context.Diagnostics.Items
-            .Concat(workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+        manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiags).ToList();
         manifest.Outputs = new List<OutputIdentity>
         {
             new OutputIdentity(
@@ -358,6 +386,8 @@ public sealed class MappingJobService
         {
             "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
             "excel" => new ExcelOutputAdapter(),
+            "json" => new JsonOutputAdapter(),
+            "xml" => new XmlOutputAdapter(),
             _ => throw new NotSupportedException($"No target adapter for kind '{conn.Kind}'.")
         };
         AssertDirection(AdapterDirection.Write, adapter.Capabilities, adapter.Kind);
@@ -381,6 +411,49 @@ public sealed class MappingJobService
             throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
                 $"Adapter '{kind}' cannot be bound for {direction} use with its declared capabilities.",
                 DiagnosticStage.Publication);
+    }
+
+    /// <summary>
+    /// IO01 capability surfacing. The designer asks this before mapping starts so a
+    /// read-only connector is visibly disabled as a target and an uncertified operation
+    /// is described with a stable reason. The gate never throws: the desktop pane uses
+    /// <see cref="TargetSuitability.Reason"/> to decorate the option in place, and the
+    /// CLI refuses the binding pre-flight rather than at publication.
+    /// </summary>
+    public static TargetSuitability DescribeTargetSuitability(SourceConnection conn)
+    {
+        try
+        {
+            var adapter = BuildTargetAdapter(conn);
+            var caps = adapter.Capabilities;
+            if (!caps.AllowsWriteTarget)
+                return new TargetSuitability(false, adapter.Kind,
+                    $"Adapter '{adapter.Kind}' does not declare a staged write or publication path.");
+            return new TargetSuitability(true, adapter.Kind, Reason: null);
+        }
+        catch (NotSupportedException ex)
+        {
+            return new TargetSuitability(false, conn.Kind, ex.Message);
+        }
+        catch (AdapterException ex)
+        {
+            return new TargetSuitability(false, conn.Kind, ex.Message);
+        }
+    }
+
+    /// <summary>IO01 read-side surfacing: whether the binding kind exposes schema
+    /// inspection, sampling, reading and lineage in the current build.</summary>
+    public static SourceSuitability DescribeSourceSuitability(SourceConnection conn)
+    {
+        ISourceAdapter adapter;
+        try { adapter = BuildAdapter(conn); }
+        catch (NotSupportedException ex)
+        { return new SourceSuitability(false, conn.Kind, ex.Message); }
+        var caps = adapter.Capabilities;
+        if (!caps.SupportsReading)
+            return new SourceSuitability(false, adapter.Kind,
+                $"Adapter '{adapter.Kind}' does not declare a read path.");
+        return new SourceSuitability(true, adapter.Kind, Reason: null);
     }
 
     private static async Task<IReadOnlyList<InputIdentity>> RecordInputIdentities(
@@ -457,6 +530,14 @@ public sealed record CompileOutcome(
     public static CompileOutcome Ok(ExecutionPlan p, MappingGraph g, DiagnosticBag d) => new(true, p, g, d);
     public static CompileOutcome Invalid(DiagnosticBag d) => new(false, null, null, d);
 }
+
+/// <summary>IO01 result of <see cref="MappingJobService.DescribeTargetSuitability"/>.
+/// A false <see cref="Allowed"/> carries a stable reason the desktop renders inline
+/// so the analyst sees "this connector cannot be chosen as a target" before mapping.</summary>
+public sealed record TargetSuitability(bool Allowed, string Kind, string? Reason);
+
+/// <summary>IO01 source-side analogue.</summary>
+public sealed record SourceSuitability(bool Allowed, string Kind, string? Reason);
 
 public sealed record JobResult(
     RunManifest Manifest,
