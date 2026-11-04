@@ -101,6 +101,7 @@ jobs:
         with:
           name: cli-${{ matrix.rid }}
           path: 'xbrl-studio-*-${{ matrix.rid }}.*'
+          if-no-files-found: error
 
   publish-desktop:
     name: Desktop ${{ matrix.rid }}
@@ -125,11 +126,12 @@ jobs:
         run: |
           set -euo pipefail
           cd out
-          tar czf "../../desktop-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" desktop-${{ matrix.rid }}
+          tar czf "../desktop-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" desktop-${{ matrix.rid }}
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.rid }}
           path: 'desktop-*-${{ matrix.rid }}.tar.gz'
+          if-no-files-found: error
 
   github-release:
     name: Publish GitHub Release
