@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -163,12 +164,53 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
             new Dictionary<string, SourceConnection> { [original.BindingId] = connection },
             new Dictionary<string, string>(), preview: false, CancellationToken.None);
 
-        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
+        Assert.True(result.IsPublishable);
         Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
         var input = Assert.Single(result.Manifest.Inputs);
         Assert.Equal("sqlite-table", input.Kind);
         Assert.True(input.IsReplayable);
+        Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, input.RowIdentityStrategy);
         Assert.StartsWith("sha256:", input.Digest);
+        Assert.Contains(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoStableRowIdentityUnavailable
+                && diagnostic.Severity == DiagnosticSeverity.Warning);
+    }
+
+    [Fact]
+    public async Task SharedExecutionServiceRecordsDeclaredSqlitePrimaryKeyIdentity()
+    {
+        var database = Path.Combine(_dir, "financials-primary-key.db");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT PRIMARY KEY, Current TEXT, Prior TEXT); INSERT INTO financials VALUES ('Revenue','1250','1100');";
+            await command.ExecuteNonQueryAsync();
+        }
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var original = project.Bindings[0];
+        project.Bindings[0] = original with
+        {
+            Kind = "sqlite",
+            Locator = database,
+            Configuration = new Dictionary<string, object?>
+            {
+                ["table"] = "financials", ["decimalColumns"] = "Current,Prior"
+            }
+        };
+        var connection = new SourceConnection(original.BindingId, "sqlite", database,
+            new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" });
+
+        var result = await NewService().RunAsync(project,
+            new Dictionary<string, SourceConnection> { [original.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        var input = Assert.Single(result.Manifest.Inputs);
+        Assert.Equal(SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy, input.RowIdentityStrategy);
+        Assert.DoesNotContain(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoStableRowIdentityUnavailable);
     }
 
     [Fact]
@@ -213,6 +255,8 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         var inputA = Assert.Single(fullA.Manifest.Inputs);
         var inputB = Assert.Single(fullB.Manifest.Inputs);
         Assert.Equal(inputA.Digest, inputB.Digest);
+        Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, inputA.RowIdentityStrategy);
+        Assert.Equal(SqliteSourceAdapter.PositionalIdentityStrategy, inputB.RowIdentityStrategy);
         Assert.Equal(Enumerable.Range(0, 12).Select(i => (decimal?)(i * 1000m)), fullA.Facts.Select(fact => fact.Value));
         Assert.Equal(Enumerable.Range(0, 12).Reverse().Select(i => (decimal?)(i * 1000m)), fullB.Facts.Select(fact => fact.Value));
         Assert.True(inputA.IsReplayable);

@@ -16,7 +16,8 @@ public sealed record TabularSchema(
     {
         var joined = string.Join('|', cols
             .OrderBy(c => c.Ordinal)
-            .Select(c => $"{c.Ordinal}:{c.Name}:{c.InferredShape}"));
+            .Select(c => $"{c.Ordinal}:{c.Name}:{c.InferredShape}"
+                + (c.PrimaryKeyOrdinal > 0 ? $":pk:{c.PrimaryKeyOrdinal}" : "")));
         return XBRLMappingStudio.Diagnostics.RunManifest.ComputeSha256(joined);
     }
 

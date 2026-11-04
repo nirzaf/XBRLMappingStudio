@@ -51,6 +51,7 @@ public static class DiagnosticCodes
     public const string IoDuplicateKey = "IO012";
     public const string IoDepthExceeded = "IO013";
     public const string IoNumberOutOfBudget = "IO014";
+    public const string IoStableRowIdentityUnavailable = "IO015";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

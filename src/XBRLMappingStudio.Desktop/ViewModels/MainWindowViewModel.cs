@@ -463,7 +463,13 @@ public sealed class MainWindowViewModel : ViewModelBase
             Session.SetBinding(binding);
             SelectedSourceBindingId = binding.BindingId;
             Raise(nameof(SourceColumns));
-            StatusText = $"Loaded {schema.Columns.Count} fields from {table}.";
+            var primaryKeys = schema.Columns.Where(column => column.PrimaryKeyOrdinal > 0)
+                .OrderBy(column => column.PrimaryKeyOrdinal)
+                .Select(column => column.Name)
+                .ToArray();
+            StatusText = primaryKeys.Length > 0
+                ? $"Loaded {schema.Columns.Count} fields from {table}. Primary key: {string.Join(", ", primaryKeys)}; stable row identity enabled."
+                : $"Loaded {schema.Columns.Count} fields from {table}. No primary key detected; SQLite does not guarantee row ordering, so positional row provenance may shift between reads.";
         }
         catch (Exception ex) { StatusText = $"SQLite table load failed: {ex.Message}"; }
         finally

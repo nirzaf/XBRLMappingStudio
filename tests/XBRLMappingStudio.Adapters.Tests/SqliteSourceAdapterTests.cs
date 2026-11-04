@@ -29,6 +29,7 @@ public sealed class SqliteSourceAdapterTests
         var schema = await adapter.InspectSchemaAsync(connection, default);
         Assert.Equal(new[] { "account", "amount", "active" }, schema.Columns.Select(c => c.Name));
         Assert.Equal(PortShape.Decimal, schema.Columns[1].InferredShape);
+        Assert.All(schema.Columns, column => Assert.Equal(0, column.PrimaryKeyOrdinal));
 
         var sample = await adapter.ReadSampleAsync(connection, schema, 1, default);
         Assert.Single(sample.Rows);
@@ -41,7 +42,114 @@ public sealed class SqliteSourceAdapterTests
         await foreach (var row in adapter.ReadFullAsync(connection, schema, default)) rows.Add(row);
         Assert.Equal(2, rows.Count);
         Assert.True(rows[1]["amount"].IsNil);
+        Assert.All(rows, row => Assert.False(row.HasStableRowIdentity));
+        Assert.StartsWith("pos:", rows[0].RowId, StringComparison.Ordinal);
         Assert.False(adapter.Capabilities.AllowsWriteTarget);
+    }
+
+    [Fact]
+    public async Task DeclaredCompositePrimaryKeyProducesStableHashedRowIdentities()
+    {
+        using var ws = new TempWorkspace();
+
+        async Task<(ISourceSchema Schema, IReadOnlyList<DataRecord> Rows)> ReadSource(string fileName, bool reverse)
+        {
+            var path = ws.PathFor(fileName);
+            await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+            {
+                await db.OpenAsync();
+                await using var command = db.CreateCommand();
+                command.CommandText = "CREATE TABLE ledger (tenant TEXT NOT NULL, account TEXT NOT NULL, amount TEXT, PRIMARY KEY(tenant,account)) WITHOUT ROWID;";
+                await command.ExecuteNonQueryAsync();
+
+                var rows = new[] { (Tenant: "tenant-a", Account: "0007", Amount: "1.25"), (Tenant: "tenant-b", Account: "0007", Amount: "2.50") };
+                foreach (var row in reverse ? rows.Reverse() : rows)
+                {
+                    command.CommandText = "INSERT INTO ledger VALUES($tenant,$account,$amount)";
+                    command.Parameters.Clear();
+                    command.Parameters.AddWithValue("$tenant", row.Tenant);
+                    command.Parameters.AddWithValue("$account", row.Account);
+                    command.Parameters.AddWithValue("$amount", row.Amount);
+                    await command.ExecuteNonQueryAsync();
+                }
+            }
+
+            var connection = new SourceConnection("ledger-source", "sqlite", path,
+                new Dictionary<string, string> { ["table"] = "ledger", ["decimalColumns"] = "amount" });
+            var adapter = new SqliteSourceAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, default);
+            var result = new List<DataRecord>();
+            await foreach (var row in adapter.ReadFullAsync(connection, schema, default)) result.Add(row);
+            return (schema, result);
+        }
+
+        var first = await ReadSource("first.db", reverse: false);
+        var second = await ReadSource("second.db", reverse: true);
+
+        Assert.Equal(1, first.Schema.Columns.Single(column => column.Name == "tenant").PrimaryKeyOrdinal);
+        Assert.Equal(2, first.Schema.Columns.Single(column => column.Name == "account").PrimaryKeyOrdinal);
+        Assert.Equal(first.Schema.Fingerprint, second.Schema.Fingerprint);
+
+        static string CompositeKey(DataRecord record)
+            => record["tenant"].AsString() + "\0" + record["account"].AsString();
+
+        var firstIds = first.Rows.ToDictionary(CompositeKey, row => row.RowId, StringComparer.Ordinal);
+        var secondIds = second.Rows.ToDictionary(CompositeKey, row => row.RowId, StringComparer.Ordinal);
+        Assert.Equal(firstIds, secondIds);
+        Assert.All(first.Rows, row =>
+        {
+            Assert.True(row.HasStableRowIdentity);
+            Assert.StartsWith("pk:sha256:", row.RowId, StringComparison.Ordinal);
+            Assert.DoesNotContain("tenant-a", row.RowId, StringComparison.Ordinal);
+            Assert.Equal(row.RowId, row.CellSources!["amount"].DisplayName);
+        });
+    }
+
+    [Fact]
+    public async Task SchemaFingerprintChangesWhenPrimaryKeyDefinitionChanges()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("schema.db");
+        await using var db = new SqliteConnection($"Data Source={path};Pooling=False");
+        await db.OpenAsync();
+        await using var command = db.CreateCommand();
+        command.CommandText = "CREATE TABLE ledger (account TEXT, amount TEXT);";
+        await command.ExecuteNonQueryAsync();
+        var connection = new SourceConnection("ledger-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "ledger" });
+        var adapter = new SqliteSourceAdapter();
+        var noKeySchema = await adapter.InspectSchemaAsync(connection, default);
+
+        command.CommandText = "DROP TABLE ledger; CREATE TABLE ledger (account TEXT PRIMARY KEY, amount TEXT);";
+        await command.ExecuteNonQueryAsync();
+        var primaryKeySchema = await adapter.InspectSchemaAsync(connection, default);
+
+        Assert.NotEqual(noKeySchema.Fingerprint, primaryKeySchema.Fingerprint);
+    }
+
+    [Fact]
+    public async Task NullValueInDeclaredPrimaryKeyCannotProduceStableIdentity()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("nullable-primary-key.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (account TEXT PRIMARY KEY, amount TEXT); INSERT INTO ledger VALUES (NULL,'1.25');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var connection = new SourceConnection("ledger-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "ledger" });
+        var adapter = new SqliteSourceAdapter();
+        var schema = await adapter.InspectSchemaAsync(connection, default);
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, default)) { }
+        });
+
+        Assert.Equal(DiagnosticCodes.IoDuplicateKey, error.Code);
     }
 
     [Fact]

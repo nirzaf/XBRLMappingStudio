@@ -163,8 +163,29 @@ public sealed class MappingJobService
             if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
             {
                 var digest = DigestRecords(conn, records);
+                var hasDeclaredPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
+                var identityStrategy = hasDeclaredPrimaryKey
+                    ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
+                    : SqliteSourceAdapter.PositionalIdentityStrategy;
+                if (!hasDeclaredPrimaryKey)
+                {
+                    context.Diagnostics.Warn(
+                        DiagnosticCodes.IoStableRowIdentityUnavailable,
+                        DiagnosticSubsystem.Adapter,
+                        DiagnosticStage.Execution,
+                        "The selected SQLite table has no declared primary key. "
+                        + "SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; "
+                        + "use a declared primary key or immutable extract if durable row-level identity is required.",
+                        operationId: opId);
+                }
                 manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
-                    ? input with { Kind = preview ? "sqlite-preview" : "sqlite-table", Digest = digest, IsReplayable = !preview }
+                    ? input with
+                    {
+                        Kind = preview ? "sqlite-preview" : "sqlite-table",
+                        Digest = digest,
+                        IsReplayable = !preview,
+                        RowIdentityStrategy = identityStrategy
+                    }
                     : input).ToArray();
             }
             context.LoadedSources[binding.BindingId] = records;
@@ -287,7 +308,9 @@ public sealed class MappingJobService
         manifest.Outcome = workerResp.Status switch
         {
             WorkerStatus.Success when !workerBlocking
-                => preview ? RunOutcome.SuccessWithWarnings : RunOutcome.Success,
+                => preview || context.Diagnostics.Items.Any(d => d.Severity == DiagnosticSeverity.Warning)
+                    ? RunOutcome.SuccessWithWarnings
+                    : RunOutcome.Success,
             WorkerStatus.Cancelled => RunOutcome.Cancelled,
             WorkerStatus.IncompleteValidation => RunOutcome.IncompleteConfiguration,
             WorkerStatus.TimedOut => RunOutcome.OperationalFailure,

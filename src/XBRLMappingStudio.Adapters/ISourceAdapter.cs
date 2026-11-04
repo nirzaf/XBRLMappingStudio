@@ -60,7 +60,8 @@ public sealed record ColumnSchema(
     string Name,
     PortShape InferredShape,
     int Ordinal,
-    string? DisplayName = null);
+    string? DisplayName = null,
+    int PrimaryKeyOrdinal = 0);
 
 /// <summary>
 /// Small sample returned by preview requests. Adapters must not stream full sources

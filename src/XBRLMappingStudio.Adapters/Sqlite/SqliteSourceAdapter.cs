@@ -1,5 +1,8 @@
 using System.Data;
+using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -12,6 +15,9 @@ namespace XBRLMappingStudio.Adapters.Sqlite;
 /// TEXT and parse them explicitly in the mapping.</summary>
 public sealed class SqliteSourceAdapter : ISourceAdapter
 {
+    public const string StablePrimaryKeyIdentityStrategy = "sqlite-primary-key-sha256";
+    public const string PositionalIdentityStrategy = "positional-row-number";
+
     public string Kind => "sqlite";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
 
@@ -30,19 +36,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     {
         var table = GetTable(connection);
         await using var db = await OpenConnectionAsync(connection, cancellationToken);
-        await using var command = db.CreateCommand();
-        command.CommandText = $"PRAGMA table_info({Quote(table)})";
-        var decimalOverrides = DecimalOverrides(connection);
-        var columns = new List<ColumnSchema>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var name = reader.GetString(1);
-            var declaredType = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            columns.Add(new ColumnSchema(name, decimalOverrides.Contains(name) ? PortShape.Decimal : Shape(declaredType), columns.Count, name));
-        }
-        if (columns.Count == 0)
-            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, $"SQLite table '{table}' does not exist or has no columns.");
+        var columns = await ReadColumnsAsync(db, connection, table, cancellationToken);
         return TabularSchema.FromSource(connection.SourceId, columns);
     }
 
@@ -65,35 +59,118 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     {
         var table = GetTable(connection);
         await using var db = await OpenConnectionAsync(connection, cancellationToken);
-        await using var command = db.CreateCommand();
-        command.CommandText = $"SELECT * FROM {Quote(table)}";
-        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken);
-        var columns = schema.Columns.OrderBy(c => c.Ordinal).ToArray();
-        if (reader.FieldCount != columns.Length
-            || Enumerable.Range(0, reader.FieldCount).Any(i => reader.GetName(i) != columns[i].Name))
-            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
-                $"SQLite table '{table}' changed after schema inspection; inspect and remap before reading.");
+        var columns = (await ReadColumnsAsync(db, connection, table, cancellationToken))
+            .OrderBy(c => c.Ordinal)
+            .ToArray();
         var actual = TabularSchema.FromSource(connection.SourceId, columns);
         if (schema.SourceId != actual.SourceId || schema.Fingerprint != actual.Fingerprint)
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 $"SQLite table '{table}' changed after schema inspection; inspect and remap before reading.");
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $"SELECT * FROM {Quote(table)}";
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken);
+        if (reader.FieldCount != columns.Length
+            || Enumerable.Range(0, reader.FieldCount).Any(i => reader.GetName(i) != columns[i].Name))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"SQLite table '{table}' changed after schema inspection; inspect and remap before reading.");
+
+        var stableKeyColumns = columns.Where(c => c.PrimaryKeyOrdinal > 0)
+            .OrderBy(c => c.PrimaryKeyOrdinal)
+            .ToArray();
 
         long rowNumber = 0;
         while (await reader.ReadAsync(cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
-            var sources = new Dictionary<string, SourceReference>(StringComparer.Ordinal);
+            var keyValues = new List<(ColumnSchema Column, object Value)>(stableKeyColumns.Length);
             foreach (var column in columns)
             {
                 var value = reader.GetValue(column.Ordinal);
                 fields[column.Name] = ConvertValue(value, column.InferredShape, column.Name);
-                sources[column.Name] = new SourceReference(connection.SourceId, $"{table}.{column.Name}", rowNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (column.PrimaryKeyOrdinal > 0)
+                    keyValues.Add((column, value));
             }
-            yield return new DataRecord { RowId = rowNumber.ToString(System.Globalization.CultureInfo.InvariantCulture), Fields = fields, CellSources = sources };
+
+            var hasStableIdentity = stableKeyColumns.Length > 0;
+            var rowId = hasStableIdentity ? StablePrimaryKeyRowId(keyValues) : $"pos:{rowNumber.ToString(CultureInfo.InvariantCulture)}";
+            var sources = columns.ToDictionary(
+                column => column.Name,
+                column => new SourceReference(connection.SourceId, $"{table}.{column.Name}", rowId),
+                StringComparer.Ordinal);
+            yield return new DataRecord
+            {
+                RowId = rowId,
+                Fields = fields,
+                CellSources = sources,
+                HasStableRowIdentity = hasStableIdentity
+            };
             rowNumber++;
         }
     }
+
+    private static async Task<IReadOnlyList<ColumnSchema>> ReadColumnsAsync(
+        SqliteConnection db,
+        SourceConnection connection,
+        string table,
+        CancellationToken cancellationToken)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({Quote(table)})";
+        var decimalOverrides = DecimalOverrides(connection);
+        var columns = new List<ColumnSchema>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var name = reader.GetString(1);
+            var declaredType = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            columns.Add(new ColumnSchema(
+                name,
+                decimalOverrides.Contains(name) ? PortShape.Decimal : Shape(declaredType),
+                columns.Count,
+                name,
+                reader.GetInt32(5)));
+        }
+        if (columns.Count == 0)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"SQLite table '{table}' does not exist or has no columns.");
+        return columns;
+    }
+
+    private static string StablePrimaryKeyRowId(IReadOnlyList<(ColumnSchema Column, object Value)> keyValues)
+    {
+        var builder = new StringBuilder();
+        foreach (var (column, rawValue) in keyValues.OrderBy(value => value.Column.PrimaryKeyOrdinal))
+        {
+            if (rawValue is DBNull)
+                throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
+                    $"SQLite primary-key column '{column.Name}' contains NULL; stable source row identity cannot be computed.");
+
+            var (kind, value) = FormatKeyValue(rawValue);
+            AppendIdentityPart(builder, column.Name);
+            AppendIdentityPart(builder, kind);
+            AppendIdentityPart(builder, value);
+        }
+
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
+        return "pk:sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
+    }
+
+    private static (string Kind, string Value) FormatKeyValue(object value) => value switch
+    {
+        string text => ("text", text),
+        long number => ("integer", number.ToString(CultureInfo.InvariantCulture)),
+        int number => ("integer", number.ToString(CultureInfo.InvariantCulture)),
+        double number => ("real", number.ToString("R", CultureInfo.InvariantCulture)),
+        byte[] bytes => ("blob", Convert.ToBase64String(bytes)),
+        IFormattable formattable => (value.GetType().FullName ?? "value",
+            formattable.ToString(null, CultureInfo.InvariantCulture) ?? ""),
+        _ => (value.GetType().FullName ?? "value", value.ToString() ?? "")
+    };
+
+    private static void AppendIdentityPart(StringBuilder builder, string value)
+        => builder.Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(value);
 
     private static async Task<SqliteConnection> OpenConnectionAsync(SourceConnection connection, CancellationToken cancellationToken)
     {

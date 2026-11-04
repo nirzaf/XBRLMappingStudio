@@ -94,7 +94,8 @@ public sealed record InputIdentity(
     string Kind,        // "file", "db-query", "snapshot"
     string? Digest,     // file hash or snapshot id; null when non-replayable
     bool IsReplayable,
-    string? OriginalPath);
+    string? OriginalPath,
+    string? RowIdentityStrategy = null);
 
 public sealed record OutputIdentity(
     string Path,

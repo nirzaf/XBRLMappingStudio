@@ -112,6 +112,7 @@ public sealed class DataRecord
     public required string RowId { get; init; }
     public required IReadOnlyDictionary<string, DataValue> Fields { get; init; }
     public IReadOnlyDictionary<string, SourceReference>? CellSources { get; init; }
+    public bool HasStableRowIdentity { get; init; }
 
     public DataValue this[string column] => Fields.TryGetValue(column, out var v) ? v : DataValue.Missing();
 }

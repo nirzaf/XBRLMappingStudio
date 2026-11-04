@@ -345,6 +345,36 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task SqliteDesignerReportsDetectedPrimaryKeyForStableRowIdentity()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-sqlite-key", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "ledger.sqlite");
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (account TEXT PRIMARY KEY, amount TEXT);";
+            await command.ExecuteNonQueryAsync();
+        }
+        try
+        {
+            var viewModel = new MainWindowViewModel(ProjectWithSource());
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+
+            await viewModel.LoadSourceAsync(database);
+
+            Assert.Contains("account", viewModel.SourceColumns);
+            Assert.Contains("Primary key: account", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("stable row identity enabled", viewModel.StatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SourceCannotBeLoadedBeforeProjectHasWorkspace()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-unsaved", Guid.NewGuid().ToString("n"));
