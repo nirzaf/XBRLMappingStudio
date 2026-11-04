@@ -118,7 +118,7 @@ graph TD
 | Component | Choice | Notes |
 |---|---|---|
 | Runtime / SDK | **.NET 10 LTS** (`net10.0`, SDK 10.0.300) | Solution uses the `.slnx` format. |
-| Language | C# 13, nullable enabled | |
+| Language | C# 14 (`LangVersion` pinned in `Directory.Build.props`), nullable enabled | |
 | Desktop UI | **Avalonia 11.1** | The guide's 12.1.5 + Nodify.Avalonia baseline does not restore in this environment; a custom `GraphCanvas` is used. Revisit at hardware/installer qualification. |
 | Excel | ClosedXML 0.104.2 | |
 | Data formats | `System.Text.Json`, `System.Xml` | XML parsed with `DtdProcessing.Prohibit` and `XmlResolver = null`. |
