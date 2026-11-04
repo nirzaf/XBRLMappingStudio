@@ -156,46 +156,66 @@
                        AutomationProperties.Name="Fact decimals" />
               <Button Content="Apply fact properties" Command="{Binding ApplyFactPropertiesCommand}" />
             </StackPanel>
-            <Expander Header="SQLite destination" IsExpanded="False" Margin="0,8,0,0">
+            <Expander Header="Destination" IsExpanded="False" Margin="0,8,0,0">
               <ScrollViewer MaxHeight="300">
                 <StackPanel Spacing="6" Margin="0,6,0,0">
-                  <Button Content="Choose SQLite database…"
-                          Command="{Binding ChooseDestinationCommand}"
-                          AutomationProperties.Name="Choose existing SQLite destination database" />
-                  <TextBlock Text="Destination file" FontWeight="SemiBold" />
-                  <TextBlock Text="{Binding DestinationPathDisplay}" TextWrapping="Wrap" />
-                  <TextBlock Text="Target table" FontWeight="SemiBold" />
-                  <ComboBox ItemsSource="{Binding DestinationTables}"
-                            SelectedItem="{Binding DestinationTable}"
-                            IsEnabled="{Binding HasDestinationTables}"
-                            AutomationProperties.Name="SQLite destination table" />
-                  <TextBlock Text="Unique business key" FontWeight="SemiBold" />
-                  <ComboBox ItemsSource="{Binding DestinationKeys}"
-                            SelectedItem="{Binding SelectedDestinationKey}"
-                            IsEnabled="{Binding CanSelectDestinationKey}">
+                  <TextBlock Text="Destination kind" FontWeight="SemiBold" />
+                  <ComboBox ItemsSource="{Binding DestinationKindOptions}"
+                            SelectedItem="{Binding SelectedDestinationKind}"
+                            AutomationProperties.Name="Destination kind">
                     <ComboBox.ItemTemplate>
-                      <DataTemplate x:DataType="vm:DestinationKeyOption">
+                      <DataTemplate x:DataType="vm:DestinationKindOption">
                         <TextBlock Text="{Binding Display}" />
                       </DataTemplate>
                     </ComboBox.ItemTemplate>
                   </ComboBox>
+                  <TextBlock Text="{Binding DestinationFormatDisplay}" TextWrapping="Wrap" />
+                  <Button Content="{Binding DestinationPickerButtonText}"
+                          Command="{Binding ChooseDestinationCommand}"
+                          AutomationProperties.Name="Choose destination path" />
+                  <TextBlock Text="Destination path" FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding DestinationPathDisplay}" TextWrapping="Wrap" />
+                  <StackPanel IsVisible="{Binding IsSqliteDestination}" Spacing="6">
+                    <TextBlock Text="Target table" FontWeight="SemiBold" />
+                    <ComboBox ItemsSource="{Binding DestinationTables}"
+                              SelectedItem="{Binding DestinationTable}"
+                              IsEnabled="{Binding HasDestinationTables}"
+                              AutomationProperties.Name="SQLite destination table" />
+                    <TextBlock Text="Unique business key" FontWeight="SemiBold" />
+                    <ComboBox ItemsSource="{Binding DestinationKeys}"
+                              SelectedItem="{Binding SelectedDestinationKey}"
+                              IsEnabled="{Binding CanSelectDestinationKey}"
+                              AutomationProperties.Name="SQLite unique business key">
+                      <ComboBox.ItemTemplate>
+                        <DataTemplate x:DataType="vm:DestinationKeyOption">
+                          <TextBlock Text="{Binding Display}" />
+                        </DataTemplate>
+                      </ComboBox.ItemTemplate>
+                    </ComboBox>
+                  </StackPanel>
                   <TextBlock Text="{Binding DestinationSchemaStatus}"
                              TextWrapping="Wrap"
-                             AutomationProperties.Name="SQLite target schema validation" />
+                             AutomationProperties.Name="Destination validation status" />
                   <CheckBox Content="I reviewed this table and its unique business key"
                             IsChecked="{Binding IsDestinationSchemaConfirmed}"
                             IsEnabled="{Binding CanConfirmDestinationSchema}"
+                            IsVisible="{Binding IsSqliteDestination}"
                             AutomationProperties.Name="Confirm SQLite target schema and business key" />
+                  <CheckBox Content="I reviewed this output path and format"
+                            IsChecked="{Binding IsDestinationSchemaConfirmed}"
+                            IsEnabled="{Binding CanConfirmDestinationSchema}"
+                            IsVisible="{Binding IsFileDestination}"
+                            AutomationProperties.Name="Confirm file destination path and format" />
                   <Button Content="Save destination plan"
                           Command="{Binding SaveDestinationPlanCommand}"
                           AutomationProperties.Name="Save destination plan" />
-                  <Button Content="Dry-run (no database writes)"
+                  <Button Content="{Binding DestinationPreviewButtonText}"
                           Command="{Binding PreviewDestinationCommand}"
-                          AutomationProperties.Name="Dry-run full mapping without database writes" />
-                  <Button Content="Publish to SQLite…"
+                          AutomationProperties.Name="Dry-run full mapping without destination writes" />
+                  <Button Content="{Binding DestinationPublishButtonText}"
                           Command="{Binding PublishDestinationCommand}"
-                          AutomationProperties.Name="Publish facts to SQLite after confirmation" />
-                  <TextBlock Text="The dry run checks the full mapping and target schema. Publication rechecks approval and schema, then asks for final confirmation."
+                          AutomationProperties.Name="Publish facts to the selected destination after confirmation" />
+                  <TextBlock Text="{Binding DestinationGuidance}"
                              TextWrapping="Wrap" />
                 </StackPanel>
               </ScrollViewer>

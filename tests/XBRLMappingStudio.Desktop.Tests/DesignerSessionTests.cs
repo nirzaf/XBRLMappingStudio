@@ -612,6 +612,81 @@ public sealed class DesignerSessionTests
         }
     }
 
+    [Fact]
+    public async Task DesktopFileDestinationRequiresPathReviewDryRunAndFinalConfirmation()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-file-destination", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var workbook = TestFixtures.MaterializeWorkbook(dir);
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        var outputPath = System.IO.Path.Combine(dir, "facts.json");
+        var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+        var dialog = new TestProjectFileDialog(null) { FileDestinationPath = outputPath };
+        try
+        {
+            var viewModel = new MainWindowViewModel(project, dialog);
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+            viewModel.SelectedDestinationKind = viewModel.DestinationKindOptions.Single(option => option.Kind == "json");
+            await viewModel.ChooseDestinationAsync();
+
+            Assert.True(viewModel.IsFileDestination);
+            Assert.True(viewModel.DestinationSchemaIsValid);
+            Assert.False(viewModel.CanSaveDestinationPlan);
+            Assert.False(File.Exists(outputPath));
+
+            viewModel.IsDestinationSchemaConfirmed = true;
+            Assert.True(viewModel.CanSaveDestinationPlan);
+            var priorDigest = viewModel.Session.Project.ComputeSemanticDigest();
+            viewModel.SaveDestinationPlanCommand.Execute(null);
+
+            var savedPlan = viewModel.Session.Project.Destination;
+            Assert.NotNull(savedPlan);
+            Assert.Equal("json", savedPlan.Kind);
+            Assert.Equal("json-records-v1", savedPlan.Format);
+            Assert.Equal("replace", savedPlan.WriteMode);
+            Assert.Empty(savedPlan.BusinessKey);
+            Assert.NotEqual(priorDigest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.DoesNotContain(viewModel.Session.Project.Approvals,
+                approval => approval.SemanticDigest == viewModel.Session.Project.ComputeSemanticDigest());
+
+            await viewModel.PreviewDestinationAsync();
+            Assert.Contains("Dry run complete", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("No file was written", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.False(File.Exists(outputPath));
+
+            viewModel.Session.Project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = viewModel.Session.Project.SemanticRevision,
+                SemanticDigest = viewModel.Session.Project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = SyntheticProfile.Build().Digest
+            });
+            viewModel.SaveProjectTo(projectPath);
+            Assert.True(viewModel.CanPublishDestination);
+
+            dialog.ConfirmationResult = false;
+            await viewModel.PublishDestinationAsync();
+            Assert.Contains("Publication cancelled", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.False(File.Exists(outputPath));
+
+            dialog.ConfirmationResult = true;
+            await viewModel.PublishDestinationAsync();
+            Assert.Equal(2, dialog.ConfirmationCount);
+            Assert.Equal(outputPath, dialog.ConfirmedFilePath);
+            Assert.Equal("json-records-v1", dialog.ConfirmedFileFormat);
+            Assert.Contains("Published json file", viewModel.StatusText, StringComparison.Ordinal);
+            using var report = System.Text.Json.JsonDocument.Parse(await File.ReadAllBytesAsync(outputPath));
+            var fact = Assert.Single(report.RootElement.EnumerateArray());
+            Assert.Equal("1250000", fact.GetProperty("value").GetRawText());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private static async Task CreateFactDatabaseAsync(string path)
     {
         await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
@@ -644,17 +719,21 @@ public sealed class DesignerSessionTests
 
     private sealed class TestProjectFileDialog(string? destinationPath) : IProjectFileDialog
     {
+        public string? FileDestinationPath { get; set; }
         public bool ConfirmationResult { get; set; }
         public int ConfirmationCount { get; private set; }
         public string? ConfirmedTable { get; private set; }
         public IReadOnlyList<string> ConfirmedBusinessKey { get; private set; } = Array.Empty<string>();
         public int ConfirmedFactCount { get; private set; }
+        public string? ConfirmedFilePath { get; private set; }
+        public string? ConfirmedFileFormat { get; private set; }
 
         public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult(destinationPath);
+        public Task<string?> SaveDestinationFileAsync(string kind) => Task.FromResult(FileDestinationPath);
 
         public Task<bool> ConfirmDestinationPublicationAsync(
             string databasePath,
@@ -666,6 +745,19 @@ public sealed class DesignerSessionTests
             ConfirmationCount++;
             ConfirmedTable = table;
             ConfirmedBusinessKey = businessKey.ToArray();
+            ConfirmedFactCount = factCount;
+            return Task.FromResult(ConfirmationResult);
+        }
+
+        public Task<bool> ConfirmFileDestinationPublicationAsync(
+            string destinationPath,
+            string format,
+            int factCount,
+            string semanticDigest)
+        {
+            ConfirmationCount++;
+            ConfirmedFilePath = destinationPath;
+            ConfirmedFileFormat = format;
             ConfirmedFactCount = factCount;
             return Task.FromResult(ConfirmationResult);
         }

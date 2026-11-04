@@ -571,6 +571,14 @@ public sealed class MappingJobService
         var root = Path.GetFullPath(workspaceRoot);
         var destinationPath = PathGuard.EnsureWithin(root,
             Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
+        var pathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(destinationPath);
+        if (pathDiagnostics.HasBlockingErrors)
+        {
+            var first = pathDiagnostics.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new AdapterException(first.Code,
+                string.Join(Environment.NewLine, pathDiagnostics.Items.Select(diagnostic => diagnostic.Message)),
+                DiagnosticStage.Publication);
+        }
         var directory = Path.GetDirectoryName(destinationPath)!;
         if (!Directory.Exists(directory))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,

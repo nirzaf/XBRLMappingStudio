@@ -407,6 +407,12 @@ static int ConfigureDestination(string[] args)
         }
         if (isFileKind)
         {
+            var pathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(fullDestination);
+            if (pathDiagnostics.HasBlockingErrors)
+            {
+                PrintDiagnostics(pathDiagnostics.Items);
+                return ExitCodesLocal.DataError;
+            }
             if (Directory.Exists(fullDestination))
             {
                 var invalid = new DiagnosticBag();

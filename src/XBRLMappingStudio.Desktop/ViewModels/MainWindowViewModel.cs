@@ -115,6 +115,8 @@ public sealed record DestinationKeyOption(IReadOnlyList<string> Columns)
     public string Display => string.Join(", ", Columns);
 }
 
+public sealed record DestinationKindOption(string Kind, string Display);
+
 /// <summary>
 /// Root window view model. Hosts a real <see cref="DesignerSession"/> over a
 /// <see cref="MappingProject"/>, a paged <see cref="TaxonomyIndex"/>-backed explorer, and
@@ -140,6 +142,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
+    private static readonly DestinationKindOption SqliteDestinationKind = new("sqlite", "SQLite fact table");
+    private DestinationKindOption _selectedDestinationKind = SqliteDestinationKind;
     private string? _destinationPath;
     private string? _destinationTable;
     private DestinationKeyOption? _selectedDestinationKey;
@@ -221,6 +225,48 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
+    public IReadOnlyList<DestinationKindOption> DestinationKindOptions { get; } = Array.AsReadOnly(new[]
+    {
+        SqliteDestinationKind,
+        new DestinationKindOption("csv", "CSV records"),
+        new DestinationKindOption("excel", "Excel workbook"),
+        new DestinationKindOption("json", "JSON records"),
+        new DestinationKindOption("xml", "XML records")
+    });
+    public DestinationKindOption SelectedDestinationKind
+    {
+        get => _selectedDestinationKind;
+        set
+        {
+            if (!Set(ref _selectedDestinationKind, value)) return;
+            ClearDestinationSelection();
+            Raise(nameof(IsSqliteDestination));
+            Raise(nameof(IsFileDestination));
+            Raise(nameof(DestinationFormatDisplay));
+            Raise(nameof(DestinationPickerButtonText));
+            Raise(nameof(DestinationPreviewButtonText));
+            Raise(nameof(DestinationPublishButtonText));
+            Raise(nameof(DestinationGuidance));
+            NotifyDestinationCommands();
+        }
+    }
+    public bool IsSqliteDestination => StringComparer.Ordinal.Equals(SelectedDestinationKind.Kind, "sqlite");
+    public bool IsFileDestination => DestinationPlanValidator.IsFileKind(SelectedDestinationKind.Kind);
+    public string DestinationFormatDisplay => IsSqliteDestination
+        ? "Contract: xbrl-facts-v1 · upsert"
+        : $"Contract: {DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)} · replace";
+    public string DestinationPickerButtonText => IsSqliteDestination
+        ? "Choose SQLite database…"
+        : "Choose output file…";
+    public string DestinationPreviewButtonText => IsSqliteDestination
+        ? "Dry-run (no database writes)"
+        : "Dry-run (no file writes)";
+    public string DestinationPublishButtonText => IsSqliteDestination
+        ? "Publish to SQLite…"
+        : "Publish file…";
+    public string DestinationGuidance => IsSqliteDestination
+        ? "The dry run checks the full mapping and target schema. Publication rechecks approval and schema, then asks for final confirmation."
+        : "The dry run checks the full mapping and output contract. Publication rechecks approval, stages and validates the file, then asks for final confirmation.";
     public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
     public string? SelectedSourceTable
     {
@@ -236,7 +282,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
     public string? DestinationPath => _destinationPath;
-    public string DestinationPathDisplay => _destinationPath ?? "No database selected.";
+    public string DestinationPathDisplay => _destinationPath ?? "No destination selected.";
     public List<string> DestinationTables { get; } = new();
     public bool HasDestinationTables => DestinationTables.Count > 0;
     public string? DestinationTable
@@ -473,6 +519,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         SelectedNode = null;
+        SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = null;
         _expectedLayoutGeneration = null;
         ClearSourceAndRunResults();
@@ -503,7 +550,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
     }
 
-    private async Task ChooseDestinationAsync()
+    public async Task ChooseDestinationAsync()
     {
         if (ProjectPath is null)
         {
@@ -512,20 +559,84 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         if (_fileDialog is null)
         {
-            StatusText = "SQLite destination picker is unavailable.";
+            StatusText = "Destination picker is unavailable.";
             return;
         }
 
         try
         {
-            var path = await _fileDialog.OpenDestinationDatabaseAsync();
-            if (path is not null) await LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+            if (IsSqliteDestination)
+            {
+                var path = await _fileDialog.OpenDestinationDatabaseAsync();
+                if (path is not null) await LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+            }
+            else
+            {
+                var path = await _fileDialog.SaveDestinationFileAsync(SelectedDestinationKind.Kind);
+                if (path is not null) await LoadDestinationFileAsync(path);
+            }
         }
         catch (Exception ex)
         {
             ResetDestinationSchemaConfirmation($"Destination load failed: {ex.Message}");
-            StatusText = "SQLite destination could not be loaded.";
+            StatusText = "Destination could not be loaded.";
         }
+    }
+
+    public Task LoadDestinationFileAsync(string path)
+    {
+        if (!IsFileDestination)
+        {
+            StatusText = "Select a file destination kind before choosing an output path.";
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var root = WorkspaceRoot();
+            _ = PathGuard.EnsureWithin(root, fullPath);
+            var pathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(fullPath);
+            if (pathDiagnostics.HasBlockingErrors)
+                throw new InvalidOperationException(string.Join(" ", pathDiagnostics.Items.Select(item => item.Message)));
+            var directory = Path.GetDirectoryName(fullPath);
+            if (directory is null || !Directory.Exists(directory) || Directory.Exists(fullPath))
+                throw new IOException("The output file must be inside an existing workspace directory.");
+
+            Interlocked.Increment(ref _destinationLoadGeneration);
+            _destinationPath = fullPath;
+            _destinationTable = null;
+            _selectedDestinationKey = null;
+            _destinationTableSchema = null;
+            _preferredDestinationKey = null;
+            DestinationTables.Clear();
+            DestinationKeys.Clear();
+            Raise(nameof(DestinationPath));
+            Raise(nameof(DestinationPathDisplay));
+            Raise(nameof(DestinationTable));
+            Raise(nameof(DestinationTables));
+            Raise(nameof(HasDestinationTables));
+            Raise(nameof(DestinationKeys));
+            Raise(nameof(SelectedDestinationKey));
+            IsDestinationLoading = false;
+            DestinationSchemaIsValid = true;
+            IsDestinationSchemaConfirmed = false;
+            DestinationSchemaStatus = $"Ready to publish {DestinationFormatDisplay} at the selected path.";
+            StatusText = "Review the output path and format before saving the destination plan.";
+        }
+        catch (Exception ex)
+        {
+            _destinationPath = null;
+            DestinationSchemaIsValid = false;
+            IsDestinationSchemaConfirmed = false;
+            DestinationSchemaStatus = $"File destination is invalid: {ex.Message}";
+            StatusText = "File destination could not be selected.";
+            Raise(nameof(DestinationPath));
+            Raise(nameof(DestinationPathDisplay));
+        }
+
+        NotifyDestinationCommands();
+        return Task.CompletedTask;
     }
 
     private async Task LoadDestinationDatabaseAsync(
@@ -591,7 +702,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     public Task LoadDestinationAsync(string path)
-        => LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+    {
+        if (!IsSqliteDestination) SelectedDestinationKind = SqliteDestinationKind;
+        return LoadDestinationDatabaseAsync(path, preferredTable: null, preferredKey: null);
+    }
 
     private async Task LoadDestinationTableSchemaAsync(string table, int generation)
     {
@@ -644,6 +758,15 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ValidateSelectedDestinationSchema()
     {
+        if (IsFileDestination)
+        {
+            DestinationSchemaIsValid = false;
+            DestinationSchemaStatus = _destinationPath is null
+                ? "Choose an output file in the workspace."
+                : $"Review the output path and {DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)} contract.";
+            return;
+        }
+
         var plan = BuildSelectedDestinationPlan();
         if (plan is null || _destinationTableSchema is null)
         {
@@ -677,19 +800,48 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     private DestinationPlan? BuildSelectedDestinationPlan()
-        => _destinationPath is null || DestinationTable is null || SelectedDestinationKey is null
-            ? null
-            : new DestinationPlan
-            {
-                Kind = DestinationPlanValidator.SupportedKind,
-                Locator = _destinationPath,
-                Table = DestinationTable,
-                BusinessKey = SelectedDestinationKey.Columns.ToList()
-            };
+    {
+        if (_destinationPath is null) return null;
+        if (IsSqliteDestination)
+        {
+            return DestinationTable is null || SelectedDestinationKey is null
+                ? null
+                : new DestinationPlan
+                {
+                    Kind = DestinationPlanValidator.SupportedKind,
+                    Locator = _destinationPath,
+                    Table = DestinationTable,
+                    BusinessKey = SelectedDestinationKey.Columns.ToList()
+                };
+        }
 
-    private bool CanUseSelectedDestination => !IsDestinationLoading && _destinationPath is not null
-        && File.Exists(_destinationPath) && DestinationTable is not null && SelectedDestinationKey is not null
-        && DestinationSchemaIsValid && IsDestinationSchemaConfirmed;
+        if (!IsFileDestination) return null;
+        return new DestinationPlan
+        {
+            Kind = SelectedDestinationKind.Kind,
+            Locator = _destinationPath,
+            Table = string.Empty,
+            BusinessKey = new List<string>(),
+            Format = DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)!,
+            WriteMode = "replace"
+        };
+    }
+
+    private bool CanUseSelectedDestination
+    {
+        get
+        {
+            if (ProjectPath is null || IsDestinationLoading || _destinationPath is null
+                || !DestinationSchemaIsValid || !IsDestinationSchemaConfirmed)
+                return false;
+            if (IsSqliteDestination)
+                return File.Exists(_destinationPath) && DestinationTable is not null
+                    && SelectedDestinationKey is not null;
+            var directory = Path.GetDirectoryName(_destinationPath);
+            return IsFileDestination && directory is not null && Directory.Exists(directory)
+                && !Directory.Exists(_destinationPath);
+        }
+    }
 
     private bool IsSavedDestinationCurrent
     {
@@ -726,6 +878,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(CanPreviewDestination));
         Raise(nameof(CanPublishDestination));
         Raise(nameof(CanSelectDestinationKey));
+        Raise(nameof(DestinationFormatDisplay));
+        Raise(nameof(DestinationPickerButtonText));
+        Raise(nameof(DestinationPreviewButtonText));
+        Raise(nameof(DestinationPublishButtonText));
+        Raise(nameof(DestinationGuidance));
     }
 
     private void SaveDestinationPlan()
@@ -736,12 +893,17 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
         var plan = BuildSelectedDestinationPlan();
-        if (plan is null || _destinationTableSchema is null || !CanUseSelectedDestination)
+        if (plan is null || !CanUseSelectedDestination
+            || (IsSqliteDestination && _destinationTableSchema is null))
         {
-            StatusText = "Confirm a compatible destination table and unique key before saving.";
+            StatusText = IsSqliteDestination
+                ? "Confirm a compatible destination table and unique key before saving."
+                : "Confirm a valid output path and format before saving.";
             return;
         }
-        var diagnostics = DestinationPlanValidator.ValidateSchema(plan, _destinationTableSchema);
+        var diagnostics = IsSqliteDestination
+            ? DestinationPlanValidator.ValidateSchema(plan, _destinationTableSchema!)
+            : DestinationPlanValidator.Validate(plan);
         if (diagnostics.HasBlockingErrors)
         {
             ShowDestinationDiagnostics(diagnostics.Items);
@@ -753,7 +915,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             Session.SetDestination(plan);
             SaveProjectTo(ProjectPath);
-            StatusText = $"Saved SQLite target {plan.Table}. A reviewer must approve this destination-bound revision before publication.";
+            StatusText = IsSqliteDestination
+                ? $"Saved SQLite target {plan.Table}. A reviewer must approve this destination-bound revision before publication."
+                : $"Saved {SelectedDestinationKind.Display} output. A reviewer must approve this destination-bound revision before publication.";
             NotifyDestinationCommands();
         }
         catch (Exception ex)
@@ -770,7 +934,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         var project = Session.Project;
         var semanticDigest = project.ComputeSemanticDigest();
         IsBusy = true;
-        StatusText = "Running a full destination dry run; no database rows will be written…";
+        StatusText = IsSqliteDestination
+            ? "Running a full destination dry run; no database rows will be written…"
+            : "Running a full destination dry run; no file will be written…";
         try
         {
             var root = WorkspaceRoot();
@@ -787,26 +953,36 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (!result.IsPublishable)
             {
                 ShowRunResult(result);
-                StatusText = $"Dry run finished: {result.Manifest.Outcome}. No database rows were written.";
+                StatusText = IsSqliteDestination
+                    ? $"Dry run finished: {result.Manifest.Outcome}. No database rows were written."
+                    : $"Dry run finished: {result.Manifest.Outcome}. No file was written.";
                 return;
             }
 
-            var schema = await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table);
-            var diagnostics = DestinationPlanValidator.ValidateSchema(plan, schema);
+            var diagnostics = IsSqliteDestination
+                ? DestinationPlanValidator.ValidateSchema(plan,
+                    await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table))
+                : DestinationPlanValidator.Validate(plan);
             if (diagnostics.HasBlockingErrors)
             {
                 ShowDestinationDiagnostics(diagnostics.Items);
-                StatusText = "Dry run found a destination schema problem. No database rows were written.";
+                StatusText = IsSqliteDestination
+                    ? "Dry run found a destination schema problem. No database rows were written."
+                    : "Dry run found an invalid file destination contract. No file was written.";
                 return;
             }
 
             ShowRunResult(result);
-            StatusText = $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Table}. No database rows were written. Publication requires a current approval and final confirmation.";
+            StatusText = IsSqliteDestination
+                ? $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Table}. No database rows were written. Publication requires a current approval and final confirmation."
+                : $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
         }
         catch (Exception ex)
         {
             ShowDestinationError(ex);
-            StatusText = "Destination dry run failed; no database rows were written.";
+            StatusText = IsSqliteDestination
+                ? "Destination dry run failed; no database rows were written."
+                : "Destination dry run failed; no file was written.";
         }
         finally { IsBusy = false; }
     }
@@ -848,37 +1024,59 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (!result.IsPublishable)
             {
                 ShowRunResult(result);
-                StatusText = $"Execution finished: {result.Manifest.Outcome}. The SQLite destination was not changed.";
+                StatusText = IsSqliteDestination
+                    ? $"Execution finished: {result.Manifest.Outcome}. The SQLite destination was not changed."
+                    : $"Execution finished: {result.Manifest.Outcome}. The file destination was not changed.";
                 return;
             }
 
-            var schema = await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table);
-            var diagnostics = DestinationPlanValidator.ValidateSchema(plan, schema);
+            var diagnostics = IsSqliteDestination
+                ? DestinationPlanValidator.ValidateSchema(plan,
+                    await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table))
+                : DestinationPlanValidator.Validate(plan);
             if (diagnostics.HasBlockingErrors)
             {
                 ShowDestinationDiagnostics(diagnostics.Items);
-                StatusText = "The destination schema changed or is incompatible. No database rows were written.";
+                StatusText = IsSqliteDestination
+                    ? "The destination schema changed or is incompatible. No database rows were written."
+                    : "The file destination contract is invalid. No file was written.";
                 return;
             }
 
-            var confirmed = await _fileDialog.ConfirmDestinationPublicationAsync(
-                _destinationPath!, plan.Table, plan.BusinessKey, result.Facts.Count, project.ComputeSemanticDigest());
+            var confirmed = IsSqliteDestination
+                ? await _fileDialog.ConfirmDestinationPublicationAsync(
+                    _destinationPath!, plan.Table, plan.BusinessKey, result.Facts.Count, project.ComputeSemanticDigest())
+                : await _fileDialog.ConfirmFileDestinationPublicationAsync(
+                    _destinationPath!, plan.Format, result.Facts.Count, project.ComputeSemanticDigest());
             if (!confirmed)
             {
                 ShowRunResult(result);
-                StatusText = "Publication cancelled. The SQLite destination was not changed.";
+                StatusText = IsSqliteDestination
+                    ? "Publication cancelled. The SQLite destination was not changed."
+                    : "Publication cancelled. The file destination was not changed.";
                 return;
             }
 
-            var receipt = await service.PublishDestinationAsync(
-                project, result, root, AllowSyntheticProfile, CancellationToken.None);
             ShowRunResult(result);
-            StatusText = $"Published {receipt.WrittenRows} fact row(s) to {plan.Table}; receipt {receipt.OperationKey}.";
+            if (IsSqliteDestination)
+            {
+                var receipt = await service.PublishDestinationAsync(
+                    project, result, root, AllowSyntheticProfile, CancellationToken.None);
+                StatusText = $"Published {receipt.WrittenRows} fact row(s) to {plan.Table}; receipt {receipt.OperationKey}.";
+            }
+            else
+            {
+                var output = await service.PublishFileDestinationAsync(
+                    project, result, root, AllowSyntheticProfile, CancellationToken.None);
+                StatusText = $"Published {output.Kind} file {Path.GetFileName(output.Path)}; digest {output.Digest}.";
+            }
         }
         catch (Exception ex)
         {
             ShowDestinationError(ex);
-            StatusText = "SQLite publication failed; inspect diagnostics and reconcile the destination.";
+            StatusText = IsSqliteDestination
+                ? "SQLite publication failed; inspect diagnostics and reconcile the destination."
+                : "File publication failed; inspect diagnostics and reconcile the destination.";
         }
         finally { IsBusy = false; }
     }
@@ -1206,6 +1404,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         SelectedNode = null;
+        SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = project.LayoutGeneration;
         ClearSourceAndRunResults();
@@ -1260,7 +1459,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(CanSelectDestinationKey));
         Raise(nameof(SelectedDestinationKey));
         IsDestinationLoading = false;
-        ResetDestinationSchemaConfirmation("Choose an existing SQLite database to inspect its tables.");
+        ResetDestinationSchemaConfirmation(IsSqliteDestination
+            ? "Choose an existing SQLite database to inspect its tables."
+            : "Choose an output file in the workspace.");
     }
 
     private async Task LoadSavedDestinationAsync()
@@ -1269,11 +1470,22 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (plan is null || ProjectPath is null) return;
         try
         {
+            var destinationKind = DestinationKindOptions.FirstOrDefault(option =>
+                StringComparer.Ordinal.Equals(option.Kind, plan.Kind));
+            if (destinationKind is null)
+            {
+                ResetDestinationSchemaConfirmation($"Saved destination kind '{plan.Kind}' is unsupported by this desktop build.");
+                return;
+            }
+            SelectedDestinationKind = destinationKind;
             var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(ProjectPath))!;
             var path = Path.IsPathRooted(plan.Locator)
                 ? Path.GetFullPath(plan.Locator)
                 : Path.GetFullPath(Path.Combine(projectDirectory, plan.Locator));
-            await LoadDestinationDatabaseAsync(path, plan.Table, plan.BusinessKey?.ToArray());
+            if (DestinationPlanValidator.IsFileKind(plan.Kind))
+                await LoadDestinationFileAsync(path);
+            else
+                await LoadDestinationDatabaseAsync(path, plan.Table, plan.BusinessKey?.ToArray());
         }
         catch (Exception ex)
         {

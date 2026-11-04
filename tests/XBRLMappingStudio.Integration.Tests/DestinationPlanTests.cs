@@ -77,6 +77,18 @@ public sealed class DestinationPlanTests
     }
 
     [Theory]
+    [InlineData("mapping.xmap")]
+    [InlineData("mapping.xmap.lock")]
+    [InlineData("mapping.xmap.bak")]
+    public void ValidateFileDestinationPath_ProtectsProjectArtifacts(string fileName)
+    {
+        var diagnostics = DestinationPlanValidator.ValidateFileDestinationPath(Path.GetFullPath(fileName));
+
+        Assert.True(diagnostics.HasBlockingErrors);
+        Assert.Contains(diagnostics.Items, diagnostic => diagnostic.Code == DiagnosticCodes.IoSchemaMismatch);
+    }
+
+    [Theory]
     [InlineData("csv", "csv-records-v1", "report.csv", "csv")]
     [InlineData("excel", "xlsx-records-v1", "report.xlsx", "xlsx")]
     [InlineData("json", "json-records-v1", "report.json", "json")]
@@ -161,6 +173,59 @@ public sealed class DestinationPlanTests
                 Assert.Single(rows);
                 Assert.Equal("1250000", rows[0]["value"].AsString());
             }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishFileDestination_RefusesProjectArtifactWithoutChangingIt()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-protected-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var destinationPath = Path.Combine(dir, "mapping.xmap");
+        var originalBytes = System.Text.Encoding.UTF8.GetBytes("project bytes must be preserved");
+        await File.WriteAllBytesAsync(destinationPath, originalBytes);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = "json",
+                Locator = Path.GetFileName(destinationPath),
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "json-records-v1",
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var binding = project.Bindings.Single();
+            var config = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, config)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            var error = await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
+                project, result, dir, allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(destinationPath));
         }
         finally
         {

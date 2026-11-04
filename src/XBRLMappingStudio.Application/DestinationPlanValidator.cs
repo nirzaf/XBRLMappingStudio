@@ -34,6 +34,27 @@ public static class DestinationPlanValidator
     public static string? FileFormatFor(string kind)
         => FileFormats.TryGetValue(kind, out var format) ? format : null;
 
+    public static DiagnosticBag ValidateFileDestinationPath(string? path)
+    {
+        var diagnostics = new DiagnosticBag();
+        if (string.IsNullOrWhiteSpace(path)) return diagnostics;
+
+        var fullPath = Path.GetFullPath(path);
+        var protectedSuffixes = new[]
+        {
+            ProjectManager.ProjectExtension,
+            ProjectManager.ProjectExtension + ProjectManager.LockSuffix,
+            ProjectManager.ProjectExtension + ProjectManager.BackupSuffix
+        };
+        if (protectedSuffixes.Any(suffix => fullPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+        {
+            diagnostics.Error(DiagnosticCodes.IoSchemaMismatch, DiagnosticSubsystem.Publication,
+                DiagnosticStage.Validation,
+                "A file destination cannot replace a project file or its lock or backup.");
+        }
+        return diagnostics;
+    }
+
     public static DiagnosticBag Validate(DestinationPlan? plan, string? operationId = null)
     {
         var diagnostics = new DiagnosticBag();
