@@ -1465,7 +1465,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private static ISourceAdapter BuildSourceAdapter(SourceConnection connection) => connection.Kind switch
     {
-        "excel" => new ExcelAdapter(),
+        "excel" => ExcelAdapter.FromConnection(connection),
         "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(connection.Configuration)),
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(connection.Configuration)),
         "xml" => new XmlAdapter(),

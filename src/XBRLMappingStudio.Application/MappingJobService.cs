@@ -826,7 +826,7 @@ public sealed class MappingJobService
 
     private static ISourceAdapter BuildAdapter(SourceConnection conn) => conn.Kind switch
     {
-        "excel" => new ExcelAdapter(),
+        "excel" => ExcelAdapter.FromConnection(conn),
         "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
         "xml" => new XmlAdapter(),

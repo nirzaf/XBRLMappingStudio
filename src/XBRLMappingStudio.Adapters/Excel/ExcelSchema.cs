@@ -18,12 +18,17 @@ public sealed record ExcelSchema(
     int LastDataRow,
     IReadOnlyList<ColumnSchema> Columns,
     IReadOnlyList<string> UnitHeadingHints,
-    string Fingerprint) : ISourceSchema
+    string Fingerprint,
+    string? RegionAddress = null,
+    ExcelAdapter.HiddenRowPolicy HiddenRowPolicy = ExcelAdapter.HiddenRowPolicy.Include) : ISourceSchema
 {
     public static string ComputeFingerprint(
         string sheet,
         IEnumerable<ColumnSchema> cols,
-        IEnumerable<string>? unitHeadingHints = null)
+        IEnumerable<string>? unitHeadingHints = null,
+        string? regionAddress = null,
+        ExcelAdapter.HiddenRowPolicy hiddenRowPolicy = ExcelAdapter.HiddenRowPolicy.Include,
+        string? formulaCacheFingerprint = null)
     {
         // Heading anchors are sorted so that a pure reorder of the banner cells above
         // the header row (without changing which anchors exist) does not look like a
@@ -36,7 +41,13 @@ public sealed record ExcelSchema(
         var anchorPart = anchors.Count > 0
             ? new[] { "anchors:" + string.Join(",", anchors) }
             : Array.Empty<string>();
-        var joined = string.Join('|', new[] { sheet }
+        var joined = string.Join('|', new[]
+            {
+                sheet,
+                "region:" + (regionAddress ?? "used-range"),
+                "hidden-rows:" + hiddenRowPolicy,
+                "formula-cache:" + (formulaCacheFingerprint ?? "none")
+            }
             .Concat(cols.OrderBy(c => c.Ordinal)
                 .Select(c => $"{c.Ordinal}:{c.Name}:{c.InferredShape}"))
             .Concat(anchorPart));
