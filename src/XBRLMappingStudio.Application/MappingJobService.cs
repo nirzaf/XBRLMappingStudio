@@ -157,14 +157,18 @@ public sealed class MappingJobService
                 records.Add(r);
                 if (preview && records.Count >= context.PreviewRowLimit) break;
             }
-            context.LoadedSources[binding.BindingId] = records;
             if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
             {
+                records = records.Select(record => (Record: record, Key: CanonicalRecord(record)))
+                    .OrderBy(item => item.Key, StringComparer.Ordinal)
+                    .ThenBy(item => item.Record.RowId, StringComparer.Ordinal)
+                    .Select(item => item.Record).ToList();
                 var digest = DigestRecords(conn, records);
                 manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
                     ? input with { Kind = preview ? "sqlite-preview" : "sqlite-table", Digest = digest, IsReplayable = !preview }
                     : input).ToArray();
             }
+            context.LoadedSources[binding.BindingId] = records;
         }
 
         if (context.Diagnostics.HasBlockingErrors)
@@ -390,31 +394,33 @@ public sealed class MappingJobService
         AppendPart(builder, connection.Configuration is not null
             && connection.Configuration.TryGetValue("table", out var table) ? table : "");
         builder.Append(records.Count).Append(':');
-        var rows = records.Select(record =>
-        {
-            var row = new StringBuilder();
-            row.Append(record.Fields.Count).Append(':');
-            foreach (var field in record.Fields.OrderBy(x => x.Key, StringComparer.Ordinal))
-            {
-                AppendPart(row, field.Key);
-                AppendPart(row, field.Value.Shape.ToString());
-                row.Append((int)field.Value.Presence).Append(':');
-                AppendPart(row, field.Value.LexicalSource ?? "");
-                AppendPart(row, field.Value.Raw switch
-                {
-                    null => "",
-                    string value => value,
-                    decimal value => value.ToString(CultureInfo.InvariantCulture),
-                    DateOnly value => value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                    DateTimeOffset value => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
-                    IFormattable value => value.ToString(null, CultureInfo.InvariantCulture) ?? "",
-                    var value => value.ToString() ?? ""
-                });
-            }
-            return row.ToString();
-        }).Order(StringComparer.Ordinal);
+        var rows = records.Select(CanonicalRecord).Order(StringComparer.Ordinal);
         foreach (var row in rows) AppendPart(builder, row);
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    private static string CanonicalRecord(DataRecord record)
+    {
+        var row = new StringBuilder();
+        row.Append(record.Fields.Count).Append(':');
+        foreach (var field in record.Fields.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            AppendPart(row, field.Key);
+            AppendPart(row, field.Value.Shape.ToString());
+            row.Append((int)field.Value.Presence).Append(':');
+            AppendPart(row, field.Value.LexicalSource ?? "");
+            AppendPart(row, field.Value.Raw switch
+            {
+                null => "",
+                string value => value,
+                decimal value => value.ToString(CultureInfo.InvariantCulture),
+                DateOnly value => value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                DateTimeOffset value => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                IFormattable value => value.ToString(null, CultureInfo.InvariantCulture) ?? "",
+                var value => value.ToString() ?? ""
+            });
+        }
+        return row.ToString();
     }
 
     private static void AppendPart(StringBuilder builder, string value) => builder.Append(value.Length).Append(':').Append(value);

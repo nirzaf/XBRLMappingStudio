@@ -90,7 +90,7 @@ public sealed class SqliteTargetPublisher
         var updates = columns.Except(businessKey, StringComparer.Ordinal).ToArray();
         if (updates.Length == 0) throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation, "Upsert requires at least one non-key column.");
         var insert = $"INSERT INTO {Quote(table)} ({string.Join(",", columns.Select(Quote))}) VALUES ({string.Join(",", columns.Select((_, i) => "$v" + i))}) "
-            + $"ON CONFLICT ({string.Join(",", businessKey.Select(Quote))}) DO UPDATE SET {string.Join(",", updates.Select(c => $"{Quote(c)}=excluded.{Quote(c)}"))}";
+            + $"ON CONFLICT ({string.Join(",", businessKey.Select(c => $"{Quote(c)} COLLATE BINARY"))}) DO UPDATE SET {string.Join(",", updates.Select(c => $"{Quote(c)}=excluded.{Quote(c)}"))}";
         await using var upsert = connection.CreateCommand();
         upsert.Transaction = transaction;
         upsert.CommandText = insert;
@@ -138,16 +138,16 @@ public sealed class SqliteTargetPublisher
     private static async Task<bool> HasUniqueBusinessKeyAsync(SqliteConnection connection, SqliteTransaction transaction,
         string table, IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
-        var primaryKey = new List<(int Ordinal, string Name)>();
+        var primaryKey = new List<(int Ordinal, string Name, string Type)>();
         await using (var info = connection.CreateCommand())
         {
             info.Transaction = transaction;
             info.CommandText = $"PRAGMA table_info({Quote(table)})";
             await using var reader = await info.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
-                if (reader.GetInt32(5) > 0) primaryKey.Add((reader.GetInt32(5), reader.GetString(1)));
+                if (reader.GetInt32(5) > 0) primaryKey.Add((reader.GetInt32(5), reader.GetString(1), reader.IsDBNull(2) ? "" : reader.GetString(2)));
         }
-        if (primaryKey.OrderBy(x => x.Ordinal).Select(x => x.Name).SequenceEqual(keys, StringComparer.Ordinal)) return true;
+        var orderedPrimaryKey = primaryKey.OrderBy(x => x.Ordinal).ToArray();
 
         await using var indexes = connection.CreateCommand();
         indexes.Transaction = transaction;
@@ -157,18 +157,32 @@ public sealed class SqliteTargetPublisher
         while (await indexReader.ReadAsync(cancellationToken))
             if (indexReader.GetInt32(2) != 0 && indexReader.GetInt32(4) == 0) uniqueNames.Add(indexReader.GetString(1));
         await indexReader.DisposeAsync();
+        var matchingKeyWithUnsupportedCollation = false;
         foreach (var index in uniqueNames)
         {
             var columns = new List<(int Ordinal, string Name)>();
+            var collations = new List<string>();
+            var hasExpression = false;
             await using var details = connection.CreateCommand();
             details.Transaction = transaction;
-            details.CommandText = $"PRAGMA index_info({Quote(index)})";
+            details.CommandText = $"PRAGMA index_xinfo({Quote(index)})";
             await using var detailReader = await details.ExecuteReaderAsync(cancellationToken);
             while (await detailReader.ReadAsync(cancellationToken))
-                if (!detailReader.IsDBNull(2)) columns.Add((detailReader.GetInt32(0), detailReader.GetString(2)));
-            if (columns.OrderBy(x => x.Ordinal).Select(x => x.Name).SequenceEqual(keys, StringComparer.Ordinal)) return true;
+            {
+                if (detailReader.GetInt32(5) == 0) continue;
+                if (detailReader.IsDBNull(2)) { hasExpression = true; continue; }
+                columns.Add((detailReader.GetInt32(0), detailReader.GetString(2)));
+                collations.Add(detailReader.GetString(4));
+            }
+            if (!hasExpression && columns.OrderBy(x => x.Ordinal).Select(x => x.Name).SequenceEqual(keys, StringComparer.Ordinal))
+            {
+                if (collations.All(c => StringComparer.OrdinalIgnoreCase.Equals(c, "BINARY"))) return true;
+                matchingKeyWithUnsupportedCollation = true;
+            }
         }
-        return false;
+        return !matchingKeyWithUnsupportedCollation && orderedPrimaryKey.Length == 1 && keys.Count == 1
+            && StringComparer.Ordinal.Equals(orderedPrimaryKey[0].Name, keys.SingleOrDefault())
+            && StringComparer.OrdinalIgnoreCase.Equals(orderedPrimaryKey[0].Type.Trim(), "INTEGER");
     }
 
     private static async Task EnsureUniqueBatchKeysAsync(SqliteConnection connection, SqliteTransaction transaction,
@@ -176,7 +190,7 @@ public sealed class SqliteTargetPublisher
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"CREATE TEMP TABLE \"__xms_batch_keys\" AS SELECT {string.Join(",", keys.Select(Quote))} FROM {Quote(table)} WHERE 0; CREATE UNIQUE INDEX \"__xms_batch_keys_unique\" ON \"__xms_batch_keys\" ({string.Join(",", keys.Select(Quote))});";
+        command.CommandText = $"CREATE TEMP TABLE \"__xms_batch_keys\" AS SELECT {string.Join(",", keys.Select(Quote))} FROM {Quote(table)} WHERE 0; CREATE UNIQUE INDEX \"__xms_batch_keys_unique\" ON \"__xms_batch_keys\" ({string.Join(",", keys.Select(c => $"{Quote(c)} COLLATE BINARY"))});";
         await command.ExecuteNonQueryAsync(cancellationToken);
         command.CommandText = $"INSERT INTO temp.\"__xms_batch_keys\" ({string.Join(",", keys.Select(Quote))}) VALUES ({string.Join(",", keys.Select((_, i) => "$k" + i))})";
         for (var i = 0; i < keys.Count; i++) command.Parameters.AddWithValue("$k" + i, DBNull.Value);

@@ -78,6 +78,8 @@ public sealed class LocalApplicationDatabaseTests
         }
 
         database.BackupTo(backupPath);
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(backupPath));
         using (var backup = new SqliteConnection($"Data Source={backupPath};Mode=ReadOnly"))
         {
             backup.Open();

@@ -59,13 +59,17 @@ public sealed class LocalApplicationDatabase
         Directory.CreateDirectory(directory);
         var temporaryPath = System.IO.Path.Combine(directory,
             $".{System.IO.Path.GetFileName(fullBackupPath)}.{Guid.NewGuid():N}.tmp");
+        var ownsTemporary = false;
         try
         {
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.ReadWrite, Share = FileShare.None };
+            if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using (new FileStream(temporaryPath, options)) ownsTemporary = true;
             using var source = OpenConnection();
             using (var target = new SqliteConnection(new SqliteConnectionStringBuilder
             {
                 DataSource = temporaryPath,
-                Mode = SqliteOpenMode.ReadWriteCreate,
+                Mode = SqliteOpenMode.ReadWrite,
                 Pooling = false,
                 DefaultTimeout = 5,
                 ForeignKeys = true
@@ -80,8 +84,9 @@ public sealed class LocalApplicationDatabase
         }
         catch
         {
-            foreach (var file in new[] { temporaryPath, temporaryPath + "-wal", temporaryPath + "-shm" })
-                try { File.Delete(file); } catch (IOException) { }
+            if (ownsTemporary)
+                foreach (var file in new[] { temporaryPath, temporaryPath + "-wal", temporaryPath + "-shm" })
+                    try { File.Delete(file); } catch (IOException) { }
             throw;
         }
     }

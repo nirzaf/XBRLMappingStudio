@@ -75,7 +75,7 @@ This matrix records repository evidence as of 2026-11-04. “Verified” means c
 ## Current verification
 
 - `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed with 0 warnings and 0 errors for this revision.
-- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed, 239 tests, 0 failed, 0 skipped for this revision.
+- `dotnet test XBRLMappingStudio.slnx -c Release --no-restore -m:1` — passed, 241 tests, 0 failed, 0 skipped for this revision.
 - `PYTHONPATH=/tmp/xms-worker-venv/lib/python3.12/site-packages python3 -m pytest tools/worker/tests -q` — passed, 5 tests, using the exact pinned `tools/worker/requirements.lock` installed into a temporary Python 3.12 environment with hashes enforced.
 - `git diff --check` — passed for this revision.
 

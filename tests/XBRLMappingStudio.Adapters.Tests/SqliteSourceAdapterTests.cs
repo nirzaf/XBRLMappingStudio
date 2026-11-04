@@ -209,6 +209,36 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task TargetRejectsExpressionAndNonBinaryUniqueIndexes()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("index-shapes.db");
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account TEXT, tenant TEXT, amount TEXT); CREATE UNIQUE INDEX uq_expr ON report(account, lower(tenant));";
+            await command.ExecuteNonQueryAsync();
+        }
+        var destination = new SourceConnection("target", "sqlite", path, new Dictionary<string, string> { ["table"] = "report" });
+        var publisher = new SqliteTargetPublisher();
+        var expression = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record("a1", 1m) }, new[] { "account" }, "expression", "intent"));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, expression.Code);
+
+        await using (var db = new SqliteConnection($"Data Source={path}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "DROP INDEX uq_expr; CREATE UNIQUE INDEX uq_nocase ON report(account COLLATE NOCASE);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var collation = await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Record("a1", 1m) }, new[] { "account" }, "nocase", "intent"));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, collation.Code);
+    }
+
+    [Fact]
     public async Task IntentFingerprintDistinguishesValueShape()
     {
         using var ws = new TempWorkspace();

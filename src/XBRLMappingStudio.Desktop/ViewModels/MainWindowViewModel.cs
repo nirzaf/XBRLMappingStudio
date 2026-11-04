@@ -368,8 +368,9 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 SelectedSourceBindingId = binding.BindingId;
                 var sqlite = new SqliteSourceAdapter();
-                SourceTables.AddRange(await sqlite.DiscoverTablesAsync(connection, CancellationToken.None));
+                var tables = await sqlite.DiscoverTablesAsync(connection, CancellationToken.None);
                 if (generation != _sourceLoadGeneration) return;
+                SourceTables.AddRange(tables);
                 Raise(nameof(SourceTables));
                 Raise(nameof(HasSourceTables));
                 if (SourceTables.Count == 0) throw new InvalidOperationException("The SQLite database has no user tables.");
@@ -626,6 +627,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ClearSourceAndRunResults()
     {
+        Interlocked.Increment(ref _sourceLoadGeneration);
         _sqliteSourcePath = null;
         _selectedSourceTable = null;
         SelectedSourceBindingId = null;

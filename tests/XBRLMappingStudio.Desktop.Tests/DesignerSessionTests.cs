@@ -311,4 +311,39 @@ public sealed class DesignerSessionTests
             if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task OpeningProjectInvalidatesPendingSourceSchemaLoad()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-open-race", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "wide.sqlite");
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            var columns = string.Join(",", Enumerable.Range(0, 900).Select(i => $"c{i} TEXT"));
+            command.CommandText = $"CREATE TABLE wide ({columns});";
+            await command.ExecuteNonQueryAsync();
+        }
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.SaveProjectTo(projectPath);
+            var originalKind = viewModel.Session.Project.Bindings[0].Kind;
+            var staleLoad = viewModel.LoadSourceAsync(database);
+            viewModel.LoadProject(projectPath);
+            await staleLoad;
+            await Task.Delay(100);
+            Assert.Empty(viewModel.SourceTables);
+            Assert.Empty(viewModel.SourceColumns);
+            Assert.Equal(originalKind, viewModel.Session.Project.Bindings[0].Kind);
+            Assert.Null(viewModel.Session.Project.Bindings[0].SchemaFingerprint);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
 }
