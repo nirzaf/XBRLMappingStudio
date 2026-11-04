@@ -72,6 +72,29 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task DestinationChangePreviewMatchesInsertCountAndLeavesDatabaseBytesUnchanged()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        var before = await File.ReadAllBytesAsync(_databasePath);
+
+        var estimate = await service.PreviewDestinationChangesAsync(project, result, _directory);
+
+        Assert.Equal(1, estimate.CandidateRows);
+        Assert.Equal(1, estimate.InspectedRows);
+        Assert.True(estimate.CountsAreComplete);
+        Assert.Equal(1, estimate.Inserts);
+        Assert.Empty(estimate.SchemaDiscrepancies);
+        Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
+
+        var receipt = await service.PublishDestinationAsync(project, result, _directory,
+            allowSyntheticProfile: true);
+        Assert.Equal(estimate.Inserts, receipt.WrittenRows);
+    }
+
+    [Fact]
     public async Task XbrlReportToSqlite_PreservesFactValuePeriodAndReportProvenance()
     {
         var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");

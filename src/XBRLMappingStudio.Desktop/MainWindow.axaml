@@ -212,6 +212,9 @@
                   <Button Content="{Binding DestinationPreviewButtonText}"
                           Command="{Binding PreviewDestinationCommand}"
                           AutomationProperties.Name="Dry-run full mapping without destination writes" />
+                  <TextBlock Text="{Binding DestinationPreviewSummary}"
+                             TextWrapping="Wrap"
+                             AutomationProperties.Name="Destination change preview" />
                   <Button Content="{Binding DestinationPublishButtonText}"
                           Command="{Binding PublishDestinationCommand}"
                           AutomationProperties.Name="Publish facts to the selected destination after confirmation" />

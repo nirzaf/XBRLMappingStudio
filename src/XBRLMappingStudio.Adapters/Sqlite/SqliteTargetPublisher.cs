@@ -9,10 +9,29 @@ using XBRLMappingStudio.Project;
 namespace XBRLMappingStudio.Adapters.Sqlite;
 
 public sealed record SqlitePublishReceipt(string OperationKey, string IntentFingerprint, int WrittenRows, DateTimeOffset CompletedUtc);
+public sealed record SqliteTargetChangeSample(int CandidateRow, string Outcome);
+public sealed record SqliteTargetChangePreview(
+    int CandidateRows,
+    int InspectedRows,
+    int Inserts,
+    int Updates,
+    int UnchangedValueUpdates,
+    int Conflicts,
+    int SampleLimit,
+    IReadOnlyList<SqliteTargetChangeSample> Samples,
+    IReadOnlyList<string> SchemaDiscrepancies)
+{
+    public int UncertainRows => CandidateRows - InspectedRows;
+    public bool CountsAreComplete => UncertainRows == 0;
+}
 
 /// <summary>Transactional SQLite upsert with a durable operation receipt in the destination database.</summary>
 public sealed class SqliteTargetPublisher
 {
+    public const int MaximumPreviewRows = 5_000;
+    public const int MaximumPreviewBytes = 4 * 1024 * 1024;
+    public const int DefaultPreviewSampleLimit = 10;
+
     public async Task<SqlitePublishReceipt> PublishAsync(SourceConnection destination,
         IReadOnlyList<DataRecord> records, IReadOnlyList<string> businessKey,
         string operationKey, string intentFingerprint, CancellationToken cancellationToken = default)
@@ -122,6 +141,225 @@ public sealed class SqliteTargetPublisher
         await transaction.CommitAsync(cancellationToken);
         return new SqlitePublishReceipt(operationKey, effectiveIntent, records.Count, completed);
     }
+
+    /// <summary>
+    /// Estimates the outcomes of a future upsert without modifying the target database.
+    /// Candidate normalization and duplicate detection happen in a private in-memory
+    /// database; the target is opened read-only and held in one SQLite read snapshot.
+    /// </summary>
+    public async Task<SqliteTargetChangePreview> PreviewAsync(
+        SourceConnection destination,
+        IReadOnlyList<DataRecord> records,
+        IReadOnlyList<string> businessKey,
+        int maximumCandidateRows = MaximumPreviewRows,
+        int sampleLimit = DefaultPreviewSampleLimit,
+        CancellationToken cancellationToken = default)
+    {
+        if (records.Count == 0) throw new ArgumentException("At least one record is required.", nameof(records));
+        if (businessKey.Count == 0 || businessKey.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("A non-empty business key is required.", nameof(businessKey));
+        if (maximumCandidateRows <= 0 || maximumCandidateRows > MaximumPreviewRows)
+            throw new ArgumentOutOfRangeException(nameof(maximumCandidateRows),
+                $"Preview row limit must be between 1 and {MaximumPreviewRows}.");
+        if (sampleLimit < 0 || sampleLimit > MaximumPreviewRows)
+            throw new ArgumentOutOfRangeException(nameof(sampleLimit),
+                $"Preview sample limit must be between 0 and {MaximumPreviewRows}.");
+
+        var table = SqliteSourceAdapter.GetConfiguredTable(destination);
+        if (string.IsNullOrWhiteSpace(destination.Path) || !File.Exists(destination.Path))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, "SQLite target database must already exist.", DiagnosticStage.Validation);
+        var columns = records.SelectMany(record => record.Fields.Keys)
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        if (records.Any(record => record.Fields.Count != columns.Length || columns.Any(column => !record.Fields.ContainsKey(column))))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, "Input records have inconsistent field sets.", DiagnosticStage.Validation);
+        if (businessKey.Except(columns, StringComparer.Ordinal).Any())
+            throw new AdapterException(DiagnosticCodes.IoColumnMissing,
+                "Every business-key field must be present in the input records.", DiagnosticStage.Validation);
+        if (records.Any(record => businessKey.Any(key => record.Fields[key].Presence is ValuePresence.Missing or ValuePresence.ExplicitNil
+                || record.Fields[key].Raw is null)))
+            throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
+                "SQLite business-key values cannot be missing or null.", DiagnosticStage.Validation);
+
+        await using var target = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.GetFullPath(destination.Path),
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+            DefaultTimeout = 5,
+            ForeignKeys = true
+        }.ToString());
+        await target.OpenAsync(cancellationToken);
+        await using var targetTransaction = target.BeginTransaction(deferred: true);
+
+        var actualColumns = await ReadColumnsAsync(target, targetTransaction, table, cancellationToken);
+        var missing = columns.Except(actualColumns.Keys, StringComparer.Ordinal).ToArray();
+        if (missing.Length != 0)
+            throw new AdapterException(DiagnosticCodes.IoColumnMissing,
+                $"SQLite target '{table}' is missing columns: {string.Join(", ", missing)}.", DiagnosticStage.Validation);
+        foreach (var column in columns.Where(column => records.Any(record => record.Fields[column].Shape == PortShape.Decimal)))
+            if (Affinity(actualColumns[column]) != "TEXT")
+                throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                    $"Exact decimal column '{column}' must have TEXT affinity in SQLite target '{table}'.", DiagnosticStage.Validation);
+        if (await GetBusinessKeyConflictTargetAsync(target, targetTransaction, table, businessKey, cancellationToken) is null)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"SQLite target '{table}' must have a primary or unique index on the configured business key.",
+                DiagnosticStage.Validation);
+        if (columns.Except(businessKey, StringComparer.Ordinal).Count() == 0)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                "Upsert requires at least one non-key column.", DiagnosticStage.Validation);
+
+        var normalizedNames = columns.Select((_, index) => "c" + index.ToString(CultureInfo.InvariantCulture)).ToArray();
+        var candidateTable = Quote("preview_candidates");
+        var createColumns = normalizedNames.Select((name, index) =>
+            $"{Quote(name)} {Affinity(actualColumns[columns[index]])}");
+        var keyIndexes = businessKey.Select(key => Array.IndexOf(columns, key)).ToArray();
+
+        await using var normalized = new SqliteConnection("Data Source=:memory:;Pooling=False");
+        await normalized.OpenAsync(cancellationToken);
+        await using var normalizedTransaction = normalized.BeginTransaction();
+        await using (var create = normalized.CreateCommand())
+        {
+            create.Transaction = normalizedTransaction;
+            create.CommandText = $"CREATE TABLE {candidateTable} ({Quote("row_number")} INTEGER PRIMARY KEY,{string.Join(",", createColumns)});"
+                + $"CREATE UNIQUE INDEX {Quote("preview_candidate_keys")} ON {candidateTable} ({string.Join(",", keyIndexes.Select(index => $"{Quote(normalizedNames[index])} COLLATE BINARY"))});";
+            await create.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var insertCandidate = normalized.CreateCommand();
+        insertCandidate.Transaction = normalizedTransaction;
+        insertCandidate.CommandText = $"INSERT INTO {candidateTable} ({Quote("row_number")},{string.Join(",", normalizedNames.Select(Quote))}) "
+            + $"VALUES ($row,{string.Join(",", normalizedNames.Select((_, index) => "$v" + index.ToString(CultureInfo.InvariantCulture)))})";
+        insertCandidate.Parameters.Add("$row", SqliteType.Integer);
+        for (var index = 0; index < columns.Length; index++)
+        {
+            var parameter = insertCandidate.CreateParameter();
+            parameter.ParameterName = "$v" + index.ToString(CultureInfo.InvariantCulture);
+            insertCandidate.Parameters.Add(parameter);
+        }
+
+        await using var readCandidate = normalized.CreateCommand();
+        readCandidate.Transaction = normalizedTransaction;
+        readCandidate.CommandText = $"SELECT {string.Join(",", normalizedNames.Select(Quote))} FROM {candidateTable} WHERE {Quote("row_number")}=$row";
+        readCandidate.Parameters.Add("$row", SqliteType.Integer);
+
+        await using var readTarget = target.CreateCommand();
+        readTarget.Transaction = targetTransaction;
+        readTarget.CommandText = $"SELECT {string.Join(",", columns.Select(Quote))} FROM {Quote(table)} WHERE "
+            + string.Join(" AND ", businessKey.Select((key, index) =>
+                $"{Quote(key)} COLLATE BINARY = $k{index.ToString(CultureInfo.InvariantCulture)}"));
+        for (var index = 0; index < businessKey.Count; index++)
+        {
+            var parameter = readTarget.CreateParameter();
+            parameter.ParameterName = "$k" + index.ToString(CultureInfo.InvariantCulture);
+            readTarget.Parameters.Add(parameter);
+        }
+
+        var samples = new List<SqliteTargetChangeSample>(Math.Min(sampleLimit, records.Count));
+        var inserts = 0;
+        var updates = 0;
+        var unchangedValueUpdates = 0;
+        var conflicts = 0;
+        var inspectedRows = 0;
+        long inspectedBytes = 0;
+        var scanCount = Math.Min(records.Count, maximumCandidateRows);
+        for (var recordIndex = 0; recordIndex < scanCount; recordIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var record = records[recordIndex];
+            var recordBytes = EstimatePreviewBytes(record, columns);
+            if (inspectedBytes + recordBytes > MaximumPreviewBytes) break;
+            inspectedBytes += recordBytes;
+            inspectedRows++;
+
+            insertCandidate.Parameters[0].Value = recordIndex + 1;
+            for (var index = 0; index < columns.Length; index++)
+                insertCandidate.Parameters[index + 1].Value = ToSql(record.Fields[columns[index]]);
+            try
+            {
+                await insertCandidate.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+            {
+                conflicts++;
+                AddSample(recordIndex + 1, "conflict");
+                continue;
+            }
+
+            readCandidate.Parameters[0].Value = recordIndex + 1;
+            var candidateValues = new object[columns.Length];
+            await using (var candidateReader = await readCandidate.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await candidateReader.ReadAsync(cancellationToken))
+                    throw new InvalidOperationException("The normalized candidate row could not be read back.");
+                for (var index = 0; index < columns.Length; index++) candidateValues[index] = candidateReader.GetValue(index);
+            }
+
+            for (var index = 0; index < keyIndexes.Length; index++)
+                readTarget.Parameters[index].Value = candidateValues[keyIndexes[index]];
+            string outcome;
+            await using (var targetReader = await readTarget.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await targetReader.ReadAsync(cancellationToken))
+                {
+                    inserts++;
+                    outcome = "insert";
+                }
+                else
+                {
+                    var same = true;
+                    for (var index = 0; index < columns.Length; index++)
+                        if (!SqliteValuesEqual(candidateValues[index], targetReader.GetValue(index)))
+                        {
+                            same = false;
+                            break;
+                        }
+                    if (same)
+                    {
+                        updates++;
+                        unchangedValueUpdates++;
+                        outcome = "unchanged";
+                    }
+                    else
+                    {
+                        updates++;
+                        outcome = "update";
+                    }
+                }
+            }
+            AddSample(recordIndex + 1, outcome);
+        }
+
+        await normalizedTransaction.CommitAsync(cancellationToken);
+        return new SqliteTargetChangePreview(records.Count, inspectedRows, inserts, updates, unchangedValueUpdates,
+            conflicts, sampleLimit, samples, Array.Empty<string>());
+
+        void AddSample(int candidateRow, string outcome)
+        {
+            if (samples.Count < sampleLimit) samples.Add(new SqliteTargetChangeSample(candidateRow, outcome));
+        }
+    }
+
+    private static long EstimatePreviewBytes(DataRecord record, IReadOnlyList<string> columns)
+    {
+        long bytes = 0;
+        foreach (var column in columns)
+        {
+            var value = ToSql(record.Fields[column]);
+            bytes += value switch
+            {
+                string text => Encoding.UTF8.GetByteCount(text),
+                DBNull => 1,
+                _ => 8
+            };
+            if (bytes > MaximumPreviewBytes) return bytes;
+        }
+        return bytes;
+    }
+
+    private static bool SqliteValuesEqual(object left, object right)
+        => left is byte[] leftBytes && right is byte[] rightBytes
+            ? leftBytes.AsSpan().SequenceEqual(rightBytes)
+            : Equals(left, right);
 
     private static async Task<Dictionary<string, string>> ReadColumnsAsync(SqliteConnection connection, SqliteTransaction transaction,
         string table, CancellationToken cancellationToken)

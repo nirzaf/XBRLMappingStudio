@@ -562,8 +562,10 @@ public sealed class DesignerSessionTests
 
             var before = await File.ReadAllBytesAsync(database);
             await viewModel.PreviewDestinationAsync();
-            Assert.Contains("Dry run complete: 1 fact row", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("Dry run complete: 1 insert(s)", viewModel.StatusText, StringComparison.Ordinal);
             Assert.Contains("No database rows were written", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("Candidate estimate: 1 insert(s)", viewModel.DestinationPreviewSummary, StringComparison.Ordinal);
+            Assert.Contains("Sample: row 1 insert", viewModel.DestinationPreviewSummary, StringComparison.Ordinal);
             Assert.Equal(before, await File.ReadAllBytesAsync(database));
 
             viewModel.Session.Project.Approvals.Add(new ApprovalRecord

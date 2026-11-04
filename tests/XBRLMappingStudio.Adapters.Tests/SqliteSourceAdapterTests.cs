@@ -318,6 +318,52 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task TargetPreviewReportsBoundedInsertUpdateUnchangedAndConflictCountsWithoutWriting()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("preview.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account TEXT PRIMARY KEY, amount TEXT); INSERT INTO report(account,amount) VALUES('existing','9'),('changed','1');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var destination = new SourceConnection("target", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "report" });
+        var records = new[]
+        {
+            Record("existing", 9m),
+            Record("changed", 2m),
+            Record("new", 11m),
+            Record("new", 12m)
+        };
+        var before = await File.ReadAllBytesAsync(path);
+        var publisher = new SqliteTargetPublisher();
+
+        var complete = await publisher.PreviewAsync(destination, records, new[] { "account" });
+        var bounded = await publisher.PreviewAsync(destination, records, new[] { "account" },
+            maximumCandidateRows: 2, sampleLimit: 1);
+
+        Assert.Equal(4, complete.CandidateRows);
+        Assert.Equal(4, complete.InspectedRows);
+        Assert.True(complete.CountsAreComplete);
+        Assert.Equal(1, complete.Inserts);
+        Assert.Equal(2, complete.Updates);
+        Assert.Equal(1, complete.UnchangedValueUpdates);
+        Assert.Equal(1, complete.Conflicts);
+        Assert.Equal(new[] { "unchanged", "update", "insert", "conflict" },
+            complete.Samples.Select(sample => sample.Outcome));
+
+        Assert.Equal(2, bounded.InspectedRows);
+        Assert.False(bounded.CountsAreComplete);
+        Assert.Equal(2, bounded.UncertainRows);
+        Assert.Single(bounded.Samples);
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
     public async Task TargetUpsertsRowIdIntegerPrimaryKeyWithoutCollationConflictTarget()
     {
         using var ws = new TempWorkspace();

@@ -378,6 +378,43 @@ public sealed class MappingJobService
     }
 
     /// <summary>
+    /// Compare a successful full-run result with the selected SQLite target using a
+    /// read-only destination snapshot. No publication receipt or database mutation is made.
+    /// </summary>
+    public async Task<SqliteTargetChangePreview> PreviewDestinationChangesAsync(
+        MappingProject project,
+        JobResult result,
+        string workspaceRoot,
+        CancellationToken cancellationToken = default)
+    {
+        var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
+        SqliteTargetTableSchema schema;
+        try
+        {
+            schema = await new SqliteDestinationInspector().InspectTableAsync(
+                prepared.Path, prepared.Plan.Table, cancellationToken);
+        }
+        catch (AdapterException ex)
+        {
+            return BlockedDestinationPreview(prepared.Records.Count, ex.Message);
+        }
+
+        var schemaDiagnostics = DestinationPlanValidator.ValidateSchema(prepared.Plan, schema);
+        if (schemaDiagnostics.HasBlockingErrors)
+            return BlockedDestinationPreview(prepared.Records.Count,
+                string.Join(" ", schemaDiagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+        var destination = new SourceConnection("destination", DestinationPlanValidator.SupportedKind,
+            prepared.Path, new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = prepared.Plan.Table });
+        return await new SqliteTargetPublisher().PreviewAsync(
+            destination, prepared.Records, prepared.Plan.BusinessKey, cancellationToken: cancellationToken);
+    }
+
+    private static SqliteTargetChangePreview BlockedDestinationPreview(int candidateRows, string discrepancy)
+        => new(candidateRows, 0, 0, 0, 0, 0, SqliteTargetPublisher.DefaultPreviewSampleLimit,
+            Array.Empty<SqliteTargetChangeSample>(), new[] { discrepancy });
+
+    /// <summary>
     /// Publish a previously validated, full run through the versioned SQLite
     /// destination plan. The call rechecks approval and run identity at the write
     /// boundary; callers cannot publish preview or stale project output.
@@ -389,10 +426,56 @@ public sealed class MappingJobService
         bool allowSyntheticProfile,
         CancellationToken cancellationToken = default)
     {
+        var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
+        var plan = prepared.Plan;
+        var manifest = result.Manifest;
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
+        if (gate.HasBlockingErrors)
+        {
+            var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw new PublicationException(first.Code,
+                string.Join(Environment.NewLine, gate.Items.Select(diagnostic => diagnostic.Message)),
+                manifest.RunId, plan.Locator);
+        }
+
+        var operationFingerprint = ComputeDestinationOperationFingerprint(
+            project, result, plan, prepared.Path, prepared.ReportDigest);
+        var operationKey = "xms-" + operationFingerprint["sha256:".Length..];
+        var destination = new SourceConnection(
+            "destination",
+            DestinationPlanValidator.SupportedKind,
+            prepared.Path,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
+
+        var receipt = await new SqliteTargetPublisher().PublishAsync(
+            destination,
+            prepared.Records,
+            plan.BusinessKey,
+            operationKey,
+            operationFingerprint,
+            cancellationToken);
+
+        manifest.Outputs = manifest.Outputs
+            .Where(output => output.Kind != "db-receipt" || output.Path != prepared.Path)
+            .Append(new OutputIdentity(prepared.Path, receipt.IntentFingerprint, 0, "db-receipt")
+            {
+                RowsWritten = receipt.WrittenRows,
+                OperationKey = receipt.OperationKey,
+                Table = plan.Table
+            })
+            .ToArray();
+        manifest.CompletedUtc = DateTimeOffset.UtcNow;
+        return receipt;
+    }
+
+    private PreparedSqliteDestination PrepareSqliteDestination(
+        MappingProject project,
+        JobResult result,
+        string workspaceRoot)
+    {
         var plan = project.Destination ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
-            "The project has no configured destination.",
-            DiagnosticStage.Publication);
+            "The project has no configured destination.", DiagnosticStage.Publication);
         var planDiagnostics = DestinationPlanValidator.Validate(plan, result.Manifest.OperationId);
         if (planDiagnostics.HasBlockingErrors)
         {
@@ -401,11 +484,13 @@ public sealed class MappingJobService
                 string.Join(Environment.NewLine, planDiagnostics.Items.Select(diagnostic => diagnostic.Message)),
                 DiagnosticStage.Publication);
         }
-
+        if (!StringComparer.Ordinal.Equals(plan.Kind, DestinationPlanValidator.SupportedKind))
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                "This operation requires a SQLite fact-table destination.", DiagnosticStage.Publication);
         if (!result.IsPublishable)
             throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
-                "Only a successful full run can be written to a durable SQLite destination; previews are never published.",
-                DiagnosticStage.Publication);
+                "A destination change preview requires a successful full run; partial previews cannot be compared.",
+                DiagnosticStage.Validation);
 
         var manifest = result.Manifest;
         var semanticDigest = project.ComputeSemanticDigest();
@@ -416,15 +501,6 @@ public sealed class MappingJobService
         {
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                 "Run evidence no longer matches the project semantic revision and filing profile.",
-                manifest.RunId, plan.Locator);
-        }
-
-        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
-        if (gate.HasBlockingErrors)
-        {
-            var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
-            throw new PublicationException(first.Code,
-                string.Join(Environment.NewLine, gate.Items.Select(diagnostic => diagnostic.Message)),
                 manifest.RunId, plan.Locator);
         }
 
@@ -451,49 +527,27 @@ public sealed class MappingJobService
         }
 
         var root = Path.GetFullPath(workspaceRoot);
-        var destinationPath = Path.IsPathRooted(plan.Locator)
-            ? Path.GetFullPath(plan.Locator)
-            : PathGuard.EnsureWithin(root, Path.Combine(root, plan.Locator));
+        var destinationPath = PathGuard.EnsureWithin(root,
+            Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
         if (!File.Exists(destinationPath))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "SQLite destination database must already exist; create or select an existing database file.",
-                DiagnosticStage.Publication);
+                DiagnosticStage.Validation);
 
         var records = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
         if (records.Count == 0)
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "An empty fact set cannot be published to the SQLite destination.",
-                DiagnosticStage.Publication);
+                DiagnosticStage.Validation);
 
-        var operationFingerprint = ComputeDestinationOperationFingerprint(
-            project, result, plan, destinationPath, jsonDigest);
-        var operationKey = "xms-" + operationFingerprint["sha256:".Length..];
-        var destination = new SourceConnection(
-            "destination",
-            DestinationPlanValidator.SupportedKind,
-            destinationPath,
-            new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
-
-        var receipt = await new SqliteTargetPublisher().PublishAsync(
-            destination,
-            records,
-            plan.BusinessKey,
-            operationKey,
-            operationFingerprint,
-            cancellationToken);
-
-        manifest.Outputs = manifest.Outputs
-            .Where(output => output.Kind != "db-receipt" || output.Path != destinationPath)
-            .Append(new OutputIdentity(destinationPath, receipt.IntentFingerprint, 0, "db-receipt")
-            {
-                RowsWritten = receipt.WrittenRows,
-                OperationKey = receipt.OperationKey,
-                Table = plan.Table
-            })
-            .ToArray();
-        manifest.CompletedUtc = DateTimeOffset.UtcNow;
-        return receipt;
+        return new PreparedSqliteDestination(plan, destinationPath, records, jsonDigest);
     }
+
+    private sealed record PreparedSqliteDestination(
+        DestinationPlan Plan,
+        string Path,
+        IReadOnlyList<DataRecord> Records,
+        string ReportDigest);
 
     /// <summary>
     /// Publish mapped XBRL fact rows through an explicitly selected staged file adapter.

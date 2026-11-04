@@ -153,6 +153,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private bool _destinationSchemaIsValid;
     private bool _isDestinationSchemaConfirmed;
     private string _destinationSchemaStatus = "Choose an existing SQLite database to inspect its tables.";
+    private string _destinationPreviewSummary = "Run a destination dry run to see its estimated changes.";
+    private string? _destinationPreviewSemanticDigest;
     private int _destinationLoadGeneration;
     private Task _destinationSchemaTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
@@ -296,6 +298,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             DestinationKeys.Clear();
             Raise(nameof(SelectedDestinationKey));
             Raise(nameof(DestinationKeys));
+            ResetDestinationPreviewSummary("The destination table changed; rerun the dry run to refresh its estimate.");
             ResetDestinationSchemaConfirmation("Inspecting the selected table…");
             NotifyDestinationCommands();
             if (value is not null && _destinationPath is not null)
@@ -313,6 +316,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (!Set(ref _selectedDestinationKey, value)) return;
+            ResetDestinationPreviewSummary("The business key changed; rerun the dry run to refresh its estimate.");
             IsDestinationSchemaConfirmed = false;
             ValidateSelectedDestinationSchema();
             NotifyDestinationCommands();
@@ -344,6 +348,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         get => _destinationSchemaStatus;
         private set => Set(ref _destinationSchemaStatus, value);
+    }
+    public string DestinationPreviewSummary
+    {
+        get => _destinationPreviewSummary;
+        private set => Set(ref _destinationPreviewSummary, value);
     }
     public bool CanSaveDestinationPlan => CanUseSelectedDestination && ProjectPath is not null
         && !IsBusy && !IsSourceLoading;
@@ -488,6 +497,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void OnSessionChanged()
     {
+        if (_destinationPreviewSemanticDigest is not null
+            && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, Session.Project.ComputeSemanticDigest()))
+            ResetDestinationPreviewSummary("The project changed after this preview; rerun the dry run to refresh its estimate.");
         if (_selectedNode is not null)
         {
             var selectedId = _selectedNode.NodeId;
@@ -622,6 +634,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             DestinationSchemaIsValid = true;
             IsDestinationSchemaConfirmed = false;
             DestinationSchemaStatus = $"Ready to publish {DestinationFormatDisplay} at the selected path.";
+            ResetDestinationPreviewSummary("The output path or format changed; rerun the dry run before publication.");
             StatusText = "Review the output path and format before saving the destination plan.";
         }
         catch (Exception ex)
@@ -933,6 +946,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var plan = BuildSelectedDestinationPlan()!;
         var project = Session.Project;
         var semanticDigest = project.ComputeSemanticDigest();
+        ResetDestinationPreviewSummary("Running a full dry run; the selected destination will not be changed…");
         IsBusy = true;
         StatusText = IsSqliteDestination
             ? "Running a full destination dry run; no database rows will be written…"
@@ -942,49 +956,91 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var result = await new MappingJobService(profile, worker).RunAsync(
+            var service = new MappingJobService(profile, worker);
+            var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, CancellationToken.None);
             if (!StringComparer.Ordinal.Equals(semanticDigest, project.ComputeSemanticDigest()))
             {
                 ShowRunResult(result);
+                ResetDestinationPreviewSummary("The project changed during the dry run; rerun it to refresh the estimate.");
                 StatusText = "The project changed during the dry run. Nothing was written; run the preview again.";
                 return;
             }
             if (!result.IsPublishable)
             {
                 ShowRunResult(result);
+                ResetDestinationPreviewSummary($"No destination estimate is available for the {result.Manifest.Outcome} run; no writes were made.");
                 StatusText = IsSqliteDestination
                     ? $"Dry run finished: {result.Manifest.Outcome}. No database rows were written."
                     : $"Dry run finished: {result.Manifest.Outcome}. No file was written.";
                 return;
             }
 
-            var diagnostics = IsSqliteDestination
-                ? DestinationPlanValidator.ValidateSchema(plan,
-                    await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table))
-                : DestinationPlanValidator.Validate(plan);
+            if (IsSqliteDestination)
+            {
+                var estimate = await service.PreviewDestinationChangesAsync(
+                    project, result, root, CancellationToken.None);
+                ShowRunResult(result);
+                if (estimate.SchemaDiscrepancies.Count > 0)
+                {
+                    DestinationPreviewSummary = "Preview blocked by destination schema discrepancies: "
+                        + string.Join(" ", estimate.SchemaDiscrepancies) + " No rows were written.";
+                    _destinationPreviewSemanticDigest = null;
+                    StatusText = "Dry run found destination schema problems. No database rows were written.";
+                    return;
+                }
+
+                DestinationPreviewSummary = FormatDestinationPreview(estimate);
+                _destinationPreviewSemanticDigest = semanticDigest;
+                StatusText = $"Dry run complete: {estimate.Inserts} insert(s), {estimate.Updates} upsert update(s), "
+                    + $"including {estimate.UnchangedValueUpdates} with unchanged values, and {estimate.Conflicts} duplicate-key conflict(s). "
+                    + "No database rows were written. The estimate is read-only; publication rechecks the source run and target schema.";
+                return;
+            }
+
+            var diagnostics = DestinationPlanValidator.Validate(plan);
             if (diagnostics.HasBlockingErrors)
             {
                 ShowDestinationDiagnostics(diagnostics.Items);
-                StatusText = IsSqliteDestination
-                    ? "Dry run found a destination schema problem. No database rows were written."
-                    : "Dry run found an invalid file destination contract. No file was written.";
+                DestinationPreviewSummary = "Preview blocked by output-contract discrepancies: "
+                    + string.Join(" ", diagnostics.Items.Select(item => item.Message)) + " No file was written.";
+                _destinationPreviewSemanticDigest = null;
+                StatusText = "Dry run found an invalid file destination contract. No file was written.";
                 return;
             }
 
             ShowRunResult(result);
-            StatusText = IsSqliteDestination
-                ? $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Table}. No database rows were written. Publication requires a current approval and final confirmation."
-                : $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
+            DestinationPreviewSummary = $"{result.Facts.Count} fact row(s) fit {plan.Format}. The existing file was not read or changed during dry run; publication stages and validates a replacement.";
+            _destinationPreviewSemanticDigest = semanticDigest;
+            StatusText = $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
         }
         catch (Exception ex)
         {
             ShowDestinationError(ex);
+            ResetDestinationPreviewSummary($"Destination preview failed: {ex.Message} No writes were made.");
             StatusText = IsSqliteDestination
                 ? "Destination dry run failed; no database rows were written."
                 : "Destination dry run failed; no file was written.";
         }
         finally { IsBusy = false; }
+    }
+
+    private static string FormatDestinationPreview(SqliteTargetChangePreview preview)
+    {
+        var completeness = preview.CountsAreComplete
+            ? $"Inspected all {preview.InspectedRows} candidate row(s)."
+            : $"Inspected {preview.InspectedRows} of {preview.CandidateRows}; {preview.UncertainRows} row(s) are uninspected.";
+        var sample = preview.Samples.Count == 0
+            ? "No outcome sample is available."
+            : "Sample: " + string.Join(", ", preview.Samples.Select(item => $"row {item.CandidateRow} {item.Outcome}")) + ".";
+        var conflictNotice = preview.Conflicts > 0
+            ? " Duplicate candidate keys block the whole publication batch until resolved."
+            : "";
+        return $"Candidate estimate: {preview.Inserts} insert(s), {preview.Updates} upsert update(s), including "
+            + $"{preview.UnchangedValueUpdates} with unchanged values, and {preview.Conflicts} duplicate-key conflict(s). "
+            + $"{completeness} Scan limit: {SqliteTargetPublisher.MaximumPreviewRows} rows or "
+            + $"{SqliteTargetPublisher.MaximumPreviewBytes / (1024 * 1024)} MiB of field values; sample limit: {preview.SampleLimit}. {sample}"
+            + conflictNotice + " This read-only estimate is not a receipt; publication rechecks the run and target schema.";
     }
 
     public async Task PublishDestinationAsync()
@@ -1459,9 +1515,16 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(CanSelectDestinationKey));
         Raise(nameof(SelectedDestinationKey));
         IsDestinationLoading = false;
+        ResetDestinationPreviewSummary("Run a destination dry run to see its estimated changes.");
         ResetDestinationSchemaConfirmation(IsSqliteDestination
             ? "Choose an existing SQLite database to inspect its tables."
             : "Choose an output file in the workspace.");
+    }
+
+    private void ResetDestinationPreviewSummary(string message)
+    {
+        _destinationPreviewSemanticDigest = null;
+        DestinationPreviewSummary = message;
     }
 
     private async Task LoadSavedDestinationAsync()
