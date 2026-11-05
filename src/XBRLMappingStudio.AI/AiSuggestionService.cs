@@ -121,7 +121,11 @@ public sealed class AiSuggestionService
         _policy = policy;
         _taxonomy = taxonomy;
         // Offline discards any supplied provider: outbound is impossible by construction.
-        _provider = policy.AllowsOutbound && provider is not null
+        // Outbound providers must reveal the fixed destination that the policy approves.
+        // Unknown/custom transports fail closed instead of inheriting approval by omission.
+        var endpointApproved = provider is IEndpointBoundChatClientProvider endpointBound
+            && policy.AllowsEndpoint(endpointBound.Endpoint);
+        _provider = policy.AllowsOutbound && endpointApproved && provider is not null
             ? provider
             : new NullProvider();
         _ranker = ranker ?? new LocalRetrievalRanker(taxonomy);

@@ -11,7 +11,13 @@ namespace XBRLMappingStudio.AI.Tests;
 public class ProviderContractTests
 {
     private static AiSuggestionService Managed(AiPolicy policy, IChatClientProvider provider) =>
-        new(policy, TestProjects.Taxonomy(), provider);
+        new(policy with
+        {
+            ProviderConfigId = "00000000-0000-0000-0000-000000000004",
+            ProviderEnabled = true,
+            ProviderApproved = true,
+            ApprovedEndpointHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "fake.example" }
+        }, TestProjects.Taxonomy(), provider);
 
     [Fact]
     public async Task Offline_NullProvider_ProbeReportsUnavailable()

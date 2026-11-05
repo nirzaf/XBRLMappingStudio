@@ -26,8 +26,9 @@ internal sealed class CountingHandler : HttpMessageHandler
 }
 
 /// <summary>Scriptable in-memory provider for the AI03 error matrix.</summary>
-internal sealed class FakeProvider : IChatClientProvider
+internal sealed class FakeProvider : IEndpointBoundChatClientProvider
 {
+    public Uri Endpoint { get; } = new("https://fake.example/v1");
     public ProbeResult Probe { get; set; } = new(true, "ok");
     public Func<ChatRequest, ChatResponse>? Completer { get; set; }
     public ChatRequest? LastRequest { get; private set; }
@@ -50,6 +51,21 @@ internal sealed class FakeProvider : IChatClientProvider
         return Task.FromResult(Completer?.Invoke(request)
             ?? new ChatResponse(Array.Empty<ProposedMapping>(), Refused: true, Truncated: false));
     }
+}
+
+internal sealed class UnboundFakeProvider : IChatClientProvider
+{
+    public string Name => "unbound-fake";
+    public int ProbeCalls { get; private set; }
+
+    public Task<ProbeResult> ProbeAsync(CancellationToken cancellationToken)
+    {
+        ProbeCalls++;
+        return Task.FromResult(new ProbeResult(true, "ok"));
+    }
+
+    public Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(new ChatResponse(Array.Empty<ProposedMapping>(), Refused: true, Truncated: false));
 }
 
 internal static class TestProjects

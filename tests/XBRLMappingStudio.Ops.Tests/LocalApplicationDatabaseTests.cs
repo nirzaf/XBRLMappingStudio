@@ -6,6 +6,21 @@ namespace XBRLMappingStudio.Ops.Tests;
 public sealed class LocalApplicationDatabaseTests
 {
     [Fact]
+    public void SelectedAiProviderStoresOnlyAUuidConfigurationReference()
+    {
+        using var workspace = new TemporaryDirectory();
+        var database = new LocalApplicationDatabase(Path.Combine(workspace.Path, "state.db"));
+        var configId = Guid.NewGuid().ToString("D");
+
+        database.SetSelectedAiProviderConfigId(configId);
+
+        Assert.Equal(configId, database.GetSelectedAiProviderConfigId());
+        Assert.Throws<ArgumentException>(() => database.SetSelectedAiProviderConfigId("sk-test-secret-value"));
+        database.SetSelectedAiProviderConfigId(null);
+        Assert.Null(database.GetSelectedAiProviderConfigId());
+    }
+
+    [Fact]
     public void InitializesVersionedSchemaAndPersistsAtomicPublicationReceipt()
     {
         using var workspace = new TemporaryDirectory();

@@ -30,8 +30,58 @@ public class DataPolicyTests
     public void OfflinePolicy_DisallowsOutbound_ByConstruction()
     {
         Assert.False(AiPolicy.Offline.AllowsOutbound);
-        Assert.True(new AiPolicy(AiMode.ManagedProvider).AllowsOutbound);
-        Assert.True(new AiPolicy(AiMode.LocalModel).AllowsOutbound);
+        Assert.False(new AiPolicy(AiMode.ManagedProvider).AllowsOutbound);
+        Assert.False(new AiPolicy(AiMode.LocalModel).AllowsOutbound);
+        Assert.True(new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000001", true, true,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ai.example" }).AllowsOutbound);
+    }
+
+    [Fact]
+    public void ProviderPolicy_RequiresApprovedManagedHost_AndKeepsLocalModelOnLoopback()
+    {
+        var managed = new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000001", true, true,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ai.example" });
+        Assert.True(managed.AllowsEndpoint(new Uri("https://ai.example/v1")));
+        Assert.False(managed.AllowsEndpoint(new Uri("https://other.example/v1")));
+        Assert.False(managed.AllowsEndpoint(new Uri("http://ai.example/v1")));
+
+        var local = new AiPolicy(AiMode.LocalModel, "00000000-0000-0000-0000-000000000005", true, true);
+        Assert.True(local.AllowsEndpoint(new Uri("http://127.0.0.1:11434")));
+        Assert.False(local.AllowsEndpoint(new Uri("https://public.example")));
+    }
+
+    [Fact]
+    public async Task DisabledOrUnapprovedProvider_IsNotProbedOrContacted()
+    {
+        var disabled = new FakeProvider();
+        var disabledService = new AiSuggestionService(
+            new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000002", ProviderEnabled: false, ProviderApproved: true),
+            TestProjects.Taxonomy(), disabled);
+        var disabledBatch = await disabledService.SuggestAsync(new[] { "Sales" }, default);
+
+        Assert.False(disabledBatch.UsedProvider);
+        Assert.Equal(0, disabled.ProbeCalls);
+        Assert.IsType<NullProvider>(disabledService.ActiveProvider);
+
+        var handler = new CountingHandler();
+        var unapproved = new HttpChatProvider(new Uri("https://unapproved.example/v1"), handler);
+        var approvedPolicy = new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000003", ProviderEnabled: true,
+            ProviderApproved: true,
+            ApprovedEndpointHosts: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "approved.example" });
+        var unapprovedService = new AiSuggestionService(approvedPolicy, TestProjects.Taxonomy(), unapproved);
+        var unapprovedBatch = await unapprovedService.SuggestAsync(new[] { "Sales" }, default);
+
+        Assert.False(unapprovedBatch.UsedProvider);
+        Assert.Equal(0, handler.RequestCount);
+        Assert.IsType<NullProvider>(unapprovedService.ActiveProvider);
+
+        var unbound = new UnboundFakeProvider();
+        var unboundService = new AiSuggestionService(approvedPolicy, TestProjects.Taxonomy(), unbound);
+        var unboundBatch = await unboundService.SuggestAsync(new[] { "Sales" }, default);
+
+        Assert.False(unboundBatch.UsedProvider);
+        Assert.Equal(0, unbound.ProbeCalls);
+        Assert.IsType<NullProvider>(unboundService.ActiveProvider);
     }
 
     [Fact]
@@ -39,7 +89,9 @@ public class DataPolicyTests
     {
         Assert.Equal(AiMode.Offline, AiPolicy.Parse(null).Mode);
         Assert.Equal(AiMode.Offline, AiPolicy.Parse("garbage").Mode);
-        Assert.Equal(AiMode.ManagedProvider, AiPolicy.Parse("managed").Mode);
+        var managedMode = AiPolicy.Parse("managed");
+        Assert.Equal(AiMode.ManagedProvider, managedMode.Mode);
+        Assert.False(managedMode.AllowsOutbound); // a mode string alone is not consent/configuration
     }
 }
 

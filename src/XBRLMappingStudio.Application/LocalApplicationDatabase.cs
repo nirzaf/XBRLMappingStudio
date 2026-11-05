@@ -15,6 +15,7 @@ public sealed class LocalApplicationDatabase
     /// integrity-checked offline taxonomy metadata cache. Migrations are non-destructive.
     /// </summary>
     public const int CurrentSchemaVersion = 6;
+    public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -55,6 +56,41 @@ public sealed class LocalApplicationDatabase
         using var command = connection.CreateCommand();
         command.CommandText = "PRAGMA integrity_check";
         return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? "unknown";
+    }
+
+    /// <summary>Persist only a nonsecret UUID reference to an approved AI provider configuration.</summary>
+    public void SetSelectedAiProviderConfigId(string? configId)
+    {
+        if (configId is not null && !Guid.TryParseExact(configId, "D", out _))
+            throw new ArgumentException("Provider configuration ID must be a UUID; secrets and endpoints are not accepted here.", nameof(configId));
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        if (configId is null)
+        {
+            command.CommandText = "DELETE FROM app_settings WHERE key=$key";
+            command.Parameters.AddWithValue("$key", SelectedAiProviderConfigSetting);
+        }
+        else
+        {
+            command.CommandText = """
+                INSERT INTO app_settings(key,value,updated_utc) VALUES($key,$value,$time)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_utc=excluded.updated_utc
+                """;
+            command.Parameters.AddWithValue("$key", SelectedAiProviderConfigSetting);
+            command.Parameters.AddWithValue("$value", configId);
+            command.Parameters.AddWithValue("$time", DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        command.ExecuteNonQuery();
+    }
+
+    public string? GetSelectedAiProviderConfigId()
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM app_settings WHERE key=$key";
+        command.Parameters.AddWithValue("$key", SelectedAiProviderConfigSetting);
+        return command.ExecuteScalar() as string;
     }
 
     public void BackupTo(string backupPath)

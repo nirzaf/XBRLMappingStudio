@@ -53,6 +53,29 @@ public interface IChatClientProvider
     Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>Exposes a provider's fixed HTTP endpoint for policy allowlist checks.</summary>
+public interface IEndpointBoundChatClientProvider : IChatClientProvider
+{
+    Uri Endpoint { get; }
+}
+
+internal static class ProviderEndpointValidation
+{
+    public static Uri Validate(Uri endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        if (!endpoint.IsAbsoluteUri || !string.IsNullOrEmpty(endpoint.UserInfo)
+            || !string.IsNullOrEmpty(endpoint.Query) || !string.IsNullOrEmpty(endpoint.Fragment))
+            throw new ArgumentException("Provider endpoint must be an absolute URI without user information, query, or fragment.", nameof(endpoint));
+        var isLoopbackHttp = endpoint.Scheme == Uri.UriSchemeHttp
+            && (System.Net.IPAddress.TryParse(endpoint.Host, out var address) && System.Net.IPAddress.IsLoopback(address)
+                || StringComparer.OrdinalIgnoreCase.Equals(endpoint.Host, "localhost"));
+        if (endpoint.Scheme != Uri.UriSchemeHttps && !isLoopbackHttp)
+            throw new ArgumentException("Provider endpoints must use HTTPS; HTTP is allowed only for loopback local models.", nameof(endpoint));
+        return endpoint;
+    }
+}
+
 /// <summary>
 /// Null-object provider used whenever outbound is disallowed. It records that it was asked
 /// but performs no I/O, so tests can assert "zero outbound" by checking that the service
@@ -82,18 +105,23 @@ public sealed class NullProvider : IChatClientProvider
 /// offline mode. The <see cref="HttpMessageHandler"/> is injectable so an offline audit can
 /// attach a counting spy and prove no request leaves the process.
 /// </summary>
-public sealed class HttpChatProvider : IChatClientProvider
+public sealed class HttpChatProvider : IEndpointBoundChatClientProvider
 {
     private const int MaxResponseBytes = 1_048_576;
     private readonly HttpClient _http;
     private readonly string _endpoint;
 
     public string Name => "http";
+    public Uri Endpoint { get; }
 
     public HttpChatProvider(Uri endpoint, HttpMessageHandler? handler = null)
     {
-        _endpoint = endpoint.ToString();
-        _http = handler is null ? new HttpClient() : new HttpClient(handler);
+        Endpoint = ProviderEndpointValidation.Validate(endpoint);
+        _endpoint = endpoint.ToString().TrimEnd('/');
+        _http = handler is null
+            ? new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false })
+            : new HttpClient(handler, disposeHandler: false);
+        _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
     public async Task<ProbeResult> ProbeAsync(CancellationToken cancellationToken)
@@ -157,10 +185,19 @@ public sealed class HttpChatProvider : IChatClientProvider
     }
 }
 
-/// <summary>Microsoft.Extensions.AI bridge for an explicitly configured chat client.</summary>
-public sealed class MicrosoftAiChatProvider(IChatClient client, string name = "Microsoft.Extensions.AI") : IChatClientProvider
+/// <summary>Microsoft.Extensions.AI bridge bound to the configured provider endpoint.</summary>
+public sealed class MicrosoftAiChatProvider : IEndpointBoundChatClientProvider
 {
-    public string Name { get; } = name;
+    private readonly IChatClient _client;
+    public string Name { get; }
+    public Uri Endpoint { get; }
+
+    public MicrosoftAiChatProvider(IChatClient client, Uri endpoint, string name = "Microsoft.Extensions.AI")
+    {
+        _client = client ?? throw new ArgumentNullException(nameof(client));
+        Endpoint = ProviderEndpointValidation.Validate(endpoint);
+        Name = name;
+    }
 
     public Task<ProbeResult> ProbeAsync(CancellationToken cancellationToken)
     {
@@ -176,7 +213,7 @@ public sealed class MicrosoftAiChatProvider(IChatClient client, string name = "M
         var prompt = $"{request.SystemPrompt}\nAllowed concepts by source field (JSON):\n{perFieldCandidates}\nSource fields:\n{request.UserPrompt}";
         try
         {
-            var response = await client.GetResponseAsync<ProposedMapping[]>(prompt,
+            var response = await _client.GetResponseAsync<ProposedMapping[]>(prompt,
                 new ChatOptions { MaxOutputTokens = request.MaxOutputTokens },
                 cancellationToken: cancellationToken);
             var proposals = response.Result ?? Array.Empty<ProposedMapping>();
