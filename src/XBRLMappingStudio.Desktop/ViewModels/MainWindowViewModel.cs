@@ -172,7 +172,17 @@ public sealed class SuggestionRow : ViewModelBase
         get => _reviewState;
         set { if (Set(ref _reviewState, value)) Raise(nameof(Display)); }
     }
-    public string Display => $"{Concept}  ·  score {Score}  ·  {Basis}  ·  {ReviewState}" + (IsAnalystEdited ? "  ·  edited" : "");
+    public string Display
+    {
+        get
+        {
+            var source = Recommendation is { } recommendation
+                ? $"{recommendation.SourceFieldName} ({recommendation.SourceFieldId})"
+                : SourceFieldId;
+            return $"{source} → {Concept}  ·  rank {Score} (not confidence)  ·  evidence {Basis}  ·  {ReviewState}"
+                + (IsAnalystEdited ? "  ·  edited" : "");
+        }
+    }
 }
 
 /// <summary>Row surfaced by the taxonomy explorer (UI03).</summary>
@@ -2723,7 +2733,10 @@ public sealed class MainWindowViewModel : ViewModelBase
             }));
             SelectedSuggestion = AiSuggestions.FirstOrDefault();
             Raise(nameof(AiSuggestions));
-            StatusText = batch.Suggestions.Count == 0
+            StatusText = batch.Abstentions.Count > 0
+                ? string.Join(" ", batch.Abstentions.Select(abstention =>
+                    $"No match for '{abstention.SourceFieldName}' ({abstention.SourceFieldId}): {abstention.Reason}"))
+                : batch.Suggestions.Count == 0
                 ? "No local concept candidates matched this field."
                 : $"Found {batch.Suggestions.Count} local candidates. No source data was sent over the network.";
         }

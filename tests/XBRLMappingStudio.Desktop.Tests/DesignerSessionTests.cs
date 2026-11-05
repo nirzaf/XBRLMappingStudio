@@ -603,6 +603,11 @@ public sealed class DesignerSessionTests
 
             var suggestion = Assert.Single(viewModel.AiSuggestions,
                 row => row.Concept == "synthetic:Revenue");
+            Assert.Contains("Revenue (", suggestion.Display);
+            Assert.Contains("→ synthetic:Revenue", suggestion.Display);
+            Assert.Contains("rank", suggestion.Display);
+            Assert.Contains("not confidence", suggestion.Display);
+            Assert.Contains("evidence local-name", suggestion.Display);
             Assert.Contains("urn:synthetic:finance:1.0", suggestion.TaxonomyEvidenceDisplay);
             Assert.Contains(SyntheticProfile.PresentationRole, suggestion.TaxonomyEvidenceDisplay);
             Assert.Contains("scale: NeedsReview", suggestion.RecommendationDisplay);
@@ -621,6 +626,36 @@ public sealed class DesignerSessionTests
             Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
             viewModel.UndoCommand.Execute(null);
             Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopNoMatch_IsExplicitAndLeavesMappingUnassigned()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-ai-no-match", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        File.WriteAllText(csv, "Internal compliance reference\nREF-123\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            await viewModel.LoadSourceAsync(csv);
+            viewModel.SelectedSourceColumn = "Internal compliance reference";
+            viewModel.Session.Select("sample-fact", additive: false);
+            var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+            await viewModel.SuggestMappingsAsync();
+
+            Assert.Empty(viewModel.AiSuggestions);
+            Assert.Contains("No match for 'Internal compliance reference'", viewModel.StatusText);
+            Assert.Contains("remains unassigned", viewModel.StatusText);
+            Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
         }
         finally
         {

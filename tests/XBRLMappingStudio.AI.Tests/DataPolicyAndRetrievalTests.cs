@@ -221,6 +221,71 @@ public class RetrievalDeterminismTests
     }
 
     [Fact]
+    public async Task UnanswerableSourceFieldReturnsTypedAbstentionWithoutGenericRevenue()
+    {
+        var service = new AiSuggestionService(AiPolicy.Offline, TestProjects.Taxonomy());
+
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("internal-tag-id", "Internal compliance reference", "USD", "duration")
+        }, default);
+
+        Assert.Empty(batch.Suggestions);
+        var abstention = Assert.Single(batch.Abstentions);
+        Assert.Equal("internal-tag-id", abstention.SourceFieldId);
+        Assert.Equal("Internal compliance reference", abstention.SourceFieldName);
+        Assert.Contains("remains unassigned", abstention.Reason, StringComparison.Ordinal);
+        Assert.Contains(batch.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("remains unassigned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AmbiguousGrossAndNetRevenueReturnsAlternativesWithoutMutatingGraph()
+    {
+        var profile = new XBRL.FilingProfile
+        {
+            ProfileId = "gross-net-profile",
+            Digest = "sha256:gross-net-v1",
+            TaxonomyVersion = "2026.1",
+            Concepts = new[]
+            {
+                new XBRL.ConceptMetadata("ex:GrossRevenue", "urn:example", "GrossRevenue", "Gross Revenue",
+                    "monetary", "duration", IsAbstract: false),
+                new XBRL.ConceptMetadata("ex:NetRevenue", "urn:example", "NetRevenue", "Net Revenue",
+                    "monetary", "duration", IsAbstract: false),
+                new XBRL.ConceptMetadata("ex:Revenue", "urn:example", "Revenue", "Revenue",
+                    "monetary", "duration", IsAbstract: false)
+            },
+            SupportedUnits = new HashSet<string>(StringComparer.Ordinal) { "USD" }
+        };
+        var taxonomy = new XBRL.TaxonomyIndex(profile);
+        var service = new AiSuggestionService(AiPolicy.Offline, taxonomy);
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("sales-field", "Gross or net revenue", "USD", "duration")
+        }, default);
+
+        Assert.Equal(3, batch.Suggestions.Count);
+        Assert.Contains(batch.Suggestions, suggestion => suggestion.Draft.Concept == "ex:Revenue");
+        Assert.All(batch.Suggestions, suggestion =>
+            Assert.Equal(2, suggestion.Recommendation!.Alternatives.Count));
+
+        var project = new XBRLMappingStudio.Project.MappingProject
+        {
+            ProjectId = "ambiguous-review",
+            Name = "ambiguous-review",
+            ProfileId = profile.ProfileId,
+            ProfileDigest = profile.Digest
+        };
+        var session = new SuggestionSession(project, new DraftValidator(taxonomy, profile));
+        session.LoadSuggestions(batch.Suggestions);
+
+        Assert.Empty(session.Draft.Nodes);
+        Assert.All(batch.Suggestions, suggestion =>
+            Assert.Equal(SuggestionState.Pending, session.StateOf(suggestion.SuggestionId)));
+    }
+
+    [Fact]
     public async Task Recommendation_SeparatesDraftListsAlternativesAndSurfacesUnresolvedAspects()
     {
         var profile = new XBRL.FilingProfile

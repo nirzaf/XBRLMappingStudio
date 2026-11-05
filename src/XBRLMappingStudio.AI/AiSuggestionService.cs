@@ -57,7 +57,13 @@ public sealed record MappingRecommendation(
 public sealed record SuggestionBatch(
     IReadOnlyList<Suggestion> Suggestions,
     IReadOnlyList<Diagnostic> Diagnostics,
-    bool UsedProvider);
+    bool UsedProvider)
+{
+    public IReadOnlyList<SuggestionAbstention> Abstentions { get; init; } = Array.Empty<SuggestionAbstention>();
+}
+
+/// <summary>An explicit no-match outcome; no generic concept is substituted (AIM10).</summary>
+public sealed record SuggestionAbstention(string SourceFieldId, string SourceFieldName, string Reason);
 
 /// <summary>
 /// Orchestrates offline ranking and (optionally) a remote provider (AI01, AI03).
@@ -75,6 +81,8 @@ public sealed class AiSuggestionService
     private const int MaxCandidateConceptsPerField = 10;
     private const int MaxProviderRequestBytes = 1_048_576;
     private const int MaxProviderResponseBytes = 1_048_576;
+    private const string NoMatchReason =
+        "No target concept in the selected taxonomy matched this field and its supplied period/unit context; it remains unassigned.";
     private static readonly IReadOnlySet<string> DeterministicTransformationNodeTypes =
         new HashSet<string>(StringComparer.Ordinal)
         {
@@ -141,7 +149,12 @@ public sealed class AiSuggestionService
         ArgumentNullException.ThrowIfNull(sourceFields);
         var diagnostics = new List<Diagnostic>();
         var suggestions = new List<Suggestion>();
+        var abstentions = new List<SuggestionAbstention>();
         bool usedProvider = false;
+        SuggestionBatch CreateBatch(bool providerUsed) => new(suggestions, diagnostics, providerUsed)
+        {
+            Abstentions = abstentions.ToArray()
+        };
 
         if (sourceFields.Count > MaxSourceFields
             || sourceFields.Any(field => field is null
@@ -160,17 +173,19 @@ public sealed class AiSuggestionService
                 IsBlocking = false,
                 Message = $"Source fields must have non-empty, unique identities, names up to {MaxSourceNameLength} characters, units and periods up to {MaxUnitLength} characters, a supported period when supplied, and no more than {MaxSourceFields} entries; no suggestions were produced."
             });
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         var rankedCandidatesByField = RankCandidates(sourceFields, diagnostics);
+        foreach (var field in sourceFields.Where(field => rankedCandidatesByField[field.Id].Count == 0))
+            abstentions.Add(new SuggestionAbstention(field.Id, field.Name, NoMatchReason));
         if (rankedCandidatesByField.Values.All(candidates => candidates.Count == 0))
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
 
         if (!_policy.AllowsOutbound)
         {
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         var allowedConcepts = rankedCandidatesByField.Values
@@ -190,7 +205,7 @@ public sealed class AiSuggestionService
         {
             diagnostics.Add(InvalidProposal("Ranked taxonomy evidence exceeded the provider request budget; the mapping request was not sent and local candidates are shown instead."));
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         ProbeResult probe;
@@ -206,7 +221,7 @@ public sealed class AiSuggestionService
         {
             diagnostics.Add(ProviderFailure($"Provider '{_provider.Name}' probe failed ({ex.GetType().Name}); falling back to local ranking."));
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         if (probe is null || !probe.Available)
@@ -221,7 +236,7 @@ public sealed class AiSuggestionService
                 Message = $"Provider '{_provider.Name}' probe failed: {probe?.Detail ?? "no response"}. Falling back to local ranking.",
             });
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         ChatResponse response;
@@ -237,14 +252,14 @@ public sealed class AiSuggestionService
         {
             diagnostics.Add(ProviderFailure($"Provider '{_provider.Name}' request failed ({ex.GetType().Name}); falling back to local ranking."));
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         if (response is null)
         {
             diagnostics.Add(ProviderFailure($"Provider '{_provider.Name}' returned no response; falling back to local ranking."));
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         if (response.Refused)
@@ -259,7 +274,7 @@ public sealed class AiSuggestionService
                 Message = $"Provider '{_provider.Name}' refused the request; no proposals were applied.",
             });
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: false);
+            return CreateBatch(providerUsed: false);
         }
 
         var proposals = response.ProposedMappings ?? Array.Empty<ProposedMapping>();
@@ -279,7 +294,7 @@ public sealed class AiSuggestionService
                 Message = "Provider response exceeded the output budget and was discarded; local candidates are shown instead.",
             });
             AddLocalSuggestions(sourceFields, rankedCandidatesByField, suggestions);
-            return new SuggestionBatch(suggestions, diagnostics, UsedProvider: true);
+            return CreateBatch(providerUsed: true);
         }
 
         usedProvider = true;
@@ -351,7 +366,7 @@ public sealed class AiSuggestionService
             });
         }
 
-        return new SuggestionBatch(suggestions, diagnostics, usedProvider);
+        return CreateBatch(usedProvider);
     }
 
     private Dictionary<string, IReadOnlyList<RankedCandidate>> RankCandidates(
@@ -364,8 +379,7 @@ public sealed class AiSuggestionService
             var candidates = _ranker.Rank(field, MaxCandidateConceptsPerField);
             result.Add(field.Id, candidates);
             if (candidates.Count == 0)
-                diagnostics.Add(InvalidProposal(
-                    "No target concept in the selected taxonomy matched this field and its supplied period/unit context; it remains unassigned."));
+                diagnostics.Add(InvalidProposal(NoMatchReason));
         }
         return result;
     }
