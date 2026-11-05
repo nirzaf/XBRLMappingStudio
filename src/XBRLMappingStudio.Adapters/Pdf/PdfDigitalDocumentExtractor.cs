@@ -36,7 +36,7 @@ public sealed record PdfDigitalExtractionOptions(
     }
 }
 
-/// <summary>Text and positional evidence extracted from one PDF word.</summary>
+/// <summary>Text and axis-aligned positional evidence in the displayed crop/rotation page frame.</summary>
 public sealed record PdfDigitalWord(
     string Text,
     double Left,
@@ -44,14 +44,27 @@ public sealed record PdfDigitalWord(
     double Right,
     double Top);
 
-/// <summary>One page, retaining the PDF's one-based page number and page rotation.</summary>
+/// <summary>
+/// One page in PdfPig's displayed crop/rotation frame. Width, height and word boxes
+/// share that frame; media/crop bounds retain the original unrotated PDF coordinates.
+/// </summary>
 public sealed record PdfDigitalPage(
     int PageNumber,
     int RotationDegrees,
     double Width,
     double Height,
     string Text,
-    IReadOnlyList<PdfDigitalWord> Words);
+    IReadOnlyList<PdfDigitalWord> Words)
+{
+    /// <summary>Physical page bounds in the original PDF default user space.</summary>
+    public PdfDigitalPageBounds? MediaBounds { get; init; }
+
+    /// <summary>Visible crop bounds in the original PDF default user space.</summary>
+    public PdfDigitalPageBounds? CropBounds { get; init; }
+}
+
+/// <summary>PDF page rectangle in original, unrotated default user space points.</summary>
+public sealed record PdfDigitalPageBounds(double Left, double Bottom, double Right, double Top);
 
 /// <summary>
 /// Immutable extraction result. Text order is the parser's content order; positions
@@ -132,12 +145,14 @@ public static class PdfDigitalDocumentExtractor
                         throw BudgetExceeded("The PDF exceeds the configured extracted-word limit.");
                     }
 
+                    var bounds = word.BoundingBox;
+                    var points = new[] { bounds.BottomLeft, bounds.BottomRight, bounds.TopLeft, bounds.TopRight };
                     words.Add(new PdfDigitalWord(
                         word.Text,
-                        word.BoundingBox.Left,
-                        word.BoundingBox.Bottom,
-                        word.BoundingBox.Right,
-                        word.BoundingBox.Top));
+                        points.Min(point => point.X),
+                        points.Min(point => point.Y),
+                        points.Max(point => point.X),
+                        points.Max(point => point.Y)));
                 }
 
                 pages.Add(new PdfDigitalPage(
@@ -146,7 +161,11 @@ public static class PdfDigitalDocumentExtractor
                     page.Width,
                     page.Height,
                     text,
-                    words));
+                    words)
+                {
+                    MediaBounds = ToBounds(page.MediaBox.Bounds),
+                    CropBounds = ToBounds(page.CropBox.Bounds)
+                });
             }
 
             return new PdfDigitalDocument(
@@ -184,4 +203,7 @@ public static class PdfDigitalDocumentExtractor
         => new(DiagnosticCodes.IoPdfEncrypted,
             "Encrypted PDFs are not supported for unattended extraction.",
             DiagnosticStage.Introspection);
+
+    private static PdfDigitalPageBounds ToBounds(UglyToad.PdfPig.Core.PdfRectangle bounds)
+        => new(bounds.Left, bounds.Bottom, bounds.Right, bounds.Top);
 }

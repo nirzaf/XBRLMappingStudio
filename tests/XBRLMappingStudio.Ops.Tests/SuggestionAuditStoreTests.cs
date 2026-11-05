@@ -106,8 +106,8 @@ public sealed class SuggestionAuditStoreTests : IDisposable
     {
         var path = NewDbPath();
 
-        // 1. Open once to create the current schema, then remove the v2/v3 columns
-        //    and roll the file back to a strict v1 shape.
+        // 1. Open once to create the current schema, then remove the newer columns
+        //    and tables and roll the file back to a strict v1 shape.
         var seed = new LocalApplicationDatabase(path);
         using (var connection = seed.OpenConnection())
         {
@@ -115,6 +115,8 @@ public sealed class SuggestionAuditStoreTests : IDisposable
             rollbackColumns.CommandText = """
                 ALTER TABLE publication_receipts DROP COLUMN validated_digest;
                 ALTER TABLE run_journal DROP COLUMN validated_digest;
+                DROP TABLE pdf_source_evidence;
+                DROP TABLE pdf_source_documents;
                 """;
             rollbackColumns.ExecuteNonQuery();
             using var drop = connection.CreateCommand();

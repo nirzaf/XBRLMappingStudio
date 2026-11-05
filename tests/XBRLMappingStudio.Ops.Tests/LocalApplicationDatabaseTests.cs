@@ -12,6 +12,14 @@ public sealed class LocalApplicationDatabaseTests
         var path = Path.Combine(workspace.Path, "state.db");
         var database = new LocalApplicationDatabase(path);
         Assert.Equal("ok", database.IntegrityCheck());
+        using (var schema = database.OpenConnection())
+        using (var version = schema.CreateCommand())
+        {
+            version.CommandText = "PRAGMA user_version";
+            Assert.Equal(4L, version.ExecuteScalar());
+            version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence')";
+            Assert.Equal(2L, version.ExecuteScalar());
+        }
 
         var journal = new RunJournal(databasePath: path);
         var staged = new JournalEntry("run-1", "/workspace/report.json", JournalState.Validated,
@@ -64,12 +72,40 @@ public sealed class LocalApplicationDatabaseTests
         { ValidatedDigest = "sha256:validated" };
         journal.Save(receiptEntry);
 
-        Assert.Equal(3, LocalApplicationDatabase.CurrentSchemaVersion);
+        Assert.Equal(4, LocalApplicationDatabase.CurrentSchemaVersion);
         Assert.Equal(receiptEntry, journal.Load("run-v2"));
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
         check.CommandText = "SELECT validated_digest FROM publication_receipts WHERE run_id='run-v2'";
         Assert.Equal("sha256:validated", check.ExecuteScalar());
+    }
+
+    [Fact]
+    public void MigratesVersionThreeDatabaseWithoutChangingExistingSettings()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "v3-state.db");
+        using (var legacy = new SqliteConnection($"Data Source={path}"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE app_settings(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updated_utc TEXT NOT NULL);
+                INSERT INTO app_settings VALUES('density','compact','2026-11-01T00:00:00Z');
+                PRAGMA user_version=3;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var database = new LocalApplicationDatabase(path);
+        using var connection = database.OpenConnection();
+        using var check = connection.CreateCommand();
+        check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
+        Assert.Equal("compact", check.ExecuteScalar());
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(4L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_source_evidence'";
+        Assert.Equal(1L, check.ExecuteScalar());
     }
 
     [Fact]

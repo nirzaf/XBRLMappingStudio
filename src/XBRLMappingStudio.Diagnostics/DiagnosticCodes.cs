@@ -61,6 +61,9 @@ public static class DiagnosticCodes
     public const string IoPdfNumericAmbiguous = "IO022";
     public const string IoPdfNumericInvalid = "IO023";
     public const string IoPdfNumericPolicyInvalid = "IO024";
+    public const string IoPdfEvidenceStale = "IO025";
+    public const string IoPdfEvidenceSnapshotInvalid = "IO026";
+    public const string IoPdfEvidenceReferenceInvalid = "IO027";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

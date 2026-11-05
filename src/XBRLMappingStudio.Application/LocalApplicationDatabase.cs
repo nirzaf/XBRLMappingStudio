@@ -10,9 +10,10 @@ public sealed class LocalApplicationDatabase
     /// <summary>
     /// AI06: v2 widens <c>suggestion_audit</c> with governed-actor and prompt-template
     /// columns. v3 adds the digest of the artifact accepted by the profile worker to
-    /// the publication journal and durable receipt. Migrations are non-destructive.
+    /// the publication journal and durable receipt. v4 adds managed PDF evidence
+    /// references. Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -115,6 +116,35 @@ public sealed class LocalApplicationDatabase
         }
     }
 
+    internal static void EnsurePrivateDirectory(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var user = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException("Could not determine the current Windows user for the private evidence directory.");
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+            if (!Directory.Exists(path))
+            {
+                try { FileSystemAclExtensions.CreateDirectory(security, path); }
+                catch (IOException) when (Directory.Exists(path))
+                {
+                    FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), security);
+                }
+            }
+            else
+            {
+                FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), security);
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
     private void Migrate()
     {
         using var connection = OpenConnection();
@@ -201,6 +231,49 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=3;
                 """;
             migration3.ExecuteNonQuery();
+        }
+        if (version < 4)
+        {
+            using var migration4 = connection.CreateCommand();
+            migration4.Transaction = transaction;
+            migration4.CommandText = """
+                CREATE TABLE pdf_source_documents (
+                    source_sha256 TEXT PRIMARY KEY NOT NULL,
+                    source_byte_length INTEGER NOT NULL CHECK(source_byte_length > 0),
+                    managed_file_name TEXT NOT NULL UNIQUE,
+                    extraction_method TEXT NOT NULL,
+                    created_utc TEXT NOT NULL
+                );
+                CREATE TABLE pdf_source_evidence (
+                    evidence_id TEXT PRIMARY KEY NOT NULL,
+                    source_sha256 TEXT NOT NULL REFERENCES pdf_source_documents(source_sha256) ON DELETE RESTRICT,
+                    original_path TEXT NOT NULL,
+                    page_number INTEGER NOT NULL CHECK(page_number > 0),
+                    page_rotation_degrees INTEGER NOT NULL CHECK(page_rotation_degrees IN (0, 90, 180, 270)),
+                    page_width REAL NOT NULL CHECK(page_width > 0),
+                    page_height REAL NOT NULL CHECK(page_height > 0),
+                    media_left REAL NOT NULL,
+                    media_bottom REAL NOT NULL,
+                    media_right REAL NOT NULL,
+                    media_top REAL NOT NULL,
+                    crop_left REAL NOT NULL,
+                    crop_bottom REAL NOT NULL,
+                    crop_right REAL NOT NULL,
+                    crop_top REAL NOT NULL,
+                    left_normalized REAL NOT NULL CHECK(left_normalized >= 0 AND left_normalized < right_normalized AND right_normalized <= 1),
+                    bottom_normalized REAL NOT NULL CHECK(bottom_normalized >= 0 AND bottom_normalized < top_normalized AND top_normalized <= 1),
+                    right_normalized REAL NOT NULL,
+                    top_normalized REAL NOT NULL,
+                    extracted_text TEXT NOT NULL CHECK(length(extracted_text) > 0),
+                    template_revision TEXT,
+                    extraction_method TEXT NOT NULL,
+                    captured_utc TEXT NOT NULL
+                );
+                CREATE INDEX ix_pdf_source_evidence_digest_page
+                    ON pdf_source_evidence(source_sha256, page_number, captured_utc);
+                PRAGMA user_version=4;
+                """;
+            migration4.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();
