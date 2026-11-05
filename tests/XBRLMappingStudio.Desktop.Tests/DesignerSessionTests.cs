@@ -5,6 +5,8 @@ using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.AI;
+using XBRLMappingStudio.Engine;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -601,21 +603,149 @@ public sealed class DesignerSessionTests
             var suggestion = Assert.Single(viewModel.AiSuggestions,
                 row => row.Concept == "synthetic:Revenue");
             viewModel.SelectedSuggestion = suggestion;
-            viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+            viewModel.Session.Select("sample-fact", additive: false);
             var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
             viewModel.ApplySuggestedMappingCommand.Execute(null);
 
-            Assert.Contains("Applied", viewModel.StatusText);
+            Assert.Contains("Accepted", viewModel.StatusText);
             var source = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-value");
             var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
             Assert.Equal("Revenue", source.Parameters["column"]?.ToString());
             Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
-            viewModel.Session.Undo();
+            viewModel.UndoCommand.Execute(null);
             Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopSuggestionWorkflow_PersistsEditAcceptUndoAndRedo()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-audit-", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var dbPath = System.IO.Path.Combine(dir, "state.db");
+            var store = new SuggestionAuditStore(new LocalApplicationDatabase(dbPath));
+            var viewModel = await PrepareSuggestionViewModelAsync(dir, () => store);
+            var projectId = viewModel.Session.Project.ProjectId;
+            var originalRevision = viewModel.Session.Project.SemanticRevision;
+            var beforeAccept = viewModel.Session.Project.ComputeSemanticDigest();
+            var restartedStore = new SuggestionAuditStore(new LocalApplicationDatabase(dbPath));
+
+            viewModel.SelectedSuggestionConcept = "synthetic:NetIncome";
+            viewModel.EditSelectedSuggestionCommand.Execute(null);
+            Assert.Contains("saved", viewModel.StatusText.ToLowerInvariant());
+            viewModel.ApplySuggestedMappingCommand.Execute(null);
+
+            Assert.Contains("Accepted", viewModel.StatusText);
+            Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
+                .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
+            var decisions = restartedStore.Read(projectId, originalRevision);
+            Assert.Contains(decisions, row => row.Decision == "edit"
+                && row.Actor == Environment.UserName
+                && row.SourceFieldRef == $"{viewModel.Session.Project.Bindings.Single().BindingId}:Revenue");
+            Assert.Contains(decisions, row => row.Decision == "accept"
+                && row.AcceptedRevision == originalRevision
+                && row.ApprovedEditJson.Contains("synthetic:NetIncome", StringComparison.Ordinal));
+
+            viewModel.UndoCommand.Execute(null);
+            Assert.Equal(beforeAccept, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(SuggestionState.Pending, viewModel.SelectedSuggestion!.ReviewState);
+            Assert.Contains(restartedStore.Read(projectId, originalRevision), row => row.Decision == "undo");
+
+            viewModel.RedoCommand.Execute(null);
+            Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
+                .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
+            Assert.Equal(2, restartedStore.Read(projectId, originalRevision).Count(row => row.Decision == "accept"));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopSuggestionWorkflow_RejectPersistsWithoutChangingProject()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-audit-", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var store = new SuggestionAuditStore(new LocalApplicationDatabase(System.IO.Path.Combine(dir, "state.db")));
+            var viewModel = await PrepareSuggestionViewModelAsync(dir, () => store);
+            var digest = viewModel.Session.Project.ComputeSemanticDigest();
+            var revision = viewModel.Session.Project.SemanticRevision;
+
+            viewModel.RejectSelectedSuggestionCommand.Execute(null);
+
+            Assert.Equal(digest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(SuggestionState.Rejected, viewModel.SelectedSuggestion!.ReviewState);
+            var row = Assert.Single(store.Read(viewModel.Session.Project.ProjectId, revision));
+            Assert.Equal("reject", row.Decision);
+            Assert.Equal($"{viewModel.Session.Project.Bindings.Single().BindingId}:Revenue", row.SourceFieldRef);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopSuggestionWorkflow_AuditFailureBlocksGraphAcceptance()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-audit-", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var store = new SuggestionAuditStore(new LocalApplicationDatabase(System.IO.Path.Combine(dir, "state.db")));
+            var sink = new FailAcceptAuditSink(store);
+            var viewModel = await PrepareSuggestionViewModelAsync(dir, () => sink);
+            var digest = viewModel.Session.Project.ComputeSemanticDigest();
+
+            viewModel.ApplySuggestedMappingCommand.Execute(null);
+
+            Assert.Contains("rolled back", viewModel.StatusText.ToLowerInvariant());
+            Assert.Equal(digest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(SuggestionState.Pending, viewModel.SelectedSuggestion!.ReviewState);
+            Assert.DoesNotContain(store.Read(viewModel.Session.Project.ProjectId,
+                viewModel.Session.Project.SemanticRevision), row => row.Decision == "accept");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static async Task<MainWindowViewModel> PrepareSuggestionViewModelAsync(
+        string directory, Func<IAuditSink> auditSinkFactory)
+    {
+        var csv = System.IO.Path.Combine(directory, "source.csv");
+        File.WriteAllText(csv, "Revenue\n1250\n");
+        var viewModel = new MainWindowViewModel(auditSinkFactory);
+        viewModel.AllowSyntheticProfile = true;
+        viewModel.SaveProjectTo(System.IO.Path.Combine(directory, "mapping.xmap"));
+        await viewModel.LoadSourceAsync(csv);
+        viewModel.SelectedSourceColumn = "Revenue";
+        await viewModel.SuggestMappingsAsync();
+        viewModel.Session.Select("sample-fact", additive: false);
+        viewModel.SelectedSuggestion = Assert.Single(viewModel.AiSuggestions,
+            row => row.Concept == "synthetic:Revenue");
+        return viewModel;
+    }
+
+    private sealed class FailAcceptAuditSink(IAuditSink inner) : IAuditSink
+    {
+        public void Append(AuditRecord record, AuditContext context)
+        {
+            if (record.Action == "accept") throw new IOException("simulated locked audit database");
+            inner.Append(record, context);
         }
     }
 
@@ -635,17 +765,37 @@ public sealed class DesignerSessionTests
                 Configuration = new Dictionary<string, object?> { ["sheet"] = "Financials", ["headerRow"] = "3" }
             });
             viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            var sourceColumnNotification = false;
+            viewModel.SourceColumns.CollectionChanged += (_, _) => sourceColumnNotification = true;
 
             await viewModel.LoadSourceAsync(workbook);
 
             Assert.Contains("Current", viewModel.SourceColumns);
             Assert.Contains("Prior", viewModel.SourceColumns);
+            Assert.True(sourceColumnNotification);
             Assert.Equal("Loaded 4 fields from revenue.xlsx.", viewModel.StatusText);
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void GraphSelectionUpdatesSelectedNodeUsedBySuggestionReview()
+    {
+        var viewModel = new MainWindowViewModel();
+        var factNode = Assert.Single(viewModel.Nodes, node => node.NodeType == NodeTypeConstants.FactConstruct);
+
+        viewModel.Session.Select(factNode.NodeId, additive: false);
+
+        Assert.Equal(factNode.NodeId, viewModel.SelectedNode?.NodeId);
+        Assert.True(viewModel.CanEditSelectedFact);
+
+        viewModel.Session.ClearSelection();
+
+        Assert.Null(viewModel.SelectedNode);
+        Assert.False(viewModel.CanEditSelectedFact);
     }
 
     [Fact]

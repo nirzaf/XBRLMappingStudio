@@ -41,3 +41,18 @@ taxonomy preflight change. It supplements the earlier snapshot above.
 The Python suite ran protocol, profile metadata, offline path/hash, plugin-option
 and taxonomy-load fixtures. The pinned Python 3.12/Arelle integration suite was
 not available in this local environment, so its runtime cases remain pending CI.
+
+## Follow-up verification for the offline suggestion review workflow
+
+| Item | Evidence |
+|---|---|
+| Base checkout | `main` at `d1a6048a575b9b57f7d3460690465f32eb24ac2c`; `origin/main` at `c68cc816f8acd157a1afc3080ccd4d06c3b029c2`; seven local commits were ahead before this worktree change. |
+| Local Release solution run | `dotnet test XBRLMappingStudio.slnx -c Release --no-restore -m:1 --verbosity minimal`: 380 passed, 0 failed, 2 skipped (382 total). Suite totals: AI 47, Project 8, Engine 33, Ops 51, Adapters 55, XBRL 49, Desktop 45, Integration 92 passed plus 2 skipped. |
+| Skipped tests | `ArelleExecutionTests.ExcelToXbrlMappingIsAdjudicatedByOfflineArelleWorker` and `ArelleExecutionTests.CliPreviewUsesArelleToValidateExcelMappingOutput`; both require the gated Arelle environment. |
+| Focused graph-widget run | `GraphCanvasWidgetTests`: 5 passed, including node selection after zoom and pan using the inverse of the rendered graph transform. |
+| Native Windows smoke | Opened the saved CSV/mapping fixture, verified the `Revenue` source field and offline `synthetic:Revenue` pending candidate, and confirmed the `XBRL Revenue` fact node updates Properties after graph pan (unit `USD`, period `duration`, decimals `0`). Candidate status stated no source data was sent over the network. No accept/reject action was made in the smoke app. |
+| Implementation evidence | Desktop suggestion edit/reject/accept/undo/redo now uses `SuggestionSession` with durable local audit persistence and fail-closed rollback. View-bound changing collections notify the desktop, and graph selection synchronizes the selected fact context. |
+| Remaining gates | The local Arelle runtime, real filing-profile approval, organizational reviewer authority, batch suggestion workflow, large-graph performance and Narrator qualification remain open. |
+
+The full solution run verifies the local Windows checkout only. It does not
+qualify a production filing profile or replace the gated worker CI job.

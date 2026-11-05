@@ -133,6 +133,7 @@ public sealed class SuggestionSession
             return new SessionOutcome(false, "Draft failed validation; project untouched.", validation);
         }
 
+        var previousFaultCount = Audit.PersistenceFaults.Count;
         PushSnapshot();
         ApplyDraftToProject(suggestion.Draft);
         _states[suggestionId] = SuggestionState.Accepted;
@@ -144,6 +145,12 @@ public sealed class SuggestionSession
         Audit.Record(new AuditRecord(
             seq, "accept", suggestion.SourceField,
             suggestion.Draft.Concept ?? "(none)", 0, Array.Empty<string>()));
+        if (Audit.PersistenceFaults.Count > previousFaultCount)
+        {
+            RestoreTopSnapshot();
+            return new SessionOutcome(false,
+                "Durable audit persistence failed; the accepted draft was rolled back.", validation);
+        }
         return new SessionOutcome(true, null, validation);
     }
 
@@ -156,6 +163,7 @@ public sealed class SuggestionSession
             return new SessionOutcome(false, "Only pending suggestions can be edited.", null);
 
         var old = _suggestions[index];
+        var previousFaultCount = Audit.PersistenceFaults.Count;
         var updated = old with { Draft = edited };
         _suggestions[index] = updated;
         var seq = Audit.NextSequence;
@@ -164,6 +172,12 @@ public sealed class SuggestionSession
         Audit.Record(new AuditRecord(
             seq, "edit", edited.SourceField, edited.Concept ?? "(none)",
             0, Array.Empty<string>()));
+        if (Audit.PersistenceFaults.Count > previousFaultCount)
+        {
+            _suggestions[index] = old;
+            return new SessionOutcome(false,
+                "Durable audit persistence failed; the suggestion edit was rolled back.", null);
+        }
         return new SessionOutcome(true, null, null);
     }
 
@@ -174,12 +188,19 @@ public sealed class SuggestionSession
         if (_states[suggestionId] != SuggestionState.Pending)
             return new SessionOutcome(false, "Only pending suggestions can be rejected.", null);
 
+        var previousFaultCount = Audit.PersistenceFaults.Count;
         _states[suggestionId] = SuggestionState.Rejected;
         var seq = Audit.NextSequence;
         _pendingPayloads[seq] = (SerializeDraft(suggestion.Draft), "", new[] { suggestion.SuggestionId });
         Audit.Record(new AuditRecord(
             seq, "reject", suggestion.SourceField,
             suggestion.Draft.Concept ?? "(none)", 0, Array.Empty<string>()));
+        if (Audit.PersistenceFaults.Count > previousFaultCount)
+        {
+            _states[suggestionId] = SuggestionState.Pending;
+            return new SessionOutcome(false,
+                "Durable audit persistence failed; the rejection was rolled back.", null);
+        }
         return new SessionOutcome(true, null, null);
     }
 
@@ -196,6 +217,7 @@ public sealed class SuggestionSession
         if (!validation.Accepted)
             return new SessionOutcome(false, "Batch contains invalid drafts; nothing applied.", validation);
 
+        var previousFaultCount = Audit.PersistenceFaults.Count;
         PushSnapshot();
         foreach (var s in pending)
         {
@@ -210,6 +232,12 @@ public sealed class SuggestionSession
         Audit.Record(new AuditRecord(
             batchSeq, "batch-accept", "(multiple)", "(multiple)",
             0, Array.Empty<string>()));
+        if (Audit.PersistenceFaults.Count > previousFaultCount)
+        {
+            RestoreTopSnapshot();
+            return new SessionOutcome(false,
+                "Durable audit persistence failed; the batch was rolled back.", validation);
+        }
         return new SessionOutcome(true, null, validation);
     }
 
@@ -218,15 +246,27 @@ public sealed class SuggestionSession
         if (_undoSnapshots.Count == 0)
             return new SessionOutcome(false, "Nothing to undo.", null);
 
-        // Roll back the whole transaction: draft graph AND suggestion dispositions.
+        // Roll back the whole transaction only when the undo decision can be persisted.
         var (payload, states) = _undoSnapshots.Pop();
+        var currentDraft = ProjectSerializer.Serialize(_draft);
+        var currentStates = new Dictionary<string, SuggestionState>(_states, StringComparer.Ordinal);
         _draft = ProjectSerializer.Deserialize(payload);
         foreach (var (id, state) in states)
             _states[id] = state;
+        var previousFaultCount = Audit.PersistenceFaults.Count;
         var undoSeq = Audit.NextSequence;
         _pendingPayloads[undoSeq] = ("", "", Array.Empty<string>());
         Audit.Record(new AuditRecord(
             undoSeq, "undo", "(project)", "(snapshot)", 0, Array.Empty<string>()));
+        if (Audit.PersistenceFaults.Count > previousFaultCount)
+        {
+            _draft = ProjectSerializer.Deserialize(currentDraft);
+            foreach (var (id, state) in currentStates)
+                _states[id] = state;
+            _undoSnapshots.Push((payload, states));
+            return new SessionOutcome(false,
+                "Durable audit persistence failed; the undo was rolled back.", null);
+        }
         return new SessionOutcome(true, null, null);
     }
 
@@ -235,6 +275,15 @@ public sealed class SuggestionSession
     private void PushSnapshot() =>
         _undoSnapshots.Push((ProjectSerializer.Serialize(_draft),
             new Dictionary<string, SuggestionState>(_states, StringComparer.Ordinal)));
+
+    private void RestoreTopSnapshot()
+    {
+        if (_undoSnapshots.Count == 0) return;
+        var (payload, states) = _undoSnapshots.Pop();
+        _draft = ProjectSerializer.Deserialize(payload);
+        foreach (var (id, state) in states)
+            _states[id] = state;
+    }
 
     private Suggestion? Find(string id) =>
         _suggestions.FirstOrDefault(s => s.SuggestionId == id);

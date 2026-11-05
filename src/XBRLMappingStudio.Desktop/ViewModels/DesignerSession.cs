@@ -42,6 +42,9 @@ public sealed class DesignerSession
     /// <summary>Raised after any operation that changes the visible graph.</summary>
     public event Action? Changed;
 
+    /// <summary>Raised when graph selection changes without changing the project.</summary>
+    public event Action? SelectionChanged;
+
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
@@ -479,5 +482,6 @@ public sealed class DesignerSession
     private void SyncSelectionFlags()
     {
         foreach (var n in _nodes) n.IsSelected = _selected.Contains(n.NodeId);
+        SelectionChanged?.Invoke();
     }
 }

@@ -43,7 +43,7 @@
         <MenuItem Header="E_xecute" Command="{Binding ExecuteCommand}" />
         <Separator />
         <MenuItem Header="Allow synthetic profile (development only)"
-                  ToggleType="CheckBox" IsChecked="{Binding AllowSyntheticProfile}" />
+                  ToggleType="CheckBox" IsChecked="{Binding AllowSyntheticProfile, Mode=TwoWay}" />
       </MenuItem>
     </Menu>
 
@@ -91,8 +91,22 @@
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
-          <Button DockPanel.Dock="Top" Content="Apply selected suggestion"
-                  Command="{Binding ApplySuggestedMappingCommand}" />
+          <TextBox DockPanel.Dock="Top" Text="{Binding SelectedSuggestionConcept}"
+                   Watermark="Proposed taxonomy concept"
+                   AutomationProperties.Name="Edited suggestion concept" />
+          <TextBox DockPanel.Dock="Top" Text="{Binding SelectedSuggestionUnit}"
+                   Watermark="Unit (for example USD)"
+                   AutomationProperties.Name="Edited suggestion unit" />
+          <ComboBox DockPanel.Dock="Top" ItemsSource="{Binding FactPeriodTypes}"
+                    SelectedItem="{Binding SelectedSuggestionPeriodType}"
+                    AutomationProperties.Name="Edited suggestion period type" />
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6">
+            <Button Content="Save edit" Command="{Binding EditSelectedSuggestionCommand}" />
+            <Button Content="Reject" Command="{Binding RejectSelectedSuggestionCommand}" />
+          </StackPanel>
+          <Button DockPanel.Dock="Top" Content="Accept selected suggestion"
+                  Command="{Binding ApplySuggestedMappingCommand}"
+                  AutomationProperties.Name="Accept selected suggestion" />
 
           <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,10,0,0">
             <TextBlock Text="Taxonomy explorer" FontWeight="Bold" />

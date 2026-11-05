@@ -81,8 +81,7 @@ public sealed class GraphCanvas : Control
         ctx.DrawRectangle(new SolidColorBrush(Color.FromRgb(0xFA, 0xFA, 0xFA)), null,
             new Rect(Bounds.Size));
 
-        var transform = Matrix.CreateTranslation(_pan.X, _pan.Y) * Matrix.CreateScale(_zoom, _zoom);
-        using (ctx.PushTransform(transform))
+        using (ctx.PushTransform(GraphTransform))
         {
             var edgePen = new Pen(new SolidColorBrush(Color.FromRgb(0x60, 0x60, 0x60)), 1.5);
             if (Edges is not null)
@@ -488,7 +487,14 @@ public sealed class GraphCanvas : Control
         for (var i = nodes.Count - 1; i >= 0; i--) yield return nodes[i];
     }
 
-    private Point ToGraph(Point screen) => (screen - _pan) / _zoom;
+    private Matrix GraphTransform =>
+        Matrix.CreateTranslation(_pan.X, _pan.Y) * Matrix.CreateScale(_zoom, _zoom);
+
+    private Point ToGraph(Point screen)
+    {
+        var inverse = GraphTransform.Invert();
+        return inverse.Transform(screen);
+    }
 
     private void Reject(string message) => InteractionRejected?.Invoke(message);
 

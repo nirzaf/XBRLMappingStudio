@@ -94,7 +94,7 @@ public sealed class AuditPersistenceTests
     }
 
     [Fact]
-    public void SinkFault_IsCapturedOnLog_AndDoesNotBlockTheSession()
+    public void SinkFault_IsCapturedOnLog_AndRollsBackTheAcceptedDraft()
     {
         var sink = new RecordingSink { Throw = true };
         var session = NewSession(sink);
@@ -106,10 +106,11 @@ public sealed class AuditPersistenceTests
 
         var outcome = session.Accept("s1");
 
-        // AI06 fail-open at the session: the in-memory log stays authoritative and
-        // the analyst's action is not rolled back by a broken durable store, but
-        // PersistenceFaults must be non-empty so the run manifest can report it.
-        Assert.True(outcome.Applied);
+        // Governed desktop acceptance fails closed when its durable audit append fails.
+        Assert.False(outcome.Applied);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s1"));
+        Assert.False(session.CanUndo);
+        Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
         Assert.Single(session.Audit.PersistenceFaults);
         Assert.Contains("simulated sink failure", session.Audit.PersistenceFaults[0]);
     }

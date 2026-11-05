@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using XBRLMappingStudio.AI;
@@ -94,13 +95,24 @@ public sealed class FactRow : ViewModelBase
 
 public sealed class SuggestionRow : ViewModelBase
 {
+    private string _concept = "";
+    private SuggestionState _reviewState = SuggestionState.Pending;
     public string SuggestionId { get; init; } = "";
     public string SourceFieldId { get; init; } = "";
     public string ProjectDigest { get; init; } = "";
-    public string Concept { get; init; } = "";
+    public string Concept
+    {
+        get => _concept;
+        set { if (Set(ref _concept, value)) Raise(nameof(Display)); }
+    }
     public int Score { get; init; }
     public string Basis { get; init; } = "";
-    public string Display => $"{Concept}  ·  score {Score}  ·  {Basis}";
+    public SuggestionState ReviewState
+    {
+        get => _reviewState;
+        set { if (Set(ref _reviewState, value)) Raise(nameof(Display)); }
+    }
+    public string Display => $"{Concept}  ·  score {Score}  ·  {Basis}  ·  {ReviewState}";
 }
 
 /// <summary>Row surfaced by the taxonomy explorer (UI03).</summary>
@@ -180,11 +192,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     private Task _destinationSchemaTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
+    private string _selectedSuggestionConcept = "";
+    private string _selectedSuggestionUnit = "";
+    private string _selectedSuggestionPeriodType = "duration";
     private string _selectedFactUnit = "USD";
     private string _selectedFactPeriodType = "duration";
     private string _selectedFactDecimals = "0";
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
+    private readonly Func<IAuditSink>? _auditSinkFactory;
     private readonly SqliteDestinationInspector _destinationInspector = new();
 
     private FilingProfile _profile;
@@ -192,6 +208,17 @@ public sealed class MainWindowViewModel : ViewModelBase
     private readonly FilingProfileWorkerFactory _workerFactory;
     private TaxonomyIndex _taxonomy;
     private DesignerSession _session;
+    private SuggestionSession? _suggestionSession;
+    private bool _isSuggestionHistoryMutation;
+    private readonly Stack<AcceptedSuggestionUndo> _acceptedSuggestionUndo = new();
+    private SuggestionRedoState? _suggestionRedoState;
+
+    private sealed record AcceptedSuggestionUndo(
+        SuggestionSession Session, string SuggestionId, string DigestBefore,
+        string DigestAfter, bool GraphChanged);
+    private sealed record SuggestionRedoState(
+        SuggestionSession Session, string SuggestionId, string DigestBefore,
+        bool GraphChanged);
 
     public string Title => _title;
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
@@ -329,7 +356,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
     public string? DestinationPath => _destinationPath;
     public string DestinationPathDisplay => _destinationPath ?? "No destination selected.";
-    public List<string> DestinationTables { get; } = new();
+    public ObservableCollection<string> DestinationTables { get; } = new();
     public bool HasDestinationTables => DestinationTables.Count > 0;
     public string? DestinationTable
     {
@@ -353,7 +380,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
         }
     }
-    public List<DestinationKeyOption> DestinationKeys { get; } = new();
+    public ObservableCollection<DestinationKeyOption> DestinationKeys { get; } = new();
     public DestinationKeyOption? SelectedDestinationKey
     {
         get => _selectedDestinationKey;
@@ -404,7 +431,17 @@ public sealed class MainWindowViewModel : ViewModelBase
     public bool CanPublishDestination => CanUseSelectedDestination && ProjectPath is not null
         && IsSavedDestinationCurrent && !IsBusy && !IsSourceLoading;
     public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
-    public SuggestionRow? SelectedSuggestion { get => _selectedSuggestion; set => Set(ref _selectedSuggestion, value); }
+    public SuggestionRow? SelectedSuggestion
+    {
+        get => _selectedSuggestion;
+        set
+        {
+            if (Set(ref _selectedSuggestion, value)) LoadSelectedSuggestionEditor();
+        }
+    }
+    public string SelectedSuggestionConcept { get => _selectedSuggestionConcept; set => Set(ref _selectedSuggestionConcept, value); }
+    public string SelectedSuggestionUnit { get => _selectedSuggestionUnit; set => Set(ref _selectedSuggestionUnit, value); }
+    public string SelectedSuggestionPeriodType { get => _selectedSuggestionPeriodType; set => Set(ref _selectedSuggestionPeriodType, value); }
     public string SelectedFactUnit { get => _selectedFactUnit; set => Set(ref _selectedFactUnit, value); }
     public string SelectedFactPeriodType { get => _selectedFactPeriodType; set => Set(ref _selectedFactPeriodType, value); }
     public string SelectedFactDecimals { get => _selectedFactDecimals; set => Set(ref _selectedFactDecimals, value); }
@@ -538,6 +575,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 if (value is not null) Session.Select(value.NodeId, additive: false);
                 LoadSelectedFactProperties();
+                if (SelectedSuggestion is not null) LoadSelectedSuggestionEditor();
                 Raise(nameof(SelectedNodeDisplayName));
                 Raise(nameof(CanEditSelectedFact));
             }
@@ -554,13 +592,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     public bool HasNextPage { get; private set; }
     public bool HasPreviousPage => _resultPage > 0;
 
-    public List<ConceptRow> ConceptResults { get; } = new();
-    public List<string> SourceColumns { get; } = new();
-    public List<string> SourceTables { get; } = new();
+    public ObservableCollection<ConceptRow> ConceptResults { get; } = new();
+    public ObservableCollection<string> SourceColumns { get; } = new();
+    public ObservableCollection<string> SourceTables { get; } = new();
     public bool HasSourceTables => SourceTables.Count > 0;
-    public List<SuggestionRow> AiSuggestions { get; } = new();
-    public List<DiagnosticRow> Diagnostics { get; } = new();
-    public List<FactRow> PreviewFacts { get; } = new();
+    public ObservableCollection<SuggestionRow> AiSuggestions { get; } = new();
+    public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
+    public ObservableCollection<FactRow> PreviewFacts { get; } = new();
 
     public RelayCommand NewProjectCommand { get; }
     public RelayCommand OpenProjectCommand { get; }
@@ -585,6 +623,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand ApplyFactPropertiesCommand { get; }
     public RelayCommand SuggestMappingsCommand { get; }
     public RelayCommand ApplySuggestedMappingCommand { get; }
+    public RelayCommand EditSelectedSuggestionCommand { get; }
+    public RelayCommand RejectSelectedSuggestionCommand { get; }
     public RelayCommand NextPageCommand { get; }
     public RelayCommand PreviousPageCommand { get; }
 
@@ -599,6 +639,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
     }
 
+    public MainWindowViewModel(IProjectFileDialog fileDialog, Func<IAuditSink> auditSinkFactory)
+        : this(BuildSampleProject(), fileDialog,
+            new SqliteSourceAdapter().InspectSchemaAsync,
+            FilingProfileResolver.FromDefaultCatalog(), auditSinkFactory: auditSinkFactory)
+    {
+    }
+
     public MainWindowViewModel(MappingProject project) : this(project, null)
     {
     }
@@ -608,13 +655,21 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
     }
 
+    internal MainWindowViewModel(Func<IAuditSink> auditSinkFactory)
+        : this(BuildSampleProject(), null, new SqliteSourceAdapter().InspectSchemaAsync,
+            FilingProfileResolver.DevelopmentOnly(), auditSinkFactory: auditSinkFactory)
+    {
+    }
+
     internal MainWindowViewModel(MappingProject project, IProjectFileDialog? fileDialog,
         Func<SourceConnection, CancellationToken, Task<ISourceSchema>> sqliteSchemaLoader,
         FilingProfileResolver? profileResolver = null,
-        FilingProfileWorkerFactory? workerFactory = null)
+        FilingProfileWorkerFactory? workerFactory = null,
+        Func<IAuditSink>? auditSinkFactory = null)
     {
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
+        _auditSinkFactory = auditSinkFactory;
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
         _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
         _profile = SyntheticProfile.Build();
@@ -622,6 +677,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
+        _session.SelectionChanged += OnSessionSelectionChanged;
         _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         RefreshTitle();
 
@@ -640,8 +696,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         PreviewCommand = new RelayCommand(async _ => await PreviewAsync(), _ => !IsBusy && !IsSourceLoading);
         ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(), _ => !IsBusy && !IsSourceLoading);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
-        UndoCommand = new RelayCommand(_ => { if (Session.CanUndo) { Session.Undo(); RefreshUndoState(); } });
-        RedoCommand = new RelayCommand(_ => { if (Session.CanRedo) { Session.Redo(); RefreshUndoState(); } });
+        UndoCommand = new RelayCommand(_ => Undo());
+        RedoCommand = new RelayCommand(_ => Redo());
         SearchTaxonomyCommand = new RelayCommand(_ => RunSearch());
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync());
         ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
@@ -656,6 +712,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         ApplyFactPropertiesCommand = new RelayCommand(_ => ApplySelectedFactProperties());
         SuggestMappingsCommand = new RelayCommand(async _ => await SuggestMappingsAsync());
         ApplySuggestedMappingCommand = new RelayCommand(_ => ApplySelectedSuggestion());
+        EditSelectedSuggestionCommand = new RelayCommand(_ => EditSelectedSuggestion());
+        RejectSelectedSuggestionCommand = new RelayCommand(_ => RejectSelectedSuggestion());
         NextPageCommand = new RelayCommand(_ => { if (HasNextPage) { _resultPage++; RunSearch(keepPage: true); } });
         PreviousPageCommand = new RelayCommand(_ => { if (_resultPage > 0) { _resultPage--; RunSearch(keepPage: true); } });
 
@@ -664,23 +722,41 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void OnSessionChanged()
     {
+        if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
         if (_destinationPreviewSemanticDigest is not null
             && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, Session.Project.ComputeSemanticDigest()))
             ResetDestinationPreviewSummary("The project changed after this preview; rerun the dry run to refresh its estimate.");
-        if (_selectedNode is not null)
-        {
-            var selectedId = _selectedNode.NodeId;
-            _selectedNode = _session.Nodes.FirstOrDefault(n => n.NodeId == selectedId);
-            LoadSelectedFactProperties();
-            Raise(nameof(SelectedNode));
-            Raise(nameof(CanEditSelectedFact));
-        }
+        SyncSelectedNodeWithSession();
         Raise(nameof(Nodes));
         Raise(nameof(Edges));
         Raise(nameof(Session));
         Raise(nameof(SelectedNodeDisplayName));
         Raise(nameof(IsProjectDirty));
         RefreshTitle();
+    }
+
+    private void OnSessionSelectionChanged() => SyncSelectedNodeWithSession();
+
+    private void SyncSelectedNodeWithSession()
+    {
+        var previousSelection = _selectedNode?.NodeId;
+        var selectedNodeId = _session.SelectedNodeIds.Count == 1
+            ? _session.SelectedNodeIds.Single()
+            : null;
+        _selectedNode = selectedNodeId is null
+            ? null
+            : _session.Nodes.FirstOrDefault(node => node.NodeId == selectedNodeId);
+        var selectionChanged = !StringComparer.Ordinal.Equals(previousSelection, _selectedNode?.NodeId);
+
+        if (_selectedNode is not null)
+        {
+            LoadSelectedFactProperties();
+            if (selectionChanged && SelectedSuggestion is not null) LoadSelectedSuggestionEditor();
+        }
+        if (!selectionChanged) return;
+        Raise(nameof(SelectedNode));
+        Raise(nameof(CanEditSelectedFact));
+        Raise(nameof(SelectedNodeDisplayName));
     }
 
     private void RefreshTitle()
@@ -721,9 +797,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ResetWorkspace(MappingProject project, string status)
     {
         _session.Changed -= OnSessionChanged;
+        _session.SelectionChanged -= OnSessionSelectionChanged;
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
+        _session.SelectionChanged += OnSessionSelectionChanged;
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = null;
@@ -910,7 +988,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             var tables = await _destinationInspector.DiscoverTablesAsync(fullPath);
             if (generation != _destinationLoadGeneration) return;
-            DestinationTables.AddRange(tables);
+            ReplaceItems(DestinationTables, tables);
             Raise(nameof(DestinationTables));
             Raise(nameof(HasDestinationTables));
             if (tables.Count == 0)
@@ -967,7 +1045,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 .OrderByDescending(key => key.Columns.SequenceEqual(new[] { "fact_key" }, StringComparer.Ordinal))
                 .ThenBy(key => key.Display, StringComparer.Ordinal)
                 .ToArray();
-            DestinationKeys.AddRange(options);
+            ReplaceItems(DestinationKeys, options);
             Raise(nameof(DestinationKeys));
             Raise(nameof(CanSelectDestinationKey));
 
@@ -1375,7 +1453,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ShowDestinationDiagnostics(IReadOnlyList<Diagnostic> diagnostics)
     {
         Diagnostics.Clear();
-        Diagnostics.AddRange(diagnostics.Select(ToDiagnosticRow));
+        ReplaceItems(Diagnostics, diagnostics.Select(ToDiagnosticRow));
         Raise(nameof(Diagnostics));
     }
 
@@ -1434,7 +1512,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 var sqlite = new SqliteSourceAdapter();
                 var tables = await sqlite.DiscoverTablesAsync(connection, CancellationToken.None);
                 if (generation != _sourceLoadGeneration) return;
-                SourceTables.AddRange(tables);
+                ReplaceItems(SourceTables, tables);
                 Raise(nameof(SourceTables));
                 Raise(nameof(HasSourceTables));
                 if (SourceTables.Count == 0) throw new InvalidOperationException("The SQLite database has no user tables.");
@@ -1454,7 +1532,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
             if (generation != _sourceLoadGeneration) return;
             SourceColumns.Clear();
-            SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
+            ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });
             SelectedSourceBindingId = binding.BindingId;
             Raise(nameof(SourceColumns));
@@ -1482,7 +1560,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
             var descriptor = SqliteSourceAdapter.Describe(connection, schema);
             SourceColumns.Clear();
-            SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
+            ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
             binding = binding with { Kind = "sqlite", Locator = Path.GetRelativePath(WorkspaceRoot(), _sqliteSourcePath),
                 Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
                 SchemaFingerprint = schema.Fingerprint };
@@ -1567,7 +1645,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public async Task SuggestMappingsAsync()
     {
-        if (!TryResolveProfile(AllowSyntheticProfile, out _)) return;
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         if (SelectedSourceBindingId is null || string.IsNullOrWhiteSpace(SelectedSourceColumn))
         {
             StatusText = "Choose a source file and select a source field first.";
@@ -1580,15 +1658,33 @@ public sealed class MainWindowViewModel : ViewModelBase
             var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
             var batch = await service.SuggestAsync(
                 new[] { new SourceFieldDescriptor(id, SelectedSourceColumn) }, CancellationToken.None);
-            AiSuggestions.Clear();
-            AiSuggestions.AddRange(batch.Suggestions.Select(s => new SuggestionRow
+            var sourceIdentity = id;
+            var sessionSuggestions = batch.Suggestions
+                .Select(suggestion => suggestion with
+                {
+                    SourceField = sourceIdentity,
+                    Draft = suggestion.Draft with { SourceField = sourceIdentity }
+                })
+                .ToArray();
+            var session = new SuggestionSession(
+                Session.Project,
+                new DraftValidator(_taxonomy, profile),
+                _auditSinkFactory?.Invoke(),
+                new SuggestionSessionContext(
+                    Actor: Environment.UserName,
+                    Method: "offline-retrieval",
+                    ProviderConfigId: "local-retrieval"));
+            session.LoadSuggestions(sessionSuggestions);
+            _suggestionSession = session;
+            ReplaceItems(AiSuggestions, sessionSuggestions.Select(s => new SuggestionRow
             {
                 SuggestionId = s.SuggestionId,
                 SourceFieldId = id,
                 ProjectDigest = Session.Project.ComputeSemanticDigest(),
                 Concept = s.Draft.Concept ?? "",
                 Score = s.Score,
-                Basis = s.Basis
+                Basis = s.Basis,
+                ReviewState = session.StateOf(s.SuggestionId)
             }));
             SelectedSuggestion = AiSuggestions.FirstOrDefault();
             Raise(nameof(AiSuggestions));
@@ -1602,24 +1698,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ApplySelectedSuggestion()
     {
         if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
-        if (SelectedSuggestion is null || SelectedSourceBindingId is null || SelectedNode is null
-            || SelectedNode.NodeType != NodeTypeConstants.FactConstruct
-            || string.IsNullOrWhiteSpace(SelectedSourceColumn))
-        {
-            StatusText = "Select a local candidate, source field, and XBRL Fact node first.";
-            return;
-        }
-        if (!string.Equals(SelectedSuggestion.SourceFieldId,
-                $"{SelectedSourceBindingId}:{SelectedSourceColumn}", StringComparison.Ordinal))
-        {
-            StatusText = "The source field changed after these suggestions were generated. Request fresh suggestions.";
-            return;
-        }
-        if (!string.Equals(SelectedSuggestion.ProjectDigest, Session.Project.ComputeSemanticDigest(), StringComparison.Ordinal))
-        {
-            StatusText = "The mapping changed after these suggestions were generated. Request fresh suggestions.";
-            return;
-        }
+        if (!TryGetCurrentSuggestionContext(out var selected, out var suggestion, out var sourceIdentity)) return;
         var sourceNodes = Session.Project.Nodes.Where(node => node.NodeType == NodeTypeConstants.ExcelField
             && node.Parameters.TryGetValue("bindingId", out var bindingId)
             && string.Equals(bindingId?.ToString(), SelectedSourceBindingId, StringComparison.Ordinal)).ToList();
@@ -1628,60 +1707,277 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = "A suggested mapping requires exactly one source field node for the selected binding.";
             return;
         }
-        if (!IsUpstream(sourceNodes[0].NodeId, SelectedNode.NodeId))
+        if (!IsUpstream(sourceNodes[0].NodeId, SelectedNode!.NodeId))
         {
             StatusText = "The selected source field does not feed the selected fact node.";
             return;
         }
-        var concept = _taxonomy.Get(SelectedSuggestion.Concept);
+
+        var concept = _taxonomy.Get(SelectedSuggestionConcept.Trim());
         if (concept is null || !TaxonomyIndex.IsFactTargetable(concept))
         {
-            StatusText = "The selected candidate is no longer a valid fact concept.";
+            StatusText = "The edited candidate is not a valid fact concept in the selected taxonomy.";
             return;
         }
-
-        var fact = Session.Project.Nodes.Single(node => node.NodeId == SelectedNode.NodeId);
-        var unit = fact.Parameters.GetValueOrDefault("unit")?.ToString();
+        var fact = Session.Project.Nodes.Single(node => node.NodeId == SelectedNode!.NodeId);
         var decimalsText = fact.Parameters.GetValueOrDefault("decimals")?.ToString();
         int? decimals = int.TryParse(decimalsText, System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var parsedDecimals) ? parsedDecimals : null;
-        var draft = new DraftMapping(SelectedSuggestion.SuggestionId, SelectedSourceColumn,
-            concept.QualifiedName, unit, concept.PeriodType, decimals);
-        var draftValidation = new DraftValidator(_taxonomy, profile).Validate(new[] { draft });
-        if (!draftValidation.Accepted)
+        var editedDraft = suggestion.Draft with
         {
-            Diagnostics.Clear();
-            Diagnostics.AddRange(draftValidation.Diagnostics.Select(ToDiagnosticRow));
-            Raise(nameof(Diagnostics));
-            StatusText = "Suggestion failed draft validation; the project was not changed.";
-            return;
-        }
+            SourceField = sourceIdentity,
+            Concept = concept.QualifiedName,
+            Unit = string.IsNullOrWhiteSpace(SelectedSuggestionUnit) ? null : SelectedSuggestionUnit.Trim(),
+            PeriodType = SelectedSuggestionPeriodType.Trim(),
+            Decimals = decimals
+        };
 
         var candidate = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(Session.Project));
         candidate.Nodes.Single(node => node.NodeId == sourceNodes[0].NodeId).Parameters["column"] = SelectedSourceColumn;
         var candidateFact = candidate.Nodes.Single(node => node.NodeId == SelectedNode.NodeId);
         candidateFact.Parameters["concept"] = concept.QualifiedName;
-        candidateFact.Parameters["periodType"] = concept.PeriodType;
+        candidateFact.Parameters["periodType"] = editedDraft.PeriodType;
+        candidateFact.Parameters["unit"] = editedDraft.Unit;
         var compile = MappingJobService.ValidateProject(candidate, profile);
         if (!compile.Success)
         {
             Diagnostics.Clear();
-            Diagnostics.AddRange(compile.Diagnostics.Items.Select(ToDiagnosticRow));
+            ReplaceItems(Diagnostics, compile.Diagnostics.Items.Select(ToDiagnosticRow));
             Raise(nameof(Diagnostics));
             StatusText = "Suggestion failed graph validation; the project was not changed.";
             return;
         }
 
-        Session.SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+        if (suggestion.Draft != editedDraft)
         {
-            [sourceNodes[0].NodeId] = new Dictionary<string, object?> { ["column"] = SelectedSourceColumn },
-            [SelectedNode.NodeId] = new Dictionary<string, object?>
+            var editOutcome = _suggestionSession!.Edit(suggestion.SuggestionId, editedDraft);
+            if (!editOutcome.Applied)
             {
-                ["concept"] = concept.QualifiedName,
-                ["periodType"] = concept.PeriodType
+                StatusText = editOutcome.Reason ?? "The suggestion edit could not be recorded.";
+                return;
             }
-        });
-        StatusText = $"Applied {concept.QualifiedName} after draft and graph validation. Review period, entity and dimensions before execution.";
+            selected.Concept = concept.QualifiedName;
+        }
+
+        var digestBefore = Session.Project.ComputeSemanticDigest();
+        var acceptOutcome = _suggestionSession!.Accept(suggestion.SuggestionId);
+        if (!acceptOutcome.Applied)
+        {
+            ShowSuggestionValidation(acceptOutcome.Validation);
+            StatusText = acceptOutcome.Reason ?? "Suggestion acceptance failed; the project was not changed.";
+            return;
+        }
+
+        bool graphChanged;
+        try
+        {
+            graphChanged = Session.SetNodeParameterValues(
+                new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+                {
+                    [sourceNodes[0].NodeId] = new Dictionary<string, object?> { ["column"] = SelectedSourceColumn },
+                    [SelectedNode!.NodeId] = new Dictionary<string, object?>
+                    {
+                        ["concept"] = concept.QualifiedName,
+                        ["unit"] = editedDraft.Unit,
+                        ["periodType"] = editedDraft.PeriodType
+                    }
+                });
+        }
+        catch (Exception ex)
+        {
+            var rollback = _suggestionSession.Undo();
+            StatusText = rollback.Applied
+                ? $"The mapping graph could not be updated after review: {ex.Message}"
+                : "The mapping graph update failed and the accepted review could not be rolled back; inspect the audit and project before continuing.";
+            return;
+        }
+
+        var digestAfter = Session.Project.ComputeSemanticDigest();
+        _acceptedSuggestionUndo.Push(new AcceptedSuggestionUndo(
+            _suggestionSession, suggestion.SuggestionId, digestBefore, digestAfter, graphChanged));
+        selected.ReviewState = SuggestionState.Accepted;
+        StatusText = $"Accepted {concept.QualifiedName} after draft and graph validation. Review entity and dimensions before execution.";
+    }
+
+    private void EditSelectedSuggestion()
+    {
+        if (!TryGetCurrentSuggestionContext(out var selected, out var suggestion, out var sourceIdentity)) return;
+        var editedDraft = BuildSelectedSuggestionDraft(suggestion, sourceIdentity);
+        var outcome = _suggestionSession!.Edit(suggestion.SuggestionId, editedDraft);
+        if (!outcome.Applied)
+        {
+            StatusText = outcome.Reason ?? "The suggestion edit could not be recorded.";
+            return;
+        }
+        selected.Concept = editedDraft.Concept ?? "";
+        StatusText = "Suggestion edit saved to the review session and audit trail. Acceptance will validate it against the current mapping.";
+    }
+
+    private void RejectSelectedSuggestion()
+    {
+        if (SelectedSuggestion is null || _suggestionSession is null)
+        {
+            StatusText = "Select a suggestion to reject.";
+            return;
+        }
+        var outcome = _suggestionSession.Reject(SelectedSuggestion.SuggestionId);
+        if (!outcome.Applied)
+        {
+            StatusText = outcome.Reason ?? "The suggestion could not be rejected.";
+            return;
+        }
+        SelectedSuggestion.ReviewState = SuggestionState.Rejected;
+        StatusText = "Suggestion rejected and recorded in the audit trail.";
+    }
+
+    private DraftMapping BuildSelectedSuggestionDraft(Suggestion suggestion, string sourceIdentity)
+    {
+        var fact = SelectedNode is null
+            ? null
+            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+        var decimalsText = fact?.Parameters.GetValueOrDefault("decimals")?.ToString();
+        int? decimals = int.TryParse(decimalsText, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var parsedDecimals) ? parsedDecimals : suggestion.Draft.Decimals;
+        return suggestion.Draft with
+        {
+            SourceField = sourceIdentity,
+            Concept = SelectedSuggestionConcept.Trim(),
+            Unit = string.IsNullOrWhiteSpace(SelectedSuggestionUnit) ? null : SelectedSuggestionUnit.Trim(),
+            PeriodType = SelectedSuggestionPeriodType.Trim(),
+            Decimals = decimals
+        };
+    }
+
+    private bool TryGetCurrentSuggestionContext(
+        out SuggestionRow selected, out Suggestion suggestion, out string sourceIdentity)
+    {
+        selected = SelectedSuggestion!;
+        suggestion = null!;
+        sourceIdentity = "";
+        if (selected is null || _suggestionSession is null || SelectedSourceBindingId is null
+            || SelectedNode is null || SelectedNode.NodeType != NodeTypeConstants.FactConstruct
+            || string.IsNullOrWhiteSpace(SelectedSourceColumn))
+        {
+            StatusText = "Select a local candidate, source field, and XBRL Fact node first.";
+            return false;
+        }
+        sourceIdentity = $"{SelectedSourceBindingId}:{SelectedSourceColumn}";
+        if (!string.Equals(selected.SourceFieldId, sourceIdentity, StringComparison.Ordinal))
+        {
+            StatusText = "The source field changed after these suggestions were generated. Request fresh suggestions.";
+            return false;
+        }
+        if (!string.Equals(selected.ProjectDigest, Session.Project.ComputeSemanticDigest(), StringComparison.Ordinal))
+        {
+            StatusText = "The mapping changed after these suggestions were generated. Request fresh suggestions.";
+            return false;
+        }
+        var selectedSuggestionId = selected.SuggestionId;
+        suggestion = _suggestionSession.Suggestions.FirstOrDefault(item =>
+            string.Equals(item.SuggestionId, selectedSuggestionId, StringComparison.Ordinal))!;
+        if (suggestion is null)
+        {
+            StatusText = "The selected suggestion is no longer part of the active review session.";
+            return false;
+        }
+        return true;
+    }
+
+    private void LoadSelectedSuggestionEditor()
+    {
+        if (SelectedSuggestion is null || _suggestionSession is null) return;
+        var suggestion = _suggestionSession.Suggestions.FirstOrDefault(item =>
+            string.Equals(item.SuggestionId, SelectedSuggestion.SuggestionId, StringComparison.Ordinal));
+        if (suggestion is null) return;
+        SelectedSuggestionConcept = suggestion.Draft.Concept ?? "";
+        var fact = SelectedNode is null
+            ? null
+            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+        SelectedSuggestionUnit = suggestion.Draft.Unit
+            ?? fact?.Parameters.GetValueOrDefault("unit")?.ToString()
+            ?? "";
+        SelectedSuggestionPeriodType = suggestion.Draft.PeriodType
+            ?? fact?.Parameters.GetValueOrDefault("periodType")?.ToString()
+            ?? "duration";
+    }
+
+    private void ShowSuggestionValidation(DraftValidationResult? validation)
+    {
+        if (validation is null) return;
+        Diagnostics.Clear();
+        ReplaceItems(Diagnostics, validation.Diagnostics.Select(ToDiagnosticRow));
+        Raise(nameof(Diagnostics));
+    }
+
+    private void Undo()
+    {
+        var currentDigest = Session.Project.ComputeSemanticDigest();
+        if (_acceptedSuggestionUndo.TryPeek(out var accepted)
+            && string.Equals(accepted.DigestAfter, currentDigest, StringComparison.Ordinal))
+        {
+            if (accepted.GraphChanged && !Session.CanUndo)
+            {
+                StatusText = "The accepted mapping can no longer be undone from the graph history.";
+                return;
+            }
+            var outcome = accepted.Session.Undo();
+            if (!outcome.Applied)
+            {
+                StatusText = outcome.Reason ?? "Undo was blocked because the audit decision was not durable.";
+                return;
+            }
+            _isSuggestionHistoryMutation = true;
+            try
+            {
+                if (accepted.GraphChanged) Session.Undo();
+            }
+            finally { _isSuggestionHistoryMutation = false; }
+            _acceptedSuggestionUndo.Pop();
+            _suggestionRedoState = new SuggestionRedoState(
+                accepted.Session, accepted.SuggestionId, accepted.DigestBefore, accepted.GraphChanged);
+            var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == accepted.SuggestionId);
+            if (row is not null) row.ReviewState = SuggestionState.Pending;
+            StatusText = "Accepted suggestion undone and the decision recorded. The project is back at its prior revision.";
+            RefreshUndoState();
+            return;
+        }
+        if (!Session.CanUndo) return;
+        Session.Undo();
+        RefreshUndoState();
+    }
+
+    private void Redo()
+    {
+        var currentDigest = Session.Project.ComputeSemanticDigest();
+        if (_suggestionRedoState is { } pending
+            && (!pending.GraphChanged || Session.CanRedo)
+            && string.Equals(pending.DigestBefore, currentDigest, StringComparison.Ordinal))
+        {
+            var outcome = pending.Session.Accept(pending.SuggestionId);
+            if (!outcome.Applied)
+            {
+                StatusText = outcome.Reason ?? "Redo was blocked because the audit decision was not durable.";
+                return;
+            }
+            _isSuggestionHistoryMutation = true;
+            try
+            {
+                if (pending.GraphChanged) Session.Redo();
+            }
+            finally { _isSuggestionHistoryMutation = false; }
+            var digestAfter = Session.Project.ComputeSemanticDigest();
+            _acceptedSuggestionUndo.Push(new AcceptedSuggestionUndo(
+                pending.Session, pending.SuggestionId, pending.DigestBefore, digestAfter, pending.GraphChanged));
+            _suggestionRedoState = null;
+            var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == pending.SuggestionId);
+            if (row is not null) row.ReviewState = SuggestionState.Accepted;
+            StatusText = "Accepted suggestion redone and recorded in the audit trail.";
+            RefreshUndoState();
+            return;
+        }
+        if (!Session.CanRedo) return;
+        Session.Redo();
+        RefreshUndoState();
     }
 
     private bool IsUpstream(string sourceNodeId, string factNodeId)
@@ -1721,8 +2017,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var profileAvailable = RefreshProfileForProject(project);
         _session.Changed -= OnSessionChanged;
+        _session.SelectionChanged -= OnSessionSelectionChanged;
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
+        _session.SelectionChanged += OnSessionSelectionChanged;
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = manager.FullPath;
@@ -1765,6 +2063,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void ClearSourceAndRunResults()
     {
+        _suggestionSession = null;
+        _acceptedSuggestionUndo.Clear();
+        _suggestionRedoState = null;
         Interlocked.Increment(ref _sourceLoadGeneration);
         ClearDestinationSelection();
         IsSourceLoading = false;
@@ -1908,7 +2209,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (compiled.Diagnostics.Items.Count == 0)
             Diagnostics.Add(new DiagnosticRow { Display = "Mapping graph and filing profile validated.", Severity = "info" });
         else
-            Diagnostics.AddRange(compiled.Diagnostics.Items.Select(ToDiagnosticRow));
+            ReplaceItems(Diagnostics, compiled.Diagnostics.Items.Select(ToDiagnosticRow));
         StatusText = compiled.Success ? "Validation complete." : "Validation found blocking issues.";
         Raise(nameof(Diagnostics));
     }
@@ -1949,7 +2250,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (gate.HasBlockingErrors)
         {
             Diagnostics.Clear();
-            Diagnostics.AddRange(gate.Items.Select(ToDiagnosticRow));
+            ReplaceItems(Diagnostics, gate.Items.Select(ToDiagnosticRow));
             Raise(nameof(Diagnostics));
             StatusText = "Execution blocked by the publication authorization gate.";
             return;
@@ -1997,7 +2298,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (!resolution.Success)
         {
             Diagnostics.Clear();
-            Diagnostics.AddRange(resolution.Diagnostics.Items.Select(ToDiagnosticRow));
+            ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
             Raise(nameof(Diagnostics));
             StatusText = "Operation blocked by filing-profile resolution.";
             profile = null!;
@@ -2024,7 +2325,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _profile = SyntheticProfile.Build();
         _taxonomy = new TaxonomyIndex(_profile);
         Diagnostics.Clear();
-        Diagnostics.AddRange(resolution.Diagnostics.Items.Select(ToDiagnosticRow));
+        ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
         Raise(nameof(Diagnostics));
         StatusText = "The project's filing profile is not installed; profile-dependent actions are blocked.";
         return false;
@@ -2059,7 +2360,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ShowRunResult(JobResult result)
     {
         Diagnostics.Clear();
-        Diagnostics.AddRange(result.Diagnostics.Items.Select(ToDiagnosticRow));
+        ReplaceItems(Diagnostics, result.Diagnostics.Items.Select(ToDiagnosticRow));
         PreviewFacts.Clear();
         foreach (var fact in result.Facts)
         {
@@ -2125,6 +2426,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(ResultPage));
         Raise(nameof(HasNextPage));
         Raise(nameof(HasPreviousPage));
+    }
+
+    private static void ReplaceItems<T>(ObservableCollection<T> collection, IEnumerable<T> items)
+    {
+        collection.Clear();
+        foreach (var item in items) collection.Add(item);
     }
 
     /// <summary>Runnable sample graph; source file and column are selected in the source pane.</summary>

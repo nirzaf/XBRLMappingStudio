@@ -104,6 +104,28 @@ public sealed class GraphCanvasWidgetTests
     }
 
     [AvaloniaFact]
+    public void ZoomedNodeHitTestingUsesTheRenderedGraphTransform()
+    {
+        var session = new DesignerSession(Project());
+        var (window, canvas) = Show(session);
+
+        window.MouseWheel(new Point(300, 150), new Vector(0, 1), RawInputModifiers.None);
+        window.MouseDown(new Point(300, 150), MouseButton.Middle, RawInputModifiers.None);
+        window.MouseMove(new Point(180, 150), RawInputModifiers.MiddleMouseButton);
+        window.MouseUp(new Point(180, 150), MouseButton.Middle, RawInputModifiers.None);
+
+        var target = Assert.Single(session.Nodes, node => node.NodeId == "n1");
+        var renderTransform = Matrix.CreateTranslation(canvas.PanOffset.X, canvas.PanOffset.Y)
+            * Matrix.CreateScale(canvas.ZoomFactor, canvas.ZoomFactor);
+        var clickPoint = renderTransform.Transform(new Point(target.X + 80, target.Y + 30));
+        window.MouseDown(clickPoint, MouseButton.Left, RawInputModifiers.None);
+        window.MouseUp(clickPoint, MouseButton.Left, RawInputModifiers.None);
+
+        Assert.Equal(new[] { "n1" }, session.SelectedNodeIds);
+        window.Close();
+    }
+
+    [AvaloniaFact]
     public void ShiftMultiSelectMovesTogetherAndPointerDragIsOneUndoStep()
     {
         var session = new DesignerSession(Project());
