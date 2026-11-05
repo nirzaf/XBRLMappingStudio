@@ -138,6 +138,149 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task UnsavedProjectPrompt_CancelPreservesWorkspaceForNewAndOpen()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-cancel", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var targetPath = Path.Combine(dir, "target.xmap");
+        var activePath = Path.Combine(dir, "active.xmap");
+        try
+        {
+            new ProjectManager(targetPath).Save(Project());
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = targetPath,
+                UnsavedChoice = UnsavedProjectChoice.Cancel
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            viewModel.SaveProjectTo(activePath);
+            var originalProjectId = viewModel.Session.Project.ProjectId;
+            viewModel.Session.MoveNode("n0", 777, 888);
+
+            await viewModel.NewProjectAsync();
+            Assert.Equal(originalProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Equal(777, viewModel.Session.Project.Nodes.Single(node => node.NodeId == "n0").Layout!.X);
+            Assert.True(viewModel.IsProjectDirty);
+
+            await viewModel.OpenProjectAsync();
+            Assert.Equal(originalProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Equal(777, viewModel.Session.Project.Nodes.Single(node => node.NodeId == "n0").Layout!.X);
+            Assert.True(viewModel.IsProjectDirty);
+
+            dialog.ProjectOpenPath = activePath;
+            await viewModel.OpenProjectAsync();
+            Assert.Equal(originalProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Equal(777, viewModel.Session.Project.Nodes.Single(node => node.NodeId == "n0").Layout!.X);
+            Assert.True(viewModel.IsProjectDirty);
+            Assert.Equal("Canceled reopen the current project; the active project is unchanged.", viewModel.StatusText);
+
+            dialog.UnsavedChoice = UnsavedProjectChoice.Discard;
+            await viewModel.CloseProjectAsync();
+            Assert.Empty(viewModel.Session.Project.Nodes);
+            Assert.Null(viewModel.ProjectPath);
+            Assert.False(viewModel.IsProjectDirty);
+            Assert.Equal("Project closed.", viewModel.StatusText);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UnsavedProjectPrompt_SaveThenNewWritesProjectBeforeReplacingWorkspace()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-save", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var savedPath = Path.Combine(dir, "saved.xmap");
+        try
+        {
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectSavePath = savedPath,
+                UnsavedChoice = UnsavedProjectChoice.Save
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            var originalProjectId = viewModel.Session.Project.ProjectId;
+            viewModel.Session.MoveNode("n1", 901, 902);
+
+            await viewModel.NewProjectAsync();
+
+            var saved = new ProjectManager(savedPath).Load();
+            Assert.Equal(originalProjectId, saved.ProjectId);
+            Assert.Equal(901, saved.Nodes.Single(node => node.NodeId == "n1").Layout!.X);
+            Assert.NotEqual(originalProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Null(viewModel.ProjectPath);
+            Assert.False(viewModel.IsProjectDirty);
+            Assert.False(File.Exists(savedPath + ProjectManager.LockSuffix));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SaveAs_RefusesToReplaceAnUnrelatedProject()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-saveas", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var activePath = Path.Combine(dir, "active.xmap");
+        var existingPath = Path.Combine(dir, "existing.xmap");
+        try
+        {
+            var existing = Project();
+            new ProjectManager(existingPath).Save(existing);
+            var dialog = new TestProjectFileDialog(null) { ProjectSavePath = existingPath };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            viewModel.SaveProjectTo(activePath);
+            viewModel.Session.MoveNode("n0", 45, 46);
+
+            await viewModel.SaveProjectAsAsync();
+
+            Assert.Equal(existing.ProjectId, new ProjectManager(existingPath).Load().ProjectId);
+            Assert.Equal(activePath, viewModel.ProjectPath);
+            Assert.True(viewModel.IsProjectDirty);
+            Assert.Contains("avoid replacing it", viewModel.StatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OpeningProject_ReconnectsSavedWorkspaceSourceBinding()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-source", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var sourcePath = Path.Combine(dir, "source.csv");
+        var projectPath = Path.Combine(dir, "mapping.xmap");
+        File.WriteAllText(sourcePath, "Revenue\n1250\n");
+        try
+        {
+            var firstViewModel = new MainWindowViewModel(ProjectWithSource());
+            firstViewModel.SaveProjectTo(projectPath);
+            await firstViewModel.LoadSourceAsync(sourcePath);
+            Assert.Equal("source.csv", firstViewModel.Session.Project.Bindings[0].Locator);
+            firstViewModel.SaveProjectTo(projectPath);
+
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = projectPath };
+            var reopened = new MainWindowViewModel(Project(), dialog);
+            await reopened.OpenProjectAsync();
+
+            Assert.Contains("Revenue", reopened.SourceColumns);
+            Assert.Equal("source", reopened.SelectedSourceBindingId);
+            Assert.Equal(firstViewModel.Session.Project.ComputeSemanticDigest(), reopened.Session.Project.ComputeSemanticDigest());
+            Assert.False(reopened.IsProjectDirty);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RubberBandSelect_SelectsIntersectingNodes()
     {
         var session = new DesignerSession(Project());
@@ -730,6 +873,9 @@ public sealed class DesignerSessionTests
 
     private sealed class TestProjectFileDialog(string? destinationPath) : IProjectFileDialog
     {
+        public string? ProjectOpenPath { get; set; }
+        public string? ProjectSavePath { get; set; }
+        public UnsavedProjectChoice UnsavedChoice { get; set; } = UnsavedProjectChoice.Cancel;
         public string? FileDestinationPath { get; set; }
         public bool ConfirmationResult { get; set; }
         public int ConfirmationCount { get; private set; }
@@ -739,8 +885,10 @@ public sealed class DesignerSessionTests
         public string? ConfirmedFilePath { get; private set; }
         public string? ConfirmedFileFormat { get; private set; }
 
-        public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
-        public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenProjectAsync() => Task.FromResult(ProjectOpenPath);
+        public Task<string?> SaveProjectAsync() => Task.FromResult(ProjectSavePath);
+        public Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
+            => Task.FromResult(UnsavedChoice);
         public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult(destinationPath);

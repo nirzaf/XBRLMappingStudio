@@ -1,10 +1,18 @@
 namespace XBRLMappingStudio.Desktop.ViewModels;
 
+public enum UnsavedProjectChoice
+{
+    Cancel = 0,
+    Save,
+    Discard
+}
+
 /// <summary>Platform file-picker boundary for project and report destinations.</summary>
 public interface IProjectFileDialog
 {
     Task<string?> OpenProjectAsync();
     Task<string?> SaveProjectAsync();
+    Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action);
     Task<string?> SaveReportAsync();
     Task<string?> OpenSourceAsync();
     Task<string?> OpenDestinationDatabaseAsync();

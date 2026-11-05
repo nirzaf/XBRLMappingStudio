@@ -136,6 +136,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string? _projectPath;
     private string? _selectedSourceBindingId;
     private int? _expectedLayoutGeneration;
+    private string _savedProjectSnapshot = "";
     private string? _selectedSourceColumn;
     private string? _selectedSourceTable;
     private string? _sqliteSourcePath;
@@ -173,7 +174,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private TaxonomyIndex _taxonomy;
     private DesignerSession _session;
 
-    public string Title { get => _title; set => Set(ref _title, value); }
+    public string Title => _title;
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
     public bool IsBusy
     {
@@ -227,6 +228,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
+    public bool IsProjectDirty => !StringComparer.Ordinal.Equals(
+        _savedProjectSnapshot, ProjectSerializer.Serialize(Session.Project));
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
     public IReadOnlyList<DestinationKindOption> DestinationKindOptions { get; } = Array.AsReadOnly(new[]
     {
@@ -413,6 +416,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand NewProjectCommand { get; }
     public RelayCommand OpenProjectCommand { get; }
     public RelayCommand SaveProjectCommand { get; }
+    public RelayCommand SaveProjectAsCommand { get; }
+    public RelayCommand CloseProjectCommand { get; }
     public RelayCommand ExitCommand { get; }
     public RelayCommand ValidateCommand { get; }
     public RelayCommand PreviewCommand { get; }
@@ -465,10 +470,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
+        _savedProjectSnapshot = ProjectSerializer.Serialize(project);
+        RefreshTitle();
 
-        NewProjectCommand = new RelayCommand(_ => NewProject());
+        NewProjectCommand = new RelayCommand(async _ => await NewProjectAsync());
         OpenProjectCommand = new RelayCommand(async _ => await OpenProjectAsync());
         SaveProjectCommand = new RelayCommand(async _ => await SaveProjectAsync());
+        SaveProjectAsCommand = new RelayCommand(async _ => await SaveProjectAsAsync());
+        CloseProjectCommand = new RelayCommand(async _ => await CloseProjectAsync());
         ExitCommand = new RelayCommand(_ =>
         {
             if (Avalonia.Application.Current?.ApplicationLifetime
@@ -518,6 +527,19 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(Edges));
         Raise(nameof(Session));
         Raise(nameof(SelectedNodeDisplayName));
+        Raise(nameof(IsProjectDirty));
+        RefreshTitle();
+    }
+
+    private void RefreshTitle()
+    {
+        var projectName = Path.GetFileNameWithoutExtension(ProjectPath) is { Length: > 0 } fileName
+            ? fileName
+            : Session.Project.Name;
+        var nextTitle = $"{projectName}{(IsProjectDirty ? " *" : string.Empty)} — XBRL Mapping Studio";
+        if (StringComparer.Ordinal.Equals(_title, nextTitle)) return;
+        _title = nextTitle;
+        Raise(nameof(Title));
     }
 
     private void LoadSelectedFactProperties()
@@ -529,10 +551,24 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedFactDecimals = node.Parameters.GetValueOrDefault("decimals")?.ToString() ?? "0";
     }
 
-    private void NewProject()
+    public async Task NewProjectAsync()
+    {
+        if (!await ConfirmUnsavedChangesAsync("create a new project")) return;
+        ResetToNewProject("New project ready.");
+    }
+
+    public async Task CloseProjectAsync()
+    {
+        if (!await ConfirmUnsavedChangesAsync("close this project")) return;
+        ResetWorkspace(BuildEmptyProject(), "Project closed.");
+    }
+
+    private void ResetToNewProject(string status)
+        => ResetWorkspace(BuildSampleProject(), status);
+
+    private void ResetWorkspace(MappingProject project, string status)
     {
         _session.Changed -= OnSessionChanged;
-        var project = BuildSampleProject();
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
@@ -540,22 +576,59 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = null;
         _expectedLayoutGeneration = null;
+        _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         ClearSourceAndRunResults();
         OnSessionChanged();
         RunSearch();
-        StatusText = "New project ready.";
+        StatusText = status;
     }
 
-    private async Task OpenProjectAsync()
+    public async Task OpenProjectAsync()
     {
         if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return; }
         try
         {
             var path = await _fileDialog.OpenProjectAsync();
-            if (path is not null) LoadProject(path);
+            if (path is null) return;
+
+            var manager = new ProjectManager(Path.GetFullPath(path));
+            var project = manager.Load(); // Validate the requested file before prompting to replace the current workspace.
+            var reopeningCurrentProject = PathsEqual(ProjectPath, manager.FullPath);
+            if (reopeningCurrentProject && !IsProjectDirty) return;
+            if (!await ConfirmUnsavedChangesAsync(reopeningCurrentProject
+                    ? "reopen the current project"
+                    : "open another project")) return;
+            if (reopeningCurrentProject) project = manager.Load();
+            ActivateProject(manager, project);
+            await LoadWorkspaceBindingsAsync();
         }
         catch (Exception ex) { StatusText = $"Open failed: {ex.Message}"; }
     }
+
+    public async Task<bool> ConfirmCloseApplicationAsync()
+        => await ConfirmUnsavedChangesAsync("close the application");
+
+    private async Task<bool> ConfirmUnsavedChangesAsync(string action)
+    {
+        if (!IsProjectDirty) return true;
+        if (_fileDialog is null)
+        {
+            StatusText = $"Cannot {action}: the current project has unsaved changes and no confirmation dialog is available.";
+            return false;
+        }
+
+        var choice = await _fileDialog.ConfirmUnsavedProjectChangesAsync(
+            Path.GetFileNameWithoutExtension(ProjectPath ?? Session.Project.Name), action);
+        if (choice == UnsavedProjectChoice.Discard) return true;
+        if (choice == UnsavedProjectChoice.Save) return await SaveProjectAsync();
+
+        StatusText = $"Canceled {action}; the active project is unchanged.";
+        return false;
+    }
+
+    private static bool PathsEqual(string? left, string? right)
+        => left is not null && right is not null
+           && StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
     private async Task ChooseSourceAsync()
     {
@@ -1167,7 +1240,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             var root = WorkspaceRoot();
             var safePath = PathGuard.EnsureWithin(root, path);
-            var binding = Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
+            var binding = Session.Project.Bindings.FirstOrDefault(b => b.BindingId == SelectedSourceBindingId)
+                ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
             if (binding is null) { StatusText = "Add a source binding to the project before choosing a file."; return; }
             var kind = Path.GetExtension(safePath).ToLowerInvariant() switch
             {
@@ -1178,7 +1252,12 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ".db" or ".sqlite" or ".sqlite3" => "sqlite",
                 _ => throw new InvalidOperationException("The selected file type is not supported.")
             };
-            binding = binding with { Kind = kind, Locator = safePath, SchemaFingerprint = null };
+            binding = binding with
+            {
+                Kind = kind,
+                Locator = Path.GetRelativePath(root, safePath),
+                SchemaFingerprint = null
+            };
             _sqliteSourcePath = kind == "sqlite" ? safePath : null;
             SourceTables.Clear();
             SourceColumns.Clear();
@@ -1248,7 +1327,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var descriptor = SqliteSourceAdapter.Describe(connection, schema);
             SourceColumns.Clear();
             SourceColumns.AddRange(schema.Columns.Select(column => column.Name));
-            binding = binding with { Kind = "sqlite", Locator = _sqliteSourcePath,
+            binding = binding with { Kind = "sqlite", Locator = Path.GetRelativePath(WorkspaceRoot(), _sqliteSourcePath),
                 Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
                 SchemaFingerprint = schema.Fingerprint };
             Session.SetBinding(binding);
@@ -1478,6 +1557,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         var fullPath = Path.GetFullPath(path);
         var manager = new ProjectManager(fullPath);
         var project = manager.Load();
+        ActivateProject(manager, project);
+        _ = LoadWorkspaceBindingsAsync();
+    }
+
+    private void ActivateProject(ProjectManager manager, MappingProject project)
+    {
         var profileAvailable = RefreshProfileForProject(project);
         _session.Changed -= OnSessionChanged;
         _session = new DesignerSession(project);
@@ -1487,12 +1572,39 @@ public sealed class MainWindowViewModel : ViewModelBase
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = project.LayoutGeneration;
         ClearSourceAndRunResults();
-        _ = LoadSavedDestinationAsync();
+        _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         OnSessionChanged();
         RunSearch();
         StatusText = profileAvailable
-            ? $"Opened {Path.GetFileName(fullPath)}."
-            : $"Opened {Path.GetFileName(fullPath)}, but its filing profile is not installed.";
+            ? $"Opened {Path.GetFileName(manager.FullPath)}."
+            : $"Opened {Path.GetFileName(manager.FullPath)}, but its filing profile is not installed.";
+    }
+
+    private async Task LoadWorkspaceBindingsAsync()
+    {
+        await LoadSavedSourceAsync();
+        await LoadSavedDestinationAsync();
+    }
+
+    private async Task LoadSavedSourceAsync()
+    {
+        var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+            candidate.Kind != "param" && !string.IsNullOrWhiteSpace(candidate.Locator));
+        if (binding is null || ProjectPath is null) return;
+
+        var root = WorkspaceRoot();
+        var path = Path.IsPathRooted(binding.Locator!)
+            ? Path.GetFullPath(binding.Locator!)
+            : Path.GetFullPath(Path.Combine(root, binding.Locator!));
+        if (!File.Exists(path))
+        {
+            SourceInspectionSummary = $"Saved source is unavailable: {Path.GetFileName(path)}.";
+            StatusText = $"Saved source file is missing from the project workspace: {Path.GetFileName(path)}.";
+            return;
+        }
+
+        SelectedSourceBindingId = binding.BindingId;
+        await LoadSourceAsync(path);
     }
 
     private void ClearSourceAndRunResults()
@@ -1580,19 +1692,39 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    private async Task SaveProjectAsync()
+    private async Task<bool> SaveProjectAsync()
     {
         try
         {
             var path = ProjectPath;
             if (path is null)
             {
-                if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return; }
+                if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return false; }
                 path = await _fileDialog.SaveProjectAsync();
             }
-            if (path is not null) SaveProjectTo(path);
+            if (path is null) return false;
+            SaveProjectTo(path);
+            return true;
         }
-        catch (Exception ex) { StatusText = $"Save failed: {ex.Message}"; }
+        catch (Exception ex) { StatusText = $"Save failed: {ex.Message}"; return false; }
+    }
+
+    public async Task SaveProjectAsAsync()
+    {
+        if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return; }
+        try
+        {
+            var path = await _fileDialog.SaveProjectAsync();
+            if (path is null) return;
+            var fullPath = Path.GetFullPath(path);
+            if (File.Exists(fullPath) && !PathsEqual(ProjectPath, fullPath))
+            {
+                StatusText = "Save As stopped because that path already contains another project. Choose a new path to avoid replacing it.";
+                return;
+            }
+            SaveProjectTo(fullPath);
+        }
+        catch (Exception ex) { StatusText = $"Save As failed: {ex.Message}"; }
     }
 
     public void SaveProjectTo(string path)
@@ -1601,9 +1733,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         var fullPath = Path.GetFullPath(path);
         var manager = new ProjectManager(fullPath);
         var saved = manager.Save(Session.Project,
-            string.Equals(ProjectPath, manager.FullPath, StringComparison.Ordinal) ? _expectedLayoutGeneration : null);
+            PathsEqual(ProjectPath, manager.FullPath) ? _expectedLayoutGeneration : null);
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = saved.NewLayoutGeneration;
+        _savedProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
+        Raise(nameof(IsProjectDirty));
+        RefreshTitle();
         StatusText = $"Saved {Path.GetFileName(fullPath)} (semantic revision {saved.NewSemanticRevision}).";
         if (!hadProjectPath && _destinationPath is null && Session.Project.Destination is not null)
             _ = LoadSavedDestinationAsync();
@@ -1938,6 +2073,18 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
         };
         return project;
+    }
+
+    private static MappingProject BuildEmptyProject()
+    {
+        var profile = SyntheticProfile.Build();
+        return new MappingProject
+        {
+            ProjectId = Id.New(),
+            Name = "Untitled Mapping",
+            ProfileId = profile.ProfileId,
+            ProfileDigest = profile.Digest
+        };
     }
 }
 

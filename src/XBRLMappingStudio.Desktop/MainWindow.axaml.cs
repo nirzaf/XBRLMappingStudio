@@ -10,9 +10,13 @@ namespace XBRLMappingStudio.Desktop;
 
 public partial class MainWindow : Window
 {
+    private bool _closeApproved;
+    private bool _closePromptRunning;
+
     public MainWindow()
     {
         InitializeComponent();
+        Closing += OnWindowClosing;
     }
 
     private void InitializeComponent()
@@ -33,6 +37,25 @@ public partial class MainWindow : Window
         {
             vm.Session.Select(row.RelatedNodeId!, additive: false);
             vm.SelectedNode = vm.Nodes.FirstOrDefault(n => n.NodeId == row.RelatedNodeId);
+        }
+    }
+
+    private async void OnWindowClosing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_closeApproved) return;
+        e.Cancel = true;
+        if (_closePromptRunning) return;
+
+        _closePromptRunning = true;
+        try
+        {
+            if (DataContext is MainWindowViewModel vm && !await vm.ConfirmCloseApplicationAsync()) return;
+            _closeApproved = true;
+            Close();
+        }
+        finally
+        {
+            _closePromptRunning = false;
         }
     }
 }
@@ -85,6 +108,43 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
             FileTypeChoices = new[] { ProjectType }
         });
         return LocalPath(file?.Path);
+    }
+
+    public async Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
+    {
+        var dialog = new Window
+        {
+            Title = "Unsaved project changes",
+            Width = 480,
+            Height = 230,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var save = new Button { Content = "Save", IsDefault = true, MinWidth = 100 };
+        var discard = new Button { Content = "Discard", MinWidth = 100 };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 100 };
+        save.Click += (_, _) => dialog.Close(UnsavedProjectChoice.Save);
+        discard.Click += (_, _) => dialog.Close(UnsavedProjectChoice.Discard);
+        cancel.Click += (_, _) => dialog.Close(UnsavedProjectChoice.Cancel);
+
+        var content = new StackPanel { Spacing = 14, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = $"'{projectName}' has unsaved changes. Save them before you {action}?",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(discard);
+        actions.Children.Add(save);
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<UnsavedProjectChoice>(owner);
     }
 
     public async Task<string?> SaveReportAsync()
