@@ -56,3 +56,36 @@ not available in this local environment, so its runtime cases remain pending CI.
 
 The full solution run verifies the local Windows checkout only. It does not
 qualify a production filing profile or replace the gated worker CI job.
+
+## Previous exact-head baseline after Arelle path correction
+
+This records the pushed code baseline before the staged-publication slice; the
+preceding entries remain historical snapshots of their respective commits.
+
+| Item | Evidence |
+|---|---|
+| Branch and worktree | `main`, clean; `HEAD`, `origin/main`, and remote `refs/heads/main` all equal `c1557d3b46208bff7e1db00088afaebd43dfab45` |
+| Exact-head CI | [Run 41971061473](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41971061473), completed successfully on the exact SHA |
+| Release builds | Ubuntu and Windows Release builds passed with 0 warnings and 0 errors; repository hygiene passed |
+| .NET test matrix | Each OS passed 380 tests and skipped 2 gated Arelle tests (382 total); eight suites: AI 47, Project 8, Engine 33, Ops 51, Adapters 55, XBRL 49, Desktop 45, Integration 92 passed plus 2 skipped |
+| Pinned worker job | All 20 Python worker tests and both gated .NET Arelle integration tests passed |
+| Local regression reproduction | Pinned Python 3.12 worker suite passed 19 tests; the symlink test was skipped because Windows denied symlink creation. Both gated .NET Arelle integration tests passed locally. |
+| Root cause corrected | The worker resolved a relative taxonomy entry point against the process working directory instead of the configured taxonomy root. Relative entries are now joined to the root before canonicalization and containment checks; the integration assertions include failure diagnostics. |
+
+These checks verify the supported synthetic-profile worker path and the repository
+test matrix. They do not close the external filing-authority/taxonomy-rights,
+reviewer-authority, Windows signing/hardware, PDF/OCR-rights or production database
+gates recorded in `docs/decisions/OPEN.md`.
+
+## Local staged-publication slice before push
+
+| Item | Evidence |
+|---|---|
+| Base head | `c1557d3b46208bff7e1db00088afaebd43dfab45`; this slice is currently in the local worktree |
+| Release build | `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1 --verbosity minimal`: 0 warnings, 0 errors |
+| Full .NET suite | 388 passed, 3 gated Arelle cases skipped (391 total) across 8 projects |
+| Gated Arelle verification | All 3 .NET Arelle integration cases passed with the pinned local Python 3.12 runtime |
+| Python worker suite | 19 passed; Windows symlink-privilege case skipped |
+| Scope | Exact staged xBRL-JSON validation, digest rechecks, terminal abort/recovery, durable validated-digest columns, CLI/Desktop publication, and README/status reconciliation |
+
+Remote exact-head CI for the staged-publication slice is pending the authorized push.

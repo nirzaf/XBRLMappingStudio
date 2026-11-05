@@ -125,6 +125,150 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.True(result.IsPublishable);
     }
 
+    [Fact]
+    public async Task StagedArtifactValidation_SendsExactStagedReportToProfileWorker()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var validationRequests = new List<WorkerRequest>();
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation == WorkerOperations.ValidateReport)
+                validationRequests.Add(request);
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null);
+        });
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+
+        var stagedPath = Path.Combine(_dir, "report.xbrl.json.xbsl-staging-test");
+        await File.WriteAllTextAsync(stagedPath, "altered-after-serialization", new System.Text.UTF8Encoding(false));
+        var altered = await Assert.ThrowsAsync<PublicationException>(() => service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "report.xbrl.json"), result));
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, altered.Code);
+        Assert.Single(validationRequests);
+
+        await File.WriteAllTextAsync(stagedPath, result.XbrlJson, new System.Text.UTF8Encoding(false));
+        var validatedDigest = await service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "report.xbrl.json"), result);
+
+        Assert.Equal(2, validationRequests.Count);
+        Assert.Equal(result.XbrlJson, validationRequests[1].Payload!.Value.GetString());
+        Assert.Equal(result.Manifest.Outputs.Single(output => output.Kind == "xbrl-json").Digest,
+            validatedDigest);
+        Assert.Equal(validatedDigest, result.Manifest.ValidatedArtifactDigest);
+    }
+
+    [Fact]
+    public async Task StagedArtifactValidation_RejectsWorkerBlockingFinding()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var validationCount = 0;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+
+            validationCount++;
+            var rejectsStaged = validationCount > 1;
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                rejectsStaged
+                    ? new[]
+                    {
+                        new Diagnostic
+                        {
+                            Code = DiagnosticCodes.XbrValidationFailed,
+                            Subsystem = DiagnosticSubsystem.XBRL,
+                            Severity = DiagnosticSeverity.Error,
+                            Stage = DiagnosticStage.Validation,
+                            IsBlocking = true,
+                            Message = "Staged report failed profile validation.",
+                            OperationId = request.OperationId
+                        }
+                    }
+                    : Array.Empty<Diagnostic>(),
+                null);
+        });
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+
+        var stagedPath = Path.Combine(_dir, "rejected-report.json");
+        await File.WriteAllTextAsync(stagedPath, result.XbrlJson, new System.Text.UTF8Encoding(false));
+        var ex = await Assert.ThrowsAsync<PublicationException>(() => service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "published-report.json"), result));
+
+        Assert.Equal(DiagnosticCodes.XbrValidationFailed, ex.Code);
+        Assert.Null(result.Manifest.ValidatedArtifactDigest);
+    }
+
+    [Fact]
+    public async Task IncompleteStagedValidation_AbortsAndPreservesPriorDestination()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var validationCount = 0;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+
+            validationCount++;
+            if (validationCount == 1)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+
+            return new WorkerResponse(request.OperationId, WorkerStatus.IncompleteValidation, Result: null,
+                new[]
+                {
+                    new Diagnostic
+                    {
+                        Code = DiagnosticCodes.XbrValidationIncomplete,
+                        Subsystem = DiagnosticSubsystem.XBRL,
+                        Severity = DiagnosticSeverity.Error,
+                        Stage = DiagnosticStage.Validation,
+                        IsBlocking = true,
+                        Message = "Profile validation did not complete.",
+                        OperationId = request.OperationId
+                    }
+                },
+                "Arelle validation is incomplete.");
+        });
+        var profile = SyntheticProfile.Build();
+        var service = new MappingJobService(profile, worker);
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+
+        var destination = Path.Combine(_dir, "existing-report.json");
+        var priorBytes = System.Text.Encoding.UTF8.GetBytes("prior-accepted-report");
+        await File.WriteAllBytesAsync(destination, priorBytes);
+        var journal = new RunJournal(Path.Combine(_dir, "incomplete-validation-journal"));
+        var publisher = new PublicationService(journal);
+        var ex = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
+            destination,
+            System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
+            _dir,
+            project,
+            profile,
+            allowSyntheticProfile: true,
+            result: result,
+            validateStagedArtifactAsync: (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                stagedPath, destination, result, token),
+            cancellationToken: CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.XbrValidationIncomplete, ex.Code);
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+        var entry = journal.Load(result.Manifest.RunId);
+        Assert.NotNull(entry);
+        Assert.Equal(JournalState.Aborted, entry!.State);
+        Assert.Null(entry.ValidatedDigest);
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
     // XBR08 timeout path: a per-request deadline that elapses without any response
     // must yield a distinct terminal outcome (OperationalFailure), a blocking WKR004
     // diagnostic, and no publication. This is not cancellation and not a crash.

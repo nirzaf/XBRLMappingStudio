@@ -56,6 +56,14 @@ public sealed class RunManifest
     /// <summary>Digest of each artifact produced.</summary>
     public IReadOnlyList<OutputIdentity> Outputs { get; set; } = Array.Empty<OutputIdentity>();
 
+    /// <summary>Digest of the exact staged bytes accepted by the selected profile worker.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ValidatedArtifactDigest { get; set; }
+
+    /// <summary>Digest confirmed at the destination after an authorized publication.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PublishedArtifactDigest { get; set; }
+
     public RunOutcome Outcome { get; set; } = RunOutcome.Unknown;
 
     /// <summary>

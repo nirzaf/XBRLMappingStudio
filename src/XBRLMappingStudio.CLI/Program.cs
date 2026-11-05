@@ -829,6 +829,17 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             PrintDiagnostics(new[] { diagnostic });
         }
 
+        static RunOutcome PublicationFailureOutcome(PublicationException ex) => ex.Code switch
+        {
+            DiagnosticCodes.XbrApprovalRequired => RunOutcome.AuthorizationFailure,
+            DiagnosticCodes.XbrSyntheticProfileNotAuthorized or DiagnosticCodes.XbrWorkerUnavailable
+                or DiagnosticCodes.XbrValidationIncomplete => RunOutcome.IncompleteConfiguration,
+            DiagnosticCodes.WkrTimeout or DiagnosticCodes.WkrCrash or DiagnosticCodes.PubStagingFailed
+                or DiagnosticCodes.PubDestinationLocked => RunOutcome.OperationalFailure,
+            DiagnosticCodes.PubPartialFailure or DiagnosticCodes.PubDigestMismatch => RunOutcome.Unknown,
+            _ => RunOutcome.InvalidMapping
+        };
+
         if (publishDestination)
         {
             if (!result.IsPublishable)
@@ -867,13 +878,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                 }
                 catch (PublicationException ex)
                 {
-                    var outcome = ex.Code switch
-                    {
-                        DiagnosticCodes.XbrApprovalRequired => RunOutcome.AuthorizationFailure,
-                        DiagnosticCodes.XbrSyntheticProfileNotAuthorized => RunOutcome.IncompleteConfiguration,
-                        _ => RunOutcome.InvalidMapping
-                    };
-                    RecordDestinationFailure(ex.ToDiagnostic(), outcome);
+                    RecordDestinationFailure(ex.ToDiagnostic(), PublicationFailureOutcome(ex));
                 }
                 catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
                 {
@@ -913,22 +918,38 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                 try
                 {
                     var publisher = new PublicationService(new RunJournal());
-                    var receipt = publisher.PublishAuthorized(
+                    var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+                    var receipt = await publisher.PublishAuthorizedAsync(
                         output,
-                        System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
+                        payload,
                         workspaceRoot,
                         p,
                         profile,
                         allowSyntheticProfile,
-                        result);
+                        result,
+                        (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                            stagedPath, output, result, token),
+                        cts.Token);
                     Console.Error.WriteLine(
-                        $"Published {receipt.DestinationPath} ({result.XbrlJson.Length} bytes) "
+                        $"Published {receipt.DestinationPath} ({payload.Length} bytes) "
                         + $"run={receipt.RunId} digest={receipt.FinalDigest}.");
                 }
                 catch (PublicationException ex)
                 {
-                    Console.Error.WriteLine($"PUB: {ex.Code}: {ex.Message}");
-                    return ExitCodesLocal.OperationalFailure;
+                    RecordDestinationFailure(ex.ToDiagnostic(), PublicationFailureOutcome(ex));
+                }
+                catch (OperationCanceledException)
+                {
+                    RecordDestinationFailure(new Diagnostic
+                    {
+                        Code = DiagnosticCodes.MapExecutionCancelled,
+                        Subsystem = DiagnosticSubsystem.Publication,
+                        Severity = DiagnosticSeverity.Error,
+                        Stage = DiagnosticStage.Publication,
+                        IsBlocking = true,
+                        Message = "Staged-artifact validation or publication was cancelled; the previous destination was preserved.",
+                        OperationId = result.Manifest.OperationId
+                    }, RunOutcome.Cancelled);
                 }
             }
         }

@@ -518,6 +518,123 @@ public sealed class MappingJobService
     }
 
     /// <summary>
+    /// Validate the exact bytes reread from the publisher's private staging file. This
+    /// is a second profile-worker adjudication at the final publication boundary; the
+    /// returned digest is checked again by <see cref="PublicationService"/> before the
+    /// staged file can replace the destination.
+    /// </summary>
+    public async Task<string> ValidateStagedArtifactAsync(
+        string stagedPath,
+        string destinationPath,
+        JobResult result,
+        CancellationToken cancellationToken = default)
+    {
+        var manifest = result.Manifest;
+        var output = manifest.Outputs.SingleOrDefault(identity => identity.Kind == "xbrl-json");
+        if (output is null)
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "The completed run has no xBRL-JSON output identity to validate.",
+                manifest.RunId, destinationPath);
+
+        byte[] bytes;
+        try
+        {
+            bytes = await File.ReadAllBytesAsync(stagedPath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new PublicationException(DiagnosticCodes.PubStagingFailed,
+                $"Could not read the staged artifact for profile validation: {ex.Message}",
+                manifest.RunId, destinationPath);
+        }
+
+        var digest = RunManifest.ComputeSha256(bytes);
+        if (!StringComparer.Ordinal.Equals(output.Digest, digest) || output.Bytes != bytes.Length)
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "Staged report bytes do not match the artifact recorded by the completed run.",
+                manifest.RunId, destinationPath);
+
+        string reportJson;
+        try
+        {
+            reportJson = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                .GetString(bytes);
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                $"Staged xBRL-JSON is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
+        }
+
+        var operationId = manifest.OperationId + "-staged-" + Guid.NewGuid().ToString("N");
+        WorkerResponse response;
+        try
+        {
+            response = await _worker.RequestAsync(new WorkerRequest(
+                WorkerOperations.ValidateReport,
+                OperationId: operationId,
+                JobId: manifest.RunId,
+                ProfileDigest: _profile.Digest,
+                DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
+                Payload: JsonSerializer.SerializeToElement(reportJson)), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw new PublicationException(DiagnosticCodes.WkrTimeout,
+                $"Staged artifact validation was interrupted: {ex.Message}", manifest.RunId, destinationPath);
+        }
+        catch (Exception ex)
+        {
+            throw new PublicationException(DiagnosticCodes.WkrCrash,
+                $"Validation worker failed while checking the staged artifact: {ex.Message}",
+                manifest.RunId, destinationPath);
+        }
+
+        if (!StringComparer.Ordinal.Equals(response.OperationId, operationId))
+            throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
+                "Validation worker response did not match the staged-artifact request.",
+                manifest.RunId, destinationPath);
+
+        var diagnostics = response.Diagnostics ?? Array.Empty<Diagnostic>();
+        var blocking = diagnostics.FirstOrDefault(diagnostic => diagnostic.IsBlocking);
+        if (response.Status == WorkerStatus.Success && blocking is null)
+        {
+            manifest.ValidatedArtifactDigest = digest;
+            manifest.Diagnostics = manifest.Diagnostics.Concat(diagnostics).ToArray();
+            return digest;
+        }
+
+        if (response.Status == WorkerStatus.Cancelled)
+            throw new OperationCanceledException(
+                response.Error ?? "The validation worker cancelled staged-artifact validation.",
+                cancellationToken);
+
+        var code = response.Status switch
+        {
+            WorkerStatus.TimedOut => DiagnosticCodes.WkrTimeout,
+            WorkerStatus.Crash => DiagnosticCodes.WkrCrash,
+            WorkerStatus.IncompleteValidation => diagnostics.FirstOrDefault(diagnostic =>
+                diagnostic.IsBlocking && diagnostic.Code is DiagnosticCodes.XbrWorkerUnavailable
+                    or DiagnosticCodes.XbrValidationIncomplete)?.Code ?? DiagnosticCodes.XbrValidationIncomplete,
+            WorkerStatus.Success or WorkerStatus.DomainFailure => blocking?.Code ?? DiagnosticCodes.XbrValidationFailed,
+            _ => DiagnosticCodes.XbrValidationIncomplete
+        };
+        var detail = blocking?.Message ?? response.Error ??
+            $"Validation worker ended with status '{response.Status}'.";
+        throw new PublicationException(code,
+            $"The staged report failed profile validation: {detail}", manifest.RunId, destinationPath);
+    }
+
+    /// <summary>
     /// Compare a successful full-run result with the selected SQLite target using a
     /// read-only destination snapshot. No publication receipt or database mutation is made.
     /// </summary>

@@ -170,7 +170,7 @@ public sealed class RunJournal
             return File.Exists(EntryPath(runId)) ? JsonSerializer.Deserialize<JournalEntry>(File.ReadAllText(EntryPath(runId))) : null;
         using var connection = _database.OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc FROM run_journal WHERE run_id=$id";
+        command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc,validated_digest FROM run_journal WHERE run_id=$id";
         command.Parameters.AddWithValue("$id", runId);
         using var reader = command.ExecuteReader();
         return reader.Read() ? ReadEntry(reader) : null;
@@ -185,11 +185,12 @@ public sealed class RunJournal
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO run_journal(run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc)
-                VALUES($id,$destination,$state,$staged,$final,$lock,$updated)
+                INSERT INTO run_journal(run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc,validated_digest)
+                VALUES($id,$destination,$state,$staged,$final,$lock,$updated,$validated)
                 ON CONFLICT(run_id) DO UPDATE SET destination_path=excluded.destination_path,state=excluded.state,
                     staged_digest=excluded.staged_digest,final_digest=excluded.final_digest,
-                    lock_token=excluded.lock_token,updated_utc=excluded.updated_utc;
+                    lock_token=excluded.lock_token,updated_utc=excluded.updated_utc,
+                    validated_digest=excluded.validated_digest;
                 """;
             Bind(command, entry);
             command.ExecuteNonQuery();
@@ -197,10 +198,11 @@ public sealed class RunJournal
             receipt.Transaction = transaction;
             if (entry.State == JournalState.Finalized && entry.FinalDigest is not null)
             {
-                receipt.CommandText = "INSERT INTO publication_receipts(run_id,final_digest,completed_utc) VALUES($id,$digest,$updated) ON CONFLICT(run_id) DO UPDATE SET final_digest=excluded.final_digest,completed_utc=excluded.completed_utc";
+                receipt.CommandText = "INSERT INTO publication_receipts(run_id,final_digest,completed_utc,validated_digest) VALUES($id,$digest,$updated,$validated) ON CONFLICT(run_id) DO UPDATE SET final_digest=excluded.final_digest,completed_utc=excluded.completed_utc,validated_digest=excluded.validated_digest";
                 receipt.Parameters.AddWithValue("$id", entry.RunId);
                 receipt.Parameters.AddWithValue("$digest", entry.FinalDigest);
                 receipt.Parameters.AddWithValue("$updated", entry.UpdatedUtc.ToString("O"));
+                receipt.Parameters.AddWithValue("$validated", (object?)entry.ValidatedDigest ?? DBNull.Value);
                 receipt.ExecuteNonQuery();
             }
             else
@@ -226,7 +228,7 @@ public sealed class RunJournal
         {
             using var connection = _database.OpenConnection();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc FROM run_journal ORDER BY run_id";
+            command.CommandText = "SELECT run_id,destination_path,state,staged_digest,final_digest,lock_token,updated_utc,validated_digest FROM run_journal ORDER BY run_id";
             using var reader = command.ExecuteReader();
             var entries = new List<JournalEntry>();
             while (reader.Read()) entries.Add(ReadEntry(reader));
@@ -273,7 +275,8 @@ public sealed class RunJournal
     private static JournalEntry ReadEntry(SqliteDataReader reader) => new(
         reader.GetString(0), reader.GetString(1), (JournalState)reader.GetInt32(2),
         reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4),
-        reader.IsDBNull(5) ? null : reader.GetString(5), DateTimeOffset.Parse(reader.GetString(6), System.Globalization.CultureInfo.InvariantCulture));
+        reader.IsDBNull(5) ? null : reader.GetString(5), DateTimeOffset.Parse(reader.GetString(6), System.Globalization.CultureInfo.InvariantCulture))
+        { ValidatedDigest = reader.IsDBNull(7) ? null : reader.GetString(7) };
 
     private static void Bind(SqliteCommand command, JournalEntry entry)
     {
@@ -284,20 +287,28 @@ public sealed class RunJournal
         command.Parameters.AddWithValue("$final", (object?)entry.FinalDigest ?? DBNull.Value);
         command.Parameters.AddWithValue("$lock", (object?)entry.LockToken ?? DBNull.Value);
         command.Parameters.AddWithValue("$updated", entry.UpdatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$validated", (object?)entry.ValidatedDigest ?? DBNull.Value);
     }
 
     /// <summary>
     /// Scan for entries that never reached <see cref="JournalState.Finalized"/> and
-    /// verify each against the destination digest. An entry whose destination already
-    /// matches the staged digest is finalized post-hoc (the replace actually landed);
-    /// anything else is reported for retry, never blindly re-run.
+    /// verify entries known to have passed validation or replacement against the
+    /// destination digest. A merely staged or digest-verified payload cannot create a
+    /// receipt, even when an older destination happens to contain identical bytes.
+    /// Anything not conclusively confirmed is reported for retry, never blindly re-run.
     /// </summary>
     public IReadOnlyList<RecoveryAction> RecoverUnfinalized()
     {
         var actions = new List<RecoveryAction>();
         foreach (var entry in AllEntries())
         {
-            if (entry.State == JournalState.Finalized) continue;
+            if (entry.State is JournalState.Finalized or JournalState.Aborted) continue;
+            if (entry.State is not (JournalState.Validated or JournalState.Replaced))
+            {
+                actions.Add(new RecoveryAction(entry.RunId, RecoveryDecision.RetryNeeded,
+                    "No validated or replaced state was recorded; publication was not confirmed."));
+                continue;
+            }
             var exists = File.Exists(entry.DestinationPath);
             if (exists && entry.StagedDigest is not null
                 && DestinationLock.DigestFile(entry.DestinationPath) == entry.StagedDigest)
@@ -318,7 +329,16 @@ public sealed class RunJournal
     }
 }
 
-public enum JournalState { Staged, Verified, Replaced, Finalized }
+// Numeric values 0-3 are persisted by existing local databases and must remain stable.
+public enum JournalState
+{
+    Staged = 0,
+    Verified = 1,
+    Replaced = 2,
+    Finalized = 3,
+    Aborted = 4,
+    Validated = 5
+}
 public enum RecoveryDecision { Finalized, RetryNeeded }
 
 public sealed record JournalEntry(
@@ -328,6 +348,10 @@ public sealed record JournalEntry(
     string? StagedDigest,
     string? FinalDigest,
     string? LockToken,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc)
+{
+    /// <summary>Digest of the exact staged artifact accepted by the profile worker.</summary>
+    public string? ValidatedDigest { get; init; }
+}
 
 public sealed record RecoveryAction(string RunId, RecoveryDecision Decision, string Detail);

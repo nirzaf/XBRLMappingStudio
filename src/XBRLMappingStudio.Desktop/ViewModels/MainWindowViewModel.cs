@@ -2269,7 +2269,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var result = await new MappingJobService(profile, worker).RunAsync(
+            var service = new MappingJobService(profile, worker);
+            var result = await service.RunAsync(
                 Session.Project, connections, ReadParameters(), preview: false, CancellationToken.None);
             ShowRunResult(result);
             if (!result.IsPublishable)
@@ -2277,9 +2278,12 @@ public sealed class MainWindowViewModel : ViewModelBase
                 StatusText = $"Execution finished: {result.Manifest.Outcome}. No artifact was published.";
                 return;
             }
-            var receipt = new PublicationService(new RunJournal()).PublishAuthorized(
-                outputPath, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), root,
-                Session.Project, profile, AllowSyntheticProfile, result);
+            var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+            var receipt = await new PublicationService(new RunJournal()).PublishAuthorizedAsync(
+                outputPath, payload, root,
+                Session.Project, profile, AllowSyntheticProfile, result,
+                (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                    stagedPath, outputPath, result, token), CancellationToken.None);
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";
         }
         catch (Exception ex)

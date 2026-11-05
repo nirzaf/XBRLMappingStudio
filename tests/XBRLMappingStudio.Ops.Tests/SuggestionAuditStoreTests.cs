@@ -106,11 +106,17 @@ public sealed class SuggestionAuditStoreTests : IDisposable
     {
         var path = NewDbPath();
 
-        // 1. Open once so the base migration creates the v1 tables + v2 columns; then
-        //    roll the file back to a strict v1 shape to simulate a pre-upgrade state.
+        // 1. Open once to create the current schema, then remove the v2/v3 columns
+        //    and roll the file back to a strict v1 shape.
         var seed = new LocalApplicationDatabase(path);
         using (var connection = seed.OpenConnection())
         {
+            using var rollbackColumns = connection.CreateCommand();
+            rollbackColumns.CommandText = """
+                ALTER TABLE publication_receipts DROP COLUMN validated_digest;
+                ALTER TABLE run_journal DROP COLUMN validated_digest;
+                """;
+            rollbackColumns.ExecuteNonQuery();
             using var drop = connection.CreateCommand();
             drop.CommandText = "DROP TABLE suggestion_audit;";
             drop.ExecuteNonQuery();

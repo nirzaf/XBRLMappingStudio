@@ -8,12 +8,11 @@ namespace XBRLMappingStudio.Application;
 public sealed class LocalApplicationDatabase
 {
     /// <summary>
-    /// AI06: v2 widens <c>suggestion_audit</c> with the governed-actor and prompt-
-    /// template columns required to reconstruct a reviewed change without leaking
-    /// raw payloads. Migration is non-destructive and forward-only; a v3 column set
-    /// is added the same way when the next contract needs it.
+    /// AI06: v2 widens <c>suggestion_audit</c> with governed-actor and prompt-template
+    /// columns. v3 adds the digest of the artifact accepted by the profile worker to
+    /// the publication journal and durable receipt. Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -191,6 +190,17 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=2;
                 """;
             migration2.ExecuteNonQuery();
+        }
+        if (version < 3)
+        {
+            using var migration3 = connection.CreateCommand();
+            migration3.Transaction = transaction;
+            migration3.CommandText = """
+                ALTER TABLE run_journal ADD COLUMN validated_digest TEXT;
+                ALTER TABLE publication_receipts ADD COLUMN validated_digest TEXT;
+                PRAGMA user_version=3;
+                """;
+            migration3.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

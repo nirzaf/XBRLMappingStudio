@@ -12,13 +12,18 @@ public sealed record PublicationReceipt(
     string StagedDigest,
     string FinalDigest,
     string LockToken,
-    DateTimeOffset CompletedUtc);
+    DateTimeOffset CompletedUtc)
+{
+    /// <summary>Digest of the exact staged artifact accepted by the profile worker.</summary>
+    public string? ValidatedDigest { get; init; }
+}
 
 /// <summary>
-/// Four-phase destination publication: Stage → Verify → Replace → Receipt (OPS02).
-/// The payload is written to a private staging sidecar, re-opened and digest-checked
-/// before it may touch the destination, swapped atomically via <see cref="File.Replace"/>
-/// under a <see cref="DestinationLock"/>, and only then finalized in the journal.
+/// Five-phase destination publication: Stage → Verify → Validate → Replace → Receipt
+/// (OPS02). The payload is written to a private staging sidecar, re-opened and
+/// digest-checked, adjudicated by the selected profile worker, and rechecked under a
+/// <see cref="DestinationLock"/> before an atomic replacement via <see cref="File.Replace"/>.
+/// The journal persists the validated digest and final receipt.
 /// A failure injected at any phase leaves the previously accepted destination intact;
 /// a crash between phases is adjudicated by <see cref="RunJournal.RecoverUnfinalized"/>.
 /// </summary>
@@ -28,16 +33,22 @@ public sealed class PublicationService
 
     public PublicationService(RunJournal journal) => _journal = journal;
 
-    /// <summary>Authorize, scope and publish one completed report at the final write boundary.</summary>
-    public PublicationReceipt PublishAuthorized(
+    /// <summary>
+    /// Authorize, validate the exact staged report, and publish it at the final write
+    /// boundary. The validator must return the digest of the bytes it adjudicated.
+    /// </summary>
+    public async Task<PublicationReceipt> PublishAuthorizedAsync(
         string destinationPath,
         byte[] payload,
         string workspaceRoot,
         MappingProject project,
         FilingProfile profile,
         bool allowSyntheticProfile,
-        JobResult result)
+        JobResult result,
+        Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
         var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
         if (gate.HasBlockingErrors)
@@ -66,7 +77,15 @@ public sealed class PublicationService
                 manifest.RunId, destinationPath);
 
         var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
-        return Publish(safeDestination, payload, manifest.RunId);
+        var receipt = await PublishCoreAsync(safeDestination, payload, manifest.RunId,
+            validateStagedArtifactAsync, cancellationToken).ConfigureAwait(false);
+        manifest.PublishedArtifactDigest = receipt.FinalDigest;
+        manifest.Outputs = manifest.Outputs
+            .Select(output => output.Kind == "xbrl-json"
+                ? output with { Path = safeDestination }
+                : output)
+            .ToArray();
+        return receipt;
     }
 
     /// <summary>
@@ -80,6 +99,19 @@ public sealed class PublicationService
         byte[] payload,
         string? runId = null,
         Action<string>? beforeReplaceFault = null,
+        TimeSpan? lockTimeout = null,
+        Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync = null,
+        CancellationToken cancellationToken = default)
+        => PublishCoreAsync(destinationPath, payload, runId, validateStagedArtifactAsync,
+            cancellationToken, beforeReplaceFault, lockTimeout).GetAwaiter().GetResult();
+
+    private async Task<PublicationReceipt> PublishCoreAsync(
+        string destinationPath,
+        byte[] payload,
+        string? runId,
+        Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync,
+        CancellationToken cancellationToken,
+        Action<string>? beforeReplaceFault = null,
         TimeSpan? lockTimeout = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
@@ -92,77 +124,203 @@ public sealed class PublicationService
         string stagedDigest;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             File.WriteAllBytes(stagedPath, payload);
             stagedDigest = DestinationLock.DigestFile(stagedPath);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            TryDelete(stagedPath);
             throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
                 $"Staging write for run '{runId}' failed: {ex.Message}", runId, full);
         }
-        _journal.Save(new JournalEntry(runId, full, JournalState.Staged,
-            stagedDigest, null, null, DateTimeOffset.UtcNow));
+        try
+        {
+            _journal.Save(new JournalEntry(runId, full, JournalState.Staged,
+                stagedDigest, null, null, DateTimeOffset.UtcNow));
+        }
+        catch (Exception ex)
+        {
+            TryDelete(stagedPath);
+            throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                $"Could not record the staged publication in the run journal: {ex.Message}", runId, full);
+        }
 
         // ---- Verify: re-open the staged bytes and confirm the digest matches the intent.
         var expectedDigest = DestinationLock.DigestBytes(payload);
         if (stagedDigest != expectedDigest)
         {
-            TryDelete(stagedPath);
-            _journal.Save(LoadAndAdvance(runId, full, JournalState.Staged, null, stagedDigest));
+            Abort(runId, full, stagedPath, stagedDigest, null);
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
                 $"Staged artifact digest {stagedDigest} does not match the payload digest {expectedDigest}.",
                 runId, full);
         }
-        _journal.Save(new JournalEntry(runId, full, JournalState.Verified,
-            stagedDigest, null, null, DateTimeOffset.UtcNow));
+        try
+        {
+            _journal.Save(new JournalEntry(runId, full, JournalState.Verified,
+                stagedDigest, null, null, DateTimeOffset.UtcNow));
+        }
+        catch (Exception ex)
+        {
+            Abort(runId, full, stagedPath, stagedDigest, null);
+            throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                $"Could not record staged-byte verification: {ex.Message}", runId, full);
+        }
+
+        var validatedDigest = stagedDigest;
+        if (validateStagedArtifactAsync is not null)
+        {
+            try
+            {
+                validatedDigest = await validateStagedArtifactAsync(stagedPath, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Abort(runId, full, stagedPath, stagedDigest, null);
+                if (ex is PublicationException or OperationCanceledException) throw;
+                throw PublicationFailed(DiagnosticCodes.XbrValidationIncomplete,
+                    $"Staged artifact validation did not complete: {ex.Message}", runId, full);
+            }
+
+            var postValidationDigest = TryDigest(stagedPath);
+            if (!StringComparer.Ordinal.Equals(validatedDigest, stagedDigest)
+                || !StringComparer.Ordinal.Equals(postValidationDigest, stagedDigest))
+            {
+                Abort(runId, full, stagedPath, stagedDigest, null,
+                    StringComparer.Ordinal.Equals(validatedDigest, stagedDigest) ? stagedDigest : null);
+                throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                    "The staged artifact changed during validation or the validator reported a different digest.",
+                    runId, full);
+            }
+
+            try
+            {
+                _journal.Save(new JournalEntry(runId, full, JournalState.Validated,
+                    stagedDigest, null, null, DateTimeOffset.UtcNow)
+                { ValidatedDigest = validatedDigest });
+            }
+            catch (Exception ex)
+            {
+                Abort(runId, full, stagedPath, stagedDigest, null, validatedDigest);
+                throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                    $"Could not record staged validation evidence: {ex.Message}", runId, full);
+            }
+        }
 
         // ---- Replace: acquire the destination lock (waited, so concurrent publishers
         // serialize), then swap atomically.
-        using var lk = DestinationLock.AcquireAsync(
-            full, lockTimeout ?? TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
-        _journal.Save(new JournalEntry(runId, full, JournalState.Verified,
-            stagedDigest, null, lk.Token, DateTimeOffset.UtcNow));
-
-        var backupPath = full + $".xbsl-prev-{runId}";
+        DestinationLock lk;
         try
         {
-            beforeReplaceFault?.Invoke(stagedPath); // test seam: simulate host failure here
-            if (File.Exists(full))
-                File.Replace(stagedPath, full, backupPath);
-            else
-                File.Move(stagedPath, full);
+            lk = await DestinationLock.AcquireAsync(
+                full, lockTimeout ?? TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch
         {
-            // Prior destination untouched by the failed swap; staging is cleaned up.
-            TryDelete(stagedPath);
-            TryDelete(backupPath);
-            throw PublicationFailed(DiagnosticCodes.PubPartialFailure,
-                $"Atomic replace failed for run '{runId}'; prior destination preserved. {ex.Message}",
-                runId, full);
+            Abort(runId, full, stagedPath, stagedDigest, null,
+                validateStagedArtifactAsync is null ? null : validatedDigest);
+            throw;
         }
-        _journal.Save(new JournalEntry(runId, full, JournalState.Replaced,
-            stagedDigest, null, lk.Token, DateTimeOffset.UtcNow));
 
-        // ---- Verify-after-replace + Receipt: final bytes must equal the staged ones.
-        var finalDigest = DestinationLock.DigestFile(full);
-        if (finalDigest != stagedDigest)
+        using (lk)
         {
-            throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
-                $"Post-replace digest {finalDigest} diverges from staged {stagedDigest}.",
-                runId, full);
+            try
+            {
+                _journal.Save(new JournalEntry(runId, full,
+                    validateStagedArtifactAsync is null ? JournalState.Verified : JournalState.Validated,
+                    stagedDigest, null, lk.Token, DateTimeOffset.UtcNow)
+                { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+            }
+            catch (Exception ex)
+            {
+                Abort(runId, full, stagedPath, stagedDigest, lk.Token,
+                    validateStagedArtifactAsync is null ? null : validatedDigest);
+                throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                    $"Could not record the locked publication state: {ex.Message}", runId, full);
+            }
+
+            var backupPath = full + $".xbsl-prev-{runId}";
+            try
+            {
+                beforeReplaceFault?.Invoke(stagedPath); // test seam: simulate host failure here
+                var preReplaceDigest = TryDigest(stagedPath);
+                if (!StringComparer.Ordinal.Equals(preReplaceDigest, validatedDigest))
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token,
+                        validateStagedArtifactAsync is null ? null : validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                        "The staged artifact changed after validation and before replacement.", runId, full);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (File.Exists(full))
+                    File.Replace(stagedPath, full, backupPath);
+                else
+                    File.Move(stagedPath, full);
+            }
+            catch (PublicationException)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                Abort(runId, full, stagedPath, stagedDigest, lk.Token,
+                    validateStagedArtifactAsync is null ? null : validatedDigest);
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Prior destination untouched by the failed swap; staging is cleaned up.
+                TryDelete(stagedPath);
+                TryDelete(backupPath);
+                _journal.Save(new JournalEntry(runId, full, JournalState.Aborted,
+                    stagedDigest, null, lk.Token, DateTimeOffset.UtcNow)
+                { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+                throw PublicationFailed(DiagnosticCodes.PubPartialFailure,
+                    $"Atomic replace failed for run '{runId}'; prior destination preserved. {ex.Message}",
+                    runId, full);
+            }
+            _journal.Save(new JournalEntry(runId, full, JournalState.Replaced,
+                stagedDigest, null, lk.Token, DateTimeOffset.UtcNow)
+            { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+
+            // ---- Verify-after-replace + Receipt: final bytes must equal the staged ones.
+            var finalDigest = DestinationLock.DigestFile(full);
+            if (!StringComparer.Ordinal.Equals(finalDigest, validatedDigest))
+            {
+                throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                    $"Post-replace digest {finalDigest} diverges from validated {validatedDigest}.",
+                    runId, full);
+            }
+            TryDelete(backupPath); // prior accepted copy no longer needed
+            var receipt = new PublicationReceipt(runId, full, stagedDigest, finalDigest,
+                lk.Token, DateTimeOffset.UtcNow)
+            {
+                ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest
+            };
+            _journal.Save(new JournalEntry(runId, full, JournalState.Finalized,
+                stagedDigest, finalDigest, lk.Token, DateTimeOffset.UtcNow)
+            { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+            return receipt;
         }
-        TryDelete(backupPath); // prior accepted copy no longer needed
-        var receipt = new PublicationReceipt(runId, full, stagedDigest, finalDigest,
-            lk.Token, DateTimeOffset.UtcNow);
-        _journal.Save(new JournalEntry(runId, full, JournalState.Finalized,
-            stagedDigest, finalDigest, lk.Token, DateTimeOffset.UtcNow));
-        return receipt;
     }
 
-    private JournalEntry LoadAndAdvance(string runId, string full, JournalState state,
-        string? finalDigest, string? stagedDigest)
-        => new(runId, full, state, stagedDigest, finalDigest, null, DateTimeOffset.UtcNow);
+    private void Abort(string runId, string full, string stagedPath, string? stagedDigest,
+        string? lockToken, string? validatedDigest = null)
+    {
+        TryDelete(stagedPath);
+        _journal.Save(new JournalEntry(runId, full, JournalState.Aborted,
+            stagedDigest, null, lockToken, DateTimeOffset.UtcNow)
+        { ValidatedDigest = validatedDigest });
+    }
+
+    private static string? TryDigest(string path)
+    {
+        try { return File.Exists(path) ? DestinationLock.DigestFile(path) : null; }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
 
     private static PublicationException PublicationFailed(string code, string message,
         string runId, string destination)
@@ -172,6 +330,7 @@ public sealed class PublicationService
     {
         try { if (File.Exists(path)) File.Delete(path); }
         catch (IOException) { /* best effort */ }
+        catch (UnauthorizedAccessException) { /* best effort */ }
     }
 }
 

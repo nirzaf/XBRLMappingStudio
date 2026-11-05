@@ -14,8 +14,9 @@ public sealed class LocalApplicationDatabaseTests
         Assert.Equal("ok", database.IntegrityCheck());
 
         var journal = new RunJournal(databasePath: path);
-        var staged = new JournalEntry("run-1", "/workspace/report.json", JournalState.Staged,
-            "sha256:abc", null, "lock", DateTimeOffset.UtcNow);
+        var staged = new JournalEntry("run-1", "/workspace/report.json", JournalState.Validated,
+            "sha256:abc", null, "lock", DateTimeOffset.UtcNow)
+        { ValidatedDigest = "sha256:abc" };
         journal.Save(staged);
         var finalized = staged with { State = JournalState.Finalized, FinalDigest = staged.StagedDigest };
         journal.Save(finalized);
@@ -24,9 +25,51 @@ public sealed class LocalApplicationDatabaseTests
         Assert.Single(journal.AllEntries());
         using var connection = database.OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT final_digest FROM publication_receipts WHERE run_id=$id";
+        command.CommandText = "SELECT final_digest,validated_digest FROM publication_receipts WHERE run_id=$id";
         command.Parameters.AddWithValue("$id", "run-1");
-        Assert.Equal("sha256:abc", command.ExecuteScalar());
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("sha256:abc", reader.GetString(0));
+        Assert.Equal("sha256:abc", reader.GetString(1));
+    }
+
+    [Fact]
+    public void MigratesVersionTwoDatabaseWithDurableValidatedDigestColumns()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "v2-state.db");
+        using (var legacy = new SqliteConnection($"Data Source={path}"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE run_journal (
+                    run_id TEXT PRIMARY KEY NOT NULL, destination_path TEXT NOT NULL,
+                    state INTEGER NOT NULL, staged_digest TEXT, final_digest TEXT,
+                    lock_token TEXT, updated_utc TEXT NOT NULL
+                );
+                CREATE TABLE publication_receipts (
+                    run_id TEXT PRIMARY KEY NOT NULL, final_digest TEXT NOT NULL,
+                    completed_utc TEXT NOT NULL
+                );
+                PRAGMA user_version=2;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var database = new LocalApplicationDatabase(path);
+        var journal = new RunJournal(databasePath: path);
+        var receiptEntry = new JournalEntry("run-v2", "/workspace/report.json", JournalState.Finalized,
+            "sha256:final", "sha256:final", "lock", DateTimeOffset.UtcNow)
+        { ValidatedDigest = "sha256:validated" };
+        journal.Save(receiptEntry);
+
+        Assert.Equal(3, LocalApplicationDatabase.CurrentSchemaVersion);
+        Assert.Equal(receiptEntry, journal.Load("run-v2"));
+        using var connection = database.OpenConnection();
+        using var check = connection.CreateCommand();
+        check.CommandText = "SELECT validated_digest FROM publication_receipts WHERE run_id='run-v2'";
+        Assert.Equal("sha256:validated", check.ExecuteScalar());
     }
 
     [Fact]

@@ -141,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | 319 test cases across 8 suites; 317 pass and 2 Arelle subprocess cases are gated. |
+| Tests | xUnit 2.9.3 | Local Release suite: 388 passed and 3 Arelle-gated cases skipped; all 3 gated cases passed locally with the pinned worker runtime. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -239,13 +239,19 @@ this development opt-in does not qualify a regulator profile.
 | Command | Purpose |
 |---|---|
 | `inspect <project.xmap>` | Print the project's bound sources and schemas. |
+| `inspect-source <project.xmap> [--binding <id>]` | Inspect the selected SQLite source schema and capabilities. |
 | `validate <project.xmap> [--allow-synthetic-profile]` | Run graph validation; the built-in development profile requires explicit opt-in. |
-| `preview <project.xmap> --binding <id>=<path> --rows <n> [--allow-synthetic-profile]` | Sampled, visibly-partial execution. |
-| `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>] [--allow-synthetic-profile]` | Full run producing xBRL-JSON; all source, output and manifest paths stay inside the workspace root (defaults to the project directory). |
+| `configure-destination <project.xmap> ...` | Save a CSV, Excel, JSON, XML, or existing SQLite target plan; use `--kind`, `--path`, and the matching format/table/key options shown by `--help`. |
+| `preview <project.xmap> --binding <id>=<path> --rows <n> [--allow-synthetic-profile] [--arelle ...]` | Sampled, visibly-partial execution. |
+| `execute <project.xmap> --binding <id>=<path> --output <path> [--workspace-root <dir>] [--allow-synthetic-profile] [--arelle ...]` | Full run producing xBRL-JSON. The publisher validates the exact staged bytes with the selected profile worker before replacing the destination; source, output, and manifest paths stay inside the workspace root. |
+| `execute <project.xmap> --binding <id>=<path> --publish-destination [--allow-synthetic-profile] [--arelle ...]` | Publish the saved destination plan (file or SQLite); cannot be combined with `--output`. |
 | `taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search against the synthetic development taxonomy. |
 | `validate-artifact <file.xbrl.json> [--allow-synthetic-profile]` | Local filing-rule validation requires the explicit development-profile flag; add `--arelle --python <exe> --taxonomy-root <dir>` (optionally `--package <zip>`, `--plugin <name>`, `--disclosure-system <name>`) for independent offline Arelle validation. Install the pinned worker runtime from `tools/worker/requirements.lock`. |
 | `inspect-run-result <runId>` | Look up a run's journal result. |
 | `support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]` | Redacted diagnostic bundle. |
+
+For `--arelle`, optional worker settings are `--python <exe>` and
+`--taxonomy-root <dir>`. The CLI requires these settings to be used with `--arelle`.
 
 **Exit codes**
 
@@ -272,17 +278,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-319 test cases across 8 xUnit projects: the latest local Windows Release run reports 317 passed and 2 gated Arelle subprocess cases skipped; the dedicated pinned worker job runs both Arelle cases:
+The latest local Release run reports 388 passed and 3 Arelle-gated subprocess cases skipped. With the pinned Python 3.12 runtime, all 3 gated .NET Arelle cases pass; the worker suite passes 19 tests and skips its Windows symlink-privilege case. The table shows current checkout totals; exact-head GitHub Actions verification will run after this slice is pushed:
 
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 33 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
 | XBRL.Tests | 49 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
 | AI.Tests | 47 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 49 | XLSX input/output with worksheet selection, CSV/JSON/XML round-trips and hardening, JSON and XML writers with staging/reconciliation, SQLite source snapshot under WAL writes, read-only destination schema inspection, primary-key row identity and target upsert |
-| Ops.Tests | 47 | Destination locking/publication/journal, local app database migrations and backup, SuggestionAuditStore v1→v2, IO01 capability surfacing, worker supervision, path guard, redaction |
-| Integration.Tests | 63 | CLI parity, destination config save and replay, invalid-target no-mutation, fail-closed profile validation, exact-decimal SQLite publication and receipt replay, schema affinity/key validation, independent cross-format fixture oracle, publication gate, XBR08 worker timeout/crash/deadline, schema drift, acceptance scenarios |
-| Desktop.Tests | 23 | Editing session: multi-select, reconnect, undo/redo, layout-vs-semantics, pinned workbook loading, SQLite destination schema review, no-write dry run, cancel, stale selection and receipt workflow |
+| Adapters.Tests | 55 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
+| Ops.Tests | 56 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 98 | 95 pass; 3 Arelle-gated cases run with the pinned worker. Covers CLI parity, destination workflows, staged report validation, preserved output on incomplete validation, profile gates, receipts and worker failures |
+| Desktop.Tests | 45 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, suggestion review and audit persistence |
 | Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash
@@ -318,23 +324,25 @@ git tag v1.0.0 && git push origin v1.0.0
 
 ## Implementation status
 
-Capabilities are tracked by stable IDs and delivery gates (G0–G5; full matrix in
-[`docs/implementation-status.md`](./docs/implementation-status.md)). The
-following IDs have implementation code and repository tests; qualification limits still apply:
+Capabilities are tracked by stable guide IDs and delivery gates in
+[`docs/implementation-status.md`](./docs/implementation-status.md). This summary
+reports evidence-backed subsets; an interface or passing unit test alone does not
+complete a guide ID:
 
-| Area | Implemented IDs |
-|---|---|
-| Foundation | `BASE02`–`BASE04`, `BASE01` (synthetic column) |
-| Mapping engine | `MAP01`–`MAP08` |
-| Adapters | `IO01`–`IO06` (JSON/XML writers closed Wave 2), `IO07`–`IO08` (SQLite source and target, partial) |
-| XBRL | `XBR01`–`XBR08` (synthetic profile; Arelle `validate-artifact` path; `XBR07` required-check completeness; `XBR08` distinct timeout/crash terminal outcomes) |
-| Desktop | `UI01` (development build), `UI02` (canvas prototype), `UI03`–`UI04`, `UI06` (headless workflow tests) |
-| AI baseline | `AI01`–`AI04`, `AI06` (offline baseline with durable `suggestion_audit` persistence); `AI05` (single-suggestion apply/undo path) |
-| Operations | `OPS01`–`OPS05`, `OPS08` (`OPS05` partial) |
+| Area | Verified subset | Still open |
+|---|---|---|
+| Foundation | `BASE02`–`BASE04`; `BASE01` synthetic development boundary | Customer rights and production profile decisions |
+| Mapping engine | `MAP01`; `MAP02` for supported graph shapes | `MAP03`–`MAP08` remain partial for resource budgets, reusable functions and provenance drill-down |
+| Adapters | `IO02`–`IO06` for documented subsets; `IO01` and SQLite `IO07`–`IO08` partial | Production database connectors `IO09`, PDF/OCR `IO10`–`IO12`, and stronger snapshot/reconciliation qualification |
+| XBRL | `XBR05` for supported constructs; `XBR07` on the synthetic profile; `XBR08` for tested worker outcomes; exact staged xBRL-JSON validation before file publication | Profile-wide aspects, xBRL-XML output publication and real filing acceptance; `XBR09` remains owner-gated |
+| Desktop | `UI02` for supported graph editing; `UI06` local suggestion-review workflow | Full lifecycle, real-profile workflow, accessibility and signed-installer qualification |
+| AI baseline | `AI01` offline policy, `AI02` local synthetic retrieval, `AI06` durable local audit | `AI03`–`AI05` partial; independent evaluation and controlled rollout `AI07`–`AI08` missing |
+| Operations | `OPS01` for supported inputs; `OPS02` for file publication | `OPS03`–`OPS09` remain partial for authority, reconciliation, packaging, recovery and retention |
+| Performance | None qualified | `PERF01`–`PERF07` need approved hardware and measured evidence |
 
-SQLite source discovery/read and transactional target upsert have repository tests.
-The target publisher remains a callable adapter rather than an end-to-end desktop/CLI
-workflow, and mixed-destination receipt reconciliation remains incomplete (`IO07`–`IO08`, `OPS05`).
+SQLite and CSV/XLSX/JSON/XML destinations are wired through shared application
+services and CLI/Desktop workflows. Mixed-destination receipt reconciliation,
+ambiguous-commit recovery and production database qualification remain incomplete.
 SQLite source rows with declared single or composite primary keys receive deterministic
 SHA-256 hashed row identities used for provenance; the schema inspector exposes
 declared primary-key order. A table without a primary key keeps positional provenance and
@@ -355,12 +363,17 @@ remains the portable source of truth for executable graphs. See
 Per-ID evidence lives in [`docs/decisions/BASE01-decision-record.md`](./docs/decisions/BASE01-decision-record.md).
 Items marked "synthetic" (e.g. the XBRL filing profile) are honestly scoped to the offline
 synthetic OIM profile — they are **not** qualified against a real regulator package.
-Independent Arelle validation is available for existing artifacts through the CLI;
-desktop and full `execute` runs still use the local synthetic validation worker.
-Desktop tests exercise the view model and canvas session without a native Windows session;
-keyboard-only use, screen-reader behavior, native dialogs and installer behavior remain
-unqualified. AI review does not yet persist a governed reviewer identity and complete
-accept/edit/reject/batch audit trail.
+CLI and Desktop resolve saved profile identity and share the fail-closed worker factory;
+non-synthetic profiles remain unavailable until their owner-approved qualification gate
+closes. Authorized xBRL-JSON file publication validates the exact staged bytes through
+that profile worker, rechecks their digest before replacement, and records matching
+validated and published digests. The synthetic profile uses the local worker by default,
+while the CLI Arelle path is covered by the dedicated offline integration job. Desktop
+headless tests and a bounded native smoke support specific workflows, not full Windows
+acceptance. Narrator, native
+dialog and installer behavior remain unqualified. AI review persists local decisions
+durably, but the local OS actor is not an organizational reviewer authority, and batch
+review/evaluation remain open.
 
 ---
 

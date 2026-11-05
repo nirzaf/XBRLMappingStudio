@@ -45,6 +45,76 @@ public class PublicationTests : IDisposable
     }
 
     [Fact]
+    public void Publish_ValidatesExactStagedBytes_AndTiesReceiptToValidatedDigest()
+    {
+        var svc = new PublicationService(_journal);
+        var dest = Dest("validated.json");
+        var payload = Encoding.UTF8.GetBytes("validated-xbrl-json");
+        string? observedStagePath = null;
+
+        var receipt = svc.Publish(dest, payload, runId: "run-validated",
+            validateStagedArtifactAsync: (stage, _) =>
+            {
+                observedStagePath = stage;
+                Assert.Equal(payload, File.ReadAllBytes(stage));
+                return Task.FromResult(DestinationLock.DigestFile(stage));
+            });
+
+        var digest = DestinationLock.DigestBytes(payload);
+        Assert.NotNull(observedStagePath);
+        Assert.Equal(digest, receipt.ValidatedDigest);
+        Assert.Equal(digest, receipt.StagedDigest);
+        Assert.Equal(digest, receipt.FinalDigest);
+        var journalEntry = _journal.Load("run-validated")!;
+        Assert.Equal(JournalState.Finalized, journalEntry.State);
+        Assert.Equal(digest, journalEntry.ValidatedDigest);
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
+    [Fact]
+    public void Publish_ValidationFailureAbortsAndPreservesPriorOutput()
+    {
+        var svc = new PublicationService(_journal);
+        var dest = Dest("validation-failure.json");
+        var prior = Encoding.UTF8.GetBytes("accepted-before-validation");
+        File.WriteAllBytes(dest, prior);
+
+        var ex = Assert.Throws<PublicationException>(() => svc.Publish(dest,
+            Encoding.UTF8.GetBytes("rejected-report"), runId: "run-validation-failure",
+            validateStagedArtifactAsync: (_, _) => throw new PublicationException(
+                DiagnosticCodes.XbrValidationFailed, "Profile rejected staged report.",
+                "run-validation-failure", dest)));
+
+        Assert.Equal(DiagnosticCodes.XbrValidationFailed, ex.Code);
+        Assert.Equal(prior, File.ReadAllBytes(dest));
+        Assert.Equal(JournalState.Aborted, _journal.Load("run-validation-failure")!.State);
+        Assert.Empty(_journal.RecoverUnfinalized());
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
+    [Fact]
+    public void Publish_PostValidationTamperingAbortsBeforeReplace()
+    {
+        var svc = new PublicationService(_journal);
+        var dest = Dest("tampered-stage.json");
+        var prior = Encoding.UTF8.GetBytes("accepted-before-tamper");
+        var payload = Encoding.UTF8.GetBytes("validated-report");
+        File.WriteAllBytes(dest, prior);
+
+        var ex = Assert.Throws<PublicationException>(() => svc.Publish(dest, payload,
+            runId: "run-post-validation-tamper",
+            beforeReplaceFault: stage => File.WriteAllText(stage, "changed-after-validation"),
+            validateStagedArtifactAsync: (stage, _) =>
+                Task.FromResult(DestinationLock.DigestFile(stage))));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, ex.Code);
+        Assert.Equal(prior, File.ReadAllBytes(dest));
+        Assert.Equal(JournalState.Aborted, _journal.Load("run-post-validation-tamper")!.State);
+        Assert.Empty(_journal.RecoverUnfinalized());
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
+    [Fact]
     public void ConcurrentWriters_Serialize_AndEveryReceiptMatchesSomeFinalState()
     {
         var svc = new PublicationService(_journal);
@@ -144,6 +214,22 @@ public class PublicationTests : IDisposable
 
         Assert.Single(actions);
         Assert.Equal(RecoveryDecision.RetryNeeded, actions[0].Decision);
+    }
+
+    [Fact]
+    public void Recovery_DoesNotFinalizeUnvalidatedPayloadEvenWhenPriorOutputMatches()
+    {
+        var dest = Dest("same-content-unvalidated.json");
+        var payload = Encoding.UTF8.GetBytes("same-content");
+        var digest = DestinationLock.DigestBytes(payload);
+        File.WriteAllBytes(dest, payload);
+        _journal.Save(new JournalEntry("run-unvalidated", Path.GetFullPath(dest),
+            JournalState.Verified, digest, null, null, DateTimeOffset.UtcNow));
+
+        var action = Assert.Single(_journal.RecoverUnfinalized());
+
+        Assert.Equal(RecoveryDecision.RetryNeeded, action.Decision);
+        Assert.Equal(JournalState.Verified, _journal.Load("run-unvalidated")!.State);
     }
 
     [Fact]

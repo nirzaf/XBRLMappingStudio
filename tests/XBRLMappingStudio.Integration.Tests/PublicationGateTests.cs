@@ -103,7 +103,7 @@ public sealed class PublicationGateTests
     }
 
     [Fact]
-    public void FinalPublisherRejectsGraphChangedAfterTheRun()
+    public async Task FinalPublisherRejectsGraphChangedAfterTheRun()
     {
         var root = Path.Combine(Path.GetTempPath(), "xms-publish-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -128,8 +128,10 @@ public sealed class PublicationGateTests
                 new DiagnosticBag(), Array.Empty<SampledTotal>());
             project.Nodes[0].Parameters["changed-after-run"] = true;
 
-            Assert.Throws<PublicationException>(() => new PublicationService(new RunJournal(root))
-                .PublishAuthorized("report.json", bytes, root, project, Synthetic, true, result));
+            await Assert.ThrowsAsync<PublicationException>(() =>
+                new PublicationService(new RunJournal(root)).PublishAuthorizedAsync(
+                    "report.json", bytes, root, project, Synthetic, true, result,
+                    (_, _) => Task.FromResult(RunManifest.ComputeSha256(bytes))));
             Assert.False(File.Exists(Path.Combine(root, "report.json")));
         }
         finally { Directory.Delete(root, recursive: true); }
