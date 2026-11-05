@@ -597,13 +597,13 @@ public sealed class DesignerSessionTests
             await viewModel.LoadSourceAsync(csv);
             Assert.Contains("Revenue", viewModel.SourceColumns);
             viewModel.SelectedSourceColumn = "Revenue";
+            viewModel.Session.Select("sample-fact", additive: false);
 
             await viewModel.SuggestMappingsAsync();
 
             var suggestion = Assert.Single(viewModel.AiSuggestions,
                 row => row.Concept == "synthetic:Revenue");
             viewModel.SelectedSuggestion = suggestion;
-            viewModel.Session.Select("sample-fact", additive: false);
             var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
             viewModel.ApplySuggestedMappingCommand.Execute(null);
 
@@ -614,6 +614,53 @@ public sealed class DesignerSessionTests
             Assert.Equal("synthetic:Revenue", fact.Parameters["concept"]?.ToString());
             viewModel.UndoCommand.Execute(null);
             Assert.Equal(beforeApply, viewModel.Session.Project.ComputeSemanticDigest());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopSuggestionWorkflow_BlocksAcceptanceAfterTargetFactChanges()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-ai-target", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        File.WriteAllText(csv, "Revenue\n1250\n");
+        try
+        {
+            var seed = new MainWindowViewModel();
+            var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+            var originalFact = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var alternativeFact = originalFact.ShallowCopy() with
+            {
+                NodeId = "alternative-fact",
+                DisplayName = "Alternative fact",
+                Layout = new LayoutPosition(500, 300)
+            };
+            project.Nodes.Add(alternativeFact);
+
+            var viewModel = new MainWindowViewModel(project);
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+            await viewModel.LoadSourceAsync(csv);
+            viewModel.SelectedSourceColumn = "Revenue";
+            viewModel.Session.Select(originalFact.NodeId, additive: false);
+            await viewModel.SuggestMappingsAsync();
+
+            var suggestion = Assert.Single(viewModel.AiSuggestions,
+                row => row.Concept == "synthetic:Revenue");
+            Assert.Equal(originalFact.NodeId, suggestion.TargetNodeId);
+            viewModel.SelectedSuggestion = suggestion;
+            var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+            viewModel.Session.Select(alternativeFact.NodeId, additive: false);
+            viewModel.ApplySuggestedMappingCommand.Execute(null);
+
+            Assert.Contains("target fact node changed", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(SuggestionState.Pending, suggestion.ReviewState);
         }
         finally
         {
@@ -634,6 +681,15 @@ public sealed class DesignerSessionTests
             var projectId = viewModel.Session.Project.ProjectId;
             var originalRevision = viewModel.Session.Project.SemanticRevision;
             var beforeAccept = viewModel.Session.Project.ComputeSemanticDigest();
+            var approvedRevision = new ApprovalRecord
+            {
+                SemanticRevision = originalRevision,
+                SemanticDigest = beforeAccept,
+                ApprovedBy = "prior-reviewer",
+                ApprovedUtc = DateTimeOffset.Parse("2026-11-04T12:00:00Z"),
+                ProfileDigest = viewModel.Session.Project.ProfileDigest
+            };
+            viewModel.Session.Project.Approvals.Add(approvedRevision);
             var restartedStore = new SuggestionAuditStore(new LocalApplicationDatabase(dbPath));
 
             viewModel.SelectedSuggestionConcept = "synthetic:NetIncome";
@@ -644,6 +700,8 @@ public sealed class DesignerSessionTests
             Assert.Contains("Accepted", viewModel.StatusText);
             Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
                 .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
+            Assert.Equal(originalRevision, viewModel.Session.Project.SemanticRevision);
+            Assert.Equal(new[] { approvedRevision }, viewModel.Session.Project.Approvals);
             var decisions = restartedStore.Read(projectId, originalRevision);
             Assert.Contains(decisions, row => row.Decision == "edit"
                 && row.Actor == Environment.UserName
@@ -654,12 +712,16 @@ public sealed class DesignerSessionTests
 
             viewModel.UndoCommand.Execute(null);
             Assert.Equal(beforeAccept, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(originalRevision, viewModel.Session.Project.SemanticRevision);
+            Assert.Equal(new[] { approvedRevision }, viewModel.Session.Project.Approvals);
             Assert.Equal(SuggestionState.Pending, viewModel.SelectedSuggestion!.ReviewState);
             Assert.Contains(restartedStore.Read(projectId, originalRevision), row => row.Decision == "undo");
 
             viewModel.RedoCommand.Execute(null);
             Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
                 .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
+            Assert.Equal(originalRevision, viewModel.Session.Project.SemanticRevision);
+            Assert.Equal(new[] { approvedRevision }, viewModel.Session.Project.Approvals);
             Assert.Equal(2, restartedStore.Read(projectId, originalRevision).Count(row => row.Decision == "accept"));
         }
         finally
@@ -733,8 +795,8 @@ public sealed class DesignerSessionTests
         viewModel.SaveProjectTo(System.IO.Path.Combine(directory, "mapping.xmap"));
         await viewModel.LoadSourceAsync(csv);
         viewModel.SelectedSourceColumn = "Revenue";
-        await viewModel.SuggestMappingsAsync();
         viewModel.Session.Select("sample-fact", additive: false);
+        await viewModel.SuggestMappingsAsync();
         viewModel.SelectedSuggestion = Assert.Single(viewModel.AiSuggestions,
             row => row.Concept == "synthetic:Revenue");
         return viewModel;

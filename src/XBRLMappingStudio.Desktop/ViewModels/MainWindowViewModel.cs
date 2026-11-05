@@ -104,6 +104,7 @@ public sealed class SuggestionRow : ViewModelBase
     private SuggestionState _reviewState = SuggestionState.Pending;
     public string SuggestionId { get; init; } = "";
     public string SourceFieldId { get; init; } = "";
+    public string TargetNodeId { get; init; } = "";
     public string ProjectDigest { get; init; } = "";
     public string Concept
     {
@@ -2599,13 +2600,30 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = "Choose a source file and select a source field first.";
             return;
         }
+        if (SelectedNode is null || SelectedNode.NodeType != NodeTypeConstants.FactConstruct)
+        {
+            StatusText = "Select the target XBRL Fact node before requesting suggestions.";
+            return;
+        }
 
         try
         {
-            var id = $"{SelectedSourceBindingId}:{SelectedSourceColumn}";
+            var sourceBindingId = SelectedSourceBindingId;
+            var sourceColumn = SelectedSourceColumn;
+            var id = $"{sourceBindingId}:{sourceColumn}";
+            var targetNodeId = SelectedNode.NodeId;
+            var projectDigest = Session.Project.ComputeSemanticDigest();
             var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
             var batch = await service.SuggestAsync(
-                new[] { new SourceFieldDescriptor(id, SelectedSourceColumn) }, CancellationToken.None);
+                new[] { new SourceFieldDescriptor(id, sourceColumn) }, CancellationToken.None);
+            if (!string.Equals(SelectedSourceBindingId, sourceBindingId, StringComparison.Ordinal)
+                || !string.Equals(SelectedSourceColumn, sourceColumn, StringComparison.Ordinal)
+                || !string.Equals(SelectedNode?.NodeId, targetNodeId, StringComparison.Ordinal)
+                || !string.Equals(Session.Project.ComputeSemanticDigest(), projectDigest, StringComparison.Ordinal))
+            {
+                StatusText = "The project or mapping selection changed while suggestions were generated. Request fresh suggestions.";
+                return;
+            }
             var sourceIdentity = id;
             var sessionSuggestions = batch.Suggestions
                 .Select(suggestion => suggestion with
@@ -2628,7 +2646,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 SuggestionId = s.SuggestionId,
                 SourceFieldId = id,
-                ProjectDigest = Session.Project.ComputeSemanticDigest(),
+                TargetNodeId = targetNodeId,
+                ProjectDigest = projectDigest,
                 Concept = s.Draft.Concept ?? "",
                 Score = s.Score,
                 Basis = s.Basis,
@@ -2813,6 +2832,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (!string.Equals(selected.SourceFieldId, sourceIdentity, StringComparison.Ordinal))
         {
             StatusText = "The source field changed after these suggestions were generated. Request fresh suggestions.";
+            return false;
+        }
+        if (!string.Equals(selected.TargetNodeId, SelectedNode.NodeId, StringComparison.Ordinal))
+        {
+            StatusText = "The target fact node changed after these suggestions were generated. Request fresh suggestions.";
             return false;
         }
         if (!string.Equals(selected.ProjectDigest, Session.Project.ComputeSemanticDigest(), StringComparison.Ordinal))
