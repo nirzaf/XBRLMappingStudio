@@ -46,6 +46,10 @@ public sealed class NodeViewModel : ViewModelBase
     public string NodeId { get; init; } = "";
     public string NodeType { get; init; } = "";
     public string DisplayName { get; init; } = "";
+    public IReadOnlyList<PortDefinition> InputPorts { get; init; } = Array.Empty<PortDefinition>();
+    public IReadOnlyList<PortDefinition> OutputPorts { get; init; } = Array.Empty<PortDefinition>();
+    public double Height => Math.Max(DesignerSession.NodeHeight,
+        48 + Math.Max(InputPorts.Count, OutputPorts.Count) * 18);
 
     private double _x;
     private double _y;
@@ -68,7 +72,9 @@ public sealed class EdgeViewModel : ViewModelBase
 {
     public string EdgeId { get; init; } = "";
     public string SourceNodeId { get; init; } = "";
+    public string SourcePortName { get; init; } = "";
     public string TargetNodeId { get; init; } = "";
+    public string TargetPortName { get; init; } = "";
     public NodeViewModel? From { get; set; }
     public NodeViewModel? To { get; set; }
 }

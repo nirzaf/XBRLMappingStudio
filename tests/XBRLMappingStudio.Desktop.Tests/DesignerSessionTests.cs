@@ -33,6 +33,8 @@ public sealed class DesignerSessionTests
                 NodeId = $"n{i}",
                 NodeType = "constant",
                 DisplayName = $"Node {i}",
+                InputPorts = new() { new PortDefinition("in", PortShape.String, PortCardinality.Single) },
+                OutputPorts = new() { new PortDefinition("out", PortShape.String, PortCardinality.Single) },
                 Layout = new LayoutPosition(i * 220, 40)
             });
         }
@@ -57,6 +59,12 @@ public sealed class DesignerSessionTests
             DisplayName = "Source"
         });
         return project;
+    }
+
+    private static void UpdateNode(MappingProject project, string nodeId, Func<MappingNode, MappingNode> update)
+    {
+        var index = project.Nodes.FindIndex(node => node.NodeId == nodeId);
+        project.Nodes[index] = update(project.Nodes[index]);
     }
 
     [Fact]
@@ -313,14 +321,17 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
-    public void Connect_AddsEdge_AndIsIdempotent()
+    public void Connect_AddsTypedEdge_AndIsIdempotent()
     {
         var session = new DesignerSession(Project());
         int before = session.Project.Edges.Count;
-        session.Connect("n2", "n3");
+        Assert.True(session.Connect("n2", "n3", "out", "in"));
         Assert.Equal(before + 1, session.Project.Edges.Count);
-        session.Connect("n2", "n3"); // duplicate ignored
+        Assert.False(session.Connect("n2", "n3", "out", "in")); // duplicate ignored
         Assert.Equal(before + 1, session.Project.Edges.Count);
+        var edge = session.Project.Edges.Single(candidate => candidate.SourceNodeId == "n2");
+        Assert.Equal("out", edge.SourcePortName);
+        Assert.Equal("in", edge.TargetPortName);
     }
 
     [Fact]
@@ -333,12 +344,105 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void Connect_RejectsIncompatibleShapeAndUnknownPort()
+    {
+        var project = Project();
+        UpdateNode(project, "n2", node => node with
+        {
+            OutputPorts = new() { new PortDefinition("out", PortShape.Decimal, PortCardinality.Single) }
+        });
+        var session = new DesignerSession(project);
+        var before = session.Project.Edges.Count;
+
+        Assert.False(session.TryConnect("n2", "n3", "out", "in", out var shapeReason));
+        Assert.Contains("Cannot connect Decimal", shapeReason, StringComparison.Ordinal);
+        Assert.False(session.TryConnect("n2", "n3", "missing", "in", out var portReason));
+        Assert.Contains("no output port", portReason, StringComparison.Ordinal);
+        Assert.Equal(before, session.Project.Edges.Count);
+    }
+
+    [Fact]
+    public void Connect_RejectsOccupiedInputAndCycle()
+    {
+        var session = new DesignerSession(Project());
+
+        Assert.False(session.TryConnect("n2", "n1", "out", "in", out var occupiedReason));
+        Assert.Contains("already has a connection", occupiedReason, StringComparison.Ordinal);
+        Assert.True(session.Connect("n1", "n2", "out", "in"));
+        Assert.False(session.TryConnect("n2", "n0", "out", "in", out var cycleReason));
+        Assert.Contains("create a cycle", cycleReason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Connect_RejectsCollectionToSingleInput()
+    {
+        var project = Project();
+        UpdateNode(project, "n2", node => node with
+        {
+            OutputPorts = new() { new PortDefinition("out", PortShape.String, PortCardinality.Collection) }
+        });
+        var session = new DesignerSession(project);
+
+        Assert.False(session.TryConnect("n2", "n3", "out", "in", out var reason));
+        Assert.Contains("collection output", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ReconnectEdge_RetargetsExistingEdge()
     {
         var session = new DesignerSession(Project());
         Assert.True(session.ReconnectEdge("e0", "n2"));
         var edge = session.Project.Edges.Single(e => e.EdgeId == "e0");
         Assert.Equal("n2", edge.TargetNodeId);
+    }
+
+    [Fact]
+    public void ReconnectEdge_ChangesTargetPortAndRejectsOccupiedPort()
+    {
+        var project = Project();
+        UpdateNode(project, "n2", node => node with { InputPorts = new()
+        {
+            new PortDefinition("in", PortShape.String, PortCardinality.Single),
+            new PortDefinition("other", PortShape.String, PortCardinality.Single)
+        } });
+        UpdateNode(project, "n3", node => node with { InputPorts = new()
+        {
+            new PortDefinition("in", PortShape.String, PortCardinality.Single)
+        } });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "e1", SourceNodeId = "n3", SourcePortName = "out",
+            TargetNodeId = "n2", TargetPortName = "in"
+        });
+        var session = new DesignerSession(project);
+
+        Assert.False(session.TryReconnectEdge("e0", "n2", "in", out var reason));
+        Assert.Contains("already has a connection", reason, StringComparison.Ordinal);
+        Assert.True(session.ReconnectEdge("e0", "n2", "other"));
+        var edge = session.Project.Edges.Single(candidate => candidate.EdgeId == "e0");
+        Assert.Equal("n2", edge.TargetNodeId);
+        Assert.Equal("other", edge.TargetPortName);
+    }
+
+    [Fact]
+    public void KeyboardNudge_MovesSelectionAsOneUndoableLayoutChange()
+    {
+        var session = new DesignerSession(Project());
+        var semanticDigest = session.Project.ComputeSemanticDigest();
+        session.Select("n0", additive: false);
+        session.Select("n2", additive: true);
+
+        Assert.True(session.MoveSelectedBy(10, -10));
+        Assert.Equal(new LayoutPosition(10, 30), session.Project.Nodes.Single(node => node.NodeId == "n0").Layout);
+        Assert.Equal(new LayoutPosition(450, 30), session.Project.Nodes.Single(node => node.NodeId == "n2").Layout);
+        Assert.Equal(semanticDigest, session.Project.ComputeSemanticDigest());
+
+        session.Undo();
+        Assert.Equal(new LayoutPosition(0, 40), session.Project.Nodes.Single(node => node.NodeId == "n0").Layout);
+        Assert.Equal(new LayoutPosition(440, 40), session.Project.Nodes.Single(node => node.NodeId == "n2").Layout);
+        session.Redo();
+        Assert.Equal(new LayoutPosition(10, 30), session.Project.Nodes.Single(node => node.NodeId == "n0").Layout);
+        Assert.Equal(semanticDigest, session.Project.ComputeSemanticDigest());
     }
 
     [Fact]

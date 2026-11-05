@@ -4,6 +4,7 @@ using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
+using XBRLMappingStudio.Desktop.Controls;
 using XBRLMappingStudio.Desktop.ViewModels;
 
 namespace XBRLMappingStudio.Desktop;
@@ -22,6 +23,11 @@ public partial class MainWindow : Window
     private void InitializeComponent()
     {
         AvaloniaXamlLoader.Load(this);
+        this.FindControl<GraphCanvas>("Canvas")!.InteractionRejected += message =>
+        {
+            if (DataContext is MainWindowViewModel viewModel)
+                viewModel.StatusText = message;
+        };
 
         // UI04: double-clicking a diagnostic row focuses and highlights its related node.
         // Wired at the window level so it is present regardless of template trimming.

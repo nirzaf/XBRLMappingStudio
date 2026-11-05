@@ -1,3 +1,4 @@
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 
 namespace XBRLMappingStudio.Desktop.ViewModels;
@@ -83,7 +84,7 @@ public sealed class DesignerSession
         int hits = 0;
         foreach (var n in _nodes)
         {
-            bool overlaps = n.X < r && n.X + NodeWidth > l && n.Y < b && n.Y + NodeHeight > t;
+            bool overlaps = n.X < r && n.X + NodeWidth > l && n.Y < b && n.Y + n.Height > t;
             if (overlaps && _selected.Add(n.NodeId)) hits++;
         }
         SyncSelectionFlags();
@@ -109,15 +110,65 @@ public sealed class DesignerSession
         Changed?.Invoke();
     }
 
+    /// <summary>Moves the selected set as one undoable layout-only keyboard edit.</summary>
+    public bool MoveSelectedBy(double dx, double dy)
+    {
+        if (_selected.Count == 0 || (dx == 0 && dy == 0)) return false;
+        var selected = _project.Nodes.Where(node => _selected.Contains(node.NodeId)).ToArray();
+        if (selected.Length == 0) return false;
+
+        PushUndo();
+        foreach (var node in selected)
+        {
+            var current = node.Layout ?? new LayoutPosition(0, 0);
+            node.Layout = new LayoutPosition(current.X + dx, current.Y + dy);
+            var viewModel = _nodes.First(view => view.NodeId == node.NodeId);
+            viewModel.X = current.X + dx;
+            viewModel.Y = current.Y + dy;
+        }
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>Commits a pointer drag as one layout-only undo operation.</summary>
+    public bool MoveNodesTo(IReadOnlyDictionary<string, LayoutPosition> positions)
+    {
+        var nodes = _project.Nodes.Where(node => positions.ContainsKey(node.NodeId)).ToArray();
+        if (!nodes.Any(node => node.Layout is null
+                || node.Layout.X != positions[node.NodeId].X
+                || node.Layout.Y != positions[node.NodeId].Y)) return false;
+
+        PushUndo();
+        foreach (var node in nodes)
+        {
+            var position = positions[node.NodeId];
+            node.Layout = position;
+            var view = _nodes.First(candidate => candidate.NodeId == node.NodeId);
+            view.X = position.X;
+            view.Y = position.Y;
+        }
+        Changed?.Invoke();
+        return true;
+    }
+
     // ---- graph topology (semantic) ----------------------------------------------
 
-    public void Connect(string sourceNodeId, string targetNodeId,
+    public bool Connect(string sourceNodeId, string targetNodeId,
         string sourcePort = "out", string targetPort = "in")
     {
-        if (sourceNodeId == targetNodeId) return;
+        return TryConnect(sourceNodeId, targetNodeId, sourcePort, targetPort, out _);
+    }
+
+    public bool TryConnect(string sourceNodeId, string targetNodeId,
+        string sourcePort, string targetPort, out string? refusalReason)
+    {
+        refusalReason = null;
+        if (!TryValidateConnection(sourceNodeId, targetNodeId, sourcePort, targetPort,
+                ignoredEdgeId: null, out refusalReason))
+            return false;
         if (_project.Edges.Any(e => e.SourceNodeId == sourceNodeId && e.TargetNodeId == targetNodeId
                                     && e.SourcePortName == sourcePort && e.TargetPortName == targetPort))
-            return; // idempotent
+            return false; // idempotent
 
         PushUndo();
         _project.Edges.Add(new MappingEdge
@@ -129,22 +180,108 @@ public sealed class DesignerSession
             TargetPortName = targetPort
         });
         RebuildViewModels(captureSnapshot: false);
+        return true;
     }
 
     /// <summary>Reconnection: retarget an existing edge to a new node, preserving the
     /// edge identity. Semantic change (edge endpoints are in the digest).</summary>
-    public bool ReconnectEdge(string edgeId, string newTargetNodeId)
+    public bool ReconnectEdge(string edgeId, string newTargetNodeId, string? newTargetPortName = null)
+        => TryReconnectEdge(edgeId, newTargetNodeId, newTargetPortName, out _);
+
+    public bool TryReconnectEdge(string edgeId, string newTargetNodeId,
+        string? newTargetPortName, out string? refusalReason)
     {
+        refusalReason = null;
         var idx = _project.Edges.FindIndex(e => e.EdgeId == edgeId);
-        var targetExists = _project.Nodes.Any(n => n.NodeId == newTargetNodeId);
-        if (idx < 0 || !targetExists) return false;
+        if (idx < 0)
+        {
+            refusalReason = "The edge no longer exists.";
+            return false;
+        }
         var old = _project.Edges[idx];
-        if (old.SourceNodeId == newTargetNodeId) return false; // no self-loop
+        var targetPort = newTargetPortName ?? old.TargetPortName;
+        if (!TryValidateConnection(old.SourceNodeId, newTargetNodeId, old.SourcePortName, targetPort,
+                edgeId, out refusalReason)) return false;
+        if (old.TargetNodeId == newTargetNodeId && old.TargetPortName == targetPort) return false;
 
         PushUndo();
-        _project.Edges[idx] = old with { TargetNodeId = newTargetNodeId };
+        _project.Edges[idx] = old with { TargetNodeId = newTargetNodeId, TargetPortName = targetPort };
         RebuildViewModels(captureSnapshot: false);
         return true;
+    }
+
+    private bool TryValidateConnection(string sourceNodeId, string targetNodeId,
+        string sourcePortName, string targetPortName, string? ignoredEdgeId, out string? refusalReason)
+    {
+        refusalReason = null;
+        if (StringComparer.Ordinal.Equals(sourceNodeId, targetNodeId))
+        {
+            refusalReason = "A node cannot connect to itself.";
+            return false;
+        }
+
+        var sourceNode = _project.Nodes.FirstOrDefault(node => node.NodeId == sourceNodeId);
+        var targetNode = _project.Nodes.FirstOrDefault(node => node.NodeId == targetNodeId);
+        if (sourceNode is null || targetNode is null)
+        {
+            refusalReason = "The connection references a node that is no longer in the graph.";
+            return false;
+        }
+
+        var sourcePort = sourceNode.OutputPorts.FirstOrDefault(port => port.Name == sourcePortName);
+        if (sourcePort is null)
+        {
+            refusalReason = $"'{sourceNode.DisplayName}' has no output port named '{sourcePortName}'.";
+            return false;
+        }
+        var targetPort = targetNode.InputPorts.FirstOrDefault(port => port.Name == targetPortName);
+        if (targetPort is null)
+        {
+            refusalReason = $"'{targetNode.DisplayName}' has no input port named '{targetPortName}'.";
+            return false;
+        }
+
+        if (!ShapeChecker.AreCompatible(sourcePort, targetPort))
+        {
+            refusalReason = $"Cannot connect {sourcePort.Shape} output '{sourcePortName}' to "
+                + $"{targetPort.Shape} input '{targetPortName}'.";
+            return false;
+        }
+        if (sourcePort.Cardinality == PortCardinality.Collection
+            && targetPort.Cardinality == PortCardinality.Single)
+        {
+            refusalReason = "A collection output cannot connect directly to a single-value input.";
+            return false;
+        }
+        if (_project.Edges.Any(edge => edge.EdgeId != ignoredEdgeId
+                && edge.TargetNodeId == targetNodeId && edge.TargetPortName == targetPortName))
+        {
+            refusalReason = $"Input port '{targetPortName}' already has a connection.";
+            return false;
+        }
+        if (WouldCreateCycle(sourceNodeId, targetNodeId, ignoredEdgeId))
+        {
+            refusalReason = "This connection would create a cycle in the mapping graph.";
+            return false;
+        }
+        return true;
+    }
+
+    private bool WouldCreateCycle(string sourceNodeId, string targetNodeId, string? ignoredEdgeId)
+    {
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<string>();
+        pending.Push(targetNodeId);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            if (!visited.Add(current)) continue;
+            if (StringComparer.Ordinal.Equals(current, sourceNodeId)) return true;
+            foreach (var edge in _project.Edges.Where(edge => edge.EdgeId != ignoredEdgeId
+                         && edge.SourceNodeId == current))
+                pending.Push(edge.TargetNodeId);
+        }
+        return false;
     }
 
     public void RemoveEdge(string edgeId)
@@ -316,6 +453,8 @@ public sealed class DesignerSession
                 DisplayName = n.DisplayName,
                 X = n.Layout?.X ?? (40 + (i % 3) * 240),
                 Y = n.Layout?.Y ?? (40 + (i / 3) * 120),
+                InputPorts = n.InputPorts.ToArray(),
+                OutputPorts = n.OutputPorts.ToArray(),
                 IsSelected = _selected.Contains(n.NodeId)
             });
         }
@@ -327,7 +466,9 @@ public sealed class DesignerSession
             {
                 EdgeId = e.EdgeId,
                 SourceNodeId = e.SourceNodeId,
+                SourcePortName = e.SourcePortName,
                 TargetNodeId = e.TargetNodeId,
+                TargetPortName = e.TargetPortName,
                 From = from,
                 To = to
             });
