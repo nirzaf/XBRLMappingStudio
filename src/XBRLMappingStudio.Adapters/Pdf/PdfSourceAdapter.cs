@@ -47,6 +47,12 @@ public sealed class PdfSourceAdapter(IPdfEvidenceCatalog? evidenceCatalog = null
         return Task.FromResult<ISourceSchema>(CreateSchema(connection.SourceId, document.Manifest));
     }
 
+    /// <summary>Returns a sidecar only after its source digest, schema and persisted evidence validate.</summary>
+    public PdfReviewedSourceManifest ReadReviewedSourceManifest(
+        SourceConnection connection,
+        CancellationToken cancellationToken)
+        => ReadReviewedDocument(connection, cancellationToken).Manifest;
+
     public Task<DataSample> ReadSampleAsync(
         SourceConnection connection,
         ISourceSchema schema,
@@ -260,6 +266,7 @@ public sealed class PdfSourceAdapter(IPdfEvidenceCatalog? evidenceCatalog = null
             || manifest.ReviewedUtc == default || manifest.ReviewedUtc.Offset != TimeSpan.Zero
             || string.IsNullOrWhiteSpace(manifest.RowLabelHeader)
             || manifest.RowLabelHeader.Length > 128
+            || manifest.TemplatePageNumber is < 1 or > PdfDigitalExtractionOptions.AbsoluteMaxPages
             || manifest.PeriodColumns is null || manifest.PeriodColumns.Count is < 2 or > 30
             || manifest.Rows is null || manifest.Rows.Count is < 1 or > MaxRows
             || manifest.NumericPolicy is null)

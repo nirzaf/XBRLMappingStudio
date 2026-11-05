@@ -250,6 +250,27 @@
                       </DataTemplate>
                     </ListBox.ItemTemplate>
                   </ListBox>
+                  <Border BorderBrush="#33000000" BorderThickness="1" Padding="6" Margin="0,6,0,0">
+                    <StackPanel Spacing="5">
+                      <TextBlock Text="Selected value correction" FontWeight="Bold" />
+                      <TextBox Text="{Binding SelectedPdfReviewValue.CorrectionValue, Mode=TwoWay}"
+                               Watermark="Canonical value, for example 1250.5"
+                               AutomationProperties.Name="Corrected canonical PDF value" />
+                      <TextBox Text="{Binding SelectedPdfReviewValue.CorrectionReasonInput, Mode=TwoWay}"
+                               Watermark="Required reason for changing the parsed value"
+                               AcceptsReturn="True" MinHeight="48"
+                               AutomationProperties.Name="Reason for correcting the PDF value" />
+                      <Button Content="Apply correction" Command="{Binding ApplyPdfCorrectionCommand}"
+                              IsEnabled="{Binding CanApplyPdfCorrection}"
+                              AutomationProperties.Name="Apply selected PDF value correction" />
+                      <Button Content="Undo latest selected review action" Command="{Binding UndoPdfReviewCommand}"
+                              IsEnabled="{Binding CanUndoPdfReview}"
+                              AutomationProperties.Name="Undo latest PDF review action for selected value" />
+                      <TextBlock Text="Durable review history" FontWeight="Bold" Margin="0,4,0,0" />
+                      <TextBlock Text="{Binding SelectedPdfReviewHistory}" TextWrapping="Wrap"
+                                 AutomationProperties.Name="Selected PDF value durable review history" />
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
               </ScrollViewer>
             </Border>

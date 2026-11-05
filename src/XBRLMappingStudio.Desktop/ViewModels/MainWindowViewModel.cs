@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using XBRLMappingStudio.AI;
@@ -201,6 +203,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _pdfReviewer = "";
     private PdfReviewValueRow? _selectedPdfReviewValue;
     private IReadOnlyList<PdfReviewWord> _pdfPageWords = Array.Empty<PdfReviewWord>();
+    private readonly Dictionary<PdfReviewValueRow, PdfReviewRowState> _pdfReviewStates = new();
+    private readonly List<PdfReviewAuditEvent> _pdfReviewAuditEvents = new();
+    private bool _applyingPdfReviewAudit;
+    private bool _restoringPdfReviewSettings;
+    private string? _pdfRestoreTemplateRevisionOverride;
     private static readonly DestinationKindOption SqliteDestinationKind = new("sqlite", "SQLite fact table");
     private string _destinationCapabilityStatus = "SQLite fact table: transactional fact publication.";
     private DestinationKindOption _selectedDestinationKind = SqliteDestinationKind;
@@ -230,6 +237,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private readonly Func<IAuditSink>? _auditSinkFactory;
     private readonly Func<string, CancellationToken, Task<PdfDigitalDocument>> _pdfDocumentLoader;
     private readonly Func<PdfEvidenceStore> _pdfEvidenceStoreFactory;
+    private readonly Func<PdfReviewAuditStore> _pdfReviewAuditStoreFactory;
     private readonly SqliteDestinationInspector _destinationInspector = new();
 
     private FilingProfile _profile;
@@ -248,6 +256,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private sealed record SuggestionRedoState(
         SuggestionSession Session, string SuggestionId, string DigestBefore,
         bool GraphChanged);
+    private sealed record PdfReviewRowState(string ReviewedValue, string? CorrectionReason, bool IsApproved);
 
     public string Title => _title;
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
@@ -687,14 +696,33 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (!Set(ref _selectedPdfReviewValue, value)) return;
             if (value is not null) CurrentPdfPageNumber = value.PageNumber;
             Raise(nameof(SelectedPdfEvidence));
+            Raise(nameof(SelectedPdfReviewHistory));
+            RefreshPdfReviewCommandState();
         }
     }
     public PdfEvidenceRegion? SelectedPdfEvidence => SelectedPdfReviewValue?.Evidence;
+    public string SelectedPdfReviewHistory => SelectedPdfReviewValue is null
+        ? "Select a value to inspect its durable review history."
+        : string.Join(Environment.NewLine, _pdfReviewAuditEvents
+            .Where(entry => entry.RowOccurrence == SelectedPdfReviewValue.SourceRow.Occurrence
+                && entry.ReportingYear == SelectedPdfReviewValue.ReportingYear)
+            .Select(entry => $"{entry.OccurredUtc:yyyy-MM-dd HH:mm:ss 'UTC'} · {entry.Action}: {entry.ReviewedValue}"
+                + (entry.CorrectionReason is null ? "" : $" · {entry.CorrectionReason}")
+                + $" · {entry.Reviewer}")) is { Length: > 0 } history
+            ? history : "No durable review actions have been recorded for this value.";
+    public bool CanApplyPdfCorrection => !IsSourceLoading && !IsBusy
+        && SelectedPdfReviewValue?.CanApplyCorrection == true
+        && TryGetPdfReviewer(out _);
+    public bool CanUndoPdfReview => !IsSourceLoading && !IsBusy
+        && SelectedPdfReviewValue is not null
+        && _pdfReviewAuditEvents.Any(entry => entry.RowOccurrence == SelectedPdfReviewValue.SourceRow.Occurrence
+            && entry.ReportingYear == SelectedPdfReviewValue.ReportingYear)
+        && TryGetPdfReviewer(out _);
     public bool CanSavePdfReview => !IsSourceLoading && !IsBusy
         && _pdfDocument is not null && _pdfTemplate is not null
         && _pdfReconstruction is { State: PdfTableReconstructionState.Anchored, Alternatives.Count: 0 }
-        && PdfReviewValues.Count > 0 && PdfReviewValues.All(row => row.CanApprove && row.IsApproved)
-        && !string.IsNullOrWhiteSpace(PdfReviewer) && PdfReviewer.Trim().Length <= 128;
+        && PdfReviewValues.Count > 0 && PdfReviewValues.All(row => row.CanApprove && row.IsApproved && !row.HasPendingCorrectionDraft)
+        && TryGetPdfReviewer(out _);
     public ObservableCollection<SuggestionRow> AiSuggestions { get; } = new();
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
     public ObservableCollection<FactRow> PreviewFacts { get; } = new();
@@ -728,6 +756,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand PreviousPageCommand { get; }
     public RelayCommand BuildPdfTemplateCommand { get; }
     public RelayCommand SavePdfReviewCommand { get; }
+    public RelayCommand ApplyPdfCorrectionCommand { get; }
+    public RelayCommand UndoPdfReviewCommand { get; }
     public RelayCommand PreviousPdfPageCommand { get; }
     public RelayCommand NextPdfPageCommand { get; }
 
@@ -770,7 +800,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         FilingProfileWorkerFactory? workerFactory = null,
         Func<IAuditSink>? auditSinkFactory = null,
         Func<string, CancellationToken, Task<PdfDigitalDocument>>? pdfDocumentLoader = null,
-        Func<PdfEvidenceStore>? pdfEvidenceStoreFactory = null)
+        Func<PdfEvidenceStore>? pdfEvidenceStoreFactory = null,
+        Func<PdfReviewAuditStore>? pdfReviewAuditStoreFactory = null)
     {
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
@@ -779,6 +810,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             new PdfExtractionProcessClient().ExtractFileAsync(path, cancellationToken: cancellationToken));
         _pdfEvidenceStoreFactory = pdfEvidenceStoreFactory ?? (() =>
             new PdfEvidenceStore(new LocalApplicationDatabase()));
+        _pdfReviewAuditStoreFactory = pdfReviewAuditStoreFactory ?? (() =>
+            new PdfReviewAuditStore(new LocalApplicationDatabase()));
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
         _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
         _profile = SyntheticProfile.Build();
@@ -827,6 +860,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         PreviousPageCommand = new RelayCommand(_ => { if (_resultPage > 0) { _resultPage--; RunSearch(keepPage: true); } });
         BuildPdfTemplateCommand = new RelayCommand(_ => BuildPdfTemplate());
         SavePdfReviewCommand = new RelayCommand(async _ => await SavePdfReviewAsync(), _ => CanSavePdfReview);
+        ApplyPdfCorrectionCommand = new RelayCommand(_ => ApplySelectedPdfCorrection(), _ => CanApplyPdfCorrection);
+        UndoPdfReviewCommand = new RelayCommand(_ => UndoSelectedPdfReview(), _ => CanUndoPdfReview);
         PreviousPdfPageCommand = new RelayCommand(_ => { if (HasPreviousPdfPage) CurrentPdfPageNumber--; }, _ => HasPreviousPdfPage);
         NextPdfPageCommand = new RelayCommand(_ => { if (HasNextPdfPage) CurrentPdfPageNumber++; }, _ => HasNextPdfPage);
 
@@ -1626,7 +1661,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (kind == "pdf-digital")
             {
                 SelectedSourceBindingId = binding.BindingId;
-                Session.SetBinding(binding);
+                Session.SetBinding(binding, clearBindingSchemasFromHistory: true);
                 await LoadPdfDocumentAsync(safePath, connection, binding, generation);
                 return;
             }
@@ -1695,16 +1730,34 @@ public sealed class MainWindowViewModel : ViewModelBase
         var reviewPath = PdfSourceAdapter.ResolveReviewManifestPath(connection);
         if (!File.Exists(reviewPath))
         {
-            Session.SetBinding(binding with { SchemaFingerprint = null });
+            Session.SetBinding(binding with { SchemaFingerprint = null }, clearBindingSchemasFromHistory: true);
             return;
         }
 
         try
         {
-            var schema = await BuildSourceAdapter(connection).InspectSchemaAsync(connection, CancellationToken.None);
+            var pdfAdapter = new PdfSourceAdapter(_pdfEvidenceStoreFactory());
+            var manifest = pdfAdapter.ReadReviewedSourceManifest(connection, CancellationToken.None);
+            if (!RestorePdfReviewManifest(manifest))
+                throw new InvalidDataException("The approved sidecar does not match the current declared template and extracted values.");
+            if (generation != _sourceLoadGeneration) return;
+
+            var hasNewerAudit = _pdfReviewAuditEvents.Any(entry => entry.OccurredUtc > manifest.ReviewedUtc);
+            if (hasNewerAudit)
+            {
+                Session.SetBinding(binding with { SchemaFingerprint = null }, clearBindingSchemasFromHistory: true);
+                SourceColumns.Clear();
+                Raise(nameof(SourceColumns));
+                SourceInspectionSummary = "The PDF is evidence-validated, but newer local review actions must be saved in a new sidecar before mapping.";
+                PdfReviewStatus = "Restored newer correction and approval history from local state. Save this review to activate mapping; reviewer identity is recorded but not authenticated.";
+                StatusText = "Restored unsaved PDF review decisions; mapping remains blocked until the review is saved.";
+                return;
+            }
+
+            var schema = await pdfAdapter.InspectSchemaAsync(connection, CancellationToken.None);
             if (generation != _sourceLoadGeneration) return;
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
-            Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });
+            Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint }, clearBindingSchemasFromHistory: true);
             Raise(nameof(SourceColumns));
             SourceInspectionSummary = $"Reviewed digital PDF schema: {schema.Columns.Count} typed fields. Source and persisted evidence matched the configured approval sidecar.";
             PdfReviewStatus = "The configured sidecar passes source and evidence validation. The visible extraction preview is still not a verified report.";
@@ -1713,7 +1766,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         catch (Exception exception) when (exception is not OutOfMemoryException
             and not StackOverflowException and not OperationCanceledException)
         {
-            Session.SetBinding(binding with { SchemaFingerprint = null });
+            _restoringPdfReviewSettings = false;
+            _pdfRestoreTemplateRevisionOverride = null;
+            Session.SetBinding(binding with { SchemaFingerprint = null }, clearBindingSchemasFromHistory: true);
+            ClearPdfReviewProposal();
             SourceInspectionSummary = $"PDF review sidecar could not be validated: {exception.Message}";
             PdfReviewStatus = "A configured sidecar is stale, invalid, or incomplete. Mapping remains blocked until a current review is saved; extracted text is not a verified report.";
             StatusText = "PDF text loaded for review; the configured sidecar did not validate.";
@@ -1752,6 +1808,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         _pdfAllowTrailingMinus = false;
         _pdfReviewer = "";
         _selectedPdfReviewValue = null;
+        _pdfReviewStates.Clear();
+        _pdfReviewAuditEvents.Clear();
         _pdfPageWords = Array.Empty<PdfReviewWord>();
         PdfPageNumbers.Clear();
         PdfReviewValues.Clear();
@@ -1782,11 +1840,19 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(SelectedPdfEvidence));
         Raise(nameof(PdfPageNumbers));
         Raise(nameof(PdfReviewValues));
+        Raise(nameof(SelectedPdfReviewHistory));
         RefreshPdfReviewCommandState();
     }
 
     private void InvalidatePdfAnalysis()
     {
+        if (!_restoringPdfReviewSettings)
+        {
+            InvalidateActivePdfBindingSchema();
+            _pdfReviewAuditEvents.Clear();
+            _pdfReviewStates.Clear();
+            Raise(nameof(SelectedPdfReviewHistory));
+        }
         if (_pdfTemplate is null && _pdfReconstruction is null && PdfReviewValues.Count == 0)
         {
             RefreshPdfReviewCommandState();
@@ -1795,6 +1861,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _pdfTemplate = null;
         _pdfReconstruction = null;
         PdfReviewValues.Clear();
+        _pdfReviewStates.Clear();
         SelectedPdfReviewValue = null;
         PdfTemplateStatus = "Template or numeric policy changed. Rebuild the proposal before reviewing values.";
         RefreshPdfReviewCommandState();
@@ -1813,8 +1880,15 @@ public sealed class MainWindowViewModel : ViewModelBase
                 throw new InvalidOperationException("Choose the direction in which table rows continue on the page.");
             var policy = CreatePdfNumericPolicy();
             var headers = ParsePdfPeriodHeaders(PdfPeriodHeaders);
-            var template = PdfTableTemplate.CreateFromFirstPage(_pdfDocument, CurrentPdfPageNumber,
+            var geometryTemplate = PdfTableTemplate.CreateFromFirstPage(_pdfDocument, CurrentPdfPageNumber,
                 PdfRowLabelHeader, headers, SelectedPdfRowDirection.RowsAtLowLineCoordinate);
+            var template = geometryTemplate with
+            {
+                Revision = _pdfRestoreTemplateRevisionOverride
+                    ?? CreatePdfReviewRevision(geometryTemplate, policy)
+            };
+            if (!_restoringPdfReviewSettings && _pdfTemplate is not null)
+                InvalidateActivePdfBindingSchema();
             var reconstruction = PdfTableTemplateReconstructor.Reconstruct(_pdfDocument, template);
             var anchored = reconstruction.State == PdfTableReconstructionState.Anchored
                 && reconstruction.Alternatives.Count == 0;
@@ -1822,6 +1896,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             _pdfTemplate = template;
             _pdfReconstruction = reconstruction;
             PdfReviewValues.Clear();
+            _pdfReviewStates.Clear();
             foreach (var row in reconstruction.Rows)
             foreach (var cell in row.Cells)
             {
@@ -1829,8 +1904,11 @@ public sealed class MainWindowViewModel : ViewModelBase
                 var viewRow = new PdfReviewValueRow(row, cell, parse, anchored);
                 viewRow.PropertyChanged += OnPdfReviewValueChanged;
                 PdfReviewValues.Add(viewRow);
+                _pdfReviewStates[viewRow] = new PdfReviewRowState(viewRow.ReviewedValue, viewRow.CorrectionReason, false);
             }
             SelectedPdfReviewValue = PdfReviewValues.FirstOrDefault();
+            if (!_restoringPdfReviewSettings)
+                RestorePdfAuditHistoryFromBeginning();
 
             PdfTemplateStatus = anchored
                 ? $"Anchored {reconstruction.Rows.Count} table rows across {headers.Count} declared years. Each parsed value still needs individual reviewer approval."
@@ -1846,6 +1924,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             _pdfTemplate = null;
             _pdfReconstruction = null;
             PdfReviewValues.Clear();
+            _pdfReviewStates.Clear();
             SelectedPdfReviewValue = null;
             PdfTemplateStatus = exception.Message;
             StatusText = "Could not build the PDF review proposal.";
@@ -1866,6 +1945,25 @@ public sealed class MainWindowViewModel : ViewModelBase
         return new PdfNumericFormatPolicy(PdfDecimalSeparator.Trim()[0], groupSeparator,
             PdfAllowGrouping, scaleFactor, PdfCurrencyCode.Trim(), PdfAllowLeadingSign,
             PdfAllowParenthesizedNegative, PdfAllowTrailingMinus, PdfNumericPolicyBasis.ExplicitTemplate).Validate();
+    }
+
+    private static string CreatePdfReviewRevision(PdfTableTemplate geometryTemplate, PdfNumericFormatPolicy policy)
+    {
+        var policyRevision = string.Join("|", new[]
+        {
+            policy.DecimalSeparator.ToString(),
+            policy.GroupSeparator?.ToString() ?? "",
+            policy.AllowGrouping.ToString(CultureInfo.InvariantCulture),
+            policy.ScaleFactor.ToString(CultureInfo.InvariantCulture),
+            policy.CurrencyCode,
+            policy.AllowLeadingSign.ToString(CultureInfo.InvariantCulture),
+            policy.AllowParenthesizedNegative.ToString(CultureInfo.InvariantCulture),
+            policy.AllowTrailingMinus.ToString(CultureInfo.InvariantCulture),
+            policy.Basis.ToString()
+        });
+        var revisionInput = $"pdf-review-v1|{geometryTemplate.Revision}|{policyRevision}";
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(revisionInput)))
+            .ToLowerInvariant();
     }
 
     private static IReadOnlyDictionary<string, int> ParsePdfPeriodHeaders(string text)
@@ -1889,15 +1987,324 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void OnPdfReviewValueChanged(object? sender, PropertyChangedEventArgs eventArgs)
     {
-        if (eventArgs.PropertyName == nameof(PdfReviewValueRow.IsApproved))
-            RefreshPdfReviewCommandState();
+        if (eventArgs.PropertyName == nameof(PdfReviewValueRow.IsApproved)
+            && !_applyingPdfReviewAudit && sender is PdfReviewValueRow row)
+            RecordPdfApprovalChange(row);
+        RefreshPdfReviewCommandState();
     }
 
     private void RefreshPdfReviewCommandState()
     {
         Raise(nameof(CanSavePdfReview));
+        Raise(nameof(CanApplyPdfCorrection));
+        Raise(nameof(CanUndoPdfReview));
         Raise(nameof(CanEditPdfReview));
         SavePdfReviewCommand?.NotifyCanExecuteChanged();
+        ApplyPdfCorrectionCommand?.NotifyCanExecuteChanged();
+        UndoPdfReviewCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void InvalidateActivePdfBindingSchema()
+    {
+        var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+            candidate.BindingId == SelectedSourceBindingId && candidate.Kind == "pdf-digital");
+        if (binding?.SchemaFingerprint is null) return;
+        Session.SetBinding(binding with { SchemaFingerprint = null }, clearBindingSchemasFromHistory: true);
+        SourceColumns.Clear();
+        Raise(nameof(SourceColumns));
+        SourceInspectionSummary = "PDF review or template changed. Save and validate a current review before mapping this source.";
+    }
+
+    private void ClearPdfReviewProposal()
+    {
+        _pdfTemplate = null;
+        _pdfReconstruction = null;
+        PdfReviewValues.Clear();
+        _pdfReviewStates.Clear();
+        _pdfReviewAuditEvents.Clear();
+        SelectedPdfReviewValue = null;
+        Raise(nameof(PdfReviewValues));
+        Raise(nameof(SelectedPdfReviewHistory));
+        RefreshPdfReviewCommandState();
+    }
+
+    private bool RestorePdfReviewManifest(PdfReviewedSourceManifest manifest)
+    {
+        var document = _pdfDocument;
+        if (document is null) return false;
+
+        var headers = manifest.PeriodColumns.ToDictionary(
+            period => period.HeaderText, period => period.ReportingYear, StringComparer.OrdinalIgnoreCase);
+        var candidatePages = manifest.TemplatePageNumber is int declaredPage
+            ? new[] { declaredPage }
+            : document.Pages.Select(page => page.PageNumber).ToArray();
+        var candidateDirections = manifest.RowsAtLowLineCoordinate is bool declaredDirection
+            ? new[] { declaredDirection }
+            : PdfRowDirections.Select(direction => direction.RowsAtLowLineCoordinate).ToArray();
+        PdfTableTemplate? matchingTemplate = null;
+
+        _restoringPdfReviewSettings = true;
+        try
+        {
+            PdfRowLabelHeader = manifest.RowLabelHeader;
+            PdfPeriodHeaders = string.Join("; ", manifest.PeriodColumns
+                .Select(period => $"{period.HeaderText}={period.ReportingYear}"));
+            PdfDecimalSeparator = manifest.NumericPolicy.DecimalSeparator.ToString();
+            PdfGroupSeparator = manifest.NumericPolicy.GroupSeparator?.ToString() ?? "";
+            PdfAllowGrouping = manifest.NumericPolicy.AllowGrouping;
+            PdfScaleFactor = manifest.NumericPolicy.ScaleFactor.ToString(CultureInfo.InvariantCulture);
+            PdfCurrencyCode = manifest.NumericPolicy.CurrencyCode;
+            PdfAllowLeadingSign = manifest.NumericPolicy.AllowLeadingSign;
+            PdfAllowParenthesizedNegative = manifest.NumericPolicy.AllowParenthesizedNegative;
+            PdfAllowTrailingMinus = manifest.NumericPolicy.AllowTrailingMinus;
+            PdfReviewer = manifest.Reviewer;
+
+            foreach (var pageNumber in candidatePages)
+            foreach (var rowsAtLowCoordinate in candidateDirections)
+            {
+                try
+                {
+                    var geometryTemplate = PdfTableTemplate.CreateFromFirstPage(document, pageNumber,
+                        manifest.RowLabelHeader, headers, rowsAtLowCoordinate);
+                    var reviewRevision = CreatePdfReviewRevision(geometryTemplate, manifest.NumericPolicy);
+                    if (StringComparer.Ordinal.Equals(geometryTemplate.Revision, manifest.TemplateRevision))
+                        _pdfRestoreTemplateRevisionOverride = manifest.TemplateRevision; // legacy PDF-07 sidecar
+                    else if (StringComparer.Ordinal.Equals(reviewRevision, manifest.TemplateRevision))
+                        _pdfRestoreTemplateRevisionOverride = null;
+                    else
+                        continue;
+                    matchingTemplate = geometryTemplate with
+                    {
+                        Revision = _pdfRestoreTemplateRevisionOverride ?? reviewRevision
+                    };
+                    CurrentPdfPageNumber = pageNumber;
+                    SelectedPdfRowDirection = PdfRowDirections.Single(direction =>
+                        direction.RowsAtLowLineCoordinate == rowsAtLowCoordinate);
+                    break;
+                }
+                catch (AdapterException)
+                {
+                    // Legacy sidecars omit the page and direction, so try the remaining declared candidates.
+                }
+            }
+        }
+        finally { _restoringPdfReviewSettings = false; }
+
+        if (matchingTemplate is null)
+        {
+            _pdfRestoreTemplateRevisionOverride = null;
+            throw new InvalidDataException($"The declared PDF template and numeric policy do not reproduce revision {manifest.TemplateRevision}.");
+        }
+        _restoringPdfReviewSettings = true;
+        try { BuildPdfTemplate(); }
+        finally
+        {
+            _restoringPdfReviewSettings = false;
+            _pdfRestoreTemplateRevisionOverride = null;
+        }
+        if (_pdfTemplate is null || _pdfReconstruction is null
+            || !StringComparer.Ordinal.Equals(_pdfTemplate.Revision, manifest.TemplateRevision)
+            || _pdfReconstruction.State != PdfTableReconstructionState.Anchored
+            || _pdfReconstruction.Alternatives.Count != 0
+            || _pdfReconstruction.Rows.Count != manifest.Rows.Count)
+            throw new InvalidDataException($"The declared PDF review could not be reconstructed (state {_pdfReconstruction?.State}, revision {_pdfTemplate?.Revision}).");
+
+        var reviewedRows = manifest.Rows.ToDictionary(row => row.Occurrence);
+        foreach (var sourceRow in _pdfReconstruction.Rows)
+        {
+            if (!reviewedRows.TryGetValue(sourceRow.Occurrence, out var reviewedRow)
+                || !StringComparer.Ordinal.Equals(sourceRow.LabelText, reviewedRow.LabelText)
+                || sourceRow.Evidence != reviewedRow.LabelEvidence
+                || sourceRow.Cells.Count != reviewedRow.Cells.Count)
+                throw new InvalidDataException($"PDF row occurrence {sourceRow.Occurrence} no longer matches the reviewed label and evidence.");
+
+            var reviewedCells = reviewedRow.Cells.ToDictionary(cell => cell.ReportingYear);
+            foreach (var sourceCell in sourceRow.Cells)
+            {
+                if (!reviewedCells.TryGetValue(sourceCell.ReportingYear, out var reviewedCell)
+                    || !StringComparer.Ordinal.Equals(sourceCell.RawText, reviewedCell.RawText)
+                    || sourceCell.Evidence != reviewedCell.Evidence)
+                    throw new InvalidDataException($"PDF cell occurrence {sourceRow.Occurrence}, year {sourceCell.ReportingYear} no longer matches its reviewed evidence.");
+                var row = PdfReviewValues.SingleOrDefault(value =>
+                    value.SourceRow.Occurrence == sourceRow.Occurrence
+                    && value.ReportingYear == sourceCell.ReportingYear);
+                if (row is null || !PdfReviewValueRow.IsCanonicalDecimal(reviewedCell.CanonicalValue))
+                    throw new InvalidDataException($"PDF cell occurrence {sourceRow.Occurrence}, year {sourceCell.ReportingYear} has no canonical reviewed value.");
+                ApplyPdfReviewState(row, new PdfReviewRowState(
+                    reviewedCell.CanonicalValue, reviewedCell.CorrectionReason, reviewedCell.IsApproved));
+                if (row.IsApproved && !row.CanApprove)
+                    throw new InvalidDataException($"PDF cell occurrence {sourceRow.Occurrence}, year {sourceCell.ReportingYear} is approved but not currently approvable.");
+            }
+        }
+
+        _pdfReviewAuditEvents.Clear();
+        _pdfReviewAuditEvents.AddRange(_pdfReviewAuditStoreFactory().Read(
+            document.SourceSha256, manifest.TemplateRevision));
+        var pendingEvents = _pdfReviewAuditEvents
+            .Where(entry => entry.OccurredUtc > manifest.ReviewedUtc)
+            .ToArray();
+        foreach (var entry in pendingEvents)
+        {
+            var row = PdfReviewValues.SingleOrDefault(value =>
+                value.SourceRow.Occurrence == entry.RowOccurrence
+                && value.ReportingYear == entry.ReportingYear);
+            if (row is null
+                || !StringComparer.Ordinal.Equals(row.RawText, entry.OriginalRawText)
+                || !StringComparer.Ordinal.Equals(row.ParseResult.CanonicalValue, entry.ParsedValue)
+                || !_pdfReviewStates.TryGetValue(row, out var current)
+                || !StringComparer.Ordinal.Equals(current.ReviewedValue, entry.PreviousReviewedValue)
+                || !StringComparer.Ordinal.Equals(current.CorrectionReason, entry.PreviousCorrectionReason)
+                || current.IsApproved != entry.PreviousIsApproved)
+                throw new InvalidDataException($"PDF audit event {entry.EventId} does not continue the restored sidecar state.");
+            ApplyPdfReviewState(row, new PdfReviewRowState(
+                entry.ReviewedValue, entry.CorrectionReason, entry.IsApproved));
+            if (row.IsApproved && !row.CanApprove)
+                throw new InvalidDataException($"PDF audit event {entry.EventId} restores a value that cannot be approved.");
+        }
+
+        Raise(nameof(SelectedPdfReviewHistory));
+        RefreshPdfReviewCommandState();
+        return true;
+    }
+
+    private void RestorePdfAuditHistoryFromBeginning()
+    {
+        if (_pdfDocument is null || _pdfTemplate is null) return;
+        _pdfReviewAuditEvents.Clear();
+        _pdfReviewAuditEvents.AddRange(_pdfReviewAuditStoreFactory().Read(
+            _pdfDocument.SourceSha256, _pdfTemplate.Revision));
+        foreach (var entry in _pdfReviewAuditEvents)
+        {
+            var row = PdfReviewValues.SingleOrDefault(value =>
+                value.SourceRow.Occurrence == entry.RowOccurrence
+                && value.ReportingYear == entry.ReportingYear);
+            if (row is null
+                || !StringComparer.Ordinal.Equals(row.RawText, entry.OriginalRawText)
+                || !StringComparer.Ordinal.Equals(row.ParseResult.CanonicalValue, entry.ParsedValue)
+                || !_pdfReviewStates.TryGetValue(row, out var current)
+                || !StringComparer.Ordinal.Equals(current.ReviewedValue, entry.PreviousReviewedValue)
+                || !StringComparer.Ordinal.Equals(current.CorrectionReason, entry.PreviousCorrectionReason)
+                || current.IsApproved != entry.PreviousIsApproved)
+                throw new InvalidDataException("The local PDF review audit history does not follow the current source value state.");
+            ApplyPdfReviewState(row, new PdfReviewRowState(
+                entry.ReviewedValue, entry.CorrectionReason, entry.IsApproved));
+            if (row.IsApproved && !row.CanApprove)
+                throw new InvalidDataException("The local PDF review audit history contains an unapprovable value.");
+        }
+        Raise(nameof(SelectedPdfReviewHistory));
+    }
+
+    private void ApplyPdfReviewState(PdfReviewValueRow row, PdfReviewRowState state)
+    {
+        _applyingPdfReviewAudit = true;
+        try { row.SetReviewedState(state.ReviewedValue, state.CorrectionReason, state.IsApproved); }
+        finally { _applyingPdfReviewAudit = false; }
+        _pdfReviewStates[row] = state;
+    }
+
+    private void RecordPdfApprovalChange(PdfReviewValueRow row)
+    {
+        if (!_pdfReviewStates.TryGetValue(row, out var previous)) return;
+        var current = new PdfReviewRowState(row.ReviewedValue, row.CorrectionReason, row.IsApproved);
+        if (current.IsApproved == previous.IsApproved) return;
+        if (!TryGetPdfReviewer(out var reviewer)
+            || _pdfDocument is null || _pdfTemplate is null || row.ParseResult.CanonicalValue is null)
+        {
+            ApplyPdfReviewState(row, previous);
+            PdfReviewStatus = "Enter a valid reviewer identity before recording an approval or rejection.";
+            return;
+        }
+        var action = current.IsApproved ? PdfReviewAuditAction.Approve : PdfReviewAuditAction.Reject;
+        AppendPdfReviewAuditEvent(row, action, previous, current, reviewer);
+    }
+
+    private void ApplySelectedPdfCorrection()
+    {
+        var row = SelectedPdfReviewValue;
+        if (row is null || !row.CanApplyCorrection || !TryGetPdfReviewer(out var reviewer)
+            || _pdfDocument is null || _pdfTemplate is null
+            || !_pdfReviewStates.TryGetValue(row, out var previous))
+            return;
+        var current = new PdfReviewRowState(row.CorrectionValue.Trim(),
+            row.CorrectionReasonInput.Trim(), false);
+        AppendPdfReviewAuditEvent(row, PdfReviewAuditAction.Correct, previous, current, reviewer);
+        if (StringComparer.Ordinal.Equals(row.ReviewedValue, current.ReviewedValue)
+            && StringComparer.Ordinal.Equals(row.CorrectionReason, current.CorrectionReason))
+            row.ClearCorrectionDraft();
+    }
+
+    private void UndoSelectedPdfReview()
+    {
+        var row = SelectedPdfReviewValue;
+        if (row is null || !TryGetPdfReviewer(out var reviewer)
+            || _pdfDocument is null || _pdfTemplate is null
+            || !_pdfReviewStates.TryGetValue(row, out var previous))
+            return;
+        var latest = _pdfReviewAuditEvents.LastOrDefault(entry =>
+            entry.RowOccurrence == row.SourceRow.Occurrence && entry.ReportingYear == row.ReportingYear);
+        if (latest is null) return;
+        var current = new PdfReviewRowState(latest.PreviousReviewedValue,
+            latest.PreviousCorrectionReason, latest.PreviousIsApproved);
+        var undo = AppendPdfReviewAuditEvent(row, PdfReviewAuditAction.Undo, previous, current,
+            reviewer, latest.EventId);
+        if (undo is not null) row.ClearCorrectionDraft();
+    }
+
+    private PdfReviewAuditEvent? AppendPdfReviewAuditEvent(
+        PdfReviewValueRow row,
+        PdfReviewAuditAction action,
+        PdfReviewRowState previous,
+        PdfReviewRowState current,
+        string reviewer,
+        string? undoesEventId = null)
+    {
+        if (_pdfDocument is null || _pdfTemplate is null || row.ParseResult.CanonicalValue is not { } parsedValue)
+            return null;
+        var entry = new PdfReviewAuditEvent
+        {
+            EventId = Guid.NewGuid().ToString("N"),
+            SourceSha256 = _pdfDocument.SourceSha256,
+            TemplateRevision = _pdfTemplate.Revision,
+            RowOccurrence = row.SourceRow.Occurrence,
+            ReportingYear = row.ReportingYear,
+            Action = action,
+            OriginalRawText = row.RawText,
+            ParsedValue = parsedValue,
+            PreviousReviewedValue = previous.ReviewedValue,
+            PreviousCorrectionReason = previous.CorrectionReason,
+            PreviousIsApproved = previous.IsApproved,
+            ReviewedValue = current.ReviewedValue,
+            CorrectionReason = current.CorrectionReason,
+            IsApproved = current.IsApproved,
+            Reviewer = reviewer,
+            OccurredUtc = DateTimeOffset.UtcNow,
+            UndoesEventId = undoesEventId
+        };
+        try
+        {
+            _pdfReviewAuditStoreFactory().Append(entry);
+            _pdfReviewAuditEvents.Add(entry);
+            ApplyPdfReviewState(row, current);
+            InvalidateActivePdfBindingSchema();
+            PdfReviewStatus = $"{action} decision recorded in local review history. Save a new review sidecar before mapping; reviewer identity is not authenticated.";
+            Raise(nameof(SelectedPdfReviewHistory));
+            RefreshPdfReviewCommandState();
+            return entry;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+            and not StackOverflowException and not OperationCanceledException)
+        {
+            ApplyPdfReviewState(row, previous);
+            PdfReviewStatus = $"The review decision was not saved: {exception.Message}";
+            RefreshPdfReviewCommandState();
+            return null;
+        }
+    }
+
+    private bool TryGetPdfReviewer(out string reviewer)
+    {
+        reviewer = PdfReviewer.Trim();
+        return reviewer.Length is > 0 and <= 128 && !reviewer.Any(char.IsControl);
     }
 
     internal async Task SavePdfReviewAsync()
@@ -1918,7 +2325,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var numericPolicy = CreatePdfNumericPolicy();
         var approvedValues = PdfReviewValues.ToDictionary(
             row => (row.SourceRow.Occurrence, row.ReportingYear),
-            row => (row.ParseResult, row.IsApproved, row.CanApprove));
+            row => row);
         IsSourceLoading = true;
         try
         {
@@ -1939,7 +2346,12 @@ public sealed class MainWindowViewModel : ViewModelBase
 
             var references = await _pdfEvidenceStoreFactory().CaptureAsync(
                 sourcePath, document, captures, template.Revision, CancellationToken.None);
-            if (generation != _sourceLoadGeneration) return;
+            if (generation != _sourceLoadGeneration)
+            {
+                PdfReviewStatus = "Review save stopped because the selected source changed during evidence persistence.";
+                StatusText = "PDF review save cancelled after source selection changed.";
+                return;
+            }
             if (references.Count != captures.Count)
                 throw new InvalidOperationException("PDF evidence persistence returned an incomplete reference set.");
 
@@ -1952,17 +2364,20 @@ public sealed class MainWindowViewModel : ViewModelBase
                 foreach (var cell in row.Cells)
                 {
                     var value = approvedValues[(row.Occurrence, cell.ReportingYear)];
-                    if (!value.IsApproved || value.ParseResult.Value is null || !value.CanApprove)
+                    if (!value.IsApproved || value.ParseResult.Value is null || !value.CanApprove
+                        || value.HasPendingCorrectionDraft
+                        || !PdfReviewValueRow.IsCanonicalDecimal(value.ReviewedValue))
                         throw new InvalidOperationException("Every source value must remain parsed and explicitly approved while the review is saved.");
                     var evidence = references[index++];
                     reviewedCells.Add(new PdfReviewedSourceCell
                     {
                         ReportingYear = cell.ReportingYear,
                         RawText = cell.RawText,
-                        CanonicalValue = value.ParseResult.Value.Value.ToString(CultureInfo.InvariantCulture),
+                        CanonicalValue = value.ReviewedValue,
                         EvidenceId = evidence.EvidenceId,
                         Evidence = cell.Evidence,
-                        IsApproved = true
+                        IsApproved = true,
+                        CorrectionReason = value.CorrectionReason
                     });
                 }
                 reviewedRows.Add(new PdfReviewedSourceRow
@@ -1984,6 +2399,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ReviewedUtc = DateTimeOffset.UtcNow,
                 IsApproved = true,
                 RowLabelHeader = template.RowLabelHeader,
+                TemplatePageNumber = template.SeedPageNumber,
+                RowsAtLowLineCoordinate = template.RowsAtLowLineCoordinate,
                 NumericPolicy = numericPolicy,
                 PeriodColumns = template.PeriodColumns,
                 Rows = reviewedRows
@@ -1993,7 +2410,12 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
             });
             var manifestPath = await WritePdfReviewManifestAsync(sourcePath, manifestBytes);
-            if (generation != _sourceLoadGeneration) return;
+            if (generation != _sourceLoadGeneration)
+            {
+                PdfReviewStatus = "The review sidecar was written but not activated because the selected source changed.";
+                StatusText = "PDF review sidecar was not activated after source selection changed.";
+                return;
+            }
 
             var configuration = binding.Configuration.ToDictionary(pair => pair.Key,
                 pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
@@ -2004,14 +2426,19 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Configuration = configuration.ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.Ordinal),
                 SchemaFingerprint = null
             };
-            Session.SetBinding(pendingBinding);
+            Session.SetBinding(pendingBinding, clearBindingSchemasFromHistory: true);
             var connection = new SourceConnection(binding.BindingId, "pdf-digital", sourcePath, configuration);
             var schema = await new PdfSourceAdapter(_pdfEvidenceStoreFactory())
                 .InspectSchemaAsync(connection, CancellationToken.None);
-            if (generation != _sourceLoadGeneration) return;
+            if (generation != _sourceLoadGeneration)
+            {
+                PdfReviewStatus = "The review sidecar was written but not activated because the selected source changed.";
+                StatusText = "PDF review sidecar was not activated after source selection changed.";
+                return;
+            }
 
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
-            Session.SetBinding(pendingBinding with { SchemaFingerprint = schema.Fingerprint });
+            Session.SetBinding(pendingBinding with { SchemaFingerprint = schema.Fingerprint }, clearBindingSchemasFromHistory: true);
             Raise(nameof(SourceColumns));
             SourceInspectionSummary = $"Reviewed digital PDF schema: {schema.Columns.Count} typed fields. Source digest, page regions and immutable evidence snapshot are current.";
             PdfReviewStatus = $"Review saved with reviewer identifier {reviewer}. This local identifier is not authenticated; raw extraction is evidence for review, not a verified report.";

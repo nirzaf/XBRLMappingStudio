@@ -13,6 +13,10 @@ public sealed record PdfReviewedSourceManifest
     public required DateTimeOffset ReviewedUtc { get; init; }
     public required bool IsApproved { get; init; }
     public required string RowLabelHeader { get; init; }
+    /// <summary>Page whose paired headings seeded the review template; absent in legacy PDF-07 sidecars.</summary>
+    public int? TemplatePageNumber { get; init; }
+    /// <summary>Declared row direction; absent in legacy PDF-07 sidecars.</summary>
+    public bool? RowsAtLowLineCoordinate { get; init; }
     public required PdfNumericFormatPolicy NumericPolicy { get; init; }
     public required IReadOnlyList<PdfPeriodColumnAnchor> PeriodColumns { get; init; }
     public required IReadOnlyList<PdfReviewedSourceRow> Rows { get; init; }

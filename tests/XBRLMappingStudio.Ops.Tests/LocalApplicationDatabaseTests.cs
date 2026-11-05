@@ -16,9 +16,9 @@ public sealed class LocalApplicationDatabaseTests
         using (var version = schema.CreateCommand())
         {
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(4L, version.ExecuteScalar());
-            version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence')";
-            Assert.Equal(2L, version.ExecuteScalar());
+            Assert.Equal(5L, version.ExecuteScalar());
+            version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence','pdf_review_audit')";
+            Assert.Equal(3L, version.ExecuteScalar());
         }
 
         var journal = new RunJournal(databasePath: path);
@@ -72,7 +72,7 @@ public sealed class LocalApplicationDatabaseTests
         { ValidatedDigest = "sha256:validated" };
         journal.Save(receiptEntry);
 
-        Assert.Equal(4, LocalApplicationDatabase.CurrentSchemaVersion);
+        Assert.Equal(5, LocalApplicationDatabase.CurrentSchemaVersion);
         Assert.Equal(receiptEntry, journal.Load("run-v2"));
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
@@ -103,8 +103,10 @@ public sealed class LocalApplicationDatabaseTests
         check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
         Assert.Equal("compact", check.ExecuteScalar());
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(4L, check.ExecuteScalar());
+        Assert.Equal(5L, check.ExecuteScalar());
         check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_source_evidence'";
+        Assert.Equal(1L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_review_audit'";
         Assert.Equal(1L, check.ExecuteScalar());
     }
 

@@ -117,6 +117,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
                 ALTER TABLE run_journal DROP COLUMN validated_digest;
                 DROP TABLE pdf_source_evidence;
                 DROP TABLE pdf_source_documents;
+                DROP TABLE pdf_review_audit;
                 """;
             rollbackColumns.ExecuteNonQuery();
             using var drop = connection.CreateCommand();

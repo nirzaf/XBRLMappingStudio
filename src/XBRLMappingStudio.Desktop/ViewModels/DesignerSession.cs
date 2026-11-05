@@ -361,12 +361,26 @@ public sealed class DesignerSession
         return true;
     }
 
-    public bool SetBinding(SourceBinding binding)
+    public bool SetBinding(SourceBinding binding, bool clearBindingSchemasFromHistory = false)
     {
         var index = _project.Bindings.FindIndex(current => current.BindingId == binding.BindingId);
-        if (index < 0 || Equals(_project.Bindings[index], binding)) return false;
+        if (index < 0) return false;
+        if (Equals(_project.Bindings[index], binding))
+        {
+            if (clearBindingSchemasFromHistory)
+            {
+                ClearBindingSchemaFromHistory(_undo, binding.BindingId);
+                ClearBindingSchemaFromHistory(_redo, binding.BindingId);
+            }
+            return false;
+        }
         PushUndo();
         _project.Bindings[index] = binding;
+        if (clearBindingSchemasFromHistory)
+        {
+            ClearBindingSchemaFromHistory(_undo, binding.BindingId);
+            ClearBindingSchemaFromHistory(_redo, binding.BindingId);
+        }
         Changed?.Invoke();
         return true;
     }
@@ -437,6 +451,21 @@ public sealed class DesignerSession
     {
         _undo.Push(ProjectSerializer.Serialize(_project));
         _redo.Clear();
+    }
+
+    private static void ClearBindingSchemaFromHistory(Stack<string> snapshots, string bindingId)
+    {
+        if (snapshots.Count == 0) return;
+        var ordered = snapshots.ToArray();
+        snapshots.Clear();
+        foreach (var snapshot in ordered.Reverse())
+        {
+            var project = ProjectSerializer.Deserialize(snapshot);
+            var index = project.Bindings.FindIndex(binding => binding.BindingId == bindingId);
+            if (index >= 0 && project.Bindings[index].SchemaFingerprint is not null)
+                project.Bindings[index] = project.Bindings[index] with { SchemaFingerprint = null };
+            snapshots.Push(ProjectSerializer.Serialize(project));
+        }
     }
 
     // ---- view-model projection --------------------------------------------------

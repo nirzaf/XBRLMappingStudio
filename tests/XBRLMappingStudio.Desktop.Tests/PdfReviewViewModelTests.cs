@@ -36,7 +36,8 @@ public sealed class PdfReviewViewModelTests
                 (_, _) => Task.FromException<ISourceSchema>(new InvalidOperationException("PDF does not use the SQLite schema loader.")),
                 pdfDocumentLoader: async (path, token) => PdfDigitalDocumentExtractor.Extract(
                     await File.ReadAllBytesAsync(path, token)),
-                pdfEvidenceStoreFactory: () => new PdfEvidenceStore(new LocalApplicationDatabase(statePath)));
+                pdfEvidenceStoreFactory: () => new PdfEvidenceStore(new LocalApplicationDatabase(statePath)),
+                pdfReviewAuditStoreFactory: () => new PdfReviewAuditStore(new LocalApplicationDatabase(statePath)));
             viewModel.SaveProjectTo(projectPath);
 
             await viewModel.LoadSourceAsync(pdfPath);
@@ -80,15 +81,34 @@ public sealed class PdfReviewViewModelTests
             Assert.Equal(1.75, viewModel.PdfReviewZoom);
 
             foreach (var value in viewModel.PdfReviewValues) value.IsApproved = true;
+            Assert.All(viewModel.PdfReviewValues, value => Assert.False(value.IsApproved));
             Assert.False(viewModel.CanSavePdfReview);
             viewModel.PdfReviewer = "fixture-reviewer";
-            Assert.True(viewModel.CanSavePdfReview);
+            Assert.False(viewModel.CanSavePdfReview);
 
             viewModel.PdfCurrencyCode = "EUR";
             Assert.Empty(viewModel.PdfReviewValues);
             Assert.False(viewModel.CanSavePdfReview);
             viewModel.PdfCurrencyCode = "USD";
             viewModel.BuildPdfTemplateCommand.Execute(null);
+
+            var corrected = viewModel.PdfReviewValues.Single(value => value.RawText == "250.00");
+            viewModel.SelectedPdfReviewValue = corrected;
+            corrected.CorrectionValue = "251";
+            corrected.CorrectionReasonInput = "Corrected after comparing with the audited schedule";
+            Assert.True(viewModel.CanApplyPdfCorrection);
+            viewModel.ApplyPdfCorrectionCommand.Execute(null);
+            Assert.Equal("251", corrected.ReviewedValue);
+            Assert.Equal("Corrected after comparing with the audited schedule", corrected.CorrectionReason);
+            Assert.False(corrected.IsApproved);
+            Assert.True(corrected.CanApprove);
+            corrected.IsApproved = true;
+            corrected.IsApproved = false;
+            Assert.False(corrected.IsApproved);
+            Assert.True(viewModel.CanUndoPdfReview);
+            viewModel.UndoPdfReviewCommand.Execute(null);
+            Assert.True(corrected.IsApproved);
+
             foreach (var value in viewModel.PdfReviewValues) value.IsApproved = true;
             Assert.True(viewModel.CanSavePdfReview);
 
@@ -103,7 +123,61 @@ public sealed class PdfReviewViewModelTests
             Assert.True(File.Exists(Path.Combine(directory, configuredManifest!)));
             Assert.Equal(previousReviewContent, await File.ReadAllTextAsync(previousManifestPath));
             Assert.Contains("validated the PDF review sidecar", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+
+            var durableCorrection = viewModel.PdfReviewValues.Single(value => value.RawText == "250.00");
+            viewModel.SelectedPdfReviewValue = durableCorrection;
+            durableCorrection.CorrectionValue = "252";
+            durableCorrection.CorrectionReasonInput = "Revised after a second source check";
+            viewModel.ApplyPdfCorrectionCommand.Execute(null);
+            Assert.Equal("252", durableCorrection.ReviewedValue);
+            Assert.False(durableCorrection.IsApproved);
+            Assert.Null(viewModel.Session.Project.Bindings.Single().SchemaFingerprint);
             viewModel.SaveProjectTo(projectPath);
+
+            var reopened = new MainWindowViewModel(viewModel.Session.Project, null,
+                (_, _) => Task.FromException<ISourceSchema>(new InvalidOperationException("PDF does not use the SQLite schema loader.")),
+                pdfDocumentLoader: async (path, token) => PdfDigitalDocumentExtractor.Extract(
+                    await File.ReadAllBytesAsync(path, token)),
+                pdfEvidenceStoreFactory: () => new PdfEvidenceStore(new LocalApplicationDatabase(statePath)),
+                pdfReviewAuditStoreFactory: () => new PdfReviewAuditStore(new LocalApplicationDatabase(statePath)));
+            reopened.SaveProjectTo(projectPath);
+            await reopened.LoadSourceAsync(pdfPath);
+            Assert.Null(reopened.Session.Project.Bindings.Single().SchemaFingerprint);
+            Assert.Contains("newer local review actions", reopened.SourceInspectionSummary, StringComparison.OrdinalIgnoreCase);
+            var reopenedCorrection = Assert.Single(reopened.PdfReviewValues, value => value.RawText == "250.00");
+            reopened.SelectedPdfReviewValue = reopenedCorrection;
+            Assert.Equal("252", reopenedCorrection.ReviewedValue);
+            Assert.Equal("Revised after a second source check", reopenedCorrection.CorrectionReason);
+            Assert.False(reopenedCorrection.IsApproved);
+            Assert.Null(reopened.Session.Project.Bindings.Single().SchemaFingerprint);
+            Assert.False(reopened.CanSavePdfReview);
+            reopenedCorrection.IsApproved = true;
+            Assert.True(reopened.CanSavePdfReview);
+            await reopened.SavePdfReviewAsync();
+            Assert.True(reopened.Session.Project.Bindings.Single().SchemaFingerprint is not null,
+                $"{reopened.StatusText} {reopened.PdfReviewStatus}");
+            Assert.Contains("Correct", reopened.SelectedPdfReviewHistory, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Undo", reopened.SelectedPdfReviewHistory, StringComparison.OrdinalIgnoreCase);
+
+            var activeBinding = reopened.Session.Project.Bindings.Single();
+            reopened.Session.SetBinding(activeBinding with { DisplayName = "Reviewed source edit" });
+            reopened.PdfRowLabelHeader = "Different header";
+            Assert.Null(reopened.Session.Project.Bindings.Single().SchemaFingerprint);
+            Assert.Empty(reopened.SourceColumns);
+            reopened.Session.Undo();
+            Assert.Null(reopened.Session.Project.Bindings.Single().SchemaFingerprint);
+
+            await File.WriteAllBytesAsync(pdfPath, pdfBytes.Append((byte)' ').ToArray());
+            var staleSource = new MainWindowViewModel(reopened.Session.Project, null,
+                (_, _) => Task.FromException<ISourceSchema>(new InvalidOperationException("PDF does not use the SQLite schema loader.")),
+                pdfDocumentLoader: async (path, token) => PdfDigitalDocumentExtractor.Extract(
+                    await File.ReadAllBytesAsync(path, token)),
+                pdfEvidenceStoreFactory: () => new PdfEvidenceStore(new LocalApplicationDatabase(statePath)),
+                pdfReviewAuditStoreFactory: () => new PdfReviewAuditStore(new LocalApplicationDatabase(statePath)));
+            staleSource.SaveProjectTo(projectPath);
+            await staleSource.LoadSourceAsync(pdfPath);
+            Assert.Null(staleSource.Session.Project.Bindings.Single().SchemaFingerprint);
+            Assert.Contains("no longer matches", staleSource.SourceInspectionSummary, StringComparison.OrdinalIgnoreCase);
 
             var csvPath = Path.Combine(directory, "replacement.csv");
             await File.WriteAllTextAsync(csvPath, "value\r\n1\r\n");

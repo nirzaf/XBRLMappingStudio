@@ -11,9 +11,9 @@ public sealed class LocalApplicationDatabase
     /// AI06: v2 widens <c>suggestion_audit</c> with governed-actor and prompt-template
     /// columns. v3 adds the digest of the artifact accepted by the profile worker to
     /// the publication journal and durable receipt. v4 adds managed PDF evidence
-    /// references. Migrations are non-destructive.
+    /// references, and v5 adds append-only PDF review audit events. Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -274,6 +274,43 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=4;
                 """;
             migration4.ExecuteNonQuery();
+        }
+        if (version < 5)
+        {
+            using var migration5 = connection.CreateCommand();
+            migration5.Transaction = transaction;
+            migration5.CommandText = """
+                CREATE TABLE pdf_review_audit (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    source_sha256 TEXT NOT NULL,
+                    template_revision TEXT NOT NULL,
+                    row_occurrence INTEGER NOT NULL CHECK(row_occurrence > 0),
+                    reporting_year INTEGER NOT NULL CHECK(reporting_year BETWEEN 1900 AND 2200),
+                    action TEXT NOT NULL CHECK(action IN ('approve', 'correct', 'reject', 'undo')),
+                    original_raw_text TEXT NOT NULL,
+                    parsed_value TEXT NOT NULL,
+                    previous_reviewed_value TEXT NOT NULL,
+                    previous_correction_reason TEXT,
+                    previous_is_approved INTEGER NOT NULL CHECK(previous_is_approved IN (0, 1)),
+                    reviewed_value TEXT NOT NULL,
+                    correction_reason TEXT,
+                    is_approved INTEGER NOT NULL CHECK(is_approved IN (0, 1)),
+                    reviewer TEXT NOT NULL,
+                    occurred_utc TEXT NOT NULL,
+                    undoes_event_id TEXT REFERENCES pdf_review_audit(event_id) ON DELETE RESTRICT
+                );
+                CREATE INDEX ix_pdf_review_audit_source_template_row
+                    ON pdf_review_audit(source_sha256, template_revision, row_occurrence, reporting_year, sequence);
+                CREATE TRIGGER pdf_review_audit_no_update
+                    BEFORE UPDATE ON pdf_review_audit
+                    BEGIN SELECT RAISE(ABORT, 'PDF review audit entries are immutable'); END;
+                CREATE TRIGGER pdf_review_audit_no_delete
+                    BEFORE DELETE ON pdf_review_audit
+                    BEGIN SELECT RAISE(ABORT, 'PDF review audit entries are immutable'); END;
+                PRAGMA user_version=5;
+                """;
+            migration5.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();
