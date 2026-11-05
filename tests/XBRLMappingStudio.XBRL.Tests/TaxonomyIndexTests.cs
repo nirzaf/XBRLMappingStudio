@@ -121,6 +121,43 @@ public sealed class TaxonomyIndexTests
     }
 
     [Fact]
+    public void PresentationOccurrences_ReturnEveryRootToConceptPathAcrossRoles()
+    {
+        var index = new TaxonomyIndex(Profile);
+
+        var occurrences = index.PresentationOccurrencesFor(SyntheticProfile.Qualified("Revenue"));
+
+        Assert.Equal(2, occurrences.Count);
+        Assert.Contains(occurrences, occurrence =>
+            occurrence.RoleUri == SyntheticProfile.PresentationRole
+            && occurrence.ConceptPath.SequenceEqual(new[]
+            {
+                SyntheticProfile.Qualified("FinancialStatements"),
+                SyntheticProfile.Qualified("Revenue")
+            }));
+        Assert.Contains(occurrences, occurrence =>
+            occurrence.RoleUri == SyntheticProfile.PresentationRole + "/income-statement"
+            && occurrence.ConceptPath.SequenceEqual(new[]
+            {
+                SyntheticProfile.Qualified("NetIncome"),
+                SyntheticProfile.Qualified("Revenue")
+            }));
+    }
+
+    [Fact]
+    public async Task Search_ObservesPreCancelledTokens_SynchronouslyAndAsynchronously()
+    {
+        var index = new TaxonomyIndex(Profile);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() =>
+            index.Search("Revenue", cancellationToken: cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            index.SearchAsync("Revenue", cancellationToken: cancellation.Token));
+    }
+
+    [Fact]
     public void AbstractConcept_IsRejected_AsFactTarget()
     {
         var index = new TaxonomyIndex(Profile);

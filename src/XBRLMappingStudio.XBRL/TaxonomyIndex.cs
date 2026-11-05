@@ -8,6 +8,9 @@ public sealed record PagedResult<T>(
     int TotalCount,
     bool HasNext);
 
+/// <summary>A concept's occurrence at one complete path in one presentation role.</summary>
+public sealed record PresentationOccurrence(string RoleUri, IReadOnlyList<string> ConceptPath);
+
 /// <summary>
 /// A single presentation relationship network (XBR03): the set of parent→child links
 /// under one role URI. A child may appear under multiple parents and multiple roles.
@@ -140,6 +143,73 @@ public sealed class TaxonomyIndex
         _links.Where(l => string.Equals(l.RoleUri, roleUri, StringComparison.Ordinal)).ToList());
 
     /// <summary>
+    /// Finds each bounded root-to-concept path in every loaded presentation role. A
+    /// concept can therefore be returned multiple times when it occurs in different
+    /// roles or beneath different parents. Cycles and excessive path growth are bounded.
+    /// </summary>
+    public IReadOnlyList<PresentationOccurrence> PresentationOccurrencesFor(
+        string qualifiedName,
+        int maximumOccurrences = 512,
+        int maximumDepth = 128,
+        CancellationToken cancellationToken = default)
+    {
+        if (maximumOccurrences <= 0) throw new ArgumentOutOfRangeException(nameof(maximumOccurrences));
+        if (maximumDepth <= 0) throw new ArgumentOutOfRangeException(nameof(maximumDepth));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_byQualifiedName.ContainsKey(qualifiedName)) return Array.Empty<PresentationOccurrence>();
+
+        var occurrences = new List<PresentationOccurrence>();
+        foreach (var roleUri in PresentationRolesFor(qualifiedName))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (occurrences.Count >= maximumOccurrences) return occurrences.AsReadOnly();
+            var roleLinks = _links
+                .Where(link => StringComparer.Ordinal.Equals(link.RoleUri, roleUri))
+                .OrderBy(link => link.Order)
+                .ThenBy(link => link.ParentQName, StringComparer.Ordinal)
+                .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+                .ToArray();
+
+            var parentsByChild = roleLinks
+                .GroupBy(link => link.ChildQName, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+            var childNames = roleLinks.Select(link => link.ChildQName)
+                .ToHashSet(StringComparer.Ordinal);
+            var reversePath = new List<string>();
+            var pathSet = new HashSet<string>(StringComparer.Ordinal);
+            VisitParents(qualifiedName);
+
+            void VisitParents(string current)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (occurrences.Count >= maximumOccurrences || reversePath.Count >= maximumDepth
+                    || !pathSet.Add(current)) return;
+                reversePath.Add(current);
+
+                if (!childNames.Contains(current))
+                {
+                    occurrences.Add(new PresentationOccurrence(
+                        roleUri,
+                        Array.AsReadOnly(reversePath.AsEnumerable().Reverse().ToArray())));
+                }
+                else if (parentsByChild.TryGetValue(current, out var parents))
+                {
+                    foreach (var parent in parents)
+                    {
+                        VisitParents(parent.ParentQName);
+                        if (occurrences.Count >= maximumOccurrences) break;
+                    }
+                }
+
+                reversePath.RemoveAt(reversePath.Count - 1);
+                pathSet.Remove(current);
+            }
+        }
+
+        return occurrences.AsReadOnly();
+    }
+
+    /// <summary>
     /// Substring search across local name, qualified name and the label in the requested
     /// language (falling back to the default label when the language is unsupported).
     /// Deterministically ordered; abstract concepts are included so the caller can render
@@ -149,18 +219,22 @@ public sealed class TaxonomyIndex
         string? query,
         string? language = null,
         int page = 0,
-        int pageSize = DefaultPageSize)
+        int pageSize = DefaultPageSize,
+        CancellationToken cancellationToken = default)
     {
         if (page < 0) throw new ArgumentOutOfRangeException(nameof(page));
         if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        cancellationToken.ThrowIfCancellationRequested();
 
         var q = (query ?? "").Trim();
         var start = (long)page * pageSize;
         var end = start + pageSize;
         var window = new List<ConceptMetadata>(Math.Min(pageSize, _orderedConcepts.Count));
         var total = 0;
+        var inspected = 0;
         foreach (var concept in _orderedConcepts)
         {
+            if ((inspected++ & 0x3f) == 0) cancellationToken.ThrowIfCancellationRequested();
             if (q.Length > 0 && !Matches(concept, q, language)) continue;
             if (total >= start && total < end) window.Add(concept);
             total++;
@@ -168,6 +242,15 @@ public sealed class TaxonomyIndex
         bool hasNext = total > end;
         return new PagedResult<ConceptMetadata>(window, page, pageSize, total, hasNext);
     }
+
+    /// <summary>Runs paged search away from the UI thread and observes superseding cancellation.</summary>
+    public Task<PagedResult<ConceptMetadata>> SearchAsync(
+        string? query,
+        string? language = null,
+        int page = 0,
+        int pageSize = DefaultPageSize,
+        CancellationToken cancellationToken = default)
+        => Task.Run(() => Search(query, language, page, pageSize, cancellationToken));
 
     private static bool Matches(ConceptMetadata c, string q, string? language)
     {

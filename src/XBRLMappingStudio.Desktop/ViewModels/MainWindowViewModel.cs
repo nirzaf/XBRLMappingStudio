@@ -207,6 +207,11 @@ public sealed record DestinationKindOption(string Kind, string Display);
 
 public sealed record PdfRowDirectionOption(bool RowsAtLowLineCoordinate, string Display);
 
+public sealed record PresentationOccurrenceRow(string RoleUri, string Path)
+{
+    public string Display => $"{RoleUri}: {Path}";
+}
+
 public sealed record AdapterCapabilityOption(
     string Kind,
     string Display,
@@ -233,6 +238,12 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _searchTerm = "";
     private string _searchLanguage = "en";
     private int _resultPage;
+    private readonly object _taxonomySearchGate = new();
+    private CancellationTokenSource? _taxonomySearchCancellation;
+    private int _taxonomySearchGeneration;
+    private bool _isTaxonomySearchBusy;
+    private string _taxonomySearchStatus = "Search the loaded taxonomy index.";
+    private string _selectedConceptOccurrencesStatus = "Select a concept to inspect its presentation paths.";
     private bool _isBusy;
     private ActiveMappingOperation? _activeMappingOperation;
     private int _mappingOperationGeneration;
@@ -582,7 +593,14 @@ public sealed class MainWindowViewModel : ViewModelBase
     public bool CanPreviewDestination => CanUseSelectedDestination && !IsBusy && !IsSourceLoading;
     public bool CanPublishDestination => CanUseSelectedDestination && ProjectPath is not null
         && IsSavedDestinationCurrent && !IsBusy && !IsSourceLoading;
-    public ConceptRow? SelectedConcept { get => _selectedConcept; set => Set(ref _selectedConcept, value); }
+    public ConceptRow? SelectedConcept
+    {
+        get => _selectedConcept;
+        set
+        {
+            if (Set(ref _selectedConcept, value)) RefreshSelectedConceptOccurrences();
+        }
+    }
     public SuggestionRow? SelectedSuggestion
     {
         get => _selectedSuggestion;
@@ -743,14 +761,54 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string SelectedNodeDisplayName => _selectedNode?.DisplayName ?? "(none)";
     public bool CanEditSelectedFact => _selectedNode?.NodeType == NodeTypeConstants.FactConstruct;
 
-    public string SearchTerm { get => _searchTerm; set => Set(ref _searchTerm, value); }
-    public string SearchLanguage { get => _searchLanguage; set => Set(ref _searchLanguage, value); }
+    public string SearchTerm
+    {
+        get => _searchTerm;
+        set
+        {
+            if (!Set(ref _searchTerm, value)) return;
+            ResetTaxonomySearchForCriteriaChange();
+        }
+    }
+    public string SearchLanguage
+    {
+        get => _searchLanguage;
+        set
+        {
+            if (!Set(ref _searchLanguage, value)) return;
+            ResetTaxonomySearchForCriteriaChange();
+            RefreshSelectedConceptOccurrences();
+        }
+    }
     public IReadOnlyList<string> SearchLanguages { get; } = new[] { "en", "fr", "ar" };
     public int ResultPage => _resultPage;
     public bool HasNextPage { get; private set; }
     public bool HasPreviousPage => _resultPage > 0;
+    public bool IsTaxonomySearchBusy
+    {
+        get => _isTaxonomySearchBusy;
+        private set
+        {
+            if (!Set(ref _isTaxonomySearchBusy, value)) return;
+            Raise(nameof(CanCancelTaxonomySearch));
+            CancelTaxonomySearchCommand?.NotifyCanExecuteChanged();
+        }
+    }
+    public bool CanCancelTaxonomySearch => IsTaxonomySearchBusy
+        && _taxonomySearchCancellation is { IsCancellationRequested: false };
+    public string TaxonomySearchStatus
+    {
+        get => _taxonomySearchStatus;
+        private set => Set(ref _taxonomySearchStatus, value);
+    }
+    public string SelectedConceptOccurrencesStatus
+    {
+        get => _selectedConceptOccurrencesStatus;
+        private set => Set(ref _selectedConceptOccurrencesStatus, value);
+    }
 
     public ObservableCollection<ConceptRow> ConceptResults { get; } = new();
+    public ObservableCollection<PresentationOccurrenceRow> SelectedConceptOccurrences { get; } = new();
     public ObservableCollection<string> SourceColumns { get; } = new();
     public ObservableCollection<string> SourceTables { get; } = new();
     public bool HasSourceTables => SourceTables.Count > 0;
@@ -860,6 +918,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand UndoCommand { get; }
     public RelayCommand RedoCommand { get; }
     public RelayCommand SearchTaxonomyCommand { get; }
+    public RelayCommand CancelTaxonomySearchCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
     public RelayCommand ChooseDestinationCommand { get; }
     public RelayCommand SaveDestinationPlanCommand { get; }
@@ -969,6 +1028,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         UndoCommand = new RelayCommand(_ => Undo());
         RedoCommand = new RelayCommand(_ => Redo());
         SearchTaxonomyCommand = new RelayCommand(_ => RunSearch());
+        CancelTaxonomySearchCommand = new RelayCommand(_ => CancelTaxonomySearch(), _ => CanCancelTaxonomySearch);
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync(), _ => !IsBusy && !IsSourceLoading);
         ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
             _ => !IsBusy && !IsDestinationLoading);
@@ -1880,6 +1940,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         => new Progress<MappingJobProgress>(progress =>
         {
             if (!IsMappingOperationCurrent(operation)) return;
+            if (progress.Stage.StartsWith("Run ended:", StringComparison.Ordinal)) return;
             StatusText = progress.Total is int total && progress.Current is int current
                 ? $"{progress.Stage} ({current:N0} of {total:N0})"
                 : progress.Current is int count
@@ -3643,11 +3704,13 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private bool RefreshProfileForProject(MappingProject project)
     {
+        InvalidateTaxonomySearch();
         var resolution = _profileResolver.Resolve(project, allowSyntheticProfile: true);
         if (resolution.Success)
         {
             _profile = resolution.Profile!;
             _taxonomy = CreateTaxonomyIndex(_profile);
+            RefreshSelectedConceptOccurrences();
             return true;
         }
 
@@ -3656,6 +3719,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         // selected profile.
         _profile = SyntheticProfile.Build();
         _taxonomy = CreateTaxonomyIndex(_profile);
+        RefreshSelectedConceptOccurrences();
         Diagnostics.Clear();
         ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
         Raise(nameof(Diagnostics));
@@ -3738,30 +3802,193 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(Edges));
     }
 
-    private void RunSearch(bool keepPage = false)
+    private void ResetTaxonomySearchForCriteriaChange()
     {
-        if (!TryResolveProfile(AllowSyntheticProfile, out _)) return;
-        if (!keepPage) _resultPage = 0;
-        var page = _taxonomy.Search(SearchTerm, SearchLanguage, _resultPage, TaxonomyIndex.DefaultPageSize);
+        InvalidateTaxonomySearch();
+        _resultPage = 0;
         ConceptResults.Clear();
-        foreach (var c in page.Items)
-        {
-            var label = TaxonomyIndex.ResolveLabel(c, SearchLanguage);
-            ConceptResults.Add(new ConceptRow
-            {
-                QualifiedName = c.QualifiedName,
-                Label = label,
-                DataType = c.DataType,
-                PeriodType = c.PeriodType,
-                IsFactTargetable = TaxonomyIndex.IsFactTargetable(c)
-            });
-        }
-        HasNextPage = page.HasNext;
-        StatusText = $"{page.TotalCount} concept(s), page {page.Page + 1}";
+        HasNextPage = false;
+        TaxonomySearchStatus = "Search criteria changed. Run Search to load matching concepts.";
         Raise(nameof(ConceptResults));
         Raise(nameof(ResultPage));
         Raise(nameof(HasNextPage));
         Raise(nameof(HasPreviousPage));
+    }
+
+    private void InvalidateTaxonomySearch()
+    {
+        lock (_taxonomySearchGate)
+        {
+            _taxonomySearchGeneration++;
+            var previous = _taxonomySearchCancellation;
+            _taxonomySearchCancellation = null;
+            previous?.Cancel();
+            IsTaxonomySearchBusy = false;
+            CancelTaxonomySearchCommand?.NotifyCanExecuteChanged();
+        }
+    }
+
+    private void CancelTaxonomySearch()
+    {
+        lock (_taxonomySearchGate)
+        {
+            if (_taxonomySearchCancellation is null) return;
+            InvalidateTaxonomySearch();
+            TaxonomySearchStatus = "Taxonomy search cancelled.";
+        }
+    }
+
+    private void RunSearch(bool keepPage = false)
+    {
+        if (!TryResolveProfile(AllowSyntheticProfile, out _))
+        {
+            InvalidateTaxonomySearch();
+            ConceptResults.Clear();
+            HasNextPage = false;
+            TaxonomySearchStatus = "Search is unavailable until the project's filing profile is installed.";
+            Raise(nameof(ConceptResults));
+            Raise(nameof(HasNextPage));
+            return;
+        }
+
+        CancellationTokenSource? previous;
+        CancellationTokenSource cancellation;
+        int generation;
+        TaxonomyIndex index;
+        string query;
+        string language;
+        int page;
+        lock (_taxonomySearchGate)
+        {
+            if (!keepPage) _resultPage = 0;
+            previous = _taxonomySearchCancellation;
+            cancellation = new CancellationTokenSource();
+            generation = ++_taxonomySearchGeneration;
+            index = _taxonomy;
+            query = SearchTerm;
+            language = SearchLanguage;
+            page = _resultPage;
+            _taxonomySearchCancellation = cancellation;
+            IsTaxonomySearchBusy = true;
+            TaxonomySearchStatus = "Searching the loaded taxonomy…";
+            Raise(nameof(ResultPage));
+            Raise(nameof(HasPreviousPage));
+            previous?.Cancel();
+        }
+        _ = CompleteTaxonomySearchAsync(index, query, language, page, generation, cancellation);
+    }
+
+    private async Task CompleteTaxonomySearchAsync(
+        TaxonomyIndex index,
+        string query,
+        string language,
+        int page,
+        int generation,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            var result = await index.SearchAsync(
+                query, language, page, TaxonomyIndex.DefaultPageSize, cancellation.Token);
+            lock (_taxonomySearchGate)
+            {
+                if (!IsCurrentTaxonomySearch(index, query, language, page, generation, cancellation)) return;
+
+                ConceptResults.Clear();
+                foreach (var concept in result.Items)
+                {
+                    ConceptResults.Add(new ConceptRow
+                    {
+                        QualifiedName = concept.QualifiedName,
+                        Label = TaxonomyIndex.ResolveLabel(concept, language),
+                        DataType = concept.DataType,
+                        PeriodType = concept.PeriodType,
+                        IsFactTargetable = TaxonomyIndex.IsFactTargetable(concept)
+                    });
+                }
+                HasNextPage = result.HasNext;
+                var countText = result.TotalCount == 1 ? "1 concept" : $"{result.TotalCount} concepts";
+                TaxonomySearchStatus = $"{countText}, page {result.Page + 1}.";
+                Raise(nameof(ConceptResults));
+                Raise(nameof(ResultPage));
+                Raise(nameof(HasNextPage));
+                Raise(nameof(HasPreviousPage));
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            lock (_taxonomySearchGate)
+            {
+                if (IsCurrentTaxonomySearch(index, query, language, page, generation, cancellation))
+                    TaxonomySearchStatus = "Taxonomy search cancelled.";
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (_taxonomySearchGate)
+            {
+                if (IsCurrentTaxonomySearch(index, query, language, page, generation, cancellation))
+                    TaxonomySearchStatus = $"Taxonomy search failed: {ex.Message}";
+            }
+        }
+        finally
+        {
+            lock (_taxonomySearchGate)
+            {
+                if (ReferenceEquals(_taxonomySearchCancellation, cancellation))
+                {
+                    _taxonomySearchCancellation = null;
+                    IsTaxonomySearchBusy = false;
+                    CancelTaxonomySearchCommand?.NotifyCanExecuteChanged();
+                }
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private bool IsCurrentTaxonomySearch(
+        TaxonomyIndex index,
+        string query,
+        string language,
+        int page,
+        int generation,
+        CancellationTokenSource cancellation)
+        => generation == _taxonomySearchGeneration
+           && ReferenceEquals(index, _taxonomy)
+           && ReferenceEquals(cancellation, _taxonomySearchCancellation)
+           && StringComparer.Ordinal.Equals(query, SearchTerm)
+           && StringComparer.Ordinal.Equals(language, SearchLanguage)
+           && page == _resultPage;
+
+    private void RefreshSelectedConceptOccurrences()
+    {
+        SelectedConceptOccurrences.Clear();
+        if (SelectedConcept is null)
+        {
+            SelectedConceptOccurrencesStatus = "Select a concept to inspect its presentation paths.";
+            Raise(nameof(SelectedConceptOccurrences));
+            return;
+        }
+
+        var occurrences = _taxonomy.PresentationOccurrencesFor(SelectedConcept.QualifiedName);
+        foreach (var occurrence in occurrences)
+        {
+            var path = string.Join(" → ", occurrence.ConceptPath.Select(qualifiedName =>
+            {
+                var concept = _taxonomy.Get(qualifiedName);
+                return concept is null
+                    ? qualifiedName
+                    : $"{TaxonomyIndex.ResolveLabel(concept, SearchLanguage)} ({qualifiedName})";
+            }));
+            SelectedConceptOccurrences.Add(new PresentationOccurrenceRow(occurrence.RoleUri, path));
+        }
+
+        SelectedConceptOccurrencesStatus = occurrences.Count == 0
+            ? "No presentation path is loaded for this concept in the selected taxonomy profile."
+            : occurrences.Count >= 512
+                ? "Showing the first 512 presentation paths (bounded)."
+                : $"{occurrences.Count} presentation path(s) in loaded taxonomy relationships.";
+        Raise(nameof(SelectedConceptOccurrences));
     }
 
     private static void ReplaceItems<T>(ObservableCollection<T> collection, IEnumerable<T> items)

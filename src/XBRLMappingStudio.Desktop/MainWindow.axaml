@@ -132,18 +132,54 @@
               <ComboBox ItemsSource="{Binding SearchLanguages}" SelectedItem="{Binding SearchLanguage}"
                         AutomationProperties.Name="Label language" />
               <Button Content="Search" Command="{Binding SearchTaxonomyCommand}" />
+              <Button Content="Cancel" Command="{Binding CancelTaxonomySearchCommand}"
+                      IsEnabled="{Binding CanCancelTaxonomySearch}"
+                      AutomationProperties.Name="Cancel taxonomy search" />
             </StackPanel>
+            <ProgressBar IsVisible="{Binding IsTaxonomySearchBusy}" IsIndeterminate="True"
+                         Height="4" AutomationProperties.Name="Taxonomy search progress" />
+            <TextBlock Text="{Binding TaxonomySearchStatus}" TextWrapping="Wrap"
+                       AutomationProperties.Name="Taxonomy search status" />
             <StackPanel Orientation="Horizontal" Spacing="6">
-              <Button Content="‹ Prev" Command="{Binding PreviousPageCommand}" />
+              <Button Content="‹ Prev" Command="{Binding PreviousPageCommand}"
+                      IsEnabled="{Binding HasPreviousPage}" />
               <TextBlock Text="{Binding ResultPage}" VerticalAlignment="Center" />
-              <Button Content="Next ›" Command="{Binding NextPageCommand}" />
+              <Button Content="Next ›" Command="{Binding NextPageCommand}"
+                      IsEnabled="{Binding HasNextPage}" />
             </StackPanel>
           </StackPanel>
+
+          <Expander DockPanel.Dock="Top" Header="Selected concept presentation paths"
+                    Margin="0,4,0,4">
+            <StackPanel Spacing="4">
+              <TextBlock Text="{Binding SelectedConceptOccurrencesStatus}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Presentation path status" />
+              <ListBox ItemsSource="{Binding SelectedConceptOccurrences}" MaxHeight="120"
+                       AutomationProperties.Name="Selected concept presentation paths">
+                <ListBox.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <VirtualizingStackPanel />
+                  </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="vm:PresentationOccurrenceRow">
+                    <TextBlock Text="{Binding Display}" TextWrapping="Wrap"
+                               AutomationProperties.Name="{Binding Display}" />
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </StackPanel>
+          </Expander>
 
           <Button DockPanel.Dock="Bottom" Content="Use selected concept on fact node"
                   Command="{Binding SetConceptCommand}" />
           <ListBox ItemsSource="{Binding ConceptResults}" SelectedItem="{Binding SelectedConcept}"
                    AutomationProperties.Name="Concept results">
+            <ListBox.ItemsPanel>
+              <ItemsPanelTemplate>
+                <VirtualizingStackPanel />
+              </ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:ConceptRow">
                 <TextBlock Text="{Binding Display}"
