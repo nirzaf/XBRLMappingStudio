@@ -193,7 +193,7 @@
       <!-- Center: mapping workspace and evidence-focused PDF review -->
       <TabControl Grid.Column="1">
         <TabItem Header="Mapping">
-          <Grid RowDefinitions="*,220">
+          <Grid RowDefinitions="*,260">
             <controls:GraphCanvas x:Name="Canvas"
                                   Grid.Row="0"
                                   Focusable="True"
@@ -203,22 +203,47 @@
                                   Edges="{Binding Edges}"
                                   AutomationProperties.Name="Mapping graph" />
             <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
-              <DockPanel>
-                <TextBlock DockPanel.Dock="Top" Text="Preview facts" FontWeight="Bold" />
-                <ScrollViewer>
-                  <ItemsControl ItemsSource="{Binding PreviewFacts}">
-                    <ItemsControl.ItemTemplate>
-                      <DataTemplate x:DataType="vm:FactRow">
-                        <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
-                      </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                  </ItemsControl>
-                </ScrollViewer>
-              </DockPanel>
+              <Grid RowDefinitions="Auto,Auto,*,Auto">
+                <TextBlock Text="Preview facts and run results" FontWeight="Bold" />
+                <TextBlock Grid.Row="1" Text="{Binding PreviewResultSummary}" TextWrapping="Wrap"
+                           Margin="0,3"
+                           AutomationProperties.Name="Run result status and preview qualification" />
+                <ListBox Grid.Row="2" ItemsSource="{Binding PreviewFacts}"
+                         SelectedItem="{Binding SelectedPreviewFact, Mode=TwoWay}"
+                         SelectionMode="Single" AutomationProperties.Name="Generated fact results">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="vm:FactRow">
+                      <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+                <Grid Grid.Row="3" ColumnDefinitions="*,Auto"
+                      IsVisible="{Binding HasSelectedPreviewFact}">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
+                               MaxHeight="38" AutomationProperties.Name="Selected fact mapping stage" />
+                    <ListBox ItemsSource="{Binding SelectedPreviewFact.Evidence}"
+                             SelectedItem="{Binding SelectedPreviewEvidence, Mode=TwoWay}"
+                             Height="54" SelectionMode="Single"
+                             AutomationProperties.Name="Selected fact contributing source evidence">
+                      <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PreviewEvidenceRow">
+                          <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                        </DataTemplate>
+                      </ListBox.ItemTemplate>
+                    </ListBox>
+                  </StackPanel>
+                  <Button Grid.Column="1" Margin="8,0,0,0" Content="Open PDF evidence"
+                          Command="{Binding OpenSelectedPreviewEvidenceCommand}"
+                          IsEnabled="{Binding CanOpenSelectedPreviewEvidence}"
+                          AutomationProperties.Name="Open selected PDF source evidence" />
+                </Grid>
+              </Grid>
             </Border>
           </Grid>
         </TabItem>
-        <TabItem Header="PDF review" IsVisible="{Binding HasPdfDocument}"
+        <TabItem Header="PDF review" IsSelected="{Binding IsPdfReviewTabSelected, Mode=TwoWay}"
+                 IsVisible="{Binding HasPdfDocument}"
                  IsEnabled="{Binding CanEditPdfReview}">
           <Grid RowDefinitions="Auto,*" ColumnDefinitions="300,*">
             <Border Grid.ColumnSpan="2" Background="#FFF5D7" Padding="8">

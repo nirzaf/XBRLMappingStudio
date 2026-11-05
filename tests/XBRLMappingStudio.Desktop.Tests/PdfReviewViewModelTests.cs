@@ -5,6 +5,7 @@ using UglyToad.PdfPig.Writer;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Pdf;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
@@ -49,6 +50,32 @@ public sealed class PdfReviewViewModelTests
             Assert.Contains("not a verified report", viewModel.PdfReviewStatus, StringComparison.OrdinalIgnoreCase);
             Assert.Contains(viewModel.PdfPageWords, word => word.Text == "Description");
 
+            var previewEvidence = new PreviewEvidenceRow(new SourceReference(
+                "pdf-source",
+                "pdf-evidence:fixture-cell;page=2;region=0.1,0.2,0.8,0.9",
+                "PDF page 2"));
+            var previewFact = new FactRow
+            {
+                Display = "synthetic:Revenue = 250 USD; 2025-01-01/2026-01-01",
+                StageSummary = "Fact construction · XBRL Revenue",
+                Evidence = new[] { previewEvidence }
+            };
+            viewModel.PreviewFacts.Add(previewFact);
+            viewModel.SelectedPreviewFact = previewFact;
+
+            Assert.True(viewModel.CanOpenSelectedPreviewEvidence);
+            viewModel.OpenSelectedPreviewEvidenceCommand.Execute(null);
+            Assert.Equal(2, viewModel.CurrentPdfPageNumber);
+            Assert.Equal(new PdfEvidenceRegion(2, 0.1, 0.2, 0.8, 0.9), viewModel.SelectedPdfEvidence);
+            Assert.True(viewModel.IsPdfReviewTabSelected);
+
+            viewModel.SelectedPreviewEvidence = new PreviewEvidenceRow(new SourceReference(
+                "csv-source", "row=4,col=2", "CSV row 4"));
+            Assert.Null(viewModel.SelectedPdfEvidence);
+            viewModel.SelectedPreviewEvidence = previewEvidence;
+            viewModel.OpenSelectedPreviewEvidenceCommand.Execute(null);
+            Assert.Equal(new PdfEvidenceRegion(2, 0.1, 0.2, 0.8, 0.9), viewModel.SelectedPdfEvidence);
+
             viewModel.PdfRowLabelHeader = "Description";
             viewModel.PdfPeriodHeaders = "2025=2025; 2024=2024";
             viewModel.SelectedPdfRowDirection = viewModel.PdfRowDirections[0];
@@ -71,6 +98,10 @@ public sealed class PdfReviewViewModelTests
             Assert.Equal(selected.Evidence, viewModel.SelectedPdfEvidence);
             Assert.Contains(viewModel.PdfPageWords, word => word.Text == "Profit");
             Assert.Contains(viewModel.PdfPageWords, word => word.AccessibleName.Contains("PDF page 2", StringComparison.Ordinal));
+
+            viewModel.OpenSelectedPreviewEvidenceCommand.Execute(null);
+            viewModel.SelectedPdfReviewValue = selected;
+            Assert.Equal(selected.Evidence, viewModel.SelectedPdfEvidence);
 
             viewModel.CurrentPdfPageNumber = 1;
             viewModel.NextPdfPageCommand.Execute(null);

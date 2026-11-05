@@ -12,6 +12,46 @@ namespace XBRLMappingStudio.Desktop.Tests;
 public sealed class MappingOperationViewModelTests
 {
     [Fact]
+    public async Task PreviewResultLabelsPartialOutputAndExposesFactMappingEvidence()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-preview-evidence-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbookPath = TestFixtures.MaterializeWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbookPath);
+            var viewModel = new MainWindowViewModel(project, null,
+                (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
+
+            var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedBusy = false;
+            viewModel.PropertyChanged += (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                if (viewModel.IsBusy) observedBusy = true;
+                else if (observedBusy) operationStopped.TrySetResult();
+            };
+
+            viewModel.PreviewCommand.Execute(null);
+            await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.Contains("partial", viewModel.PreviewResultSummary, StringComparison.OrdinalIgnoreCase);
+            var fact = Assert.Single(viewModel.PreviewFacts);
+            Assert.Contains("Fact construction", fact.StageSummary, StringComparison.Ordinal);
+            Assert.Contains("Scale to units", fact.StageSummary, StringComparison.Ordinal);
+            Assert.NotEmpty(fact.Evidence);
+            Assert.Same(fact, viewModel.SelectedPreviewFact);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task CancelCommandCancelsActivePreviewAndRestoresIdleState()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-cancel-" + Guid.NewGuid().ToString("N"));

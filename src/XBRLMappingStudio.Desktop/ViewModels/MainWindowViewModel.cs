@@ -96,6 +96,51 @@ public sealed class DiagnosticRow : ViewModelBase
 public sealed class FactRow : ViewModelBase
 {
     public string Display { get; init; } = "";
+    public string StageSummary { get; init; } = "Mapping stage is unavailable.";
+    public IReadOnlyList<PreviewEvidenceRow> Evidence { get; init; } = Array.Empty<PreviewEvidenceRow>();
+}
+
+/// <summary>A source location contributing to a generated fact.</summary>
+public sealed class PreviewEvidenceRow
+{
+    public SourceReference Source { get; }
+    public string Display => Source.DisplayName is { Length: > 0 } displayName
+        ? $"{displayName} · {Source.SourceId}: {Source.Locator}"
+        : $"{Source.SourceId}: {Source.Locator}";
+    public PdfEvidenceRegion? PdfEvidence { get; }
+
+    public PreviewEvidenceRow(SourceReference source)
+    {
+        Source = source;
+        PdfEvidence = ParsePdfEvidence(source.Locator);
+    }
+
+    private static PdfEvidenceRegion? ParsePdfEvidence(string locator)
+    {
+        if (!locator.StartsWith("pdf-evidence:", StringComparison.OrdinalIgnoreCase)) return null;
+        var pageMarker = locator.IndexOf("page=", StringComparison.OrdinalIgnoreCase);
+        var regionMarker = locator.IndexOf("region=", StringComparison.OrdinalIgnoreCase);
+        if (pageMarker < 0 || regionMarker < 0 || regionMarker <= pageMarker) return null;
+
+        var pageEnd = locator.IndexOf(';', pageMarker);
+        var pageText = locator[(pageMarker + "page=".Length)..(pageEnd < 0 ? regionMarker : pageEnd)];
+        var regionText = locator[(regionMarker + "region=".Length)..];
+        var parts = regionText.Split(',', StringSplitOptions.TrimEntries);
+        if (!int.TryParse(pageText, NumberStyles.None, CultureInfo.InvariantCulture, out var pageNumber)
+            || pageNumber < 1
+            || parts.Length != 4
+            || !double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var left)
+            || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var bottom)
+            || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var right)
+            || !double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var top)
+            || !double.IsFinite(left) || !double.IsFinite(bottom)
+            || !double.IsFinite(right) || !double.IsFinite(top)
+            || left < 0 || bottom < 0 || right > 1 || top > 1
+            || right <= left || top <= bottom)
+            return null;
+
+        return new PdfEvidenceRegion(pageNumber, left, bottom, right, top);
+    }
 }
 
 public sealed class SuggestionRow : ViewModelBase
@@ -318,6 +363,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactSourceSummary = "Select a fact to inspect its source mapping.";
     private string _selectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
     private string _selectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
+    private string _previewResultSummary = "Run a preview or full execution to inspect generated facts and evidence.";
+    private FactRow? _selectedPreviewFact;
+    private PreviewEvidenceRow? _selectedPreviewEvidence;
+    private PdfEvidenceRegion? _selectedPreviewPdfEvidence;
+    private bool _isPdfReviewTabSelected;
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
     private readonly Func<IAuditSink>? _auditSinkFactory;
@@ -665,6 +715,47 @@ public sealed class MainWindowViewModel : ViewModelBase
         get => _selectedFactEntitySourceSummary;
         private set => Set(ref _selectedFactEntitySourceSummary, value);
     }
+    public string PreviewResultSummary
+    {
+        get => _previewResultSummary;
+        private set => Set(ref _previewResultSummary, value);
+    }
+    public FactRow? SelectedPreviewFact
+    {
+        get => _selectedPreviewFact;
+        set
+        {
+            if (!Set(ref _selectedPreviewFact, value)) return;
+            _selectedPreviewPdfEvidence = null;
+            Raise(nameof(SelectedPdfEvidence));
+            SelectedPreviewEvidence = value?.Evidence.FirstOrDefault();
+            Raise(nameof(HasSelectedPreviewFact));
+        }
+    }
+    public bool HasSelectedPreviewFact => SelectedPreviewFact is not null;
+    public PreviewEvidenceRow? SelectedPreviewEvidence
+    {
+        get => _selectedPreviewEvidence;
+        set
+        {
+            if (!Set(ref _selectedPreviewEvidence, value)) return;
+            if (_selectedPreviewPdfEvidence is not null)
+            {
+                _selectedPreviewPdfEvidence = null;
+                Raise(nameof(SelectedPdfEvidence));
+            }
+            Raise(nameof(CanOpenSelectedPreviewEvidence));
+            OpenSelectedPreviewEvidenceCommand?.NotifyCanExecuteChanged();
+        }
+    }
+    public bool CanOpenSelectedPreviewEvidence =>
+        SelectedPreviewEvidence?.PdfEvidence is { } evidence
+        && _pdfDocument?.Pages.Any(page => page.PageNumber == evidence.PageNumber) == true;
+    public bool IsPdfReviewTabSelected
+    {
+        get => _isPdfReviewTabSelected;
+        set => Set(ref _isPdfReviewTabSelected, value);
+    }
     public IReadOnlyList<string> FactPeriodTypes { get; } = new[] { "duration", "instant" };
 
     private static IReadOnlyList<AdapterCapabilityOption> BuildSourceCapabilities()
@@ -911,14 +1002,21 @@ public sealed class MainWindowViewModel : ViewModelBase
         get => _selectedPdfReviewValue;
         set
         {
-            if (!Set(ref _selectedPdfReviewValue, value)) return;
+            var clearedPreviewEvidence = _selectedPreviewPdfEvidence is not null;
+            _selectedPreviewPdfEvidence = null;
+            if (!Set(ref _selectedPdfReviewValue, value))
+            {
+                if (clearedPreviewEvidence) Raise(nameof(SelectedPdfEvidence));
+                return;
+            }
             if (value is not null) CurrentPdfPageNumber = value.PageNumber;
             Raise(nameof(SelectedPdfEvidence));
             Raise(nameof(SelectedPdfReviewHistory));
             RefreshPdfReviewCommandState();
         }
     }
-    public PdfEvidenceRegion? SelectedPdfEvidence => SelectedPdfReviewValue?.Evidence;
+    public PdfEvidenceRegion? SelectedPdfEvidence =>
+        _selectedPreviewPdfEvidence ?? SelectedPdfReviewValue?.Evidence;
     public string SelectedPdfReviewHistory => SelectedPdfReviewValue is null
         ? "Select a value to inspect its durable review history."
         : string.Join(Environment.NewLine, _pdfReviewAuditEvents
@@ -981,6 +1079,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand UndoPdfReviewCommand { get; }
     public RelayCommand PreviousPdfPageCommand { get; }
     public RelayCommand NextPdfPageCommand { get; }
+    public RelayCommand OpenSelectedPreviewEvidenceCommand { get; }
 
     public MainWindowViewModel() : this(BuildSampleProject())
     {
@@ -1094,6 +1193,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         UndoPdfReviewCommand = new RelayCommand(_ => UndoSelectedPdfReview(), _ => CanUndoPdfReview);
         PreviousPdfPageCommand = new RelayCommand(_ => { if (HasPreviousPdfPage) CurrentPdfPageNumber--; }, _ => HasPreviousPdfPage);
         NextPdfPageCommand = new RelayCommand(_ => { if (HasNextPdfPage) CurrentPdfPageNumber++; }, _ => HasNextPdfPage);
+        OpenSelectedPreviewEvidenceCommand = new RelayCommand(_ => OpenSelectedPreviewEvidence(),
+            _ => CanOpenSelectedPreviewEvidence);
 
         RunSearch();
     }
@@ -2211,6 +2312,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(HasPdfDocument));
         Raise(nameof(CanEditPdfReview));
         Raise(nameof(PdfPageCount));
+        Raise(nameof(CanOpenSelectedPreviewEvidence));
+        OpenSelectedPreviewEvidenceCommand?.NotifyCanExecuteChanged();
         CurrentPdfPageNumber = 1;
         RefreshPdfPageWords();
         PdfReviewStatus = $"Digital text preview loaded from {document.Pages.Count} pages. This extraction is not a verified report; mapping requires an explicit reviewed sidecar.";
@@ -3693,6 +3796,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         FilteredAiSuggestions.Clear();
         SuggestionFilter = "";
         PreviewFacts.Clear();
+        SelectedPreviewFact = null;
+        SelectedPreviewEvidence = null;
+        _selectedPreviewPdfEvidence = null;
+        PreviewResultSummary = "Run a preview or full execution to inspect generated facts and evidence.";
+        Raise(nameof(SelectedPdfEvidence));
         Diagnostics.Clear();
         Raise(nameof(SourceColumns));
         Raise(nameof(SourceTables));
@@ -4034,19 +4142,56 @@ public sealed class MainWindowViewModel : ViewModelBase
         Diagnostics.Clear();
         ReplaceItems(Diagnostics, result.Diagnostics.Items.Select(ToDiagnosticRow));
         PreviewFacts.Clear();
+        SelectedPreviewFact = null;
+        SelectedPreviewEvidence = null;
+        _selectedPreviewPdfEvidence = null;
+        Raise(nameof(SelectedPdfEvidence));
         foreach (var fact in result.Facts)
         {
             var value = fact.IsNil ? "nil" : fact.Value?.ToString() ?? fact.TextValue ?? "(empty)";
             var unit = fact.Unit?.ToString() ?? fact.CompoundUnit?.CanonicalKey;
-            var sources = string.Join(", ", fact.ContributingSources.Select(source => source.Locator));
+            var sourceNodes = Session.Project.Nodes
+                .Where(node => node.NodeType == NodeTypeConstants.FactConstruct
+                    && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("concept")?.ToString(), fact.ConceptName))
+                .OrderBy(node => node.NodeId, StringComparer.Ordinal)
+                .ToArray();
+            var stage = sourceNodes.Length switch
+            {
+                0 => "Fact construction stage could not be matched to a saved mapping node.",
+                1 => $"Fact construction · {sourceNodes[0].DisplayName} ({sourceNodes[0].NodeId}). "
+                    + DescribeFactInputSources(sourceNodes[0], "value"),
+                _ => "Fact construction node is ambiguous for this concept; candidate paths: "
+                    + string.Join(" | ", sourceNodes.Select(node =>
+                        $"{node.DisplayName} ({node.NodeId}): {DescribeFactInputSources(node, "value")}"))
+            };
             PreviewFacts.Add(new FactRow
             {
-                Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}"
-                    + (sources.Length == 0 ? "" : $"; source: {sources}")
+                Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
+                StageSummary = stage,
+                Evidence = fact.ContributingSources.Select(source => new PreviewEvidenceRow(source)).ToArray()
             });
         }
+        var errors = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var warnings = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning);
+        PreviewResultSummary = result.Manifest.IsPreview
+            ? $"Preview only · {PreviewFacts.Count} sampled fact(s). "
+                + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published."
+            : $"Full run · {PreviewFacts.Count} fact(s) · {errors} error(s), {warnings} warning(s). See Diagnostics for details.";
+        SelectedPreviewFact = PreviewFacts.FirstOrDefault();
         Raise(nameof(Diagnostics));
         Raise(nameof(PreviewFacts));
+    }
+
+    private void OpenSelectedPreviewEvidence()
+    {
+        if (SelectedPreviewEvidence?.PdfEvidence is not { } evidence || !CanOpenSelectedPreviewEvidence)
+            return;
+
+        _selectedPreviewPdfEvidence = evidence;
+        CurrentPdfPageNumber = evidence.PageNumber;
+        IsPdfReviewTabSelected = true;
+        Raise(nameof(SelectedPdfEvidence));
+        StatusText = $"Showing source evidence on PDF page {evidence.PageNumber} for the selected fact.";
     }
 
     private static DiagnosticRow ToDiagnosticRow(Diagnostic diagnostic) => new()
