@@ -47,12 +47,17 @@
       </MenuItem>
     </Menu>
 
-    <Border Height="26" Background="#EFEFEF" DockPanel.Dock="Bottom" Padding="8,4">
-      <StackPanel Orientation="Horizontal" Spacing="8">
+    <Border Height="32" Background="#EFEFEF" DockPanel.Dock="Bottom" Padding="8,3">
+      <Grid ColumnDefinitions="Auto,*,Auto">
         <ProgressBar Width="90" Height="8" IsIndeterminate="True" IsVisible="{Binding IsBusy}"
                      AutomationProperties.Name="Operation in progress" />
-        <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" />
-      </StackPanel>
+        <TextBlock Grid.Column="1" Text="{Binding StatusText}" VerticalAlignment="Center" Margin="8,0"
+                   TextTrimming="CharacterEllipsis" AutomationProperties.Name="Operation status" />
+        <Button Grid.Column="2" Content="{Binding CancelOperationButtonText}"
+                Command="{Binding CancelOperationCommand}" IsVisible="{Binding IsBusy}"
+                IsEnabled="{Binding CanCancelOperation}" MinWidth="112" Padding="6,1" Margin="8,0,0,0"
+                AutomationProperties.Name="Cancel current operation" />
+      </Grid>
     </Border>
 
     <Grid ColumnDefinitions="280,*,340">

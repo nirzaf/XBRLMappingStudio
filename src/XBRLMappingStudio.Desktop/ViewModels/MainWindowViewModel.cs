@@ -234,6 +234,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _searchLanguage = "en";
     private int _resultPage;
     private bool _isBusy;
+    private ActiveMappingOperation? _activeMappingOperation;
+    private int _mappingOperationGeneration;
     private bool _allowSyntheticProfile;
     private string? _projectPath;
     private string? _selectedSourceBindingId;
@@ -325,6 +327,33 @@ public sealed class MainWindowViewModel : ViewModelBase
         bool GraphChanged);
     private sealed record PdfReviewRowState(string ReviewedValue, string? CorrectionReason, bool IsApproved);
 
+    private sealed class ActiveMappingOperation(
+        int generation,
+        CancellationTokenSource cancellation,
+        MappingProject project,
+        string projectDigest,
+        int sourceGeneration,
+        int destinationGeneration,
+        string destinationSelection,
+        bool syntheticProfileAuthorization,
+        bool destinationSchemaConfirmed,
+        bool destinationSchemaValid,
+        string profileDigest)
+    {
+        public int Generation { get; } = generation;
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public MappingProject Project { get; } = project;
+        public string ProjectDigest { get; } = projectDigest;
+        public int SourceGeneration { get; } = sourceGeneration;
+        public int DestinationGeneration { get; } = destinationGeneration;
+        public string DestinationSelection { get; } = destinationSelection;
+        public bool SyntheticProfileAuthorization { get; } = syntheticProfileAuthorization;
+        public bool DestinationSchemaConfirmed { get; } = destinationSchemaConfirmed;
+        public bool DestinationSchemaValid { get; } = destinationSchemaValid;
+        public string ProfileDigest { get; } = profileDigest;
+        public string? InvalidationReason { get; set; }
+    }
+
     public string Title => _title;
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
     public bool IsBusy
@@ -334,6 +363,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             if (Set(ref _isBusy, value))
             {
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
                 ChooseSourceCommand?.NotifyCanExecuteChanged();
@@ -342,6 +374,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
         }
     }
+    public bool CanCancelOperation => IsBusy
+        && _activeMappingOperation is { } operation
+        && !operation.Cancellation.IsCancellationRequested;
+    public string CancelOperationButtonText =>
+        _activeMappingOperation?.Cancellation.IsCancellationRequested == true ? "Cancelling…" : "Cancel operation";
     public bool IsSourceLoading
     {
         get => _isSourceLoading;
@@ -374,6 +411,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (!Set(ref _allowSyntheticProfile, value)) return;
+            InvalidateMappingOperationIfStale();
             if (value)
             {
                 Diagnostics.Clear();
@@ -458,6 +496,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (Set(ref _selectedSourceTable, value) && value is not null && _sqliteSourcePath is not null)
             {
                 var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+                InvalidateMappingOperationIfStale();
                 IsSourceLoading = true;
                 _sqliteTableLoadTask = LoadSqliteTableAsync(value, generation);
             }
@@ -473,6 +512,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (!Set(ref _destinationTable, value)) return;
+            InvalidateMappingOperationIfStale();
             _destinationTableSchema = null;
             _selectedDestinationKey = null;
             DestinationKeys.Clear();
@@ -496,6 +536,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         set
         {
             if (!Set(ref _selectedDestinationKey, value)) return;
+            InvalidateMappingOperationIfStale();
             ResetDestinationPreviewSummary("The business key changed; rerun the dry run to refresh its estimate.");
             IsDestinationSchemaConfirmed = false;
             ValidateSelectedDestinationSchema();
@@ -508,6 +549,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         private set
         {
             if (!Set(ref _destinationSchemaIsValid, value)) return;
+            InvalidateMappingOperationIfStale();
             Raise(nameof(CanConfirmDestinationSchema));
             NotifyDestinationCommands();
         }
@@ -519,6 +561,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         {
             if (value && !DestinationSchemaIsValid) return;
             if (!Set(ref _isDestinationSchemaConfirmed, value)) return;
+            InvalidateMappingOperationIfStale();
             NotifyDestinationCommands();
         }
     }
@@ -812,6 +855,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand ValidateCommand { get; }
     public RelayCommand PreviewCommand { get; }
     public RelayCommand ExecuteCommand { get; }
+    public RelayCommand CancelOperationCommand { get; }
     public RelayCommand DeleteSelectedCommand { get; }
     public RelayCommand UndoCommand { get; }
     public RelayCommand RedoCommand { get; }
@@ -920,6 +964,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         ValidateCommand = new RelayCommand(_ => Validate());
         PreviewCommand = new RelayCommand(async _ => await PreviewAsync(), _ => !IsBusy && !IsSourceLoading);
         ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(), _ => !IsBusy && !IsSourceLoading);
+        CancelOperationCommand = new RelayCommand(_ => CancelMappingOperation(), _ => CanCancelOperation);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
         UndoCommand = new RelayCommand(_ => Undo());
         RedoCommand = new RelayCommand(_ => Redo());
@@ -953,6 +998,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void OnSessionChanged()
     {
+        InvalidateMappingOperationIfStale();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
         if (_destinationPreviewSemanticDigest is not null
             && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, Session.Project.ComputeSemanticDigest()))
@@ -1156,6 +1202,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 throw new IOException("The output file must be inside an existing workspace directory.");
 
             Interlocked.Increment(ref _destinationLoadGeneration);
+            InvalidateMappingOperationIfStale();
             _destinationPath = fullPath;
             _destinationTable = null;
             _selectedDestinationKey = null;
@@ -1199,6 +1246,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var fullPath = Path.GetFullPath(path);
         var generation = Interlocked.Increment(ref _destinationLoadGeneration);
+        InvalidateMappingOperationIfStale();
         _destinationPath = fullPath;
         _preferredDestinationKey = preferredKey;
         Raise(nameof(DestinationPath));
@@ -1491,10 +1539,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         var project = Session.Project;
         var semanticDigest = project.ComputeSemanticDigest();
         ResetDestinationPreviewSummary("Running a full dry run; the selected destination will not be changed…");
-        IsBusy = true;
-        StatusText = IsSqliteDestination
+        var operation = BeginMappingOperation(profile, IsSqliteDestination
             ? "Running a full destination dry run; no database rows will be written…"
-            : "Running a full destination dry run; no file will be written…";
+            : "Running a full destination dry run; no file will be written…");
+        var cancellationToken = operation.Cancellation.Token;
         try
         {
             var root = WorkspaceRoot();
@@ -1502,28 +1550,36 @@ public sealed class MainWindowViewModel : ViewModelBase
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
             var result = await service.RunAsync(
-                project, connections, ReadParameters(), preview: false, CancellationToken.None);
-            if (!StringComparer.Ordinal.Equals(semanticDigest, project.ComputeSemanticDigest()))
+                project, connections, ReadParameters(), preview: false, cancellationToken,
+                CreateMappingProgress(operation));
+            if (!IsMappingOperationCurrent(operation))
             {
-                ShowRunResult(result);
-                ResetDestinationPreviewSummary("The project changed during the dry run; rerun it to refresh the estimate.");
-                StatusText = "The project changed during the dry run. Nothing was written; run the preview again.";
+                StatusText = OperationStoppedStatus(operation, "Destination dry run");
+                ResetDestinationPreviewSummary(StatusText);
                 return;
             }
             if (!result.IsPublishable)
             {
                 ShowRunResult(result);
                 ResetDestinationPreviewSummary($"No destination estimate is available for the {result.Manifest.Outcome} run; no writes were made.");
-                StatusText = IsSqliteDestination
-                    ? $"Dry run finished: {result.Manifest.Outcome}. No database rows were written."
-                    : $"Dry run finished: {result.Manifest.Outcome}. No file was written.";
+                StatusText = result.Manifest.Outcome == RunOutcome.Cancelled
+                    ? "Destination dry run canceled by the validation worker. No destination writes were made."
+                    : IsSqliteDestination
+                        ? $"Destination dry run ended with {result.Manifest.Outcome}. No database rows were written."
+                        : $"Destination dry run ended with {result.Manifest.Outcome}. No file was written.";
                 return;
             }
 
             if (IsSqliteDestination)
             {
                 var estimate = await service.PreviewDestinationChangesAsync(
-                    project, result, root, CancellationToken.None);
+                    project, result, root, cancellationToken);
+                if (!IsMappingOperationCurrent(operation))
+                {
+                    StatusText = OperationStoppedStatus(operation, "Destination dry run");
+                    ResetDestinationPreviewSummary(StatusText);
+                    return;
+                }
                 ShowRunResult(result);
                 if (estimate.SchemaDiscrepancies.Count > 0)
                 {
@@ -1558,6 +1614,16 @@ public sealed class MainWindowViewModel : ViewModelBase
             _destinationPreviewSemanticDigest = semanticDigest;
             StatusText = $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Destination dry run");
+            ResetDestinationPreviewSummary(StatusText);
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Destination dry run");
+            ResetDestinationPreviewSummary(StatusText);
+        }
         catch (Exception ex)
         {
             ShowDestinationError(ex);
@@ -1566,7 +1632,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ? "Destination dry run failed; no database rows were written."
                 : "Destination dry run failed; no file was written.";
         }
-        finally { IsBusy = false; }
+        finally { FinishMappingOperation(operation); }
     }
 
     private static string FormatDestinationPreview(SqliteTargetChangePreview preview)
@@ -1611,8 +1677,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
-        IsBusy = true;
-        StatusText = "Executing the approved mapping before publication…";
+        var operation = BeginMappingOperation(profile, "Executing the approved mapping before publication…");
+        var cancellationToken = operation.Cancellation.Token;
         try
         {
             var root = WorkspaceRoot();
@@ -1620,20 +1686,32 @@ public sealed class MainWindowViewModel : ViewModelBase
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
             var result = await service.RunAsync(project, connections, ReadParameters(),
-                preview: false, CancellationToken.None);
+                preview: false, cancellationToken, CreateMappingProgress(operation));
+            if (!IsMappingOperationCurrent(operation))
+            {
+                StatusText = OperationStoppedStatus(operation, "Destination publication");
+                return;
+            }
             if (!result.IsPublishable)
             {
                 ShowRunResult(result);
-                StatusText = IsSqliteDestination
-                    ? $"Execution finished: {result.Manifest.Outcome}. The SQLite destination was not changed."
-                    : $"Execution finished: {result.Manifest.Outcome}. The file destination was not changed.";
+                StatusText = result.Manifest.Outcome == RunOutcome.Cancelled
+                    ? "Execution canceled by the validation worker. The destination was not changed."
+                    : IsSqliteDestination
+                        ? $"Execution ended with {result.Manifest.Outcome}. The SQLite destination was not changed."
+                        : $"Execution ended with {result.Manifest.Outcome}. The file destination was not changed.";
                 return;
             }
 
             var diagnostics = IsSqliteDestination
                 ? DestinationPlanValidator.ValidateSchema(plan,
-                    await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table))
+                    await _destinationInspector.InspectTableAsync(_destinationPath!, plan.Table, cancellationToken))
                 : DestinationPlanValidator.Validate(plan);
+            if (!IsMappingOperationCurrent(operation))
+            {
+                StatusText = OperationStoppedStatus(operation, "Destination publication");
+                return;
+            }
             if (diagnostics.HasBlockingErrors)
             {
                 ShowDestinationDiagnostics(diagnostics.Items);
@@ -1648,6 +1726,11 @@ public sealed class MainWindowViewModel : ViewModelBase
                     _destinationPath!, plan.Table, plan.BusinessKey, result.Facts.Count, project.ComputeSemanticDigest())
                 : await _fileDialog.ConfirmFileDestinationPublicationAsync(
                     _destinationPath!, plan.Format, result.Facts.Count, project.ComputeSemanticDigest());
+            if (!IsMappingOperationCurrent(operation))
+            {
+                StatusText = OperationStoppedStatus(operation, "Destination publication");
+                return;
+            }
             if (!confirmed)
             {
                 ShowRunResult(result);
@@ -1661,15 +1744,23 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (IsSqliteDestination)
             {
                 var receipt = await service.PublishDestinationAsync(
-                    project, result, root, AllowSyntheticProfile, CancellationToken.None);
+                    project, result, root, AllowSyntheticProfile, cancellationToken);
                 StatusText = $"Published {receipt.WrittenRows} fact row(s) to {plan.Table}; receipt {receipt.OperationKey}.";
             }
             else
             {
                 var output = await service.PublishFileDestinationAsync(
-                    project, result, root, AllowSyntheticProfile, CancellationToken.None);
+                    project, result, root, AllowSyntheticProfile, cancellationToken);
                 StatusText = $"Published {output.Kind} file {Path.GetFileName(output.Path)}; digest {output.Digest}.";
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Destination publication");
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Destination publication");
         }
         catch (Exception ex)
         {
@@ -1678,7 +1769,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ? "SQLite publication failed; inspect diagnostics and reconcile the destination."
                 : "File publication failed; inspect diagnostics and reconcile the destination.";
         }
-        finally { IsBusy = false; }
+        finally { FinishMappingOperation(operation); }
     }
 
     private void ShowDestinationDiagnostics(IReadOnlyList<Diagnostic> diagnostics)
@@ -1695,10 +1786,116 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(Diagnostics));
     }
 
+    private ActiveMappingOperation BeginMappingOperation(FilingProfile profile, string initialStatus)
+    {
+        var operation = new ActiveMappingOperation(
+            ++_mappingOperationGeneration,
+            new CancellationTokenSource(),
+            Session.Project,
+            Session.Project.ComputeSemanticDigest(),
+            _sourceLoadGeneration,
+            _destinationLoadGeneration,
+            CurrentDestinationSelectionKey(),
+            AllowSyntheticProfile,
+            IsDestinationSchemaConfirmed,
+            DestinationSchemaIsValid,
+            profile.Digest);
+        _activeMappingOperation = operation;
+        IsBusy = true;
+        StatusText = initialStatus;
+        return operation;
+    }
+
+    private void CancelMappingOperation()
+    {
+        var operation = _activeMappingOperation;
+        if (operation is null || operation.Cancellation.IsCancellationRequested) return;
+        operation.Cancellation.Cancel();
+        Raise(nameof(CanCancelOperation));
+        Raise(nameof(CancelOperationButtonText));
+        CancelOperationCommand.NotifyCanExecuteChanged();
+        StatusText = "Cancellation requested; waiting for the active operation to stop…";
+    }
+
+    private bool IsMappingOperationCurrent(ActiveMappingOperation operation)
+    {
+        if (!ReferenceEquals(_activeMappingOperation, operation)
+            || operation.Generation != _mappingOperationGeneration
+            || operation.InvalidationReason is not null)
+            return false;
+
+        string? reason = null;
+        if (!ReferenceEquals(operation.Project, Session.Project)
+            || !StringComparer.Ordinal.Equals(operation.ProjectDigest, Session.Project.ComputeSemanticDigest()))
+            reason = "the mapping changed";
+        else if (operation.SourceGeneration != _sourceLoadGeneration)
+            reason = "the selected source changed";
+        else if (operation.DestinationGeneration != _destinationLoadGeneration
+            || !StringComparer.Ordinal.Equals(operation.DestinationSelection, CurrentDestinationSelectionKey()))
+            reason = "the selected destination changed";
+        else if (!StringComparer.Ordinal.Equals(operation.ProfileDigest, _profile.Digest))
+            reason = "the filing profile changed";
+        else if (operation.SyntheticProfileAuthorization != AllowSyntheticProfile)
+            reason = "the synthetic-profile authorization setting changed";
+        else if (operation.DestinationSchemaConfirmed != IsDestinationSchemaConfirmed
+            || operation.DestinationSchemaValid != DestinationSchemaIsValid)
+            reason = "the destination review state changed";
+
+        if (reason is not null && !operation.Cancellation.IsCancellationRequested)
+        {
+            operation.InvalidationReason = reason;
+            operation.Cancellation.Cancel();
+            Raise(nameof(CanCancelOperation));
+            Raise(nameof(CancelOperationButtonText));
+            CancelOperationCommand.NotifyCanExecuteChanged();
+            StatusText = $"Stopping because {reason}; the stale result will not be applied or published…";
+            return false;
+        }
+
+        return reason is null && !operation.Cancellation.IsCancellationRequested;
+    }
+
+    private void InvalidateMappingOperationIfStale()
+    {
+        if (_activeMappingOperation is { } operation)
+            IsMappingOperationCurrent(operation);
+    }
+
+    private string OperationStoppedStatus(ActiveMappingOperation operation, string action)
+        => operation.InvalidationReason is { } reason
+            ? $"{action} stopped because {reason}. No stale result was applied or published."
+            : $"{action} canceled. No output was published.";
+
+    private void FinishMappingOperation(ActiveMappingOperation operation)
+    {
+        if (ReferenceEquals(_activeMappingOperation, operation))
+        {
+            _activeMappingOperation = null;
+            IsBusy = false;
+        }
+        operation.Cancellation.Dispose();
+    }
+
+    private IProgress<MappingJobProgress> CreateMappingProgress(ActiveMappingOperation operation)
+        => new Progress<MappingJobProgress>(progress =>
+        {
+            if (!IsMappingOperationCurrent(operation)) return;
+            StatusText = progress.Total is int total && progress.Current is int current
+                ? $"{progress.Stage} ({current:N0} of {total:N0})"
+                : progress.Current is int count
+                    ? $"{progress.Stage} ({count:N0} row(s))"
+                    : progress.Stage;
+        });
+
+    private string CurrentDestinationSelectionKey()
+        => string.Join("\u001f", SelectedDestinationKind.Kind, _destinationPath ?? "", _destinationTable ?? "",
+            string.Join("\u001e", SelectedDestinationKey?.Columns ?? Array.Empty<string>()));
+
     public async Task LoadSourceAsync(string path)
     {
         if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+        InvalidateMappingOperationIfStale();
         IsSourceLoading = true;
         var sqliteTableLoadPending = false;
         try
@@ -3147,6 +3344,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _acceptedSuggestionUndo.Clear();
         _suggestionRedoState = null;
         Interlocked.Increment(ref _sourceLoadGeneration);
+        InvalidateMappingOperationIfStale();
         ClearDestinationSelection();
         IsSourceLoading = false;
         _sqliteSourcePath = null;
@@ -3176,6 +3374,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void ClearDestinationSelection()
     {
         Interlocked.Increment(ref _destinationLoadGeneration);
+        InvalidateMappingOperationIfStale();
         _destinationPath = null;
         _destinationTable = null;
         _selectedDestinationKey = null;
@@ -3303,17 +3502,38 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (IsSourceLoading) { StatusText = "Wait for source loading to finish before previewing."; return; }
         if (IsBusy) return;
         if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
-        IsBusy = true;
-        StatusText = "Running bounded preview…";
+        var project = Session.Project;
+        var operation = BeginMappingOperation(profile, "Running bounded preview…");
+        var cancellationToken = operation.Cancellation.Token;
         try
         {
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
             var result = await new MappingJobService(profile, worker).RunAsync(
-                Session.Project, connections, ReadParameters(), preview: true, CancellationToken.None);
+                project, connections, ReadParameters(), preview: true, cancellationToken,
+                CreateMappingProgress(operation));
+            if (!IsMappingOperationCurrent(operation))
+            {
+                StatusText = OperationStoppedStatus(operation, "Preview");
+                return;
+            }
             ShowRunResult(result);
-            StatusText = $"Preview finished: {result.Manifest.Outcome}. Sampled output is partial.";
+            StatusText = result.Manifest.Outcome switch
+            {
+                RunOutcome.Cancelled => "Preview canceled by the validation worker. Sampled output is unavailable.",
+                RunOutcome.Success or RunOutcome.SuccessWithWarnings
+                    => $"Preview complete: {result.Manifest.Outcome}. Sampled output is partial.",
+                _ => $"Preview ended with {result.Manifest.Outcome}. No validated sample is available."
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Preview");
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Preview");
         }
         catch (Exception ex)
         {
@@ -3322,7 +3542,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             Raise(nameof(Diagnostics));
             StatusText = "Preview failed.";
         }
-        finally { IsBusy = false; }
+        finally { FinishMappingOperation(operation); }
     }
 
     private async Task ExecuteAsync()
@@ -3330,7 +3550,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (IsSourceLoading) { StatusText = "Wait for source loading to finish before executing."; return; }
         if (IsBusy) return;
         if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
-        var gate = PublicationGate.Evaluate(Session.Project, profile, AllowSyntheticProfile);
+        var project = Session.Project;
+        var projectDigest = project.ComputeSemanticDigest();
+        var gate = PublicationGate.Evaluate(project, profile, AllowSyntheticProfile);
         if (gate.HasBlockingErrors)
         {
             Diagnostics.Clear();
@@ -3345,9 +3567,15 @@ public sealed class MainWindowViewModel : ViewModelBase
         try { outputPath = await _fileDialog.SaveReportAsync(); }
         catch (Exception ex) { StatusText = $"Output selection failed: {ex.Message}"; return; }
         if (outputPath is null) return;
+        if (!ReferenceEquals(project, Session.Project)
+            || !StringComparer.Ordinal.Equals(projectDigest, project.ComputeSemanticDigest()))
+        {
+            StatusText = "Execution stopped because the mapping changed while choosing the output path. Review it and start a new run.";
+            return;
+        }
 
-        IsBusy = true;
-        StatusText = "Executing and validating report…";
+        var operation = BeginMappingOperation(profile, "Executing and validating report…");
+        var cancellationToken = operation.Cancellation.Token;
         try
         {
             var root = WorkspaceRoot();
@@ -3355,20 +3583,36 @@ public sealed class MainWindowViewModel : ViewModelBase
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
             var result = await service.RunAsync(
-                Session.Project, connections, ReadParameters(), preview: false, CancellationToken.None);
+                project, connections, ReadParameters(), preview: false, cancellationToken,
+                CreateMappingProgress(operation));
+            if (!IsMappingOperationCurrent(operation))
+            {
+                StatusText = OperationStoppedStatus(operation, "Execution");
+                return;
+            }
             ShowRunResult(result);
             if (!result.IsPublishable)
             {
-                StatusText = $"Execution finished: {result.Manifest.Outcome}. No artifact was published.";
+                StatusText = result.Manifest.Outcome == RunOutcome.Cancelled
+                    ? "Execution canceled by the validation worker. No artifact was published."
+                    : $"Execution ended with {result.Manifest.Outcome}. No artifact was published.";
                 return;
             }
             var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
             var receipt = await new PublicationService(new RunJournal()).PublishAuthorizedAsync(
                 outputPath, payload, root,
-                Session.Project, profile, AllowSyntheticProfile, result,
+                project, profile, AllowSyntheticProfile, result,
                 (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                    stagedPath, outputPath, result, token), CancellationToken.None);
+                    stagedPath, outputPath, result, token), cancellationToken);
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Execution");
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            StatusText = OperationStoppedStatus(operation, "Execution");
         }
         catch (Exception ex)
         {
@@ -3377,7 +3621,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             Raise(nameof(Diagnostics));
             StatusText = "Execution failed; no unvalidated output was published.";
         }
-        finally { IsBusy = false; }
+        finally { FinishMappingOperation(operation); }
     }
 
     private bool TryResolveProfile(bool allowSyntheticProfile, out FilingProfile profile)

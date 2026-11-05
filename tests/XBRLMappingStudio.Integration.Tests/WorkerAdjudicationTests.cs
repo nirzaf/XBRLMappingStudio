@@ -96,6 +96,49 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MappingJobReportsWorkerAndSourceProgressStages()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(req => new WorkerResponse(
+            req.OperationId, WorkerStatus.Success, Result: null, Array.Empty<Diagnostic>(), Error: null));
+        var progress = new RecordingProgress<MappingJobProgress>();
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None, progress);
+
+        Assert.True(result.IsPublishable);
+        Assert.Contains(progress.Items, item => item.Stage == "Starting validation worker");
+        Assert.Contains(progress.Items, item => item.Stage == "Loading filing taxonomy in validation worker");
+        Assert.Contains(progress.Items, item => item.Stage == "Recording source identities");
+        Assert.Contains(progress.Items, item => item.Stage.StartsWith("Inspecting source ", StringComparison.Ordinal));
+        Assert.Contains(progress.Items, item => item.Stage.StartsWith("Read source ", StringComparison.Ordinal));
+        Assert.Contains(progress.Items, item => item.Stage == "Executing mapping");
+        Assert.Contains(progress.Items, item => item.Stage == "Validating generated report in validation worker");
+        Assert.Contains(progress.Items, item => item.Stage == "Run ended: Success");
+    }
+
+    [Fact]
+    public async Task MappingJobCancellationDuringWorkerStartupIsTerminalAndNonPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new CancellationWaitingWorker();
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        using var cancellation = new CancellationTokenSource();
+
+        var run = service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, cancellation.Token);
+        await worker.HandshakeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var result = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RunOutcome.Cancelled, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Empty(result.Facts);
+        Assert.Equal(string.Empty, result.XbrlJson);
+    }
+
+    [Fact]
     public async Task WorkerSuccess_NoBlockingDiagnostic_IsPublishable()
     {
         // Guards against over-correction: a genuinely clean validation still publishes.
@@ -448,6 +491,29 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
 
         public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
             => throw new InvalidOperationException("Request should not be sent after a startup failure.");
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingProgress<T> : IProgress<T>
+    {
+        public List<T> Items { get; } = new();
+        public void Report(T value) => Items.Add(value);
+    }
+
+    private sealed class CancellationWaitingWorker : IWorkerClient
+    {
+        public TaskCompletionSource HandshakeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
+        {
+            HandshakeStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The canceled handshake unexpectedly continued.");
+        }
+
+        public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("No worker request should follow a canceled handshake.");
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

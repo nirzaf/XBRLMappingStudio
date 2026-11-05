@@ -399,6 +399,73 @@ public sealed class ArelleExecutionTests
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(revisionInput))).ToLowerInvariant();
     }
 
+    [RequiresArelleRuntimeFact]
+    public async Task CancellingArelleRequestKillsTheWorkerProcess()
+    {
+        var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
+
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-cancel-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "blocked_worker.py");
+        var pidPath = Path.Combine(workspace, "worker.pid");
+        await File.WriteAllTextAsync(scriptPath,
+            "import os, sys, time\n"
+            + "temporary = sys.argv[1] + '.tmp'\n"
+            + "with open(temporary, 'w', encoding='ascii') as marker: marker.write(str(os.getpid()))\n"
+            + "os.replace(temporary, sys.argv[1])\n"
+            + "while True: time.sleep(1)\n");
+
+        ArelleWorker? worker = null;
+        try
+        {
+            worker = new ArelleWorker(python!, new[] { scriptPath, pidPath });
+            using var cancellation = new CancellationTokenSource();
+            var handshake = worker.HandshakeAsync(cancellation.Token);
+            Assert.True(await WaitForAsync(() => File.Exists(pidPath), TimeSpan.FromSeconds(5)),
+                "The test worker did not start and write its process ID.");
+            var processId = int.Parse(await File.ReadAllTextAsync(pidPath), CultureInfo.InvariantCulture);
+
+            cancellation.Cancel();
+            var startupFailure = await Assert.ThrowsAsync<WorkerStartupException>(
+                () => handshake.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(WorkerStatus.Cancelled, startupFailure.Status);
+            await worker.DisposeAsync();
+
+            Assert.True(await WaitForAsync(() => !IsProcessAlive(processId), TimeSpan.FromSeconds(5)),
+                "The worker process remained alive after its request was cancelled.");
+        }
+        finally
+        {
+            if (worker is not null) await worker.DisposeAsync();
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static async Task<bool> WaitForAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return true;
+            await Task.Delay(50);
+        }
+        return condition();
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static byte[] BuildDigitalPdf(string? currentYearValue, string? priorYearValue)
     {
         var builder = new PdfDocumentBuilder();

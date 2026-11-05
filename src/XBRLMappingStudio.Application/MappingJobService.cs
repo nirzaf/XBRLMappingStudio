@@ -19,6 +19,9 @@ using RunContext = XBRLMappingStudio.Engine.ExecutionContext;
 
 namespace XBRLMappingStudio.Application;
 
+/// <summary>Observable stage progress for a mapping job. Worker work may be indeterminate.</summary>
+public sealed record MappingJobProgress(string Stage, int? Current = null, int? Total = null);
+
 /// <summary>
 /// Shared application service used by Desktop and CLI (OPS01). Executes the same
 /// graph in-process; callers supply the parameters and destinations.
@@ -115,8 +118,10 @@ public sealed class MappingJobService
         IReadOnlyDictionary<string, SourceConnection> connections,
         IReadOnlyDictionary<string, string> parameters,
         bool preview,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<MappingJobProgress>? progress = null)
     {
+        progress?.Report(new MappingJobProgress("Checking filing profile and mapping"));
         var runId = Guid.NewGuid().ToString("N");
         var opId = Guid.NewGuid().ToString("N");
         var manifest = new RunManifest
@@ -158,12 +163,14 @@ public sealed class MappingJobService
         WorkerHandshake handshake;
         try
         {
+            progress?.Report(new MappingJobProgress("Starting validation worker"));
             handshake = await _worker.HandshakeAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             manifest.Outcome = RunOutcome.Cancelled;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
         catch (WorkerStartupException ex)
@@ -228,6 +235,7 @@ public sealed class MappingJobService
         WorkerResponse taxonomyResponse;
         try
         {
+            progress?.Report(new MappingJobProgress("Loading filing taxonomy in validation worker"));
             taxonomyResponse = await _worker.RequestAsync(new WorkerRequest(
                 WorkerOperations.LoadTaxonomy,
                 OperationId: opId + "-taxonomy",
@@ -241,6 +249,7 @@ public sealed class MappingJobService
         {
             manifest.Outcome = RunOutcome.Cancelled;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
@@ -299,11 +308,14 @@ public sealed class MappingJobService
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new MappingJobProgress("Recording source identities"));
             manifest.Inputs = await RecordInputIdentities(connections, cancellationToken);
         }
         catch (OperationCanceledException)
         {
             manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
@@ -317,8 +329,10 @@ public sealed class MappingJobService
         };
 
         // Load each source binding into the context.
+        var bindingIndex = 0;
         foreach (var binding in project.Bindings)
         {
+            bindingIndex++;
             if (!connections.TryGetValue(binding.BindingId, out var conn))
             {
                 context.Diagnostics.Error(
@@ -334,6 +348,8 @@ public sealed class MappingJobService
 
             try
             {
+                progress?.Report(new MappingJobProgress(
+                    $"Inspecting source {binding.DisplayName}", bindingIndex, project.Bindings.Count));
                 var adapter = BuildExecutionAdapter(conn);
                 var schema = await adapter.InspectSchemaAsync(conn, cancellationToken);
 
@@ -356,8 +372,11 @@ public sealed class MappingJobService
                 await foreach (var r in adapter.ReadFullAsync(conn, schema, cancellationToken))
                 {
                     records.Add(r);
+                    if (records.Count % 500 == 0)
+                        progress?.Report(new MappingJobProgress($"Reading source {binding.DisplayName}", records.Count));
                     if (preview && records.Count >= context.PreviewRowLimit) break;
                 }
+                progress?.Report(new MappingJobProgress($"Read source {binding.DisplayName}", records.Count));
                 if (StringComparer.Ordinal.Equals(conn.Kind, "pdf-digital")
                     && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, conn, manifest.Inputs, cancellationToken))
                 {
@@ -421,7 +440,16 @@ public sealed class MappingJobService
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
+        progress?.Report(new MappingJobProgress("Executing mapping"));
         var exec = await compile.Plan.ExecuteAsync(context);
+        if (exec.Outcome == RunOutcome.Cancelled || cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
 
         // Fold PendingFacts into validated XbrlFacts, then emit xBRL-JSON.
         var facts = new List<XbrlFact>();
@@ -498,6 +526,7 @@ public sealed class MappingJobService
             ProfileDigest: _profile.Digest,
             DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
             Payload: JsonSerializer.SerializeToElement(json));
+        progress?.Report(new MappingJobProgress("Validating generated report in validation worker"));
         var workerResp = await _worker.RequestAsync(validateReq, cancellationToken);
 
         // XBR05 fail-closed worker adjudication: a run may be labelled successful only
@@ -561,6 +590,8 @@ public sealed class MappingJobService
                 Bytes: System.Text.Encoding.UTF8.GetByteCount(json),
                 Kind: "xbrl-json")
         };
+
+        progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
 
         return JobResult.FromManifest(manifest, facts, json, context.SampledTotals);
     }
