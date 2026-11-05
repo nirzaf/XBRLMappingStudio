@@ -174,6 +174,101 @@ public class AnalystWorkflowTests
     }
 
     [Fact]
+    public void AcceptSelectedValid_AcceptsChosenCandidatesInOneAuditedUndoTransaction()
+    {
+        var (session, _) = CreateSession();
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("revenue", "sales-id", Mapping("revenue", "sales-id", "synthetic:Revenue", "USD", "duration"), "local", 9),
+            new Suggestion("net-income", "sales-id", Mapping("net-income", "sales-id", "synthetic:NetIncome", "USD", "duration"), "local", 8),
+            new Suggestion("debt", "debt-id", Mapping("debt", "debt-id", "synthetic:Liabilities", "USD", "instant"), "local", 7),
+        });
+
+        var outcome = session.AcceptSelectedValid(new[] { "revenue", "debt" });
+
+        Assert.True(outcome.Applied, outcome.Reason);
+        Assert.Equal(SuggestionState.Accepted, session.StateOf("revenue"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("net-income"));
+        Assert.Equal(SuggestionState.Accepted, session.StateOf("debt"));
+        Assert.Equal(new[] { "batch-accept" }, session.Audit.Records.Select(record => record.Action));
+        Assert.Equal(2, session.Draft.Nodes.Count(node => node.NodeType == NodeTypeConstants.FactConstruct));
+
+        Assert.True(session.Undo().Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("revenue"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("net-income"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("debt"));
+        Assert.Equal(new[] { "batch-accept", "undo" }, session.Audit.Records.Select(record => record.Action));
+    }
+
+    [Fact]
+    public void AcceptSelectedValid_ConflictBlocksWholeSelectionWithoutMutation()
+    {
+        var (session, _) = CreateSession();
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("revenue", "sales-id", Mapping("revenue", "sales-id", "synthetic:Revenue", "USD", "duration"), "local", 9),
+            new Suggestion("net-income", "sales-id", Mapping("net-income", "sales-id", "synthetic:NetIncome", "USD", "duration"), "local", 8),
+            new Suggestion("debt", "debt-id", Mapping("debt", "debt-id", "synthetic:Liabilities", "USD", "instant"), "local", 7),
+        });
+
+        var outcome = session.AcceptSelectedValid(new[] { "revenue", "net-income" });
+
+        Assert.False(outcome.Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("revenue"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("net-income"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("debt"));
+        Assert.Contains(outcome.Validation!.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("competing pending mapping alternatives", StringComparison.Ordinal));
+        Assert.Empty(session.Audit.Records);
+    }
+
+    [Fact]
+    public void AcceptSelectedValid_DuplicateFactsBlockWholeSelectionWithoutMutation()
+    {
+        var (session, _) = CreateSession();
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("sales", "sales-id", Mapping("sales", "sales-id", "synthetic:Revenue", "USD", "duration"), "local", 9),
+            new Suggestion("turnover", "turnover-id", Mapping("turnover", "turnover-id", "synthetic:Revenue", "USD", "duration"), "local", 8),
+        });
+
+        var outcome = session.AcceptSelectedValid(new[] { "sales", "turnover" });
+
+        Assert.False(outcome.Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("sales"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("turnover"));
+        Assert.Contains(outcome.Validation!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrDuplicateFact);
+        Assert.Empty(session.Audit.Records);
+    }
+
+    [Fact]
+    public void AcceptSelectedValid_IncompleteDimensionBlocksWholeSelectionWithoutMutation()
+    {
+        var (session, _) = CreateSession();
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("sales", "sales-id", Mapping("sales", "sales-id", "synthetic:Revenue", "USD", "duration")
+                with { DimensionName = "synthetic:Region" }, "local", 9),
+            new Suggestion("debt", "debt-id", Mapping("debt", "debt-id", "synthetic:Liabilities", "USD", "instant"), "local", 8),
+        });
+
+        var outcome = session.AcceptSelectedValid(new[] { "sales", "debt" });
+
+        Assert.False(outcome.Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("sales"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("debt"));
+        Assert.Contains(outcome.Validation!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.AiInvalidDraft
+            && diagnostic.Message.Contains("dimension name and member", StringComparison.Ordinal));
+        Assert.Empty(session.Audit.Records);
+    }
+
+    [Fact]
     public void AcceptAllValid_CompetingConceptsForSameSource_BlockWholeBatch()
     {
         var (session, _) = CreateSession();

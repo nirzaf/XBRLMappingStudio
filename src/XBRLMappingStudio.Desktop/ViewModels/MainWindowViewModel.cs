@@ -148,9 +148,12 @@ public sealed class SuggestionRow : ViewModelBase
     private string _concept = "";
     private SuggestionState _reviewState = SuggestionState.Pending;
     private bool _isAnalystEdited;
+    private bool _isBatchSelected;
     public string SuggestionId { get; init; } = "";
     public string SourceFieldId { get; init; } = "";
+    public string SourceNodeId { get; init; } = "";
     public string TargetNodeId { get; init; } = "";
+    public bool IsConnectedBatch { get; init; }
     public string ProjectDigest { get; init; } = "";
     public string Concept
     {
@@ -216,6 +219,11 @@ public sealed class SuggestionRow : ViewModelBase
     {
         get => _reviewState;
         set { if (Set(ref _reviewState, value)) Raise(nameof(Display)); }
+    }
+    public bool IsBatchSelected
+    {
+        get => _isBatchSelected;
+        set => Set(ref _isBatchSelected, value);
     }
     public string Display
     {
@@ -350,6 +358,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
     private string _suggestionFilter = "";
+    private string _suggestionBatchSummary = "Generate suggestions for uniquely connected source fields to review a batch.";
+    private string? _suggestionEditorBaselineId;
+    private string _suggestionEditorBaselineConcept = "";
+    private string _suggestionEditorBaselineUnit = "";
+    private string _suggestionEditorBaselinePeriodType = "";
     private string _selectedSuggestionConcept = "";
     private string _selectedSuggestionUnit = "";
     private string _selectedSuggestionPeriodType = "duration";
@@ -385,14 +398,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     private SuggestionSession? _suggestionSession;
     private bool _isSuggestionHistoryMutation;
     private readonly Stack<AcceptedSuggestionUndo> _acceptedSuggestionUndo = new();
+    private readonly Dictionary<string, DraftMapping> _unsavedSuggestionDrafts = new(StringComparer.Ordinal);
     private SuggestionRedoState? _suggestionRedoState;
 
     private sealed record AcceptedSuggestionUndo(
-        SuggestionSession Session, string SuggestionId, string DigestBefore,
-        string DigestAfter, bool GraphChanged);
+        SuggestionSession Session, IReadOnlyList<string> SuggestionIds, string DigestBefore,
+        string DigestAfter, bool GraphChanged, bool IsBatch);
     private sealed record SuggestionRedoState(
-        SuggestionSession Session, string SuggestionId, string DigestBefore,
-        bool GraphChanged);
+        SuggestionSession Session, IReadOnlyList<string> SuggestionIds, string DigestBefore,
+        bool GraphChanged, bool IsBatch);
     private sealed record PdfReviewRowState(string ReviewedValue, string? CorrectionReason, bool IsApproved);
 
     private sealed class ActiveMappingOperation(
@@ -436,6 +450,9 @@ public sealed class MainWindowViewModel : ViewModelBase
                 CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
+                Raise(nameof(CanAcceptSelectedSuggestionBatch));
+                AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
                 ChooseSourceCommand?.NotifyCanExecuteChanged();
                 NotifyDestinationCommands();
                 RefreshPdfReviewCommandState();
@@ -456,6 +473,9 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
+                Raise(nameof(CanAcceptSelectedSuggestionBatch));
+                AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
                 ChooseSourceCommand?.NotifyCanExecuteChanged();
                 NotifyDestinationCommands();
                 RefreshPdfReviewCommandState();
@@ -671,7 +691,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         get => _selectedSuggestion;
         set
         {
-            if (Set(ref _selectedSuggestion, value)) LoadSelectedSuggestionEditor();
+            if (ReferenceEquals(_selectedSuggestion, value)) return;
+            CaptureSelectedSuggestionDraft();
+            if (Set(ref _selectedSuggestion, value))
+            {
+                if (value is null) ClearSelectedSuggestionEditor();
+                else LoadSelectedSuggestionEditor();
+            }
         }
     }
     public string SuggestionFilter
@@ -682,6 +708,14 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (Set(ref _suggestionFilter, value)) RefreshFilteredSuggestions();
         }
     }
+    public string SuggestionBatchSummary
+    {
+        get => _suggestionBatchSummary;
+        private set => Set(ref _suggestionBatchSummary, value);
+    }
+    public bool CanAcceptSelectedSuggestionBatch =>
+        !IsBusy && !IsSourceLoading && _suggestionSession is not null
+        && AiSuggestions.Any(row => row.IsBatchSelected);
     public string SelectedSuggestionConcept { get => _selectedSuggestionConcept; set => Set(ref _selectedSuggestionConcept, value); }
     public string SelectedSuggestionUnit { get => _selectedSuggestionUnit; set => Set(ref _selectedSuggestionUnit, value); }
     public string SelectedSuggestionPeriodType { get => _selectedSuggestionPeriodType; set => Set(ref _selectedSuggestionPeriodType, value); }
@@ -884,7 +918,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 if (value is not null) Session.Select(value.NodeId, additive: false);
                 LoadSelectedFactProperties();
-                if (SelectedSuggestion is not null) LoadSelectedSuggestionEditor();
+                if (SelectedSuggestion is not null)
+                {
+                    CaptureSelectedSuggestionDraft();
+                    LoadSelectedSuggestionEditor();
+                }
                 Raise(nameof(SelectedNodeDisplayName));
                 Raise(nameof(CanEditSelectedFact));
             }
@@ -1068,7 +1106,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand SetConceptCommand { get; }
     public RelayCommand ApplyFactPropertiesCommand { get; }
     public RelayCommand SuggestMappingsCommand { get; }
+    public RelayCommand SuggestConnectedMappingsCommand { get; }
     public RelayCommand ApplySuggestedMappingCommand { get; }
+    public RelayCommand AcceptSelectedSuggestionBatchCommand { get; }
     public RelayCommand EditSelectedSuggestionCommand { get; }
     public RelayCommand RejectSelectedSuggestionCommand { get; }
     public RelayCommand NextPageCommand { get; }
@@ -1182,7 +1222,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         SetConceptCommand = new RelayCommand(_ => SetSelectedConcept());
         ApplyFactPropertiesCommand = new RelayCommand(_ => ApplySelectedFactProperties());
         SuggestMappingsCommand = new RelayCommand(async _ => await SuggestMappingsAsync());
+        SuggestConnectedMappingsCommand = new RelayCommand(async _ => await SuggestConnectedMappingsAsync(),
+            _ => !IsBusy && !IsSourceLoading);
         ApplySuggestedMappingCommand = new RelayCommand(_ => ApplySelectedSuggestion());
+        AcceptSelectedSuggestionBatchCommand = new RelayCommand(_ => AcceptSelectedSuggestionBatch(),
+            _ => CanAcceptSelectedSuggestionBatch);
         EditSelectedSuggestionCommand = new RelayCommand(_ => EditSelectedSuggestion());
         RejectSelectedSuggestionCommand = new RelayCommand(_ => RejectSelectedSuggestion());
         NextPageCommand = new RelayCommand(_ => { if (HasNextPage) { _resultPage++; RunSearch(keepPage: true); } });
@@ -1231,7 +1275,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (_selectedNode is not null)
         {
             LoadSelectedFactProperties();
-            if (selectionChanged && SelectedSuggestion is not null) LoadSelectedSuggestionEditor();
+            if (selectionChanged && SelectedSuggestion is not null)
+            {
+                CaptureSelectedSuggestionDraft();
+                LoadSelectedSuggestionEditor();
+            }
         }
         if (!selectionChanged) return;
         Raise(nameof(SelectedNode));
@@ -3340,6 +3388,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             var sourceColumn = SelectedSourceColumn;
             var id = $"{sourceBindingId}:{sourceColumn}";
             var targetNodeId = SelectedNode.NodeId;
+            var sourceNodeId = Session.Project.Nodes
+                .Where(node => node.NodeType == NodeTypeConstants.ExcelField
+                    && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("bindingId")?.ToString(), sourceBindingId))
+                .Select(node => node.NodeId)
+                .SingleOrDefault() ?? "";
             var targetFact = Session.Project.Nodes.Single(node => node.NodeId == targetNodeId);
             var contextUnit = targetFact.Parameters.GetValueOrDefault("unit")?.ToString();
             var contextPeriod = targetFact.Parameters.GetValueOrDefault("periodType")?.ToString();
@@ -3374,10 +3427,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             session.LoadSuggestions(sessionSuggestions);
             _suggestionSession = session;
             SuggestionFilter = "";
-            ReplaceItems(AiSuggestions, sessionSuggestions.Select(s => new SuggestionRow
+            ReplaceSuggestionRows(sessionSuggestions.Select(s => new SuggestionRow
             {
                 SuggestionId = s.SuggestionId,
                 SourceFieldId = id,
+                SourceNodeId = sourceNodeId,
                 TargetNodeId = targetNodeId,
                 ProjectDigest = projectDigest,
                 Concept = s.Draft.Concept ?? "",
@@ -3388,9 +3442,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 IsAnalystEdited = s.IsAnalystEdited,
                 ReviewState = session.StateOf(s.SuggestionId)
             }));
-            RefreshFilteredSuggestions();
             SelectedSuggestion = FilteredAiSuggestions.FirstOrDefault();
-            Raise(nameof(AiSuggestions));
             StatusText = batch.Abstentions.Count > 0
                 ? string.Join(" ", batch.Abstentions.Select(abstention =>
                     $"No match for '{abstention.SourceFieldName}' ({abstention.SourceFieldId}): {abstention.Reason}"))
@@ -3401,21 +3453,209 @@ public sealed class MainWindowViewModel : ViewModelBase
         catch (Exception ex) { StatusText = $"Local suggestions failed: {ex.Message}"; }
     }
 
+    public async Task SuggestConnectedMappingsAsync()
+    {
+        if (IsBusy || IsSourceLoading)
+        {
+            StatusText = "Wait for the current operation or source inspection to finish before generating batch suggestions.";
+            return;
+        }
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
+
+        var project = Session.Project;
+        var projectDigest = project.ComputeSemanticDigest();
+        var factNodes = project.Nodes.Where(node => node.NodeType == NodeTypeConstants.FactConstruct).ToArray();
+        var sourceNodes = project.Nodes.Where(node => node.NodeType == NodeTypeConstants.ExcelField)
+            .OrderBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToArray();
+        var scopeDiagnostics = new List<Diagnostic>();
+        var identities = sourceNodes.Select(node =>
+        {
+            var bindingId = node.Parameters.GetValueOrDefault("bindingId")?.ToString() ?? "";
+            var column = node.Parameters.GetValueOrDefault("column")?.ToString() ?? "";
+            return (Node: node, BindingId: bindingId, Column: column, FieldId: $"{bindingId}:{column}");
+        }).ToArray();
+        var duplicateIdentities = identities
+            .Where(identity => !string.IsNullOrWhiteSpace(identity.BindingId) && !string.IsNullOrWhiteSpace(identity.Column))
+            .GroupBy(identity => identity.FieldId, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        var targetsByFieldId = new Dictionary<string, (string SourceNodeId, string TargetNodeId)>(StringComparer.Ordinal);
+        var descriptors = new List<SourceFieldDescriptor>();
+
+        void AddScopeWarning(string message, string? nodeId = null)
+            => scopeDiagnostics.Add(new Diagnostic
+            {
+                Code = DiagnosticCodes.AiInvalidDraft,
+                Subsystem = DiagnosticSubsystem.AI,
+                Stage = DiagnosticStage.Validation,
+                Severity = DiagnosticSeverity.Warning,
+                IsBlocking = false,
+                Message = message,
+                NodeId = nodeId
+            });
+
+        foreach (var identity in identities)
+        {
+            if (string.IsNullOrWhiteSpace(identity.BindingId) || string.IsNullOrWhiteSpace(identity.Column))
+            {
+                AddScopeWarning($"Source node '{identity.Node.DisplayName}' has no binding or field name; it was excluded from batch suggestions.", identity.Node.NodeId);
+                continue;
+            }
+            if (duplicateIdentities.Contains(identity.FieldId))
+            {
+                AddScopeWarning($"Source field '{identity.FieldId}' is represented by multiple graph nodes; it was excluded as ambiguous.", identity.Node.NodeId);
+                continue;
+            }
+            if (!project.Bindings.Any(binding => StringComparer.Ordinal.Equals(binding.BindingId, identity.BindingId)))
+            {
+                AddScopeWarning($"Source field '{identity.FieldId}' references a missing source binding; it was excluded.", identity.Node.NodeId);
+                continue;
+            }
+
+            var targetFacts = factNodes.Where(factNode => IsUpstreamToFactValue(identity.Node.NodeId, factNode.NodeId)).ToArray();
+            if (targetFacts.Length != 1)
+            {
+                AddScopeWarning(targetFacts.Length == 0
+                    ? $"Source field '{identity.FieldId}' is not connected to a fact value input; it remains unassigned."
+                    : $"Source field '{identity.FieldId}' reaches multiple fact nodes; choose one mapping path before batch suggestions.",
+                    identity.Node.NodeId);
+                continue;
+            }
+
+            var target = targetFacts[0];
+            descriptors.Add(new SourceFieldDescriptor(
+                identity.FieldId,
+                identity.Column,
+                target.Parameters.GetValueOrDefault("unit")?.ToString(),
+                target.Parameters.GetValueOrDefault("periodType")?.ToString()));
+            targetsByFieldId.Add(identity.FieldId, (identity.Node.NodeId, target.NodeId));
+        }
+
+        if (descriptors.Count == 0)
+        {
+            _suggestionSession = null;
+            ReplaceSuggestionRows(Array.Empty<SuggestionRow>());
+            ReplaceItems(Diagnostics, scopeDiagnostics.Select(ToDiagnosticRow));
+            Raise(nameof(Diagnostics));
+            SuggestionBatchSummary = "No uniquely connected source-field to fact-node pairs are ready for batch suggestions.";
+            StatusText = "Connect each source field to exactly one fact node before generating a batch.";
+            return;
+        }
+
+        try
+        {
+            var suggestions = new List<Suggestion>();
+            var abstentions = new List<SuggestionAbstention>();
+            var diagnostics = new List<Diagnostic>(scopeDiagnostics);
+            var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
+            foreach (var chunk in descriptors.Chunk(100))
+            {
+                var batch = await service.SuggestAsync(chunk, CancellationToken.None);
+                suggestions.AddRange(batch.Suggestions);
+                abstentions.AddRange(batch.Abstentions);
+                diagnostics.AddRange(batch.Diagnostics);
+            }
+
+            if (!ReferenceEquals(project, Session.Project)
+                || !StringComparer.Ordinal.Equals(projectDigest, Session.Project.ComputeSemanticDigest()))
+            {
+                StatusText = "The project changed while batch suggestions were generated. No candidates were applied; request fresh suggestions.";
+                return;
+            }
+
+            var session = new SuggestionSession(
+                project,
+                new DraftValidator(_taxonomy, profile),
+                _auditSinkFactory?.Invoke(),
+                new SuggestionSessionContext(
+                    Actor: Environment.UserName,
+                    Method: "offline-retrieval",
+                    ProviderConfigId: "local-retrieval"));
+            var sessionSuggestions = suggestions.Select(suggestion =>
+            {
+                var fieldId = suggestion.Recommendation?.SourceFieldId;
+                if (string.IsNullOrWhiteSpace(fieldId) || !targetsByFieldId.ContainsKey(fieldId))
+                    throw new InvalidOperationException("A local candidate has no matching connected source-field identity.");
+                return suggestion with
+                {
+                    SourceField = fieldId,
+                    Draft = suggestion.Draft with { SourceField = fieldId }
+                };
+            }).ToArray();
+            session.LoadSuggestions(sessionSuggestions);
+            _suggestionSession = session;
+            SuggestionFilter = "";
+            ReplaceSuggestionRows(sessionSuggestions.Select(suggestion =>
+            {
+                var fieldId = suggestion.Draft.SourceField;
+                var target = targetsByFieldId[fieldId];
+                return new SuggestionRow
+                {
+                    SuggestionId = suggestion.SuggestionId,
+                    SourceFieldId = fieldId,
+                    SourceNodeId = target.SourceNodeId,
+                    TargetNodeId = target.TargetNodeId,
+                    ProjectDigest = projectDigest,
+                    IsConnectedBatch = true,
+                    Concept = suggestion.Draft.Concept ?? "",
+                    Score = suggestion.Score,
+                    Basis = suggestion.Basis,
+                    TaxonomyEvidence = suggestion.TaxonomyEvidence,
+                    Recommendation = suggestion.Recommendation,
+                    IsAnalystEdited = suggestion.IsAnalystEdited,
+                    ReviewState = session.StateOf(suggestion.SuggestionId)
+                };
+            }));
+            SelectedSuggestion = FilteredAiSuggestions.FirstOrDefault();
+            ReplaceItems(Diagnostics, diagnostics.Select(ToDiagnosticRow));
+            Raise(nameof(Diagnostics));
+
+            var fieldsWithCandidates = sessionSuggestions.Select(suggestion => suggestion.Draft.SourceField)
+                .Distinct(StringComparer.Ordinal).Count();
+            SuggestionBatchSummary = suggestions.Count == 0
+                ? $"No candidates were ranked for {descriptors.Count} connected field(s); all remain unassigned."
+                : $"{suggestions.Count} candidate(s) for {fieldsWithCandidates} connected field(s). Check one candidate per field; confidence is not calibrated probability.";
+            StatusText = suggestions.Count == 0
+                ? string.Join(" ", abstentions.Select(abstention =>
+                    $"No match for '{abstention.SourceFieldName}' ({abstention.SourceFieldId}): {abstention.Reason}"))
+                : $"Found {suggestions.Count} offline candidates across {fieldsWithCandidates} connected source field(s). "
+                    + $"{abstentions.Count} field(s) remain unassigned. No source data was sent over the network.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Offline batch suggestions failed: {ex.Message}";
+        }
+    }
+
     private void ApplySelectedSuggestion()
     {
         if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
         if (!TryGetCurrentSuggestionContext(out var selected, out var suggestion, out var sourceIdentity)) return;
-        var sourceNodes = Session.Project.Nodes.Where(node => node.NodeType == NodeTypeConstants.ExcelField
-            && node.Parameters.TryGetValue("bindingId", out var bindingId)
-            && string.Equals(bindingId?.ToString(), SelectedSourceBindingId, StringComparison.Ordinal)).ToList();
-        if (sourceNodes.Count != 1)
+        var sourceNode = Session.Project.Nodes.SingleOrDefault(node => node.NodeId == selected.SourceNodeId
+            && node.NodeType == NodeTypeConstants.ExcelField);
+        if (sourceNode is null)
         {
-            StatusText = "A suggested mapping requires exactly one source field node for the selected binding.";
+            StatusText = "The suggestion's source field node is missing or ambiguous; request fresh suggestions.";
             return;
         }
-        if (!IsUpstream(sourceNodes[0].NodeId, SelectedNode!.NodeId))
+        if (!selected.IsConnectedBatch)
         {
-            StatusText = "The selected source field does not feed the selected fact node.";
+            var sourceNodes = Session.Project.Nodes.Where(node => node.NodeType == NodeTypeConstants.ExcelField
+                && node.Parameters.TryGetValue("bindingId", out var bindingId)
+                && string.Equals(bindingId?.ToString(), SelectedSourceBindingId, StringComparison.Ordinal)).ToList();
+            if (sourceNodes.Count != 1)
+            {
+                StatusText = "A suggested mapping requires exactly one source field node for the selected binding.";
+                return;
+            }
+        }
+        var targetFactNode = Session.Project.Nodes.SingleOrDefault(node => node.NodeId == selected.TargetNodeId
+            && node.NodeType == NodeTypeConstants.FactConstruct);
+        if (targetFactNode is null || !IsUpstreamToFactValue(sourceNode.NodeId, targetFactNode.NodeId))
+        {
+            StatusText = "The suggestion's source field is no longer connected to its target fact node.";
             return;
         }
 
@@ -3425,7 +3665,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = "The edited candidate is not a valid fact concept in the selected taxonomy.";
             return;
         }
-        var fact = Session.Project.Nodes.Single(node => node.NodeId == SelectedNode!.NodeId);
+        var fact = targetFactNode;
         var decimalsText = fact.Parameters.GetValueOrDefault("decimals")?.ToString();
         int? decimals = int.TryParse(decimalsText, System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var parsedDecimals) ? parsedDecimals : null;
@@ -3439,8 +3679,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         };
 
         var candidate = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(Session.Project));
-        candidate.Nodes.Single(node => node.NodeId == sourceNodes[0].NodeId).Parameters["column"] = SelectedSourceColumn;
-        var candidateFact = candidate.Nodes.Single(node => node.NodeId == SelectedNode.NodeId);
+        var sourceColumn = selected.IsConnectedBatch
+            ? sourceNode.Parameters.GetValueOrDefault("column")?.ToString() ?? ""
+            : SelectedSourceColumn;
+        candidate.Nodes.Single(node => node.NodeId == sourceNode.NodeId).Parameters["column"] = sourceColumn;
+        var candidateFact = candidate.Nodes.Single(node => node.NodeId == targetFactNode.NodeId);
         candidateFact.Parameters["concept"] = concept.QualifiedName;
         candidateFact.Parameters["periodType"] = editedDraft.PeriodType;
         candidateFact.Parameters["unit"] = editedDraft.Unit;
@@ -3480,8 +3723,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             graphChanged = Session.SetNodeParameterValues(
                 new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
                 {
-                    [sourceNodes[0].NodeId] = new Dictionary<string, object?> { ["column"] = SelectedSourceColumn },
-                    [SelectedNode!.NodeId] = new Dictionary<string, object?>
+                    [sourceNode.NodeId] = new Dictionary<string, object?> { ["column"] = sourceColumn },
+                    [targetFactNode.NodeId] = new Dictionary<string, object?>
                     {
                         ["concept"] = concept.QualifiedName,
                         ["unit"] = editedDraft.Unit,
@@ -3500,9 +3743,153 @@ public sealed class MainWindowViewModel : ViewModelBase
 
         var digestAfter = Session.Project.ComputeSemanticDigest();
         _acceptedSuggestionUndo.Push(new AcceptedSuggestionUndo(
-            _suggestionSession, suggestion.SuggestionId, digestBefore, digestAfter, graphChanged));
+            _suggestionSession, new[] { suggestion.SuggestionId }, digestBefore, digestAfter, graphChanged, IsBatch: false));
         selected.ReviewState = SuggestionState.Accepted;
+        selected.IsBatchSelected = false;
         StatusText = $"Accepted {concept.QualifiedName} after draft and graph validation. Review entity and dimensions before execution.";
+    }
+
+    private void AcceptSelectedSuggestionBatch()
+    {
+        CaptureSelectedSuggestionDraft();
+        if (_suggestionSession is null)
+        {
+            StatusText = "Generate suggestions before accepting a batch.";
+            return;
+        }
+        var selectedRows = AiSuggestions.Where(row => row.IsBatchSelected).ToArray();
+        if (selectedRows.Length == 0)
+        {
+            StatusText = "Check at least one suggestion for batch acceptance.";
+            return;
+        }
+        if (selectedRows.Any(row => row.ReviewState != SuggestionState.Pending))
+        {
+            StatusText = "Only pending suggestions can be accepted; uncheck accepted or rejected rows.";
+            return;
+        }
+        if (selectedRows.GroupBy(row => row.SourceFieldId, StringComparer.Ordinal).Any(group => group.Count() > 1))
+        {
+            StatusText = "Choose one candidate per source field. No mappings changed.";
+            return;
+        }
+        if (selectedRows.Where(row => !string.IsNullOrWhiteSpace(row.TargetNodeId))
+            .GroupBy(row => row.TargetNodeId, StringComparer.Ordinal).Any(group => group.Count() > 1))
+        {
+            StatusText = "Two checked candidates target the same fact node. Resolve the target conflict; no mappings changed.";
+            return;
+        }
+
+        if (selectedRows.Any(row => _unsavedSuggestionDrafts.ContainsKey(row.SuggestionId)))
+        {
+            StatusText = "Save the checked candidate edits before batch acceptance. No mappings changed.";
+            return;
+        }
+
+        var currentProject = Session.Project;
+        var digestBefore = currentProject.ComputeSemanticDigest();
+        if (selectedRows.Any(row => !StringComparer.Ordinal.Equals(row.ProjectDigest, digestBefore)))
+        {
+            StatusText = "The project changed after these suggestions were generated. No mappings changed; request fresh suggestions.";
+            return;
+        }
+        if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
+
+        var selectedIds = selectedRows.Select(row => row.SuggestionId).ToArray();
+        var suggestionsById = _suggestionSession.Suggestions.ToDictionary(
+            suggestion => suggestion.SuggestionId, StringComparer.Ordinal);
+        var candidate = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(currentProject));
+        var changes = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal);
+        foreach (var row in selectedRows)
+        {
+            if (!suggestionsById.TryGetValue(row.SuggestionId, out var suggestion)
+                || !StringComparer.Ordinal.Equals(suggestion.Draft.SourceField, row.SourceFieldId))
+            {
+                StatusText = "A checked candidate no longer belongs to the active review session. No mappings changed.";
+                return;
+            }
+            var sourceNode = currentProject.Nodes.FirstOrDefault(node => node.NodeId == row.SourceNodeId
+                && node.NodeType == NodeTypeConstants.ExcelField);
+            var targetNode = currentProject.Nodes.FirstOrDefault(node => node.NodeId == row.TargetNodeId
+                && node.NodeType == NodeTypeConstants.FactConstruct);
+            if (sourceNode is null || targetNode is null || !IsUpstreamToFactValue(sourceNode.NodeId, targetNode.NodeId))
+            {
+                StatusText = "A checked source-to-fact path changed after suggestion generation. No mappings changed.";
+                return;
+            }
+            var bindingId = sourceNode.Parameters.GetValueOrDefault("bindingId")?.ToString();
+            var column = sourceNode.Parameters.GetValueOrDefault("column")?.ToString();
+            if (string.IsNullOrWhiteSpace(bindingId) || string.IsNullOrWhiteSpace(column)
+                || !StringComparer.Ordinal.Equals(row.SourceFieldId, $"{bindingId}:{column}"))
+            {
+                StatusText = "A checked source field identity changed after suggestion generation. No mappings changed.";
+                return;
+            }
+
+            var concept = _taxonomy.Get(suggestion.Draft.Concept ?? "");
+            if (concept is null || !TaxonomyIndex.IsFactTargetable(concept))
+            {
+                StatusText = $"Candidate '{suggestion.Draft.Concept ?? "(none)"}' is not a targetable concept; no mappings changed.";
+                return;
+            }
+            var candidateFact = candidate.Nodes.Single(node => node.NodeId == targetNode.NodeId);
+            candidateFact.Parameters["concept"] = concept.QualifiedName;
+            candidateFact.Parameters["periodType"] = suggestion.Draft.PeriodType;
+            candidateFact.Parameters["unit"] = suggestion.Draft.Unit;
+            if (suggestion.Draft.Decimals is { } decimals)
+                candidateFact.Parameters["decimals"] = decimals.ToString(CultureInfo.InvariantCulture);
+            var factChanges = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["concept"] = concept.QualifiedName,
+                ["periodType"] = suggestion.Draft.PeriodType,
+                ["unit"] = suggestion.Draft.Unit
+            };
+            if (suggestion.Draft.Decimals is { } changedDecimals)
+                factChanges["decimals"] = changedDecimals.ToString(CultureInfo.InvariantCulture);
+            changes[targetNode.NodeId] = factChanges;
+        }
+
+        var compile = MappingJobService.ValidateProject(candidate, profile);
+        if (!compile.Success)
+        {
+            ReplaceItems(Diagnostics, compile.Diagnostics.Items.Select(ToDiagnosticRow));
+            Raise(nameof(Diagnostics));
+            StatusText = "The checked batch failed graph validation; no mappings changed.";
+            return;
+        }
+
+        var acceptance = _suggestionSession.AcceptSelectedValid(selectedIds);
+        if (!acceptance.Applied)
+        {
+            ShowSuggestionValidation(acceptance.Validation);
+            StatusText = acceptance.Reason ?? "Batch validation or audit persistence failed; no mappings changed.";
+            return;
+        }
+
+        bool graphChanged;
+        try
+        {
+            graphChanged = Session.SetNodeParameterValues(changes);
+        }
+        catch (Exception ex)
+        {
+            var rollback = _suggestionSession.Undo();
+            StatusText = rollback.Applied
+                ? $"The mapping batch could not be applied and was rolled back: {ex.Message}"
+                : "The mapping batch failed and its review rollback was not durable; inspect the audit and project before continuing.";
+            return;
+        }
+
+        var suggestionIds = selectedRows.Select(row => row.SuggestionId).ToArray();
+        var digestAfter = Session.Project.ComputeSemanticDigest();
+        _acceptedSuggestionUndo.Push(new AcceptedSuggestionUndo(
+            _suggestionSession, suggestionIds, digestBefore, digestAfter, graphChanged, IsBatch: true));
+        foreach (var row in selectedRows)
+        {
+            row.ReviewState = SuggestionState.Accepted;
+            row.IsBatchSelected = false;
+        }
+        StatusText = $"Accepted {selectedRows.Length} mapping(s) as one validated, audited transaction. Review entity and dimensions before execution.";
     }
 
     private void EditSelectedSuggestion()
@@ -3517,6 +3904,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         selected.Concept = editedDraft.Concept ?? "";
         selected.IsAnalystEdited = true;
+        _unsavedSuggestionDrafts.Remove(selected.SuggestionId);
+        LoadSelectedSuggestionEditor();
         StatusText = "Suggestion edit saved to the review session and audit trail. Acceptance will validate it against the current mapping.";
     }
 
@@ -3534,14 +3923,17 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
         SelectedSuggestion.ReviewState = SuggestionState.Rejected;
+        SelectedSuggestion.IsBatchSelected = false;
+        _unsavedSuggestionDrafts.Remove(SelectedSuggestion.SuggestionId);
+        LoadSelectedSuggestionEditor();
         StatusText = "Suggestion rejected and recorded in the audit trail.";
     }
 
     private DraftMapping BuildSelectedSuggestionDraft(Suggestion suggestion, string sourceIdentity)
     {
-        var fact = SelectedNode is null
+        var fact = SelectedSuggestion is null
             ? null
-            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedSuggestion.TargetNodeId);
         var decimalsText = fact?.Parameters.GetValueOrDefault("decimals")?.ToString();
         int? decimals = int.TryParse(decimalsText, System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out var parsedDecimals) ? parsedDecimals : suggestion.Draft.Decimals;
@@ -3555,28 +3947,82 @@ public sealed class MainWindowViewModel : ViewModelBase
         };
     }
 
+    private bool HasUnsavedSuggestionEditorChanges(SuggestionRow row)
+        => StringComparer.Ordinal.Equals(row.SuggestionId, _suggestionEditorBaselineId)
+            && (!StringComparer.Ordinal.Equals(SelectedSuggestionConcept, _suggestionEditorBaselineConcept)
+                || !StringComparer.Ordinal.Equals(SelectedSuggestionUnit, _suggestionEditorBaselineUnit)
+                || !StringComparer.Ordinal.Equals(SelectedSuggestionPeriodType, _suggestionEditorBaselinePeriodType));
+
+    private void CaptureSelectedSuggestionDraft()
+    {
+        var selected = SelectedSuggestion;
+        if (selected is null || _suggestionSession is null) return;
+        var suggestion = _suggestionSession.Suggestions.FirstOrDefault(item =>
+            StringComparer.Ordinal.Equals(item.SuggestionId, selected.SuggestionId));
+        if (suggestion is null) return;
+
+        if (!HasUnsavedSuggestionEditorChanges(selected))
+        {
+            _unsavedSuggestionDrafts.Remove(selected.SuggestionId);
+            return;
+        }
+
+        _unsavedSuggestionDrafts[selected.SuggestionId] = BuildSelectedSuggestionDraft(suggestion, selected.SourceFieldId);
+    }
+
     private bool TryGetCurrentSuggestionContext(
         out SuggestionRow selected, out Suggestion suggestion, out string sourceIdentity)
     {
         selected = SelectedSuggestion!;
         suggestion = null!;
         sourceIdentity = "";
-        if (selected is null || _suggestionSession is null || SelectedSourceBindingId is null
-            || SelectedNode is null || SelectedNode.NodeType != NodeTypeConstants.FactConstruct
-            || string.IsNullOrWhiteSpace(SelectedSourceColumn))
+        if (selected is null || _suggestionSession is null)
         {
-            StatusText = "Select a local candidate, source field, and XBRL Fact node first.";
+            StatusText = "Select a local suggestion from an active review session first.";
             return false;
         }
-        sourceIdentity = $"{SelectedSourceBindingId}:{SelectedSourceColumn}";
-        if (!string.Equals(selected.SourceFieldId, sourceIdentity, StringComparison.Ordinal))
+
+        var selectedRow = selected;
+        var sourceNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == selectedRow.SourceNodeId
+            && node.NodeType == NodeTypeConstants.ExcelField);
+        var targetNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == selectedRow.TargetNodeId
+            && node.NodeType == NodeTypeConstants.FactConstruct);
+        if (sourceNode is null || targetNode is null)
+        {
+            StatusText = "The suggestion's source or target mapping node is no longer present.";
+            return false;
+        }
+        var sourceBindingId = sourceNode.Parameters.GetValueOrDefault("bindingId")?.ToString();
+        var sourceColumn = sourceNode.Parameters.GetValueOrDefault("column")?.ToString();
+        if (string.IsNullOrWhiteSpace(sourceBindingId) || string.IsNullOrWhiteSpace(sourceColumn))
+        {
+            StatusText = "The suggestion's source field no longer has a binding and column identity.";
+            return false;
+        }
+        var currentSourceIdentity = $"{sourceBindingId}:{sourceColumn}";
+        if (selected.IsConnectedBatch
+            && !string.Equals(selected.SourceFieldId, currentSourceIdentity, StringComparison.Ordinal))
         {
             StatusText = "The source field changed after these suggestions were generated. Request fresh suggestions.";
             return false;
         }
-        if (!string.Equals(selected.TargetNodeId, SelectedNode.NodeId, StringComparison.Ordinal))
+        sourceIdentity = selected.IsConnectedBatch ? currentSourceIdentity : selected.SourceFieldId;
+        if (!selected.IsConnectedBatch
+            && !string.Equals(SelectedNode?.NodeId, targetNode.NodeId, StringComparison.Ordinal))
         {
             StatusText = "The target fact node changed after these suggestions were generated. Request fresh suggestions.";
+            return false;
+        }
+        if (!selected.IsConnectedBatch
+            && (!string.Equals(SelectedSourceBindingId, sourceBindingId, StringComparison.Ordinal)
+                || !string.Equals(selected.SourceFieldId, $"{SelectedSourceBindingId}:{SelectedSourceColumn}", StringComparison.Ordinal)))
+        {
+            StatusText = "The source field selection changed after these suggestions were generated. Request fresh suggestions.";
+            return false;
+        }
+        if (!IsUpstreamToFactValue(sourceNode.NodeId, targetNode.NodeId))
+        {
+            StatusText = "The source field is no longer connected to its suggested target fact node.";
             return false;
         }
         if (!string.Equals(selected.ProjectDigest, Session.Project.ComputeSemanticDigest(), StringComparison.Ordinal))
@@ -3601,16 +4047,41 @@ public sealed class MainWindowViewModel : ViewModelBase
         var suggestion = _suggestionSession.Suggestions.FirstOrDefault(item =>
             string.Equals(item.SuggestionId, SelectedSuggestion.SuggestionId, StringComparison.Ordinal));
         if (suggestion is null) return;
-        SelectedSuggestionConcept = suggestion.Draft.Concept ?? "";
-        var fact = SelectedNode is null
-            ? null
-            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
-        SelectedSuggestionUnit = suggestion.Draft.Unit
+        var fact = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedSuggestion.TargetNodeId);
+        var savedConcept = suggestion.Draft.Concept ?? "";
+        var savedUnit = suggestion.Draft.Unit
             ?? fact?.Parameters.GetValueOrDefault("unit")?.ToString()
             ?? "";
-        SelectedSuggestionPeriodType = suggestion.Draft.PeriodType
+        var savedPeriodType = suggestion.Draft.PeriodType
             ?? fact?.Parameters.GetValueOrDefault("periodType")?.ToString()
             ?? "duration";
+        _suggestionEditorBaselineId = suggestion.SuggestionId;
+        _suggestionEditorBaselineConcept = savedConcept;
+        _suggestionEditorBaselineUnit = savedUnit;
+        _suggestionEditorBaselinePeriodType = savedPeriodType;
+
+        if (_unsavedSuggestionDrafts.TryGetValue(suggestion.SuggestionId, out var unsaved))
+        {
+            SelectedSuggestionConcept = unsaved.Concept ?? "";
+            SelectedSuggestionUnit = unsaved.Unit ?? "";
+            SelectedSuggestionPeriodType = unsaved.PeriodType ?? "duration";
+            return;
+        }
+
+        SelectedSuggestionConcept = savedConcept;
+        SelectedSuggestionUnit = savedUnit;
+        SelectedSuggestionPeriodType = savedPeriodType;
+    }
+
+    private void ClearSelectedSuggestionEditor()
+    {
+        _suggestionEditorBaselineId = null;
+        _suggestionEditorBaselineConcept = "";
+        _suggestionEditorBaselineUnit = "";
+        _suggestionEditorBaselinePeriodType = "";
+        SelectedSuggestionConcept = "";
+        SelectedSuggestionUnit = "";
+        SelectedSuggestionPeriodType = "duration";
     }
 
     private void ShowSuggestionValidation(DraftValidationResult? validation)
@@ -3646,10 +4117,15 @@ public sealed class MainWindowViewModel : ViewModelBase
             finally { _isSuggestionHistoryMutation = false; }
             _acceptedSuggestionUndo.Pop();
             _suggestionRedoState = new SuggestionRedoState(
-                accepted.Session, accepted.SuggestionId, accepted.DigestBefore, accepted.GraphChanged);
-            var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == accepted.SuggestionId);
-            if (row is not null) row.ReviewState = SuggestionState.Pending;
-            StatusText = "Accepted suggestion undone and the decision recorded. The project is back at its prior revision.";
+                accepted.Session, accepted.SuggestionIds, accepted.DigestBefore, accepted.GraphChanged, accepted.IsBatch);
+            foreach (var suggestionId in accepted.SuggestionIds)
+            {
+                var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == suggestionId);
+                if (row is not null) row.ReviewState = SuggestionState.Pending;
+            }
+            StatusText = accepted.IsBatch
+                ? "Accepted suggestion batch undone as one transaction and recorded. The project is back at its prior revision."
+                : "Accepted suggestion undone and the decision recorded. The project is back at its prior revision.";
             RefreshUndoState();
             return;
         }
@@ -3665,7 +4141,9 @@ public sealed class MainWindowViewModel : ViewModelBase
             && (!pending.GraphChanged || Session.CanRedo)
             && string.Equals(pending.DigestBefore, currentDigest, StringComparison.Ordinal))
         {
-            var outcome = pending.Session.Accept(pending.SuggestionId);
+            var outcome = pending.IsBatch
+                ? pending.Session.AcceptSelectedValid(pending.SuggestionIds)
+                : pending.Session.Accept(pending.SuggestionIds.Single());
             if (!outcome.Applied)
             {
                 StatusText = outcome.Reason ?? "Redo was blocked because the audit decision was not durable.";
@@ -3679,11 +4157,16 @@ public sealed class MainWindowViewModel : ViewModelBase
             finally { _isSuggestionHistoryMutation = false; }
             var digestAfter = Session.Project.ComputeSemanticDigest();
             _acceptedSuggestionUndo.Push(new AcceptedSuggestionUndo(
-                pending.Session, pending.SuggestionId, pending.DigestBefore, digestAfter, pending.GraphChanged));
+                pending.Session, pending.SuggestionIds, pending.DigestBefore, digestAfter, pending.GraphChanged, pending.IsBatch));
             _suggestionRedoState = null;
-            var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == pending.SuggestionId);
-            if (row is not null) row.ReviewState = SuggestionState.Accepted;
-            StatusText = "Accepted suggestion redone and recorded in the audit trail.";
+            foreach (var suggestionId in pending.SuggestionIds)
+            {
+                var row = AiSuggestions.FirstOrDefault(item => item.SuggestionId == suggestionId);
+                if (row is not null) row.ReviewState = SuggestionState.Accepted;
+            }
+            StatusText = pending.IsBatch
+                ? "Accepted suggestion batch redone and recorded in the audit trail."
+                : "Accepted suggestion redone and recorded in the audit trail.";
             RefreshUndoState();
             return;
         }
@@ -3705,6 +4188,12 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         return false;
     }
+
+    private bool IsUpstreamToFactValue(string sourceNodeId, string factNodeId)
+        => Session.Project.Edges
+            .Where(edge => edge.TargetNodeId == factNodeId
+                && StringComparer.Ordinal.Equals(edge.TargetPortName, "value"))
+            .Any(edge => IsUpstream(sourceNodeId, edge.SourceNodeId));
 
     private ISourceAdapter BuildSourceAdapter(SourceConnection connection) => connection.Kind switch
     {
@@ -3792,8 +4281,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SourceColumns.Clear();
         SourceTables.Clear();
         SourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
-        AiSuggestions.Clear();
-        FilteredAiSuggestions.Clear();
+        ReplaceSuggestionRows(Array.Empty<SuggestionRow>());
         SuggestionFilter = "";
         PreviewFacts.Clear();
         SelectedPreviewFact = null;
@@ -4412,6 +4900,57 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         collection.Clear();
         foreach (var item in items) collection.Add(item);
+    }
+
+    private void ReplaceSuggestionRows(IEnumerable<SuggestionRow> rows)
+    {
+        _unsavedSuggestionDrafts.Clear();
+        if (_selectedSuggestion is not null)
+        {
+            _selectedSuggestion = null;
+            Raise(nameof(SelectedSuggestion));
+        }
+        ClearSelectedSuggestionEditor();
+        foreach (var existing in AiSuggestions)
+            existing.PropertyChanged -= OnSuggestionRowPropertyChanged;
+
+        var materialized = rows.ToArray();
+        ReplaceItems(AiSuggestions, materialized);
+        foreach (var row in materialized)
+            row.PropertyChanged += OnSuggestionRowPropertyChanged;
+
+        RefreshFilteredSuggestions();
+        RefreshSuggestionBatchSummary();
+        Raise(nameof(AiSuggestions));
+        Raise(nameof(CanAcceptSelectedSuggestionBatch));
+        AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void OnSuggestionRowPropertyChanged(object? sender, PropertyChangedEventArgs eventArgs)
+    {
+        if (eventArgs.PropertyName != nameof(SuggestionRow.IsBatchSelected)) return;
+        RefreshSuggestionBatchSummary();
+        Raise(nameof(CanAcceptSelectedSuggestionBatch));
+        AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void RefreshSuggestionBatchSummary()
+    {
+        var selected = AiSuggestions.Where(row => row.IsBatchSelected).ToArray();
+        if (selected.Length == 0)
+        {
+            SuggestionBatchSummary = "Choose one candidate per source field; conflicting or stale selections are rejected as a whole.";
+            return;
+        }
+
+        var sourceConflicts = selected.GroupBy(row => row.SourceFieldId, StringComparer.Ordinal)
+            .Count(group => group.Count() > 1);
+        var targetConflicts = selected.Where(row => !string.IsNullOrWhiteSpace(row.TargetNodeId))
+            .GroupBy(row => row.TargetNodeId, StringComparer.Ordinal)
+            .Count(group => group.Count() > 1);
+        SuggestionBatchSummary = sourceConflicts > 0 || targetConflicts > 0
+            ? $"{selected.Length} candidate(s) checked; resolve {sourceConflicts} source conflict(s) and {targetConflicts} target conflict(s). No partial apply is allowed."
+            : $"{selected.Length} candidate(s) checked across {selected.Select(row => row.SourceFieldId).Distinct(StringComparer.Ordinal).Count()} source field(s). Batch acceptance validates all together and creates one undo step.";
     }
 
     /// <summary>Runnable sample graph; source file and column are selected in the source pane.</summary>

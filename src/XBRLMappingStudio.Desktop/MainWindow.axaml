@@ -83,9 +83,12 @@
                      AutomationProperties.Name="Source schema and capabilities" />
           <Button DockPanel.Dock="Top" Content="Bind field to selected Excel Field node"
                   Command="{Binding BindSourceColumnCommand}" />
-          <Button DockPanel.Dock="Top" Content="Suggest concepts offline"
-                  Command="{Binding SuggestMappingsCommand}"
-                  AutomationProperties.Name="Suggest concepts offline" />
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4">
+            <Button Content="Suggest selected" Command="{Binding SuggestMappingsCommand}"
+                    AutomationProperties.Name="Suggest concepts for selected source and fact" />
+            <Button Content="Suggest connected" Command="{Binding SuggestConnectedMappingsCommand}"
+                    AutomationProperties.Name="Suggest mappings for connected source fields" />
+          </StackPanel>
           <TextBox DockPanel.Dock="Top" Text="{Binding SuggestionFilter}"
                    Watermark="Filter by field, concept, evidence or review status…"
                    AutomationProperties.Name="Filter mapping suggestions" />
@@ -94,11 +97,14 @@
                    AutomationProperties.Name="Offline concept suggestions">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:SuggestionRow">
-                <TextBlock Text="{Binding Display}" TextWrapping="Wrap"
-                           AutomationProperties.Name="{Binding Display}" />
+                <CheckBox IsChecked="{Binding IsBatchSelected, Mode=TwoWay}"
+                          Content="{Binding Display}" AutomationProperties.Name="{Binding Display}" />
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
+          <TextBlock DockPanel.Dock="Top" Text="{Binding SuggestionBatchSummary}"
+                     TextWrapping="Wrap" MaxHeight="36" Margin="0,2,0,4"
+                     AutomationProperties.Name="Batch suggestion selection status" />
           <TextBlock DockPanel.Dock="Top" Text="{Binding SelectedSuggestion.TaxonomyEvidenceDisplay}"
                      TextWrapping="Wrap" MaxHeight="72" Margin="0,2,0,6"
                      AutomationProperties.Name="Selected concept taxonomy evidence" />
@@ -120,9 +126,13 @@
             <Button Content="Save edit" Command="{Binding EditSelectedSuggestionCommand}" />
             <Button Content="Reject" Command="{Binding RejectSelectedSuggestionCommand}" />
           </StackPanel>
-          <Button DockPanel.Dock="Top" Content="Accept selected suggestion"
-                  Command="{Binding ApplySuggestedMappingCommand}"
-                  AutomationProperties.Name="Accept selected suggestion" />
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4">
+            <Button Content="Accept selected" Command="{Binding ApplySuggestedMappingCommand}"
+                    AutomationProperties.Name="Accept selected suggestion" />
+            <Button Content="Accept batch" Command="{Binding AcceptSelectedSuggestionBatchCommand}"
+                    IsEnabled="{Binding CanAcceptSelectedSuggestionBatch}"
+                    AutomationProperties.Name="Accept checked suggestion batch as one transaction" />
+          </StackPanel>
 
           <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="0,10,0,0">
             <TextBlock Text="Taxonomy explorer" FontWeight="Bold" />

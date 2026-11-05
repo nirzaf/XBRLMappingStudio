@@ -781,6 +781,234 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task DesktopConnectedSuggestionBatch_AcceptsUndoAndRedoesOneSelectedMappingPerFact()
+    {
+        var seed = new MainWindowViewModel();
+        var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+        var source = project.Nodes.Single(node => node.NodeId == "sample-value").ShallowCopy() with
+        {
+            NodeId = "sample-net-income-source",
+            DisplayName = "Net income source field",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["bindingId"] = "sample-source",
+                ["column"] = "Net Income"
+            },
+            Layout = new LayoutPosition(40, 440)
+        };
+        var fact = project.Nodes.Single(node => node.NodeId == "sample-fact").ShallowCopy() with
+        {
+            NodeId = "sample-net-income-fact",
+            DisplayName = "XBRL Net income",
+            Layout = new LayoutPosition(760, 440)
+        };
+        project.Nodes.Add(source);
+        project.Nodes.Add(fact);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-net-income-value",
+            SourceNodeId = source.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "value"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-net-income-entity",
+            SourceNodeId = "sample-entity",
+            SourcePortName = "value",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "entity"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-net-income-period",
+            SourceNodeId = "sample-period",
+            SourcePortName = "value",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "period"
+        });
+
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.AllowSyntheticProfile = true;
+        var digestBefore = viewModel.Session.Project.ComputeSemanticDigest();
+
+        await viewModel.SuggestConnectedMappingsAsync();
+
+        var revenue = Assert.Single(viewModel.AiSuggestions, row =>
+            row.SourceFieldId == "sample-source:Revenue" && row.Concept == "synthetic:Revenue");
+        var netIncome = Assert.Single(viewModel.AiSuggestions, row =>
+            row.SourceFieldId == "sample-source:Net Income" && row.Concept == "synthetic:NetIncome");
+        Assert.True(revenue.IsConnectedBatch);
+        Assert.True(netIncome.IsConnectedBatch);
+        revenue.IsBatchSelected = true;
+        netIncome.IsBatchSelected = true;
+        viewModel.SelectedSuggestion = revenue;
+        Assert.True(viewModel.CanAcceptSelectedSuggestionBatch);
+
+        viewModel.AcceptSelectedSuggestionBatchCommand.Execute(null);
+
+        Assert.Contains("one validated, audited transaction", viewModel.StatusText);
+        Assert.Equal(SuggestionState.Accepted, revenue.ReviewState);
+        Assert.Equal(SuggestionState.Accepted, netIncome.ReviewState);
+        Assert.Equal("synthetic:Revenue", viewModel.Session.Project.Nodes
+            .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
+        Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
+            .Single(node => node.NodeId == "sample-net-income-fact").Parameters["concept"]?.ToString());
+        var digestAfter = viewModel.Session.Project.ComputeSemanticDigest();
+        Assert.NotEqual(digestBefore, digestAfter);
+
+        viewModel.UndoCommand.Execute(null);
+
+        Assert.Equal(digestBefore, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal(SuggestionState.Pending, revenue.ReviewState);
+        Assert.Equal(SuggestionState.Pending, netIncome.ReviewState);
+        Assert.Contains("batch undone as one transaction", viewModel.StatusText);
+
+        viewModel.RedoCommand.Execute(null);
+
+        Assert.Equal(digestAfter, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal(SuggestionState.Accepted, revenue.ReviewState);
+        Assert.Equal(SuggestionState.Accepted, netIncome.ReviewState);
+    }
+
+    [Fact]
+    public async Task DesktopConnectedSuggestionBatch_StaleProjectDoesNotChangeMapping()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.AllowSyntheticProfile = true;
+
+        await viewModel.SuggestConnectedMappingsAsync();
+
+        var suggestion = Assert.Single(viewModel.AiSuggestions,
+            row => row.SourceFieldId == "sample-source:Revenue" && row.Concept == "synthetic:Revenue");
+        suggestion.IsBatchSelected = true;
+        viewModel.Session.SetNodeParameter("sample-fact", "unit", "EUR");
+        var currentDigest = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.AcceptSelectedSuggestionBatchCommand.Execute(null);
+
+        Assert.Contains("project changed after these suggestions were generated", viewModel.StatusText);
+        Assert.Equal(currentDigest, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal("EUR", viewModel.Session.Project.Nodes
+            .Single(node => node.NodeId == "sample-fact").Parameters["unit"]?.ToString());
+        Assert.Equal(SuggestionState.Pending, suggestion.ReviewState);
+    }
+
+    [Fact]
+    public async Task DesktopConnectedSuggestionBatch_PreservesDirtyCheckedDraftWhenSelectionChanges()
+    {
+        var seed = new MainWindowViewModel();
+        var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+        var source = project.Nodes.Single(node => node.NodeId == "sample-value").ShallowCopy() with
+        {
+            NodeId = "sample-net-income-source",
+            DisplayName = "Net income source field",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["bindingId"] = "sample-source",
+                ["column"] = "Net Income"
+            },
+            Layout = new LayoutPosition(40, 440)
+        };
+        var fact = project.Nodes.Single(node => node.NodeId == "sample-fact").ShallowCopy() with
+        {
+            NodeId = "sample-net-income-fact",
+            DisplayName = "XBRL Net income",
+            Layout = new LayoutPosition(760, 440)
+        };
+        project.Nodes.Add(source);
+        project.Nodes.Add(fact);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-net-income-value",
+            SourceNodeId = source.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "value"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-net-income-entity",
+            SourceNodeId = "sample-entity",
+            SourcePortName = "value",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "entity"
+        });
+
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.AllowSyntheticProfile = true;
+        await viewModel.SuggestConnectedMappingsAsync();
+
+        var revenue = Assert.Single(viewModel.AiSuggestions, row =>
+            row.SourceFieldId == "sample-source:Revenue" && row.Concept == "synthetic:Revenue");
+        var netIncome = Assert.Single(viewModel.AiSuggestions, row =>
+            row.SourceFieldId == "sample-source:Net Income" && row.Concept == "synthetic:NetIncome");
+        revenue.IsBatchSelected = true;
+        netIncome.IsBatchSelected = true;
+        viewModel.SelectedSuggestion = revenue;
+        viewModel.SelectedSuggestionConcept = "synthetic:Cash";
+        viewModel.Session.Select("sample-net-income-fact", additive: false);
+        Assert.Equal("synthetic:Cash", viewModel.SelectedSuggestionConcept);
+        viewModel.SelectedSuggestion = netIncome;
+
+        var digestBefore = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.AcceptSelectedSuggestionBatchCommand.Execute(null);
+
+        Assert.Contains("Save the checked candidate edits", viewModel.StatusText);
+        Assert.Equal(digestBefore, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal(SuggestionState.Pending, revenue.ReviewState);
+        Assert.Equal(SuggestionState.Pending, netIncome.ReviewState);
+        viewModel.SelectedSuggestion = revenue;
+        Assert.Equal("synthetic:Cash", viewModel.SelectedSuggestionConcept);
+    }
+
+    [Fact]
+    public async Task DesktopConnectedSuggestionBatch_ExcludesSourceConnectedOnlyToFactEntity()
+    {
+        var seed = new MainWindowViewModel();
+        var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+        var entitySource = project.Nodes.Single(node => node.NodeId == "sample-value").ShallowCopy() with
+        {
+            NodeId = "sample-entity-source",
+            DisplayName = "Revenue entity field",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["bindingId"] = "entity-source",
+                ["column"] = "Revenue"
+            },
+            OutputPorts = new List<PortDefinition>
+            {
+                new PortDefinition("value", PortShape.String, PortCardinality.Single)
+            },
+            Layout = new LayoutPosition(40, 440)
+        };
+        project.Bindings.Add(new SourceBinding
+        {
+            BindingId = "entity-source",
+            Kind = "csv",
+            DisplayName = "Entity source"
+        });
+        project.Nodes.Add(entitySource);
+        project.Edges.RemoveAll(edge => edge.EdgeId == "sample-e3");
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "sample-entity-source-edge",
+            SourceNodeId = entitySource.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = "sample-fact",
+            TargetPortName = "entity"
+        });
+
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.AllowSyntheticProfile = true;
+        await viewModel.SuggestConnectedMappingsAsync();
+
+        Assert.DoesNotContain(viewModel.AiSuggestions, row => row.SourceFieldId == "entity-source:Revenue");
+        Assert.Contains(viewModel.Diagnostics, row =>
+            row.Display.Contains("not connected to a fact value input", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task DesktopNoMatch_IsExplicitAndLeavesMappingUnassigned()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-ai-no-match", Guid.NewGuid().ToString("n"));

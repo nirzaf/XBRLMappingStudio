@@ -101,6 +101,11 @@ public sealed class DraftValidator
                 DiagnosticStage.Validation,
                 $"Draft '{d.MappingId}' declares unknown period type '{d.PeriodType}'.",
                 nodeId: FactNodeId(d));
+        if ((d.DimensionName is null) != (d.DimensionMember is null))
+            Aspect(d, bag, "dimension name and member");
+        else if (d.DimensionName is not null
+            && (string.IsNullOrWhiteSpace(d.DimensionName) || string.IsNullOrWhiteSpace(d.DimensionMember)))
+            Aspect(d, bag, "dimension name and member");
         var concept = d.Concept is null ? null : _taxonomy.Get(d.Concept);
         if (concept is { DataType: "monetary" } && string.IsNullOrWhiteSpace(d.Unit))
             Aspect(d, bag, "unit");

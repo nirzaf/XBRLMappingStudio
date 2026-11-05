@@ -209,8 +209,38 @@ public sealed class SuggestionSession
     /// duplicates are caught), then applies as one transaction with a single undo point.</summary>
     public SessionOutcome AcceptAllValid()
     {
+        var pendingIds = _suggestions
+            .Where(suggestion => _states[suggestion.SuggestionId] == SuggestionState.Pending)
+            .Select(suggestion => suggestion.SuggestionId)
+            .ToArray();
+        return pendingIds.Length == 0
+            ? new SessionOutcome(false, "Nothing pending.", null)
+            : AcceptSelectedValid(pendingIds);
+    }
+
+    /// <summary>
+    /// Batch accept an analyst-selected subset of pending candidates. All selected
+    /// drafts are validated together, then applied with one undo snapshot and one
+    /// durable batch audit record. A conflict or audit failure leaves the whole set
+    /// unchanged.
+    /// </summary>
+    public SessionOutcome AcceptSelectedValid(IReadOnlyCollection<string> suggestionIds)
+    {
+        ArgumentNullException.ThrowIfNull(suggestionIds);
+        if (suggestionIds.Count == 0)
+            return new SessionOutcome(false, "Nothing selected for batch acceptance.", null);
+        if (suggestionIds.Any(string.IsNullOrWhiteSpace))
+            return new SessionOutcome(false,
+                "Every selected suggestion must be a distinct pending item in the active review session.", null);
+
+        var selectedIds = new HashSet<string>(suggestionIds, StringComparer.Ordinal);
+        if (selectedIds.Count != suggestionIds.Count
+            || selectedIds.Any(id => !_states.TryGetValue(id, out var state) || state != SuggestionState.Pending))
+            return new SessionOutcome(false,
+                "Every selected suggestion must be a distinct pending item in the active review session.", null);
+
         var pending = _suggestions
-            .Where(s => _states[s.SuggestionId] == SuggestionState.Pending)
+            .Where(suggestion => selectedIds.Contains(suggestion.SuggestionId))
             .ToList();
         if (pending.Count == 0) return new SessionOutcome(false, "Nothing pending.", null);
 
