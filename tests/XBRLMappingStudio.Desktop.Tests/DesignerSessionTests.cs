@@ -565,20 +565,161 @@ public sealed class DesignerSessionTests
         var viewModel = new MainWindowViewModel();
         viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
         viewModel.SelectedFactUnit = "EUR";
-        viewModel.SelectedFactPeriodType = "instant";
+        viewModel.SelectedFactPeriodType = "duration";
         viewModel.SelectedFactDecimals = "-2";
 
         viewModel.ApplyFactPropertiesCommand.Execute(null);
 
         var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
         Assert.Equal("EUR", fact.Parameters["unit"]);
-        Assert.Equal("instant", fact.Parameters["periodType"]);
+        Assert.Equal("duration", fact.Parameters["periodType"]);
         Assert.Equal("-2", fact.Parameters["decimals"]);
         viewModel.Session.Undo();
         fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
         Assert.Equal("USD", fact.Parameters["unit"]?.ToString());
         Assert.Equal("duration", fact.Parameters["periodType"]?.ToString());
         Assert.Equal("0", fact.Parameters["decimals"]?.ToString());
+    }
+
+    [Fact]
+    public void EditingOneFactPropertyPreservesTheOtherProperties()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactUnit = "EUR";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        var entity = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity");
+        Assert.Equal("EUR", fact.Parameters["unit"]);
+        Assert.Equal("duration", fact.Parameters["periodType"]?.ToString());
+        Assert.Equal("0", fact.Parameters["decimals"]?.ToString());
+        Assert.Equal("ABC-Corp", entity.Parameters["literal"]?.ToString());
+    }
+
+    [Fact]
+    public void ConceptSelectionRejectsIncompatibleConnectedPeriodBeforeMutation()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.AllowSyntheticProfile = true;
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedConcept = new ConceptRow
+        {
+            QualifiedName = "synthetic:Assets",
+            Label = "Total Assets",
+            IsFactTargetable = true
+        };
+        var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+        viewModel.SetConceptCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR004", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("duration period source", viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConceptSelectionRejectsUnsupportedValueTypeBeforeMutation()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.AllowSyntheticProfile = true;
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedConcept = new ConceptRow
+        {
+            QualifiedName = "synthetic:EntityRegistrantName",
+            Label = "Entity Registrant Name",
+            DataType = "string",
+            IsFactTargetable = true
+        };
+        var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+        viewModel.SetConceptCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR011", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("numeric values", viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InvalidFactPropertyEditLeavesProjectUnchangedWithDiagnostic()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactDimensions = "ex:UnknownAxis=ex:Member";
+        var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR013", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("not declared", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+
+        viewModel.SelectedFactDimensions = "";
+        viewModel.SelectedFactPeriodType = "instant";
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR004", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("requires a duration", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void EntityAndDimensionEditIsAtomicAndSurvivesProjectRoundTrip()
+    {
+        var synthetic = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = synthetic.ProfileId,
+            Digest = synthetic.Digest,
+            Concepts = synthetic.Concepts,
+            SupportedUnits = synthetic.SupportedUnits,
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                ["ex:RegionAxis"] = new[] { "ex:Domestic", "ex:International" }
+            },
+            TaxonomyVersion = synthetic.TaxonomyVersion,
+            OutputFormat = synthetic.OutputFormat,
+            NamespaceUris = synthetic.NamespaceUris,
+            TaxonomyUrls = synthetic.TaxonomyUrls,
+            PackageHashes = synthetic.PackageHashes,
+            RequiredChecks = synthetic.RequiredChecks
+        };
+        var project = new MainWindowViewModel().Session.Project;
+        var viewModel = new MainWindowViewModel(project, null,
+            (_, _) => Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                new InvalidOperationException("Source inspection must not run.")),
+            new FilingProfileResolver(new[] { profile }));
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactUnit = "EUR";
+        viewModel.SelectedFactPeriodType = "duration";
+        viewModel.SelectedFactDecimals = "-2";
+        viewModel.SelectedFactEntityIdentifier = "ABC-International";
+        viewModel.SelectedFactDimensions = "ex:RegionAxis=ex:International";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        var entity = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity");
+        Assert.Equal("EUR", fact.Parameters["unit"]);
+        Assert.Equal("duration", fact.Parameters["periodType"]);
+        Assert.Equal("-2", fact.Parameters["decimals"]);
+        Assert.Equal("ex:RegionAxis=ex:International", fact.Parameters["dimensions"]);
+        Assert.Equal("ABC-International", entity.Parameters["literal"]);
+
+        var reopened = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(viewModel.Session.Project));
+        Assert.Equal("ex:RegionAxis=ex:International",
+            reopened.Nodes.Single(node => node.NodeId == "sample-fact").Parameters["dimensions"]?.ToString());
+        Assert.Equal("ABC-International",
+            reopened.Nodes.Single(node => node.NodeId == "sample-entity").Parameters["literal"]?.ToString());
+
+        viewModel.Session.Undo();
+        fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        entity = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity");
+        Assert.Equal("USD", fact.Parameters["unit"]?.ToString());
+        Assert.False(fact.Parameters.ContainsKey("dimensions"));
+        Assert.Equal("ABC-Corp", entity.Parameters["literal"]?.ToString());
     }
 
     [Fact]
@@ -901,6 +1042,12 @@ public sealed class DesignerSessionTests
 
         Assert.Equal(factNode.NodeId, viewModel.SelectedNode?.NodeId);
         Assert.True(viewModel.CanEditSelectedFact);
+        Assert.Contains("synthetic:Revenue", viewModel.SelectedFactConceptIdentity, StringComparison.Ordinal);
+        Assert.Contains("Revenue", viewModel.SelectedFactSourceSummary, StringComparison.Ordinal);
+        Assert.Contains("Scale to thousands", viewModel.SelectedFactSourceSummary, StringComparison.Ordinal);
+        Assert.Contains("2025-01-01", viewModel.SelectedFactPeriodSummary, StringComparison.Ordinal);
+        Assert.True(viewModel.CanEditSelectedFactEntity);
+        Assert.Equal("ABC-Corp", viewModel.SelectedFactEntityIdentifier);
 
         viewModel.Session.ClearSelection();
 

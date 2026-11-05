@@ -375,12 +375,32 @@
             <TextBlock Text="{Binding SelectedNodeDisplayName}" />
             <StackPanel IsVisible="{Binding CanEditSelectedFact}" Spacing="4">
               <TextBlock Text="Fact target properties" FontWeight="SemiBold" />
+              <TextBlock Text="Taxonomy concept" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding SelectedFactConceptIdentity}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Selected concept identity and filing profile" />
+              <TextBlock Text="{Binding SelectedFactSourceSummary}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Selected source column and transformation path" />
+              <TextBlock Text="{Binding SourceInspectionSummary}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Source schema inspection status" />
+              <TextBlock Text="{Binding SelectedFactPeriodSummary}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Fact reporting period sources" />
+              <TextBlock Text="Entity source" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding SelectedFactEntitySourceSummary}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Fact entity source and editability" />
+              <TextBox Text="{Binding SelectedFactEntityIdentifier}" Watermark="Entity identifier"
+                       IsEnabled="{Binding CanEditSelectedFactEntity}"
+                       AutomationProperties.Name="Fact entity identifier" />
               <TextBox Text="{Binding SelectedFactUnit}" Watermark="Unit (for example USD)"
                        AutomationProperties.Name="Fact unit" />
               <ComboBox ItemsSource="{Binding FactPeriodTypes}" SelectedItem="{Binding SelectedFactPeriodType}"
                         AutomationProperties.Name="Fact period type" />
               <TextBox Text="{Binding SelectedFactDecimals}" Watermark="Decimals or INF"
                        AutomationProperties.Name="Fact decimals" />
+              <TextBlock Text="Explicit dimensions (one axisQName=memberQName per line)" FontWeight="SemiBold"
+                         TextWrapping="Wrap" />
+              <TextBox Text="{Binding SelectedFactDimensions}" Watermark="ex:RegionAxis=ex:Domestic"
+                       AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
+                       AutomationProperties.Name="Fact explicit dimensions" />
               <Button Content="Apply fact properties" Command="{Binding ApplyFactPropertiesCommand}" />
             </StackPanel>
             <TextBlock Text="{Binding TargetCapabilitySummary}" TextWrapping="Wrap"

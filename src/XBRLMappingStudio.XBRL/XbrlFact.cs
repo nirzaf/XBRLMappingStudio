@@ -223,6 +223,7 @@ public sealed class PendingFact
     public bool IsNil { get; set; }
     public int? Decimals { get; set; }
     public string? Language { get; set; }
+    public IReadOnlyList<Dimension> Dimensions { get; set; } = Array.Empty<Dimension>();
     public List<SourceReference> Sources { get; } = new();
 }
 

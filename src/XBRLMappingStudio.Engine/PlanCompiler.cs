@@ -1129,6 +1129,22 @@ public sealed class PlanCompiler
                     unit = new XbrlUnit(unitStr);
                 }
 
+                if (!FactDimensionParser.TryParse(
+                        GetString(node, "dimensions"),
+                        profile.DimensionDomains,
+                        out var dimensions,
+                        out var dimensionError))
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrDimensionInvalid,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        dimensionError,
+                        nodeId: node.NodeId);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+
                 var entity = inputs.GetValueOrDefault("entity", DataValue.Missing(PortShape.String)).AsString();
                 var periodIn = inputs.GetValueOrDefault("period", DataValue.Missing(PortShape.Instant));
                 var instantIn = inputs.GetValueOrDefault("instantDate", DataValue.Missing(PortShape.Instant));
@@ -1171,6 +1187,7 @@ public sealed class PlanCompiler
                     Unit = unit,
                     Decimals = decimals,
                     Language = GetString(node, "language"),
+                    Dimensions = dimensions,
                     Value = valueIn.Presence == ValuePresence.Present ? valueIn.AsDecimal() : null,
                     IsNil = valueIn.IsNil
                 };
@@ -1186,6 +1203,7 @@ public sealed class PlanCompiler
                     Value = pf.Value,
                     Decimals = pf.Decimals,
                     Language = pf.Language,
+                    Dimensions = pf.Dimensions,
                     IsNil = pf.IsNil
                 };
                 if (!probe.ValidateAgainst(conceptMeta, out var reason))

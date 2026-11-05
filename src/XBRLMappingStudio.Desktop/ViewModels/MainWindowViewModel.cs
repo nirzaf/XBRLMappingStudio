@@ -311,6 +311,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactUnit = "USD";
     private string _selectedFactPeriodType = "duration";
     private string _selectedFactDecimals = "0";
+    private string _selectedFactDimensions = "";
+    private string _selectedFactEntityIdentifier = "";
+    private bool _canEditSelectedFactEntity;
+    private string _selectedFactConceptIdentity = "Select a fact to inspect its taxonomy identity.";
+    private string _selectedFactSourceSummary = "Select a fact to inspect its source mapping.";
+    private string _selectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
+    private string _selectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
     private readonly Func<IAuditSink>? _auditSinkFactory;
@@ -493,7 +500,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string DestinationGuidance => IsSqliteDestination
         ? "The dry run checks the full mapping and target schema. Publication rechecks approval and schema, then asks for final confirmation."
         : "The dry run checks the full mapping and output contract. Publication rechecks approval, stages and validates the file, then asks for final confirmation.";
-    public string? SelectedSourceColumn { get => _selectedSourceColumn; set => Set(ref _selectedSourceColumn, value); }
+    public string? SelectedSourceColumn
+    {
+        get => _selectedSourceColumn;
+        set
+        {
+            if (!Set(ref _selectedSourceColumn, value)) return;
+            RefreshSelectedFactSourceSummary();
+        }
+    }
     public string SourceInspectionSummary
     {
         get => _sourceInspectionSummary;
@@ -623,6 +638,33 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string SelectedFactUnit { get => _selectedFactUnit; set => Set(ref _selectedFactUnit, value); }
     public string SelectedFactPeriodType { get => _selectedFactPeriodType; set => Set(ref _selectedFactPeriodType, value); }
     public string SelectedFactDecimals { get => _selectedFactDecimals; set => Set(ref _selectedFactDecimals, value); }
+    public string SelectedFactDimensions { get => _selectedFactDimensions; set => Set(ref _selectedFactDimensions, value); }
+    public string SelectedFactEntityIdentifier { get => _selectedFactEntityIdentifier; set => Set(ref _selectedFactEntityIdentifier, value); }
+    public bool CanEditSelectedFactEntity
+    {
+        get => _canEditSelectedFactEntity;
+        private set => Set(ref _canEditSelectedFactEntity, value);
+    }
+    public string SelectedFactConceptIdentity
+    {
+        get => _selectedFactConceptIdentity;
+        private set => Set(ref _selectedFactConceptIdentity, value);
+    }
+    public string SelectedFactSourceSummary
+    {
+        get => _selectedFactSourceSummary;
+        private set => Set(ref _selectedFactSourceSummary, value);
+    }
+    public string SelectedFactPeriodSummary
+    {
+        get => _selectedFactPeriodSummary;
+        private set => Set(ref _selectedFactPeriodSummary, value);
+    }
+    public string SelectedFactEntitySourceSummary
+    {
+        get => _selectedFactEntitySourceSummary;
+        private set => Set(ref _selectedFactEntitySourceSummary, value);
+    }
     public IReadOnlyList<string> FactPeriodTypes { get; } = new[] { "duration", "instant" };
 
     private static IReadOnlyList<AdapterCapabilityOption> BuildSourceCapabilities()
@@ -1110,10 +1152,117 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void LoadSelectedFactProperties()
     {
         var node = _selectedNode is null ? null : Session.Project.Nodes.FirstOrDefault(n => n.NodeId == _selectedNode.NodeId);
-        if (node?.NodeType != NodeTypeConstants.FactConstruct) return;
+        if (node?.NodeType != NodeTypeConstants.FactConstruct)
+        {
+            CanEditSelectedFactEntity = false;
+            SelectedFactConceptIdentity = "Select a fact to inspect its taxonomy identity.";
+            SelectedFactSourceSummary = "Select a fact to inspect its source mapping.";
+            SelectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
+            SelectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
+            return;
+        }
         SelectedFactUnit = node.Parameters.GetValueOrDefault("unit")?.ToString() ?? "";
         SelectedFactPeriodType = node.Parameters.GetValueOrDefault("periodType")?.ToString() ?? "duration";
         SelectedFactDecimals = node.Parameters.GetValueOrDefault("decimals")?.ToString() ?? "0";
+        SelectedFactDimensions = node.Parameters.GetValueOrDefault("dimensions")?.ToString() ?? "";
+
+        var conceptName = node.Parameters.GetValueOrDefault("concept")?.ToString();
+        var concept = conceptName is null ? null : _profile.FindConcept(conceptName);
+        SelectedFactConceptIdentity = concept is null
+            ? $"Concept '{conceptName ?? "(unset)"}' is unavailable in profile '{_profile.ProfileId}'."
+            : $"{concept.Label} · {concept.QualifiedName} · {{{concept.Namespace}}}{concept.LocalName} · {concept.DataType}, {concept.PeriodType} · profile {_profile.ProfileId} ({_profile.Digest})";
+
+        RefreshSelectedFactSourceSummary();
+        SelectedFactPeriodSummary = DescribeFactInputSources(node, "period", "instantDate");
+        LoadSelectedFactEntity(node);
+    }
+
+    private void RefreshSelectedFactSourceSummary()
+    {
+        var node = _selectedNode is null ? null : Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == _selectedNode.NodeId);
+        if (node?.NodeType != NodeTypeConstants.FactConstruct)
+        {
+            SelectedFactSourceSummary = "Select a fact to inspect its source mapping.";
+            return;
+        }
+
+        var selectedColumn = string.IsNullOrWhiteSpace(SelectedSourceColumn) ? "(none selected)" : SelectedSourceColumn;
+        var valueSource = DescribeFactInputSources(node, "value");
+        SelectedFactSourceSummary = $"Selected column: {selectedColumn}. Value path: {valueSource}";
+    }
+
+    private string DescribeFactInputSources(MappingNode factNode, params string[] inputPorts)
+    {
+        var edges = Session.Project.Edges
+            .Where(edge => edge.TargetNodeId == factNode.NodeId && inputPorts.Contains(edge.TargetPortName, StringComparer.Ordinal))
+            .OrderBy(edge => Array.IndexOf(inputPorts, edge.TargetPortName))
+            .ToArray();
+        if (edges.Length == 0) return $"No {string.Join(" or ", inputPorts)} source is connected.";
+        return string.Join("; ", edges.Select(edge =>
+            $"{edge.TargetPortName}: {DescribeNodePath(edge.SourceNodeId, new HashSet<string>(StringComparer.Ordinal))}"));
+    }
+
+    private string DescribeNodePath(string nodeId, HashSet<string> visiting)
+    {
+        const int maximumDepth = 128;
+        return DescribeNodePath(nodeId, visiting, depth: 0, maximumDepth);
+    }
+
+    private string DescribeNodePath(string nodeId, HashSet<string> visiting, int depth, int maximumDepth)
+    {
+        if (depth >= maximumDepth) return $"Path truncated after {maximumDepth} nodes";
+        var node = Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == nodeId);
+        if (node is null) return $"Missing node {nodeId}";
+        if (!visiting.Add(nodeId)) return $"Cycle at {node.DisplayName}";
+
+        var parents = Session.Project.Edges
+            .Where(edge => edge.TargetNodeId == nodeId)
+            .OrderBy(edge => node.InputPorts.FindIndex(port => StringComparer.Ordinal.Equals(port.Name, edge.TargetPortName)))
+            .Select(edge => DescribeNodePath(edge.SourceNodeId, visiting, depth + 1, maximumDepth))
+            .ToArray();
+        visiting.Remove(nodeId);
+
+        var label = DescribeNode(node);
+        return parents.Length == 0 ? label : $"{string.Join(" + ", parents)} → {label}";
+    }
+
+    private string DescribeNode(MappingNode node)
+    {
+        if (node.NodeType == NodeTypeConstants.ExcelField)
+        {
+            var column = node.Parameters.GetValueOrDefault("column")?.ToString() ?? "(unbound column)";
+            var bindingId = node.Parameters.GetValueOrDefault("bindingId")?.ToString();
+            var binding = Session.Project.Bindings.FirstOrDefault(candidate => candidate.BindingId == bindingId);
+            return $"{binding?.DisplayName ?? bindingId ?? "Source"}.{column}";
+        }
+        if (node.NodeType == NodeTypeConstants.Constant)
+            return $"{node.DisplayName}: {node.Parameters.GetValueOrDefault("literal")?.ToString() ?? "(empty)"}";
+
+        var transformKeys = new[] { "factor", "culture", "rounding", "mode", "operator", "format", "scale" };
+        var settings = transformKeys
+            .Where(key => node.Parameters.ContainsKey(key))
+            .Select(key => $"{key}={node.Parameters[key]}")
+            .ToArray();
+        return settings.Length == 0 ? node.DisplayName : $"{node.DisplayName} ({string.Join(", ", settings)})";
+    }
+
+    private void LoadSelectedFactEntity(MappingNode factNode)
+    {
+        var edge = Session.Project.Edges.FirstOrDefault(candidate =>
+            candidate.TargetNodeId == factNode.NodeId && candidate.TargetPortName == "entity");
+        var source = edge is null
+            ? null
+            : Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == edge.SourceNodeId);
+        CanEditSelectedFactEntity = source?.NodeType == NodeTypeConstants.Constant
+            && string.Equals(source.Parameters.GetValueOrDefault("shape")?.ToString(), "String", StringComparison.OrdinalIgnoreCase);
+        SelectedFactEntityIdentifier = CanEditSelectedFactEntity
+            ? source!.Parameters.GetValueOrDefault("literal")?.ToString() ?? ""
+            : "";
+        SelectedFactEntitySourceSummary = source is null
+            ? "No entity source is connected. Add a String source before executing this mapping."
+            : CanEditSelectedFactEntity
+                ? $"Entity identifier comes from the String constant '{source.DisplayName}' and can be edited here."
+                : $"Entity identifier is supplied by '{source.DisplayName}' ({source.NodeType}); select that source node to edit it.";
     }
 
     public async Task NewProjectAsync()
@@ -2906,30 +3055,153 @@ public sealed class MainWindowViewModel : ViewModelBase
         { StatusText = "Abstract concepts cannot be used as fact targets."; return; }
         if (profile.FindConcept(SelectedConcept.QualifiedName) is null)
         { StatusText = "The selected concept is not part of this project's filing profile."; return; }
-        Session.SetNodeParameter(SelectedNode.NodeId, "concept", SelectedConcept.QualifiedName);
+        var concept = profile.FindConcept(SelectedConcept.QualifiedName)!;
+        if (!StringComparer.Ordinal.Equals(concept.DataType, "monetary"))
+        {
+            StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
+            return;
+        }
+        var factNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+        var graphPeriodType = factNode is null ? null : GetFactGraphPeriodType(factNode);
+        if (graphPeriodType is not null && !StringComparer.Ordinal.Equals(graphPeriodType, concept.PeriodType))
+        {
+            StatusText = $"XBR004: the connected {graphPeriodType} period source cannot target a {concept.PeriodType} concept.";
+            return;
+        }
+        Session.SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+        {
+            [SelectedNode.NodeId] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["concept"] = SelectedConcept.QualifiedName,
+                ["periodType"] = concept.PeriodType
+            }
+        });
         StatusText = $"Proposed target {SelectedConcept.QualifiedName} for {SelectedNodeDisplayName}. Review its unit and period before execution.";
     }
 
     private void ApplySelectedFactProperties()
     {
         if (SelectedNode is null || !CanEditSelectedFact) return;
-        var periodType = SelectedFactPeriodType.Trim().ToLowerInvariant();
-        var decimals = SelectedFactDecimals.Trim();
-        if (string.IsNullOrWhiteSpace(SelectedFactUnit)
-            || periodType is not ("instant" or "duration")
-            || (decimals != "INF" && !int.TryParse(decimals, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out _)))
+        var resolution = _profileResolver.Resolve(Session.Project, allowSyntheticProfile: true);
+        if (!resolution.Success || resolution.Profile is null)
         {
-            StatusText = "Enter a unit, instant or duration period, and integer decimals or INF.";
+            StatusText = "Fact properties cannot be validated because the project's filing profile is unavailable.";
             return;
         }
-        Session.SetNodeParameters(SelectedNode.NodeId, new Dictionary<string, object?>
+
+        var factNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+        if (factNode is null) { StatusText = "The selected fact node no longer exists."; return; }
+        var profile = resolution.Profile;
+        var conceptName = factNode.Parameters.GetValueOrDefault("concept")?.ToString();
+        var concept = conceptName is null ? null : profile.FindConcept(conceptName);
+        if (concept is null || concept.IsAbstract)
         {
-            ["unit"] = SelectedFactUnit.Trim(),
+            StatusText = $"XBR001: concept '{conceptName ?? "(unset)"}' is unavailable or cannot carry facts in profile '{profile.ProfileId}'.";
+            return;
+        }
+        if (!StringComparer.Ordinal.Equals(concept.DataType, "monetary"))
+        {
+            StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
+            return;
+        }
+
+        var unit = SelectedFactUnit.Trim();
+        var periodType = SelectedFactPeriodType.Trim().ToLowerInvariant();
+        var decimals = SelectedFactDecimals.Trim();
+        if (unit.Length > 0 && !profile.SupportedUnits.Contains(unit))
+        {
+            StatusText = $"XBR002: unit '{unit}' is not supported by filing profile '{profile.ProfileId}'.";
+            return;
+        }
+        if (concept.DataType == "monetary" && unit.Length == 0)
+        {
+            StatusText = $"XBR002: monetary concept '{concept.QualifiedName}' requires a unit.";
+            return;
+        }
+        if (periodType is not ("instant" or "duration")
+            || !StringComparer.Ordinal.Equals(periodType, concept.PeriodType))
+        {
+            StatusText = $"XBR004: concept '{concept.QualifiedName}' requires a {concept.PeriodType} period type.";
+            return;
+        }
+        var graphPeriodType = GetFactGraphPeriodType(factNode);
+        if (graphPeriodType is not null && !StringComparer.Ordinal.Equals(graphPeriodType, concept.PeriodType))
+        {
+            StatusText = $"XBR004: the connected {graphPeriodType} period source cannot target a {concept.PeriodType} concept.";
+            return;
+        }
+
+        string normalizedDecimals;
+        if (StringComparer.OrdinalIgnoreCase.Equals(decimals, "INF"))
+            normalizedDecimals = "INF";
+        else if (int.TryParse(decimals, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedDecimals)
+                 && parsedDecimals is >= -30 and <= 30)
+            normalizedDecimals = parsedDecimals.ToString(CultureInfo.InvariantCulture);
+        else
+        {
+            StatusText = "XBR008: decimals must be INF or an integer in the supported range [-30, 30].";
+            return;
+        }
+
+        if (!FactDimensionParser.TryParse(SelectedFactDimensions, profile.DimensionDomains,
+                out var dimensions, out var dimensionError))
+        {
+            StatusText = $"XBR013: {dimensionError}";
+            return;
+        }
+
+        var factUpdates = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["unit"] = unit,
             ["periodType"] = periodType,
-            ["decimals"] = decimals
-        });
-        StatusText = "Fact properties updated.";
+            ["decimals"] = normalizedDecimals
+        };
+        if (dimensions.Count > 0 || factNode.Parameters.ContainsKey("dimensions"))
+            factUpdates["dimensions"] = FactDimensionParser.Format(dimensions);
+
+        var updates = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+        {
+            [factNode.NodeId] = factUpdates
+        };
+        if (CanEditSelectedFactEntity)
+        {
+            var identifier = SelectedFactEntityIdentifier.Trim();
+            if (identifier.Length == 0 || identifier.Any(char.IsControl))
+            {
+                StatusText = "XBR005: entity identifier must contain at least one non-control character.";
+                return;
+            }
+
+            var entityEdge = Session.Project.Edges.FirstOrDefault(edge =>
+                edge.TargetNodeId == factNode.NodeId && edge.TargetPortName == "entity");
+            var entityNode = entityEdge is null
+                ? null
+                : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == entityEdge.SourceNodeId);
+            if (entityNode?.NodeType == NodeTypeConstants.Constant)
+                updates[entityNode.NodeId] = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["literal"] = identifier
+                };
+        }
+
+        var changed = Session.SetNodeParameterValues(updates);
+        StatusText = changed ? "Fact properties updated as one undoable change." : "No fact properties changed.";
+    }
+
+    private string? GetFactGraphPeriodType(MappingNode factNode)
+    {
+        var edge = Session.Project.Edges.FirstOrDefault(candidate =>
+            candidate.TargetNodeId == factNode.NodeId
+            && candidate.TargetPortName is "period" or "instantDate");
+        var source = edge is null
+            ? null
+            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == edge.SourceNodeId);
+        return source?.NodeType switch
+        {
+            NodeTypeConstants.BuildDurationDate => "duration",
+            NodeTypeConstants.BuildInstantDate => "instant",
+            _ => null
+        };
     }
 
     private void RefreshFilteredSuggestions()

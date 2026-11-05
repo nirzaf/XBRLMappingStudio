@@ -225,6 +225,48 @@ public class ExecutionPlanTests
     }
 
     [Fact]
+    public async Task FactConstructCarriesOnlyProfileDeclaredDimensions()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-dimensions-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, synthetic) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factNode.Parameters["dimensions"] = "ex:RegionAxis=ex:Domestic";
+            var profile = new FilingProfile
+            {
+                ProfileId = synthetic.ProfileId,
+                Digest = synthetic.Digest,
+                Concepts = synthetic.Concepts,
+                SupportedUnits = synthetic.SupportedUnits,
+                DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                {
+                    ["ex:RegionAxis"] = new[] { "ex:Domestic" }
+                },
+                TaxonomyVersion = synthetic.TaxonomyVersion,
+                OutputFormat = synthetic.OutputFormat,
+                NamespaceUris = synthetic.NamespaceUris,
+                TaxonomyUrls = synthetic.TaxonomyUrls,
+                PackageHashes = synthetic.PackageHashes,
+                RequiredChecks = synthetic.RequiredChecks
+            };
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.NotEmpty(result.Facts);
+            Assert.Equal("ex:RegionAxis", Assert.Single(result.Facts[0]!.Dimensions).Name);
+            Assert.Equal("ex:Domestic", result.Facts[0]!.Dimensions[0].MemberName);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task Cancellation_DiscardsPartialOutput()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xbrl-g1-" + Guid.NewGuid().ToString("N"));

@@ -476,6 +476,7 @@ public sealed class MappingJobService
                 IsNil = pf.IsNil,
                 Decimals = pf.Decimals,
                 Language = pf.Language,
+                Dimensions = pf.Dimensions,
                 ContributingSources = pf.Sources
             });
         }
