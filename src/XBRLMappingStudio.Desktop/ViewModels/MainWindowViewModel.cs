@@ -236,6 +236,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private readonly IProjectFileDialog? _fileDialog;
     private readonly Func<SourceConnection, CancellationToken, Task<ISourceSchema>> _sqliteSchemaLoader;
     private readonly Func<IAuditSink>? _auditSinkFactory;
+    private readonly Func<TaxonomyConceptIndexStore>? _taxonomyIndexStoreFactory;
     private readonly Func<string, CancellationToken, Task<PdfDigitalDocument>> _pdfDocumentLoader;
     private readonly Func<PdfEvidenceStore> _pdfEvidenceStoreFactory;
     private readonly Func<PdfReviewAuditStore> _pdfReviewAuditStoreFactory;
@@ -773,10 +774,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
     }
 
-    public MainWindowViewModel(IProjectFileDialog fileDialog, Func<IAuditSink> auditSinkFactory)
+    public MainWindowViewModel(
+        IProjectFileDialog fileDialog,
+        Func<IAuditSink> auditSinkFactory,
+        Func<TaxonomyConceptIndexStore>? taxonomyIndexStoreFactory = null)
         : this(BuildSampleProject(), fileDialog,
             new SqliteSourceAdapter().InspectSchemaAsync,
-            FilingProfileResolver.FromDefaultCatalog(), auditSinkFactory: auditSinkFactory)
+            FilingProfileResolver.FromDefaultCatalog(),
+            auditSinkFactory: auditSinkFactory,
+            taxonomyIndexStoreFactory: taxonomyIndexStoreFactory)
     {
     }
 
@@ -802,11 +808,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         Func<IAuditSink>? auditSinkFactory = null,
         Func<string, CancellationToken, Task<PdfDigitalDocument>>? pdfDocumentLoader = null,
         Func<PdfEvidenceStore>? pdfEvidenceStoreFactory = null,
-        Func<PdfReviewAuditStore>? pdfReviewAuditStoreFactory = null)
+        Func<PdfReviewAuditStore>? pdfReviewAuditStoreFactory = null,
+        Func<TaxonomyConceptIndexStore>? taxonomyIndexStoreFactory = null)
     {
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
         _auditSinkFactory = auditSinkFactory;
+        _taxonomyIndexStoreFactory = taxonomyIndexStoreFactory;
         _pdfDocumentLoader = pdfDocumentLoader ?? ((path, cancellationToken) =>
             new PdfExtractionProcessClient().ExtractFileAsync(path, cancellationToken: cancellationToken));
         _pdfEvidenceStoreFactory = pdfEvidenceStoreFactory ?? (() =>
@@ -816,7 +824,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
         _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
         _profile = SyntheticProfile.Build();
-        _taxonomy = new TaxonomyIndex(_profile);
+        _taxonomy = CreateTaxonomyIndex(_profile);
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
@@ -3293,7 +3301,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (resolution.Success)
         {
             _profile = resolution.Profile!;
-            _taxonomy = new TaxonomyIndex(_profile);
+            _taxonomy = CreateTaxonomyIndex(_profile);
             return true;
         }
 
@@ -3301,13 +3309,17 @@ public sealed class MainWindowViewModel : ViewModelBase
         // by TryResolveProfile. Never treat this display-only fallback as the project's
         // selected profile.
         _profile = SyntheticProfile.Build();
-        _taxonomy = new TaxonomyIndex(_profile);
+        _taxonomy = CreateTaxonomyIndex(_profile);
         Diagnostics.Clear();
         ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
         Raise(nameof(Diagnostics));
         StatusText = "The project's filing profile is not installed; profile-dependent actions are blocked.";
         return false;
     }
+
+    private TaxonomyIndex CreateTaxonomyIndex(FilingProfile profile)
+        => _taxonomyIndexStoreFactory?.Invoke().LoadOrBuild(profile).Index
+            ?? new TaxonomyIndex(profile);
 
     private string WorkspaceRoot() => ProjectPath is null
         ? Environment.CurrentDirectory

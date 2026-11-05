@@ -11,9 +11,10 @@ public sealed class LocalApplicationDatabase
     /// AI06: v2 widens <c>suggestion_audit</c> with governed-actor and prompt-template
     /// columns. v3 adds the digest of the artifact accepted by the profile worker to
     /// the publication journal and durable receipt. v4 adds managed PDF evidence
-    /// references, and v5 adds append-only PDF review audit events. Migrations are non-destructive.
+    /// references, v5 adds append-only PDF review audit events, and v6 adds an
+    /// integrity-checked offline taxonomy metadata cache. Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
     public string Path { get; }
 
     public LocalApplicationDatabase(string? path = null)
@@ -311,6 +312,26 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=5;
                 """;
             migration5.ExecuteNonQuery();
+        }
+        if (version < 6)
+        {
+            using var migration6 = connection.CreateCommand();
+            migration6.Transaction = transaction;
+            migration6.CommandText = """
+                CREATE TABLE taxonomy_profile_index (
+                    profile_id TEXT NOT NULL,
+                    profile_digest TEXT NOT NULL,
+                    cache_schema INTEGER NOT NULL,
+                    taxonomy_version TEXT NOT NULL,
+                    concept_count INTEGER NOT NULL CHECK(concept_count >= 0),
+                    snapshot_json TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256) = 64),
+                    indexed_utc TEXT NOT NULL,
+                    PRIMARY KEY(profile_id, profile_digest)
+                );
+                PRAGMA user_version=6;
+                """;
+            migration6.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

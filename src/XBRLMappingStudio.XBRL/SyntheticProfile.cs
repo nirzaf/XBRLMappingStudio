@@ -189,6 +189,8 @@ public static class SyntheticProfile
             Digest = digest,
             Concepts = Concepts,
             SupportedUnits = SupportedUnits,
+            TaxonomyVersion = ProfileId,
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal),
             TaxonomyUrls = new[] { TaxonomyFileName },
             NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
             {

@@ -74,6 +74,7 @@ public sealed class TaxonomyIndexTests
         var profile = TwoNamespaceSameLabelProfile();
         var index = new TaxonomyIndex(profile);
         var hits = index.Search("Revenue");
+        Assert.Empty(index.Roles);
         // Both concepts carry the label "Revenue" but live in different namespaces.
         Assert.Equal(2, hits.Items.Count);
         Assert.Equal(
@@ -128,6 +129,80 @@ public sealed class TaxonomyIndexTests
         Assert.True(financial.IsAbstract);
         Assert.False(TaxonomyIndex.IsFactTargetable(financial));
         Assert.True(TaxonomyIndex.IsFactTargetable(revenue));
+    }
+
+    [Fact]
+    public void LargeIndex_UsesExpandedNamesAndStableDigestBoundPaging()
+    {
+        const int conceptCount = 20_000;
+        var concepts = Enumerable.Range(0, conceptCount)
+            .Select(index =>
+            {
+                var namespaceIndex = index % 4;
+                var localName = $"Disclosure{index:D5}";
+                return new ConceptMetadata(
+                    $"t{namespaceIndex}:{localName}",
+                    $"urn:finance:{namespaceIndex}",
+                    localName,
+                    "Revenue",
+                    "monetary",
+                    "duration",
+                    IsAbstract: index % 97 == 0)
+                {
+                    SupportedLanguages = new[] { "en", "fr" },
+                    LabelsByLanguage = new Dictionary<string, string>
+                    {
+                        ["en"] = "Revenue",
+                        ["fr"] = "Produit"
+                    }
+                };
+            })
+            .ToArray();
+        var profile = new FilingProfile
+        {
+            ProfileId = "large-taxonomy",
+            Digest = "sha256:large-taxonomy-v1",
+            TaxonomyVersion = "2026.1",
+            Concepts = concepts,
+            SupportedUnits = new HashSet<string>(StringComparer.Ordinal) { "EUR", "USD" },
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                ["t0:RegionAxis"] = new[] { "t0:Domestic", "t0:International" }
+            }
+        };
+        var index = new TaxonomyIndex(profile, Array.Empty<PresentationLink>());
+
+        var firstPage = index.Search("Produit", language: "fr", page: 0, pageSize: 37);
+        var nextPage = index.Search("Produit", language: "fr", page: 1, pageSize: 37);
+
+        Assert.Equal(conceptCount, firstPage.TotalCount);
+        Assert.True(firstPage.HasNext);
+        Assert.Equal(37, firstPage.Items.Count);
+        Assert.Equal(37, nextPage.Items.Count);
+        Assert.Equal(
+            concepts.OrderBy(concept => concept.Namespace, StringComparer.Ordinal)
+                .ThenBy(concept => concept.LocalName, StringComparer.Ordinal)
+                .Take(74)
+                .Select(concept => concept.QualifiedName),
+            firstPage.Items.Concat(nextPage.Items).Select(concept => concept.QualifiedName));
+        Assert.Same(concepts[19_999], index.GetByExpandedName(
+            concepts[19_999].Namespace, concepts[19_999].LocalName));
+        Assert.Equal("2026.1", index.TaxonomyVersion);
+        Assert.Contains("USD", index.SupportedUnits);
+        Assert.Contains("t0:Domestic", index.DimensionDomains["t0:RegionAxis"]);
+        Assert.True(index.IsCurrentFor(profile));
+
+        var changedProfile = new FilingProfile
+        {
+            ProfileId = profile.ProfileId,
+            Digest = "sha256:large-taxonomy-v2",
+            TaxonomyVersion = "2026.2",
+            Concepts = concepts,
+            SupportedUnits = profile.SupportedUnits,
+            DimensionDomains = profile.DimensionDomains
+        };
+        Assert.False(index.IsCurrentFor(changedProfile));
+        Assert.Empty(index.Search("", page: int.MaxValue, pageSize: int.MaxValue).Items);
     }
 
     [Fact]

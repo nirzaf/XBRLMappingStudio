@@ -173,6 +173,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
                 DROP TABLE pdf_source_evidence;
                 DROP TABLE pdf_source_documents;
                 DROP TABLE pdf_review_audit;
+                DROP TABLE taxonomy_profile_index;
                 """;
             rollbackColumns.ExecuteNonQuery();
             using var drop = connection.CreateCommand();

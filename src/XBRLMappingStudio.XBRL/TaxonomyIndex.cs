@@ -53,16 +53,57 @@ public sealed class TaxonomyIndex
 
     private readonly FilingProfile _profile;
     private readonly IReadOnlyList<PresentationLink> _links;
+    private readonly IReadOnlyList<ConceptMetadata> _orderedConcepts;
+    private readonly IReadOnlyDictionary<string, ConceptMetadata> _byQualifiedName;
+    private readonly IReadOnlyDictionary<ExpandedConceptName, ConceptMetadata> _byExpandedName;
 
     public TaxonomyIndex(FilingProfile profile, IEnumerable<PresentationLink>? links = null)
     {
-        _profile = profile;
-        _links = (links ?? SyntheticProfile.PresentationLinks).ToList();
+        _profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        if (string.IsNullOrWhiteSpace(profile.ProfileId) || string.IsNullOrWhiteSpace(profile.Digest))
+            throw new ArgumentException("A taxonomy index requires a versioned profile identity.", nameof(profile));
+        var concepts = profile.Concepts
+            .OrderBy(concept => concept.Namespace, StringComparer.Ordinal)
+            .ThenBy(concept => concept.LocalName, StringComparer.Ordinal)
+            .ToArray();
+        try
+        {
+            _byExpandedName = concepts.ToDictionary(concept => concept.ExpandedName);
+            _byQualifiedName = concepts.ToDictionary(concept => concept.QualifiedName, StringComparer.Ordinal);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException(
+                "A taxonomy profile must have unique expanded names and qualified names.", nameof(profile), ex);
+        }
+        _orderedConcepts = Array.AsReadOnly(concepts);
+        _links = (links ?? (StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)
+            ? SyntheticProfile.PresentationLinks
+            : Array.Empty<PresentationLink>())).ToList();
     }
 
-    public IReadOnlyList<ConceptMetadata> AllConcepts => _profile.Concepts;
+    public string ProfileId => _profile.ProfileId;
+    public string ProfileDigest => _profile.Digest;
+    public string TaxonomyVersion => string.IsNullOrWhiteSpace(_profile.TaxonomyVersion)
+        ? _profile.Digest
+        : _profile.TaxonomyVersion;
+    public IReadOnlySet<string> SupportedUnits => _profile.SupportedUnits;
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains => _profile.DimensionDomains;
+    public IReadOnlyList<ConceptMetadata> AllConcepts => _orderedConcepts;
 
-    public ConceptMetadata? Get(string qualifiedName) => _profile.FindConcept(qualifiedName);
+    public ConceptMetadata? Get(string qualifiedName) =>
+        _byQualifiedName.TryGetValue(qualifiedName, out var concept) ? concept : null;
+
+    public ConceptMetadata? GetByExpandedName(string namespaceUri, string localName) =>
+        _byExpandedName.TryGetValue(new ExpandedConceptName(namespaceUri, localName), out var concept)
+            ? concept
+            : null;
+
+    /// <summary>Whether this index is bound to the exact installed profile version.</summary>
+    public bool IsCurrentFor(FilingProfile profile) =>
+        profile is not null
+        && StringComparer.Ordinal.Equals(ProfileId, profile.ProfileId)
+        && StringComparer.Ordinal.Equals(ProfileDigest, profile.Digest);
 
     public IReadOnlyList<string> Roles => _links
         .Select(l => l.RoleUri)
@@ -90,15 +131,17 @@ public sealed class TaxonomyIndex
         if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
 
         var q = (query ?? "").Trim();
-        var matches = _profile.Concepts
-            .Where(c => q.Length == 0 || Matches(c, q, language))
-            .OrderBy(c => c.Namespace, StringComparer.Ordinal)
-            .ThenBy(c => c.LocalName, StringComparer.Ordinal)
-            .ToList();
-
-        int total = matches.Count;
-        var window = matches.Skip(page * pageSize).Take(pageSize).ToList();
-        bool hasNext = (page + 1) * pageSize < total;
+        var start = (long)page * pageSize;
+        var end = start + pageSize;
+        var window = new List<ConceptMetadata>(Math.Min(pageSize, _orderedConcepts.Count));
+        var total = 0;
+        foreach (var concept in _orderedConcepts)
+        {
+            if (q.Length > 0 && !Matches(concept, q, language)) continue;
+            if (total >= start && total < end) window.Add(concept);
+            total++;
+        }
+        bool hasNext = total > end;
         return new PagedResult<ConceptMetadata>(window, page, pageSize, total, hasNext);
     }
 

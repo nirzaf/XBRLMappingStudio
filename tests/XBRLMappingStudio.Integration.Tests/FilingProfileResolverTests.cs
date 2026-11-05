@@ -109,6 +109,70 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public void CatalogIndexesDimensionDomainsAndKeepsLegacyManifestDigestCompatible()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-dimension-profile", "3.0.0", "Revenue");
+            var manifestPath = Path.Combine(
+                installed.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
+            var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(
+                File.ReadAllText(manifestPath),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var dimensionManifest = manifest with
+            {
+                Concepts = manifest.Concepts.Concat(new[]
+                {
+                    new ConceptMetadata("ex:RegionAxis", "urn:example", "RegionAxis",
+                        "Region", "dimension", "duration", IsAbstract: true),
+                    new ConceptMetadata("ex:NorthAmerica", "urn:example", "NorthAmerica",
+                        "North America", "domain-item", "duration", IsAbstract: false)
+                }).ToList(),
+                DimensionDomains = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+                {
+                    ["ex:RegionAxis"] = new() { "ex:NorthAmerica" }
+                },
+                ProfileDigest = ""
+            };
+            dimensionManifest = dimensionManifest with
+            {
+                ProfileDigest = dimensionManifest.ComputeDigest()
+            };
+            File.WriteAllText(manifestPath, dimensionManifest.ToJson());
+
+            var loaded = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles);
+            Assert.Equal("3.0.0", loaded.Profile.TaxonomyVersion);
+            Assert.Equal(new[] { "ex:NorthAmerica" }, loaded.Profile.DimensionDomains["ex:RegionAxis"]);
+            Assert.NotEqual(dimensionManifest.ProfileDigest,
+                (dimensionManifest with
+                {
+                    DimensionDomains = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+                    {
+                        ["ex:RegionAxis"] = new() { "ex:NorthAmerica", "ex:Asia" }
+                    },
+                    ProfileDigest = ""
+                }).ComputeDigest());
+
+            var legacy = manifest with
+            {
+                SchemaVersion = 2,
+                ProfileDigest = ""
+            };
+            legacy = legacy with { ProfileDigest = legacy.ComputeDigest() };
+            File.WriteAllText(manifestPath, legacy.ToJson());
+            var reloadedLegacy = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles);
+            Assert.Equal(2, reloadedLegacy.SchemaVersion);
+            Assert.Equal("fixture-dimension-profile", reloadedLegacy.Profile.ProfileId);
+            Assert.Empty(reloadedLegacy.Profile.DimensionDomains);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CatalogRejectsTamperedPackageAndReportsTheAffectedProfile()
     {
         var root = NewCatalogDirectory();

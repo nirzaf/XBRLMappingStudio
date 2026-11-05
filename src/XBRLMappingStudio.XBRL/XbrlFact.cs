@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.XBRL;
@@ -240,7 +241,12 @@ public sealed record ConceptMetadata(
     public IReadOnlyList<string> SupportedLanguages { get; init; } = new[] { "en" };
     public IReadOnlyDictionary<string, string> LabelsByLanguage { get; init; }
         = new Dictionary<string, string>();
+    [JsonIgnore]
+    public ExpandedConceptName ExpandedName => new(Namespace, LocalName);
 }
+
+/// <summary>Stable taxonomy identity independent of a package's chosen QName prefix.</summary>
+public readonly record struct ExpandedConceptName(string NamespaceUri, string LocalName);
 
 /// <summary>
 /// Immutable agreement about what constitutes an acceptable deliverable for one
@@ -252,6 +258,11 @@ public sealed class FilingProfile
     public required string Digest { get; init; }             // "sha256:..."
     public required IReadOnlyList<ConceptMetadata> Concepts { get; init; }
     public required IReadOnlySet<string> SupportedUnits { get; init; }
+    /// <summary>Version label for the offline taxonomy package set.</summary>
+    public string TaxonomyVersion { get; init; } = "";
+    /// <summary>Dimension QName to its allowed member QNames, when declared by the package.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains { get; init; }
+        = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
     public string OutputFormat { get; init; } = "xbrl-json";
     public IReadOnlyDictionary<string, string> NamespaceUris { get; init; }
         = new Dictionary<string, string>();

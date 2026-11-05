@@ -15,10 +15,12 @@ public partial class App : AvaloniaApplication
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            var database = new LocalApplicationDatabase();
             var window = new MainWindow();
             window.DataContext = new MainWindowViewModel(
                 new AvaloniaProjectFileDialog(window),
-                () => new SuggestionAuditStore(new LocalApplicationDatabase()));
+                () => new SuggestionAuditStore(database),
+                () => new TaxonomyConceptIndexStore(database));
             desktop.MainWindow = window;
         }
         base.OnFrameworkInitializationCompleted();

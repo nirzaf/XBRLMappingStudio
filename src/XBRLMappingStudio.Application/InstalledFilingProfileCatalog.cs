@@ -11,7 +11,7 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     public required int SchemaVersion { get; init; }
     public required string ProfileId { get; init; }
@@ -22,6 +22,8 @@ public sealed record FilingProfileManifest
     public required List<ConceptMetadata> Concepts { get; init; }
     public required List<string> SupportedUnits { get; init; }
     public Dictionary<string, string> NamespaceUris { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>Dimension QName to allowed member QNames for the exact taxonomy version.</summary>
+    public Dictionary<string, List<string>> DimensionDomains { get; init; } = new(StringComparer.Ordinal);
     public required List<string> PackageNames { get; init; }
     /// <summary>Relative package path to sha256 digest. Every file is verified before install.</summary>
     public required Dictionary<string, string> PackageFiles { get; init; }
@@ -41,6 +43,11 @@ public sealed record FilingProfileManifest
         Digest = ProfileDigest,
         Concepts = Concepts.ToArray(),
         SupportedUnits = new HashSet<string>(SupportedUnits, StringComparer.Ordinal),
+        TaxonomyVersion = Version,
+        DimensionDomains = DimensionDomains.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<string>)pair.Value.ToArray(),
+            StringComparer.Ordinal),
         OutputFormat = OutputFormat,
         NamespaceUris = new Dictionary<string, string>(NamespaceUris, StringComparer.Ordinal),
         TaxonomyUrls = OfflineReferences.Keys.Order(StringComparer.Ordinal).ToArray(),
@@ -229,7 +236,7 @@ public static class InstalledFilingProfileCatalog
     private static void ValidateManifestShape(FilingProfileManifest manifest,
         string directoryProfileId, string directoryVersion)
     {
-        if (manifest.SchemaVersion != FilingProfileManifest.CurrentSchemaVersion)
+        if (manifest.SchemaVersion is < 2 or > FilingProfileManifest.CurrentSchemaVersion)
             throw new InvalidDataException($"Unsupported profile manifest schema version '{manifest.SchemaVersion}'.");
         EnsureSafeIdentifier(manifest.ProfileId, "profile ID");
         EnsureSafeIdentifier(manifest.Version, "profile version");
@@ -244,9 +251,11 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException($"Concept count exceeds the {MaxConcepts}-concept limit or is missing.");
         if (manifest.SupportedUnits is null || manifest.PackageNames is null
             || manifest.PackageFiles is null || manifest.NamespaceUris is null
-            || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
+            || manifest.DimensionDomains is null || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
             || manifest.RequiredChecks is null)
             throw new InvalidDataException("Profile collections cannot be null.");
+        if (manifest.SchemaVersion < 3 && manifest.DimensionDomains.Count > 0)
+            throw new InvalidDataException("Dimension domains require profile manifest schema version 3.");
         if (manifest.PackageNames.Count is 0 or > MaxPackageNames)
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageNames} taxonomy package names.");
         if (manifest.PackageFiles.Count is 0 or > MaxPackageFiles)
@@ -291,6 +300,16 @@ public static class InstalledFilingProfileCatalog
                 || string.IsNullOrWhiteSpace(pair.Value)
                 || !concept.SupportedLanguages.Contains(pair.Key, StringComparer.Ordinal)))
                 throw new InvalidDataException($"Localized labels for concept '{concept.QualifiedName}' must use a supported language and non-empty text.");
+        }
+        foreach (var (dimensionQName, memberQNames) in manifest.DimensionDomains)
+        {
+            if (!manifest.Concepts.Any(concept => StringComparer.Ordinal.Equals(concept.QualifiedName, dimensionQName))
+                || memberQNames is null || memberQNames.Count == 0)
+                throw new InvalidDataException($"Dimension domain '{dimensionQName}' must name an indexed taxonomy concept and at least one member.");
+            EnsureUnique(memberQNames, $"dimension member for '{dimensionQName}'");
+            foreach (var memberQName in memberQNames)
+                if (!manifest.Concepts.Any(concept => StringComparer.Ordinal.Equals(concept.QualifiedName, memberQName)))
+                    throw new InvalidDataException($"Dimension domain '{dimensionQName}' refers to unindexed member '{memberQName}'.");
         }
 
         EnsureSafeRelativePath(manifest.EntryPoint, "taxonomy entry point");
@@ -456,6 +475,22 @@ internal static class FilingProfileManifestDigest
         IReadOnlyList<string> RequiredPlugins,
         IReadOnlyList<string> RequiredChecks);
 
+    private sealed record DigestPayloadV3(
+        int SchemaVersion,
+        string ProfileId,
+        string Version,
+        string EntryPoint,
+        string OutputFormat,
+        IReadOnlyList<CanonicalConcept> Concepts,
+        IReadOnlyList<string> SupportedUnits,
+        IReadOnlyDictionary<string, string> NamespaceUris,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains,
+        IReadOnlyList<string> PackageNames,
+        IReadOnlyDictionary<string, string> PackageFiles,
+        IReadOnlyDictionary<string, string> OfflineReferences,
+        IReadOnlyList<string> RequiredPlugins,
+        IReadOnlyList<string> RequiredChecks);
+
     private sealed record CanonicalConcept(
         string QualifiedName,
         string Namespace,
@@ -469,31 +504,48 @@ internal static class FilingProfileManifestDigest
 
     public static string Compute(FilingProfileManifest manifest)
     {
-        var canonical = new DigestPayload(
-            manifest.SchemaVersion,
-            manifest.ProfileId,
-            manifest.Version,
-            manifest.EntryPoint,
-            manifest.OutputFormat,
-            manifest.Concepts.OrderBy(concept => concept.QualifiedName, StringComparer.Ordinal)
-                .Select(concept => new CanonicalConcept(
-                    concept.QualifiedName,
-                    concept.Namespace,
-                    concept.LocalName,
-                    concept.Label,
-                    concept.DataType,
-                    concept.PeriodType,
-                    concept.IsAbstract,
-                    concept.SupportedLanguages.Order(StringComparer.Ordinal).ToArray(),
-                    Sorted(concept.LabelsByLanguage)))
-                .ToArray(),
-            manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
-            Sorted(manifest.NamespaceUris),
-            manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
-            Sorted(manifest.PackageFiles),
-            Sorted(manifest.OfflineReferences),
-            manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
-            manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray());
+        var concepts = manifest.Concepts.OrderBy(concept => concept.QualifiedName, StringComparer.Ordinal)
+            .Select(concept => new CanonicalConcept(
+                concept.QualifiedName,
+                concept.Namespace,
+                concept.LocalName,
+                concept.Label,
+                concept.DataType,
+                concept.PeriodType,
+                concept.IsAbstract,
+                concept.SupportedLanguages.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(concept.LabelsByLanguage)))
+            .ToArray();
+        object canonical = manifest.SchemaVersion < 3
+            ? new DigestPayload(
+                manifest.SchemaVersion,
+                manifest.ProfileId,
+                manifest.Version,
+                manifest.EntryPoint,
+                manifest.OutputFormat,
+                concepts,
+                manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.NamespaceUris),
+                manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.PackageFiles),
+                Sorted(manifest.OfflineReferences),
+                manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray())
+            : new DigestPayloadV3(
+                manifest.SchemaVersion,
+                manifest.ProfileId,
+                manifest.Version,
+                manifest.EntryPoint,
+                manifest.OutputFormat,
+                concepts,
+                manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.NamespaceUris),
+                SortedDomains(manifest.DimensionDomains),
+                manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.PackageFiles),
+                Sorted(manifest.OfflineReferences),
+                manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray());
         var bytes = JsonSerializer.SerializeToUtf8Bytes(canonical,
             InstalledFilingProfileCatalog.SerializerOptionsForManifest);
         return "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -504,6 +556,15 @@ internal static class FilingProfileManifestDigest
         var result = new SortedDictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in values.OrderBy(pair => pair.Key, StringComparer.Ordinal))
             result.Add(key, value);
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> SortedDomains(
+        IReadOnlyDictionary<string, List<string>> values)
+    {
+        var result = new SortedDictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        foreach (var (key, members) in values.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            result.Add(key, members.Order(StringComparer.Ordinal).ToArray());
         return result;
     }
 }
