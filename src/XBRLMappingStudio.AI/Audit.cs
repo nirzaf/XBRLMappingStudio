@@ -104,7 +104,11 @@ public sealed class AuditLog
     public void Record(AuditRecord record)
     {
         Interlocked.Increment(ref _sequence);
-        var stamped = record with { Sequence = _sequence };
+        var stamped = record with
+        {
+            Sequence = _sequence,
+            SourceField = AiMetadataSanitizer.Redact(record.SourceField)
+        };
         _records.Add(stamped);
         if (_sink is null || _contextFactory is null) return;
         // AI06: persistence is best-effort so a broken store cannot block the analyst,

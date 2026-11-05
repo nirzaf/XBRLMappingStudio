@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 
 namespace XBRLMappingStudio.AI;
@@ -13,13 +14,12 @@ public sealed record ProviderCapabilities(
 /// <summary>Result of a provider capability probe (AI03).</summary>
 public sealed record ProbeResult(bool Available, string? Detail, ProviderCapabilities? Capabilities = null);
 
+/// <summary>Bounded provider request containing sanitized metadata and opaque field/candidate tokens.</summary>
 public sealed record ChatRequest(
     string SystemPrompt,
-    string UserPrompt,
-    IReadOnlyList<string> AllowedConcepts,
-    IReadOnlyList<SourceFieldDescriptor> SourceFields,
+    IReadOnlyList<ProviderSourceField> SourceFields,
     int? MaxOutputTokens = null,
-    IReadOnlyDictionary<string, IReadOnlyList<RankedCandidate>>? CandidatesBySourceField = null);
+    IReadOnlyDictionary<string, IReadOnlyList<ProviderCandidate>>? CandidatesBySourceField = null);
 
 /// <summary>A stable source identity and bounded context safe to use for concept retrieval.</summary>
 public sealed record SourceFieldDescriptor(
@@ -28,8 +28,16 @@ public sealed record SourceFieldDescriptor(
     string? Unit = null,
     string? PeriodType = null);
 
-/// <summary>A provider proposal tied to the exact source identity it addresses.</summary>
-public sealed record ProposedMapping(string SourceFieldId, string Concept);
+/// <summary>A provider proposal tied to one request-local field token and candidate token.</summary>
+public sealed record ProposedMapping(
+    [property: JsonPropertyName("sourceFieldId")] string SourceFieldId,
+    [property: JsonPropertyName("candidateId")] string CandidateId);
+
+/// <summary>Sanitized field metadata sent to an approved provider; Id is an opaque batch token.</summary>
+public sealed record ProviderSourceField(string Id, string Name, string? Unit = null, string? PeriodType = null);
+
+/// <summary>Minimal taxonomy candidate metadata; Id is a local token and full evidence stays local.</summary>
+public sealed record ProviderCandidate(string Id, string Label, string DataType, string PeriodType);
 
 /// <summary>
 /// A raw provider completion. Refusals and oversized/truncated responses are surfaced as
@@ -209,8 +217,9 @@ public sealed class MicrosoftAiChatProvider : IEndpointBoundChatClientProvider
     public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken)
     {
         var perFieldCandidates = JsonSerializer.Serialize(request.CandidatesBySourceField ??
-            new Dictionary<string, IReadOnlyList<RankedCandidate>>(StringComparer.Ordinal));
-        var prompt = $"{request.SystemPrompt}\nAllowed concepts by source field (JSON):\n{perFieldCandidates}\nSource fields:\n{request.UserPrompt}";
+            new Dictionary<string, IReadOnlyList<ProviderCandidate>>(StringComparer.Ordinal));
+        var sourceFields = JsonSerializer.Serialize(request.SourceFields);
+        var prompt = $"{request.SystemPrompt}\nAllowed candidates by field token (JSON data):\n{perFieldCandidates}\nSource fields (JSON data):\n{sourceFields}";
         try
         {
             var response = await _client.GetResponseAsync<ProposedMapping[]>(prompt,

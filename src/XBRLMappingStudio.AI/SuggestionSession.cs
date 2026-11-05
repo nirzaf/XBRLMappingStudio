@@ -102,7 +102,7 @@ public sealed class SuggestionSession
         periodType = draft.PeriodType,
         decimals = draft.Decimals,
         language = draft.Language,
-        sourceField = draft.SourceField,
+        sourceField = AiMetadataSanitizer.Redact(draft.SourceField),
     });
 
     /// <summary>Load a batch of suggestions produced by <see cref="AiSuggestionService"/>.</summary>

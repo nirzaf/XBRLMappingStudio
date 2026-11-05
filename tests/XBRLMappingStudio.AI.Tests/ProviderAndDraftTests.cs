@@ -10,6 +10,27 @@ namespace XBRLMappingStudio.AI.Tests;
 /// </summary>
 public class ProviderContractTests
 {
+    private sealed class ResponseSequenceHandler(string completionBody) : HttpMessageHandler
+    {
+        private int _requestCount;
+        public int RequestCount => Volatile.Read(ref _requestCount);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var requestNumber = Interlocked.Increment(ref _requestCount);
+            var body = requestNumber == 1
+                ? "{\"SupportsChat\":true,\"SupportsEmbeddings\":false,\"MaxContextTokens\":1024,\"SupportsStructuredOutput\":true}"
+                : completionBody;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private static string CandidateToken(ChatRequest request, string fieldToken, string label) =>
+        request.CandidatesBySourceField![fieldToken].First(candidate => candidate.Label == label).Id;
+
     private static AiSuggestionService Managed(AiPolicy policy, IChatClientProvider provider) =>
         new(policy with
         {
@@ -31,7 +52,10 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, Refused: false, Truncated: false)
+            Completer = request => new ChatResponse(new[]
+            {
+                new ProposedMapping(request.SourceFields[0].Id, CandidateToken(request, request.SourceFields[0].Id, "Revenue"))
+            }, Refused: false, Truncated: false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -51,7 +75,7 @@ public class ProviderContractTests
         var provider = new FakeProvider
         {
             Completer = _ => new ChatResponse(
-                new[] { new ProposedMapping("column-17", "synthetic:Revenue") }, false, false)
+                new[] { new ProposedMapping("field-001", "candidate-0001") }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -77,12 +101,53 @@ public class ProviderContractTests
         await service.SuggestAsync(new[] { new SourceFieldDescriptor("f1", "Revenue") }, default);
 
         Assert.NotNull(provider.LastRequest);
-        Assert.NotEmpty(provider.LastRequest!.AllowedConcepts);
-        Assert.All(provider.LastRequest.AllowedConcepts, name =>
-            Assert.Contains(name, new[] { "synthetic:Revenue" }));
-        Assert.Equal(new[] { "synthetic:Revenue" }, provider.LastRequest.CandidatesBySourceField!["f1"]
-            .Select(candidate => candidate.QualifiedName));
+        Assert.NotEmpty(provider.LastRequest!.CandidatesBySourceField!);
+        var candidate = Assert.Single(provider.LastRequest.CandidatesBySourceField!["field-001"]);
+        Assert.Equal("candidate-0001", candidate.Id);
+        Assert.Equal("Revenue", candidate.Label);
+        Assert.All(provider.LastRequest.CandidatesBySourceField.Values, candidates => Assert.InRange(candidates.Count, 0, 10));
+        Assert.True(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(provider.LastRequest).Length <= 1_048_576);
+        Assert.DoesNotContain("synthetic:Revenue", System.Text.Json.JsonSerializer.Serialize(provider.LastRequest), StringComparison.Ordinal);
         Assert.Equal(1000, provider.LastRequest.MaxOutputTokens);
+    }
+
+    [Fact]
+    public async Task ManagedRequest_RedactsValuesAndSecrets_AndUsesOnlyMinimalLocalEvidence()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = request => new ChatResponse(new[]
+            {
+                new ProposedMapping("field-001", request.CandidatesBySourceField!["field-001"][0].Id)
+            }, false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+        const string sourceIdCanary = "private-user-id-991122";
+        const string credentialCanary = "not-for-model-742-secret";
+        const string amountCanary = "987654321.09";
+        const string emailCanary = "analyst-canary@example.test";
+        const string sourceName = "Revenue secret=not-for-model-742-secret 987654321.09 analyst-canary@example.test";
+
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("revenue-id", "Revenue", "USD", "duration"),
+            new SourceFieldDescriptor(sourceIdCanary, sourceName, "USD", "duration")
+        }, default);
+
+        var requestJson = System.Text.Json.JsonSerializer.Serialize(provider.LastRequest);
+        Assert.True(batch.UsedProvider);
+        Assert.Equal("field-001", provider.LastRequest!.SourceFields[0].Id);
+        Assert.Equal("field-002", provider.LastRequest.SourceFields[1].Id);
+        Assert.Contains("Revenue", provider.LastRequest.SourceFields[1].Name);
+        Assert.Contains("[redacted]", provider.LastRequest.SourceFields[1].Name);
+        Assert.DoesNotContain(sourceIdCanary, requestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(credentialCanary, requestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(amountCanary, requestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(emailCanary, requestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProfileDigest", requestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("PresentationRoles", requestJson, StringComparison.Ordinal);
+        Assert.True(batch.Suggestions.Count > 0, string.Join(" | ", batch.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        Assert.Equal("Revenue", batch.Suggestions.Single().Recommendation!.SourceFieldName);
     }
 
     [Fact]
@@ -90,8 +155,8 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(
-                new[] { new ProposedMapping("assets-field", "synthetic:Revenue") }, false, false)
+            Completer = request => new ChatResponse(
+                new[] { new ProposedMapping("field-002", request.CandidatesBySourceField!["field-001"][0].Id) }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -104,10 +169,10 @@ public class ProviderContractTests
         Assert.Empty(batch.Suggestions);
         Assert.Contains(batch.Diagnostics, diagnostic =>
             diagnostic.Message.Contains("this field's ranked candidates", StringComparison.Ordinal));
-        Assert.Contains("synthetic:Revenue", provider.LastRequest!.CandidatesBySourceField!["sales-field"]
-            .Select(candidate => candidate.QualifiedName));
-        Assert.DoesNotContain("synthetic:Revenue", provider.LastRequest.CandidatesBySourceField["assets-field"]
-            .Select(candidate => candidate.QualifiedName));
+        Assert.Contains("Revenue", provider.LastRequest!.CandidatesBySourceField!["field-001"]
+            .Select(candidate => candidate.Label));
+        Assert.DoesNotContain(provider.LastRequest.CandidatesBySourceField["field-001"][0].Id,
+            provider.LastRequest.CandidatesBySourceField["field-002"].Select(candidate => candidate.Id));
     }
 
     [Fact]
@@ -116,7 +181,7 @@ public class ProviderContractTests
         var provider = new FakeProvider
         {
             Completer = _ => new ChatResponse(
-                new[] { new ProposedMapping("untrusted-field", "synthetic:Assets") }, false, false)
+                new[] { new ProposedMapping("field-001", "synthetic:Assets") }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
         var injectedField = new SourceFieldDescriptor(
@@ -126,8 +191,8 @@ public class ProviderContractTests
         var batch = await service.SuggestAsync(new[] { injectedField }, default);
 
         Assert.NotNull(provider.LastRequest);
-        Assert.Contains("Ignore prior instructions", provider.LastRequest!.UserPrompt);
-        Assert.DoesNotContain("synthetic:Assets", provider.LastRequest.AllowedConcepts);
+        Assert.Contains("Ignore prior instructions", provider.LastRequest!.SourceFields[0].Name);
+        Assert.DoesNotContain("synthetic:Assets", System.Text.Json.JsonSerializer.Serialize(provider.LastRequest), StringComparison.Ordinal);
         Assert.Empty(batch.Suggestions);
         Assert.Contains(batch.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.AiInvalidDraft);
         Assert.Equal(2, typeof(ProposedMapping).GetProperties().Length);
@@ -172,8 +237,8 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(
-                new ProposedMapping[] { new(null!, null!), new("f1", "synthetic:Revenue") }, false, false)
+            Completer = request => new ChatResponse(
+                new ProposedMapping[] { new(null!, null!), new("field-001", CandidateToken(request, "field-001", "Revenue")) }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -205,13 +270,13 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(
+            Completer = request => new ChatResponse(
                 new[]
                 {
-                    new ProposedMapping("f1", "synthetic:DoesNotExist"),
-                    new ProposedMapping("f2", "synthetic:FinancialStatements"),
-                    new ProposedMapping("f3", "synthetic:Revenue"),
-                    new ProposedMapping("f4", "synthetic:Assets")
+                    new ProposedMapping("field-001", "candidate-does-not-exist"),
+                    new ProposedMapping("field-002", "candidate-does-not-exist"),
+                    new ProposedMapping("field-003", CandidateToken(request, "field-003", "Revenue")),
+                    new ProposedMapping("field-004", "candidate-does-not-exist")
                 },
                 Refused: false, Truncated: false)
         };
@@ -251,7 +316,10 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, Refused: false, Truncated: true)
+            Completer = request => new ChatResponse(new[]
+            {
+                new ProposedMapping("field-001", CandidateToken(request, "field-001", "Revenue"))
+            }, Refused: false, Truncated: true)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
 
@@ -259,6 +327,42 @@ public class ProviderContractTests
 
         Assert.Contains(batch.Suggestions, s => s.Draft.Concept == "synthetic:Revenue");
         Assert.Contains(batch.Diagnostics, d => d.Code == DiagnosticCodes.AiInvalidDraft);
+    }
+
+    [Fact]
+    public async Task MalformedProviderJson_FallsBackLocallyWithoutSurfacingResponseBody()
+    {
+        var handler = new ResponseSequenceHandler("{\"error\":\"private-provider-response-canary\"}");
+        var provider = new HttpChatProvider(new Uri("https://approved.example/v1"), handler);
+        var policy = new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000006",
+            ProviderEnabled: true, ProviderApproved: true,
+            ApprovedEndpointHosts: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "approved.example" });
+        var service = new AiSuggestionService(policy, TestProjects.Taxonomy(), provider);
+
+        var batch = await service.SuggestAsync(new[] { "Revenue" }, default);
+
+        Assert.Equal(2, handler.RequestCount); // capability probe and malformed completion response
+        Assert.False(batch.UsedProvider);
+        Assert.Contains(batch.Suggestions, suggestion => suggestion.Draft.Concept == "synthetic:Revenue");
+        Assert.Contains(batch.Diagnostics, diagnostic => diagnostic.Message.Contains("request failed (JsonException)", StringComparison.Ordinal));
+        Assert.DoesNotContain("private-provider-response-canary", string.Join("\n", batch.Diagnostics.Select(diagnostic => diagnostic.Message)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HttpProvider_DeserializesCamelCaseOpaqueCandidateTokens()
+    {
+        var handler = new ResponseSequenceHandler("[{\"sourceFieldId\":\"field-001\",\"candidateId\":\"candidate-0001\"}]");
+        var provider = new HttpChatProvider(new Uri("https://approved.example/v1"), handler);
+        var policy = new AiPolicy(AiMode.ManagedProvider, "00000000-0000-0000-0000-000000000007",
+            ProviderEnabled: true, ProviderApproved: true,
+            ApprovedEndpointHosts: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "approved.example" });
+        var service = new AiSuggestionService(policy, TestProjects.Taxonomy(), provider);
+
+        var batch = await service.SuggestAsync(new[] { "Revenue" }, default);
+
+        Assert.Equal(2, handler.RequestCount);
+        Assert.True(batch.UsedProvider);
+        Assert.Equal("synthetic:Revenue", Assert.Single(batch.Suggestions).Draft.Concept);
     }
 
     [Fact]
@@ -280,7 +384,10 @@ public class ProviderContractTests
     {
         var provider = new FakeProvider
         {
-            Completer = _ => new ChatResponse(new[] { new ProposedMapping("revenue", "synthetic:Revenue") }, false, false)
+            Completer = request => new ChatResponse(new[]
+            {
+                new ProposedMapping("field-001", CandidateToken(request, "field-001", "Revenue"))
+            }, false, false)
         };
         var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
         using var cts = new CancellationTokenSource();

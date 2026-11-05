@@ -63,6 +63,29 @@ public sealed class AuditPersistenceTests
     }
 
     [Fact]
+    public void AuditPersistence_RedactsValueLikeAndCredentialLikeSourceText()
+    {
+        var sink = new RecordingSink();
+        var session = NewSession(sink);
+        const string sourceName = "Revenue secret=do-not-store-8822 987654321.09";
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", sourceName,
+                new DraftMapping("s1", sourceName, "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+
+        Assert.True(session.Accept("s1").Applied);
+
+        var row = Assert.Single(sink.Rows);
+        var persistedAudit = string.Join("\n", row.Record.SourceField, row.Context.OriginalProposalJson,
+            row.Context.ApprovedEditJson);
+        Assert.DoesNotContain("do-not-store-8822", persistedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain("987654321.09", persistedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret=", persistedAudit, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[redacted]", persistedAudit, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Edit_Reject_Undo_EachPersistOneRow()
     {
         var sink = new RecordingSink();
