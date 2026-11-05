@@ -1,5 +1,7 @@
 using XBRLMappingStudio.AI;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Ops.Tests;
 
@@ -71,6 +73,59 @@ public sealed class SuggestionAuditStoreTests : IDisposable
 
         var row = Assert.Single(store.Read("p", 3));
         Assert.Equal(3, row.AcceptedRevision);
+    }
+
+    [Fact]
+    public void AcceptAllValid_PersistsBatchAndUndoAcrossStoreReopen()
+    {
+        var databasePath = NewDbPath();
+        var database = new LocalApplicationDatabase(databasePath);
+        var store = new SuggestionAuditStore(database);
+        var profile = SyntheticProfile.Build();
+        var project = new MappingProject
+        {
+            ProjectId = "batch-audit-project",
+            Name = "Batch audit fixture",
+            ProfileId = SyntheticProfile.ProfileId,
+            ProfileDigest = profile.Digest
+        };
+        var session = new SuggestionSession(
+            project,
+            new DraftValidator(new TaxonomyIndex(profile), profile),
+            store,
+            new SuggestionSessionContext(
+                Actor: "test-analyst",
+                Method: "offline-retrieval",
+                ProviderConfigId: "local-retrieval"));
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("sales", "source:Sales",
+                new DraftMapping("sales", "source:Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+            new Suggestion("costs", "source:Costs",
+                new DraftMapping("costs", "source:Costs", "synthetic:Expenses", "USD", "duration"), "t", 8),
+        });
+
+        var accepted = session.AcceptAllValid();
+
+        Assert.True(accepted.Applied, accepted.Reason);
+        Assert.Equal(SuggestionState.Accepted, session.StateOf("sales"));
+        Assert.Equal(SuggestionState.Accepted, session.StateOf("costs"));
+        var reopenedStore = new SuggestionAuditStore(new LocalApplicationDatabase(databasePath));
+        var batch = Assert.Single(reopenedStore.Read(project.ProjectId, project.SemanticRevision));
+        Assert.Equal("batch-accept", batch.Decision);
+        Assert.Equal("test-analyst", batch.Actor);
+        Assert.Equal("offline-retrieval", batch.Method);
+        Assert.Equal(new[] { "sales", "costs" }, batch.CandidateIds);
+        Assert.Equal(project.SemanticRevision, batch.AcceptedRevision);
+        Assert.Contains("synthetic:Revenue", batch.ApprovedEditJson);
+        Assert.Contains("synthetic:Expenses", batch.ApprovedEditJson);
+
+        Assert.True(session.Undo().Applied);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("sales"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("costs"));
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Contains(reopenedStore.Read(project.ProjectId, project.SemanticRevision),
+            row => row.Decision == "undo");
     }
 
     [Fact]

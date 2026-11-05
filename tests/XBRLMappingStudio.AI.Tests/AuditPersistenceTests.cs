@@ -7,9 +7,8 @@ namespace XBRLMappingStudio.AI.Tests;
 /// AI06 audit persistence hook. Every analyst decision — accept, reject, edit,
 /// batch-accept, undo — must reach the injected sink with the governed actor,
 /// method, prompt-template revision and a bounded rendering of the reviewed
-/// payload. A sink that throws records a PersistenceFault on the log and never
-/// blocks the analyst's session (fail-open at the session, fail-closed at the
-/// report surface).
+/// payload. A sink that throws records a PersistenceFault and returns a failed,
+/// rolled-back mutation so a governed caller can fail closed.
 /// </summary>
 public sealed class AuditPersistenceTests
 {
@@ -113,6 +112,30 @@ public sealed class AuditPersistenceTests
         Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
         Assert.Single(session.Audit.PersistenceFaults);
         Assert.Contains("simulated sink failure", session.Audit.PersistenceFaults[0]);
+    }
+
+    [Fact]
+    public void BatchSinkFault_RollsBackEveryDraftAndDisposition()
+    {
+        var sink = new RecordingSink { Throw = true };
+        var session = NewSession(sink);
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+            new Suggestion("s2", "Costs",
+                new DraftMapping("s2", "Costs", "synthetic:Expenses", "USD", "duration"), "t", 8),
+        });
+
+        var outcome = session.AcceptAllValid();
+
+        Assert.False(outcome.Applied);
+        Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s1"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s2"));
+        Assert.Empty(session.Draft.Nodes);
+        Assert.False(session.CanUndo);
+        Assert.Single(session.Audit.PersistenceFaults);
     }
 
     [Fact]
