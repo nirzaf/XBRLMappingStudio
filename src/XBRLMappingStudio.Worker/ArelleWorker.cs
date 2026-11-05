@@ -211,14 +211,32 @@ public sealed class ArelleWorker : IWorkerClient
     private readonly StreamReader _stdout;
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly Task _stderrDrain;
+    private readonly string? _expectedProfileId;
+    private readonly int? _expectedProfileSchemaVersion;
+    private readonly string? _expectedProfileVersion;
+    private readonly string? _expectedProfileDigest;
+    private readonly string? _expectedTaxonomyEntryPoint;
+    private readonly IReadOnlyList<string>? _expectedRequiredPlugins;
     private int _disposed;
     private int _disposeStarted;
 
     public string ExecutablePath { get; }
 
-    public ArelleWorker(string executablePath, string[]? args = null)
+    public ArelleWorker(string executablePath, string[]? args = null,
+        string? expectedProfileId = null,
+        int? expectedProfileSchemaVersion = null,
+        string? expectedProfileVersion = null,
+        string? expectedProfileDigest = null,
+        string? expectedTaxonomyEntryPoint = null,
+        IReadOnlyList<string>? expectedRequiredPlugins = null)
     {
         ExecutablePath = executablePath;
+        _expectedProfileId = expectedProfileId;
+        _expectedProfileSchemaVersion = expectedProfileSchemaVersion;
+        _expectedProfileVersion = expectedProfileVersion;
+        _expectedProfileDigest = expectedProfileDigest;
+        _expectedTaxonomyEntryPoint = expectedTaxonomyEntryPoint;
+        _expectedRequiredPlugins = expectedRequiredPlugins?.ToArray();
         var psi = new ProcessStartInfo
         {
             FileName = executablePath,
@@ -254,14 +272,54 @@ public sealed class ArelleWorker : IWorkerClient
             }));
         var resp = await SendAsync(req, cancellationToken);
         if (resp.Status != WorkerStatus.Success)
-            throw new InvalidOperationException($"Worker handshake failed: {resp.Error}");
+            throw new WorkerStartupException(resp.Status,
+                resp.Error ?? "Worker returned a non-success status during handshake.",
+                resp.Diagnostics ?? Array.Empty<Diagnostic>());
         var handshake = resp.Result!.Value.Deserialize<WorkerHandshake>(WorkerJson.Options)
             ?? throw new InvalidOperationException("Worker returned an empty handshake.");
         if (handshake.ProtocolVersion < WorkerProtocol.MinimumVersion
             || handshake.ProtocolVersion > WorkerProtocol.CurrentVersion)
-            throw new InvalidOperationException($"Worker protocol {handshake.ProtocolVersion} is not supported.");
+        {
+            const string message = "Arelle worker returned an unsupported protocol version.";
+            throw new WorkerStartupException(WorkerStatus.DomainFailure, message,
+                new[] { StartupDiagnostic(DiagnosticCodes.WkrProtocolVersionMismatch, message) });
+        }
+        if (!handshake.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
+        {
+            const string message = "Arelle worker does not support report validation.";
+            throw new WorkerStartupException(WorkerStatus.DomainFailure, message,
+                new[] { StartupDiagnostic(DiagnosticCodes.WkrHandshakeFailed, message) });
+        }
+        if (handshake.ArelleAvailable == false)
+            throw new WorkerStartupException(WorkerStatus.IncompleteValidation,
+                "The Arelle runtime is not installed in the configured worker environment.",
+                new[] { StartupDiagnostic(DiagnosticCodes.XbrWorkerUnavailable,
+                    "The Arelle runtime is not installed in the configured worker environment.") });
+        if (_expectedProfileId is not null
+            && (_expectedProfileSchemaVersion != handshake.ProfileSchemaVersion
+                || !StringComparer.Ordinal.Equals(_expectedProfileId, handshake.ProfileId)
+                || !StringComparer.Ordinal.Equals(_expectedProfileVersion, handshake.ProfileVersion)
+                || !StringComparer.Ordinal.Equals(_expectedProfileDigest, handshake.ProfileDigest)
+                || !StringComparer.Ordinal.Equals(_expectedTaxonomyEntryPoint, handshake.TaxonomyEntryPoint)
+                || !(_expectedRequiredPlugins ?? Array.Empty<string>()).SequenceEqual(
+                    handshake.RequiredPlugins, StringComparer.Ordinal)))
+        {
+            const string message = "Arelle worker profile metadata does not match the hash-verified installation.";
+            throw new WorkerStartupException(WorkerStatus.DomainFailure, message,
+                new[] { StartupDiagnostic(DiagnosticCodes.XbrProfileMismatch, message) });
+        }
         return handshake;
     }
+
+    private static Diagnostic StartupDiagnostic(string code, string message) => new()
+    {
+        Code = code,
+        Subsystem = DiagnosticSubsystem.Worker,
+        Severity = DiagnosticSeverity.Error,
+        Stage = DiagnosticStage.Worker,
+        IsBlocking = true,
+        Message = message
+    };
 
     public async Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
     {

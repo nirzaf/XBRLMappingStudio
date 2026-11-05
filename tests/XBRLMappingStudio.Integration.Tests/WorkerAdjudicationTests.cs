@@ -171,6 +171,73 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
             d => d.Code == DiagnosticCodes.WkrCrash && d.IsBlocking);
     }
 
+    [Fact]
+    public async Task WorkerStartupTimeout_IsOperationalFailure_WithWkrTimeoutDiagnostic()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new StartupFailureWorker(WorkerStatus.TimedOut, "Handshake deadline elapsed.");
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.OperationalFailure, result.Manifest.Outcome);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.WkrTimeout && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task WorkerStartupProtocolMismatch_UsesDistinctDiagnostic()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new StartupFailureWorker(WorkerStatus.DomainFailure,
+            "No mutually supported protocol version.");
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.WkrProtocolVersionMismatch && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task WorkerSuccessWithUnsupportedProtocol_IsIncompleteAndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(_ => throw new InvalidOperationException(
+            "Request must not be sent after an unsupported handshake."),
+            new WorkerHandshake(WorkerProtocol.CurrentVersion + 1, "fake/unsupported",
+                new[] { WorkerOperations.ValidateReport }));
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.WkrProtocolVersionMismatch && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task TaxonomyPreflightFailureStopsBeforeMissingSourceIsRead()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var missingPath = Path.Combine(_dir, "missing-source.xlsx");
+        var worker = new FakeWorker(request => new WorkerResponse(
+            request.OperationId, WorkerStatus.DomainFailure, null, Array.Empty<Diagnostic>(),
+            "Taxonomy entry point could not be loaded."));
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, missingPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.WkrHandshakeFailed && diagnostic.IsBlocking);
+    }
+
     // Deadline is propagated on the request sent by MappingJobService (XBR08).
     [Fact]
     public async Task RequestDeadline_IsInTheFutureAndCarriesProfileDigest()
@@ -200,17 +267,43 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     private sealed class FakeWorker : IWorkerClient
     {
         private readonly Func<WorkerRequest, WorkerResponse> _responder;
-        public FakeWorker(Func<WorkerRequest, WorkerResponse> responder) => _responder = responder;
+        private readonly WorkerHandshake _handshake;
+
+        public FakeWorker(Func<WorkerRequest, WorkerResponse> responder, WorkerHandshake? handshake = null)
+        {
+            _responder = responder;
+            _handshake = handshake ?? new WorkerHandshake(WorkerProtocol.CurrentVersion, "fake/1.0",
+                new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport });
+        }
 
         public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
-            => Task.FromResult(new WorkerHandshake(WorkerProtocol.CurrentVersion, "fake/1.0",
-                new[] { WorkerOperations.ValidateReport }));
+            => Task.FromResult(_handshake);
 
         public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(_responder(request));
         }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class StartupFailureWorker : IWorkerClient
+    {
+        private readonly WorkerStatus _status;
+        private readonly string _message;
+
+        public StartupFailureWorker(WorkerStatus status, string message)
+        {
+            _status = status;
+            _message = message;
+        }
+
+        public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
+            => Task.FromException<WorkerHandshake>(new WorkerStartupException(_status, _message));
+
+        public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Request should not be sent after a startup failure.");
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

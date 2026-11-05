@@ -76,7 +76,45 @@ internal static class WorkerJson
 public sealed record WorkerHandshake(
     int ProtocolVersion,
     string EngineVersion,
-    IReadOnlyList<string> Capabilities);
+    IReadOnlyList<string> Capabilities)
+{
+    public bool? ArelleAvailable { get; init; }
+    public int? ProfileSchemaVersion { get; init; }
+    public string? ProfileId { get; init; }
+    public string? ProfileVersion { get; init; }
+    public string? ProfileDigest { get; init; }
+    public string? TaxonomyEntryPoint { get; init; }
+    public IReadOnlyList<string> RequiredPlugins { get; init; } = Array.Empty<string>();
+}
+
+/// <summary>Versioned evidence returned after the worker loads the selected taxonomy.</summary>
+public sealed record WorkerTaxonomyLoadResult(
+    string Engine,
+    string EngineVersion,
+    IReadOnlyList<string> Capabilities,
+    bool Completed,
+    int? ProfileSchemaVersion,
+    string? ProfileId,
+    string? ProfileVersion,
+    string? ProfileDigest,
+    string? TaxonomyEntryPoint,
+    IReadOnlyList<string> RequiredPlugins,
+    int ConceptCount);
+
+/// <summary>A worker returned a terminal status before its validation handshake completed.</summary>
+public sealed class WorkerStartupException : Exception
+{
+    public WorkerStatus Status { get; }
+    public IReadOnlyList<Diagnostic> Diagnostics { get; }
+
+    public WorkerStartupException(WorkerStatus status, string? message,
+        IReadOnlyList<Diagnostic>? diagnostics = null)
+        : base(message ?? $"Worker startup ended with status '{status}'.")
+    {
+        Status = status;
+        Diagnostics = diagnostics ?? Array.Empty<Diagnostic>();
+    }
+}
 
 public static class WorkerProtocol
 {

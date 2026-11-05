@@ -11,7 +11,7 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public required int SchemaVersion { get; init; }
     public required string ProfileId { get; init; }
@@ -27,6 +27,8 @@ public sealed record FilingProfileManifest
     public required Dictionary<string, string> PackageFiles { get; init; }
     /// <summary>External taxonomy URI to its verified local package file. No URL is fetched.</summary>
     public Dictionary<string, string> OfflineReferences { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>Required Arelle plugin IDs passed as separate worker arguments.</summary>
+    public List<string> RequiredPlugins { get; init; } = new();
     public List<string> RequiredChecks { get; init; } = new();
 
     public string ComputeDigest() => FilingProfileManifestDigest.Compute(this);
@@ -50,10 +52,12 @@ public sealed record FilingProfileManifest
 public sealed record InstalledFilingProfile(
     FilingProfile Profile,
     string Version,
+    int SchemaVersion,
     string InstallationDirectory,
     string EntryPointPath,
     IReadOnlyList<string> PackageNames,
     IReadOnlyDictionary<string, string> OfflineReferences,
+    IReadOnlyList<string> RequiredPlugins,
     string ManifestFileDigest);
 
 public sealed record FilingProfileCatalogIssue(string? ProfileId, string? Version, string Message);
@@ -213,10 +217,12 @@ public static class InstalledFilingProfileCatalog
         return new InstalledFilingProfile(
             profile,
             manifest.Version,
+            manifest.SchemaVersion,
             Path.GetFullPath(versionDirectory),
             entryPointPath,
             manifest.PackageNames.ToArray(),
             new Dictionary<string, string>(manifest.OfflineReferences, StringComparer.Ordinal),
+            manifest.RequiredPlugins.ToArray(),
             "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
     }
 
@@ -238,15 +244,25 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException($"Concept count exceeds the {MaxConcepts}-concept limit or is missing.");
         if (manifest.SupportedUnits is null || manifest.PackageNames is null
             || manifest.PackageFiles is null || manifest.NamespaceUris is null
-            || manifest.OfflineReferences is null || manifest.RequiredChecks is null)
+            || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
+            || manifest.RequiredChecks is null)
             throw new InvalidDataException("Profile collections cannot be null.");
         if (manifest.PackageNames.Count is 0 or > MaxPackageNames)
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageNames} taxonomy package names.");
         if (manifest.PackageFiles.Count is 0 or > MaxPackageFiles)
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageFiles} package files.");
+        if (manifest.RequiredPlugins.Count > 128)
+            throw new InvalidDataException("A profile can declare at most 128 required Arelle plugins.");
         EnsureUnique(manifest.PackageNames, "package name");
         EnsureUnique(manifest.SupportedUnits, "supported unit");
+        EnsureUnique(manifest.RequiredPlugins, "required plugin");
         EnsureUnique(manifest.RequiredChecks, "required check");
+        foreach (var plugin in manifest.RequiredPlugins)
+            if (plugin.Length > 256 || plugin.StartsWith("/", StringComparison.Ordinal)
+                || plugin.Contains('\\') || plugin.Contains(',') || plugin.Any(char.IsWhiteSpace)
+                || plugin.Split('/').Any(segment => segment is "" or "." or "..")
+                || plugin.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' or '+' or '.' or '/')))
+                throw new InvalidDataException($"Required plugin ID '{plugin}' contains unsupported characters.");
 
         foreach (var (prefix, namespaceUri) in manifest.NamespaceUris)
         {
@@ -437,6 +453,7 @@ internal static class FilingProfileManifestDigest
         IReadOnlyList<string> PackageNames,
         IReadOnlyDictionary<string, string> PackageFiles,
         IReadOnlyDictionary<string, string> OfflineReferences,
+        IReadOnlyList<string> RequiredPlugins,
         IReadOnlyList<string> RequiredChecks);
 
     private sealed record CanonicalConcept(
@@ -475,6 +492,7 @@ internal static class FilingProfileManifestDigest
             manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
             Sorted(manifest.PackageFiles),
             Sorted(manifest.OfflineReferences),
+            manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
             manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray());
         var bytes = JsonSerializer.SerializeToUtf8Bytes(canonical,
             InstalledFilingProfileCatalog.SerializerOptionsForManifest);

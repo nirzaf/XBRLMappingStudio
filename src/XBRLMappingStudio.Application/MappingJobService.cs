@@ -67,6 +67,37 @@ public sealed class MappingJobService
         return CompileOutcome.Ok(result.Plan, graph, diag);
     }
 
+    private static JobResult PreflightFailure(
+        RunManifest manifest,
+        RunOutcome outcome,
+        string fallbackCode,
+        string fallbackMessage,
+        IEnumerable<Diagnostic>? diagnostics = null)
+    {
+        var items = diagnostics?.Select(diagnostic => diagnostic with
+        {
+            OperationId = manifest.OperationId
+        }).ToList() ?? new List<Diagnostic>();
+        if (!items.Any(diagnostic => diagnostic.IsBlocking))
+        {
+            items.Add(new Diagnostic
+            {
+                Code = fallbackCode,
+                Subsystem = DiagnosticSubsystem.Worker,
+                Severity = DiagnosticSeverity.Error,
+                Stage = DiagnosticStage.Worker,
+                IsBlocking = true,
+                Message = fallbackMessage,
+                OperationId = manifest.OperationId
+            });
+        }
+
+        manifest.Outcome = outcome;
+        manifest.CompletedUtc = DateTimeOffset.UtcNow;
+        manifest.Diagnostics = items;
+        return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+    }
+
     /// <summary>
     /// Preflight + execute the project against the given source connections.
     /// When <paramref name="preview"/> is true, only a bounded sample is processed
@@ -113,6 +144,149 @@ public sealed class MappingJobService
             manifest.Outcome = RunOutcome.InvalidMapping;
             manifest.Diagnostics = compile.Diagnostics.Items;
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
+        // Verify the selected worker and load the exact profile taxonomy before
+        // hashing, inspecting, or reading any source data.
+        WorkerHandshake handshake;
+        try
+        {
+            handshake = await _worker.HandshakeAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (WorkerStartupException ex)
+        {
+            var outcome = ex.Status switch
+            {
+                WorkerStatus.Cancelled => RunOutcome.Cancelled,
+                WorkerStatus.Crash or WorkerStatus.TimedOut => RunOutcome.OperationalFailure,
+                _ => RunOutcome.IncompleteConfiguration
+            };
+            var fallbackCode = ex.Status switch
+            {
+                WorkerStatus.TimedOut => DiagnosticCodes.WkrTimeout,
+                WorkerStatus.Crash => DiagnosticCodes.WkrCrash,
+                WorkerStatus.IncompleteValidation => DiagnosticCodes.XbrWorkerUnavailable,
+                WorkerStatus.DomainFailure => DiagnosticCodes.WkrProtocolVersionMismatch,
+                _ => DiagnosticCodes.WkrHandshakeFailed
+            };
+            return PreflightFailure(manifest, outcome, fallbackCode,
+                $"Validation worker startup failed: {ex.Message}", ex.Diagnostics);
+        }
+        catch (Exception ex)
+        {
+            return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                DiagnosticCodes.WkrHandshakeFailed,
+                $"Validation worker handshake failed: {ex.Message}");
+        }
+
+        if (handshake.ProtocolVersion < WorkerProtocol.MinimumVersion
+            || handshake.ProtocolVersion > WorkerProtocol.CurrentVersion)
+            return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                DiagnosticCodes.WkrProtocolVersionMismatch,
+                $"Validation worker '{handshake.EngineVersion}' returned an unsupported protocol version.");
+
+        var requiredCapabilities = new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport };
+        var missingCapabilities = requiredCapabilities
+            .Where(capability => !handshake.Capabilities.Contains(capability, StringComparer.Ordinal))
+            .ToArray();
+        if (missingCapabilities.Length > 0)
+            return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                DiagnosticCodes.WkrHandshakeFailed,
+                $"Validation worker '{handshake.EngineVersion}' lacks required capabilities: {string.Join(", ", missingCapabilities)}.");
+
+        var isSynthetic = StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId);
+        if (!isSynthetic
+            && (!StringComparer.Ordinal.Equals(_profile.ProfileId, handshake.ProfileId)
+                || !StringComparer.Ordinal.Equals(_profile.Digest, handshake.ProfileDigest)
+                || handshake.ProfileSchemaVersion is null
+                || string.IsNullOrWhiteSpace(handshake.TaxonomyEntryPoint)))
+            return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                DiagnosticCodes.XbrProfileMismatch,
+                "Validation worker profile identity or taxonomy metadata does not match the selected profile.");
+
+        var taxonomyEntryPoint = handshake.TaxonomyEntryPoint;
+        if (string.IsNullOrWhiteSpace(taxonomyEntryPoint) && isSynthetic)
+            taxonomyEntryPoint = _profile.TaxonomyUrls.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(taxonomyEntryPoint))
+            return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                DiagnosticCodes.XbrProfileMismatch,
+                "Selected profile does not expose a taxonomy entry point for worker preflight.");
+
+        WorkerResponse taxonomyResponse;
+        try
+        {
+            taxonomyResponse = await _worker.RequestAsync(new WorkerRequest(
+                WorkerOperations.LoadTaxonomy,
+                OperationId: opId + "-taxonomy",
+                JobId: runId,
+                ProfileDigest: _profile.Digest,
+                DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
+                Payload: JsonSerializer.SerializeToElement(new { taxonomyPath = taxonomyEntryPoint })),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
+        var taxonomyDiagnostics = taxonomyResponse.Diagnostics ?? Array.Empty<Diagnostic>();
+        if (taxonomyResponse.Status != WorkerStatus.Success
+            || taxonomyDiagnostics.Any(diagnostic => diagnostic.IsBlocking))
+        {
+            var outcome = taxonomyResponse.Status switch
+            {
+                WorkerStatus.Cancelled => RunOutcome.Cancelled,
+                WorkerStatus.Crash or WorkerStatus.TimedOut => RunOutcome.OperationalFailure,
+                WorkerStatus.Success when taxonomyDiagnostics.Any(diagnostic => diagnostic.IsBlocking)
+                    => RunOutcome.InvalidMapping,
+                _ => RunOutcome.IncompleteConfiguration
+            };
+            var fallbackCode = taxonomyResponse.Status switch
+            {
+                WorkerStatus.TimedOut => DiagnosticCodes.WkrTimeout,
+                WorkerStatus.Crash => DiagnosticCodes.WkrCrash,
+                WorkerStatus.IncompleteValidation => DiagnosticCodes.XbrWorkerUnavailable,
+                _ => DiagnosticCodes.WkrHandshakeFailed
+            };
+            return PreflightFailure(manifest, outcome, fallbackCode,
+                taxonomyResponse.Error ?? "The selected taxonomy did not load successfully.", taxonomyDiagnostics);
+        }
+
+        if (!isSynthetic)
+        {
+            WorkerTaxonomyLoadResult? loadedProfile;
+            try
+            {
+                loadedProfile = taxonomyResponse.Result?.Deserialize<WorkerTaxonomyLoadResult>(
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            }
+            catch (JsonException)
+            {
+                loadedProfile = null;
+            }
+
+            if (loadedProfile is null
+                || !loadedProfile.Completed
+                || loadedProfile.Capabilities is null
+                || loadedProfile.RequiredPlugins is null
+                || loadedProfile.ProfileSchemaVersion != handshake.ProfileSchemaVersion
+                || !StringComparer.Ordinal.Equals(loadedProfile.ProfileId, handshake.ProfileId)
+                || !StringComparer.Ordinal.Equals(loadedProfile.ProfileVersion, handshake.ProfileVersion)
+                || !StringComparer.Ordinal.Equals(loadedProfile.ProfileDigest, _profile.Digest)
+                || !StringComparer.Ordinal.Equals(loadedProfile.TaxonomyEntryPoint, taxonomyEntryPoint)
+                || !loadedProfile.RequiredPlugins.SequenceEqual(handshake.RequiredPlugins, StringComparer.Ordinal)
+                || !loadedProfile.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
+                return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
+                    DiagnosticCodes.XbrProfileMismatch,
+                    "Loaded taxonomy metadata does not match the selected profile handshake.");
         }
 
         try
@@ -268,41 +442,7 @@ public sealed class MappingJobService
             return JobResult.FromManifest(manifest, facts, "");
         }
 
-        // Validate through the worker (XBR05 acceptance).
-        WorkerHandshake handshake;
-        try
-        {
-            handshake = await _worker.HandshakeAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            manifest.Outcome = RunOutcome.Cancelled;
-            manifest.CompletedUtc = DateTimeOffset.UtcNow;
-            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-        }
-        catch (Exception ex)
-        {
-            context.Diagnostics.Error(DiagnosticCodes.WkrHandshakeFailed,
-                DiagnosticSubsystem.Worker, DiagnosticStage.Worker,
-                $"Validation worker handshake failed: {ex.Message}", operationId: opId);
-            manifest.Outcome = RunOutcome.IncompleteConfiguration;
-            manifest.CompletedUtc = DateTimeOffset.UtcNow;
-            manifest.Diagnostics = context.Diagnostics.Items;
-            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-        }
-        if (handshake.ProtocolVersion < WorkerProtocol.MinimumVersion
-            || handshake.ProtocolVersion > WorkerProtocol.CurrentVersion
-            || !handshake.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
-        {
-            context.Diagnostics.Error(DiagnosticCodes.WkrProtocolVersionMismatch,
-                DiagnosticSubsystem.Worker, DiagnosticStage.Worker,
-                $"Validation worker '{handshake.EngineVersion}' has an incompatible protocol or lacks report validation.",
-                operationId: opId);
-            manifest.Outcome = RunOutcome.IncompleteConfiguration;
-            manifest.CompletedUtc = DateTimeOffset.UtcNow;
-            manifest.Diagnostics = context.Diagnostics.Items;
-            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-        }
+        // Validate the staged report through the already preflighted worker (XBR05).
         var validateReq = new WorkerRequest(
             WorkerOperations.ValidateReport,
             OperationId: opId + "-validate",

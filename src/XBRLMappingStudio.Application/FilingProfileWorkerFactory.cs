@@ -92,12 +92,25 @@ public sealed class FilingProfileWorkerFactory
                     args.Add(Path.Combine(installation.InstallationDirectory,
                         package.Replace('/', Path.DirectorySeparatorChar)));
                 }
+                foreach (var plugin in installation.RequiredPlugins)
+                {
+                    args.Add("--plugin");
+                    args.Add(plugin);
+                }
             }
 
             var executable = pythonExecutablePath
                 ?? Environment.GetEnvironmentVariable("XMS_PYTHON")
                 ?? (OperatingSystem.IsWindows() ? "python" : "python3");
-            return new ArelleWorker(executable, args.ToArray());
+            return new ArelleWorker(executable, args.ToArray(),
+                expectedProfileId: installation?.Profile.ProfileId,
+                expectedProfileSchemaVersion: installation?.SchemaVersion,
+                expectedProfileVersion: installation?.Version,
+                expectedProfileDigest: installation?.Profile.Digest,
+                expectedTaxonomyEntryPoint: installation is null ? null
+                    : Path.GetRelativePath(installation.InstallationDirectory, installation.EntryPointPath)
+                        .Replace('\\', '/'),
+                expectedRequiredPlugins: installation?.RequiredPlugins);
         });
 
         static string? FindWorkerScript(string? configured)

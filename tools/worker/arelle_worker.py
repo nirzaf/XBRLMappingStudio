@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
 PROTOCOL_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
@@ -138,12 +139,28 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
         raise ValueError("Profile manifest is not valid UTF-8 JSON") from ex
     if not isinstance(manifest, dict):
         raise ValueError("Profile manifest must be a JSON object")
+    if manifest.get("schemaVersion") != PROFILE_SCHEMA_VERSION:
+        raise ValueError("Profile manifest uses an unsupported schema version")
+    for field in ("profileId", "version", "profileDigest", "entryPoint"):
+        if not isinstance(manifest.get(field), str) or not manifest[field] or len(manifest[field]) > 1024:
+            raise ValueError("Profile manifest has invalid " + field)
     files = manifest.get("packageFiles")
     references = manifest.get("offlineReferences", {})
     if not isinstance(files, dict) or not files or len(files) > MAX_PROFILE_FILES:
         raise ValueError("Profile manifest has no valid hash-pinned package files")
     if not isinstance(references, dict):
         raise ValueError("Profile offlineReferences must be an object")
+    required_plugins = manifest.get("requiredPlugins", [])
+    if not isinstance(required_plugins, list) or len(required_plugins) > 128:
+        raise ValueError("Profile requiredPlugins must be an array with at most 128 entries")
+    if (any(not isinstance(plugin, str) or not plugin or len(plugin) > 256
+            or plugin.startswith("/") or "\\" in plugin or "," in plugin
+            or any(ch.isspace() for ch in plugin)
+            or any(part in ("", ".", "..") for part in plugin.split("/"))
+            or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.+/" for ch in plugin)
+            for plugin in required_plugins)
+            or len(set(required_plugins)) != len(required_plugins)):
+        raise ValueError("Profile required plugin IDs are invalid or duplicated")
     total_bytes = 0
     verified_files = {}
     for relative_path, expected in files.items():
@@ -235,7 +252,7 @@ def run_arelle(entrypoint, args, temporary_path=None):
         logFile="logToStructuredMessage",
         logPropagate=False,
         packages=args.package or None,
-        plugins=",".join(args.plugin) if args.plugin else None,
+        plugins="|".join(args.plugin) if args.plugin else None,
         disclosureSystemName=args.disclosure_system,
     )
     with Session() as session:
@@ -266,6 +283,28 @@ def log_diagnostics(logs, op_id, temporary_path=None):
     return result
 
 
+def required_plugin_load_failures(logs, required_plugins):
+    failure_phrases = ("unable to load", "failed to load", "could not load", "not found")
+    failures = []
+    for plugin in required_plugins:
+        for item in logs or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("messageCode", item.get("code", ""))).lower()
+            message = item.get("msg")
+            if message is None:
+                message = item.get("message")
+            if isinstance(message, dict):
+                message = message.get("text", "")
+            text = str(message or "").lower()
+            combined = code + " " + text
+            if plugin.lower() in combined and "plugin" in combined \
+                    and any(phrase in combined for phrase in failure_phrases):
+                failures.append(plugin)
+                break
+    return failures
+
+
 def handle(req, args):
     op_id = req.get("operationId", "-")
     if not valid_request(req):
@@ -281,11 +320,32 @@ def handle(req, args):
         maximum = requested.get("maximumProtocolVersion", PROTOCOL_VERSION)
         if not isinstance(minimum, int) or not isinstance(maximum, int) or not minimum <= PROTOCOL_VERSION <= maximum:
             return response(op_id, "domainFailure", error="No mutually supported protocol version")
+        if not ARELLE_AVAILABLE:
+            message = "The Arelle runtime is not installed in the configured worker environment."
+            return response(op_id, "incompleteValidation", diagnostics=[diagnostic(
+                op_id, "XBR007", "error", message)], error=message)
+        if getattr(args, "profile_error", None):
+            message = "Installed profile verification failed: " + args.profile_error
+            return response(op_id, "domainFailure", diagnostics=[diagnostic(
+                op_id, "XBR015", "error", message)], error=message)
+        profile = getattr(args, "profile_manifest_data", None)
+        required_plugins = profile.get("requiredPlugins", []) if profile else []
+        missing_plugins = sorted(set(required_plugins) - set(args.plugin))
+        if missing_plugins:
+            message = "Required Arelle plugins were not configured: " + ", ".join(missing_plugins)
+            return response(op_id, "incompleteValidation", diagnostics=[diagnostic(
+                op_id, "XBR010", "error", message)], error=message)
         return response(op_id, "success", {
             "protocolVersion": PROTOCOL_VERSION,
             "engineVersion": ENGINE_VERSION,
             "capabilities": CAPABILITIES,
-            "arelleAvailable": ARELLE_AVAILABLE,
+            "arelleAvailable": True,
+            "profileSchemaVersion": profile.get("schemaVersion") if profile else None,
+            "profileId": profile.get("profileId") if profile else None,
+            "profileVersion": profile.get("version") if profile else None,
+            "profileDigest": profile.get("profileDigest") if profile else None,
+            "taxonomyEntryPoint": profile.get("entryPoint") if profile else None,
+            "requiredPlugins": required_plugins,
         })
 
     if operation == "shutdown":
@@ -314,11 +374,33 @@ def handle(req, args):
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
             ok, logs, concept_count = run_arelle(taxonomy_path, args)
+            plugin_failures = required_plugin_load_failures(
+                logs, profile.get("requiredPlugins", []) if profile else [])
+            if plugin_failures:
+                diags = [diagnostic(op_id, "XBR010", "error",
+                                    "Required Arelle plugin could not be loaded: " + plugin,
+                                    "plugin:" + plugin)
+                         for plugin in plugin_failures]
+                return response(op_id, "incompleteValidation", {"conceptCount": concept_count}, diags,
+                                "A required Arelle plugin is unavailable")
             diags = log_diagnostics(logs, op_id)
             if not ok or any(d["isBlocking"] for d in diags):
                 return response(op_id, "domainFailure", {"conceptCount": concept_count}, diags,
                                 "Arelle could not load the filing taxonomy")
-            return response(op_id, "success", {"conceptCount": concept_count}, diags)
+            relative_entry_point = os.path.relpath(taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
+            return response(op_id, "success", {
+                "engine": "Arelle",
+                "engineVersion": ENGINE_VERSION,
+                "capabilities": CAPABILITIES,
+                "profileSchemaVersion": profile.get("schemaVersion") if profile else None,
+                "profileId": profile.get("profileId") if profile else None,
+                "profileVersion": profile.get("version") if profile else None,
+                "profileDigest": profile.get("profileDigest") if profile else None,
+                "taxonomyEntryPoint": relative_entry_point,
+                "requiredPlugins": profile.get("requiredPlugins", []) if profile else [],
+                "conceptCount": concept_count,
+                "completed": True,
+            }, diags)
         except Exception as ex:
             return response(op_id, "domainFailure", error=str(ex)[:1000])
 
@@ -344,6 +426,17 @@ def handle(req, args):
                 path = Path(workdir) / "report.json"
                 path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
                 ok, logs, concept_count = run_arelle(path, args, workdir)
+                plugin_failures = required_plugin_load_failures(
+                    logs, profile.get("requiredPlugins", []) if profile else [])
+                if plugin_failures:
+                    diags = [diagnostic(op_id, "XBR010", "error",
+                                        "Required Arelle plugin could not be loaded: " + plugin,
+                                        "plugin:" + plugin)
+                             for plugin in plugin_failures]
+                    return response(op_id, "incompleteValidation", {
+                        "engine": "Arelle", "engineVersion": ENGINE_VERSION,
+                        "completed": False, "conceptCount": concept_count,
+                    }, diags, "A required Arelle plugin is unavailable")
                 diags = log_diagnostics(logs, op_id, workdir)
                 result = {"engine": "Arelle", "engineVersion": ENGINE_VERSION,
                           "completed": True, "conceptCount": concept_count}

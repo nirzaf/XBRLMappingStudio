@@ -92,6 +92,8 @@ public sealed class FilingProfileResolverTests
 
             Assert.True(first.Success);
             Assert.Equal("1.0.0", catalog.Profiles.Single(profile => profile.Profile.Digest == v1.Profile.Digest).Version);
+            Assert.Equal(FilingProfileManifest.CurrentSchemaVersion,
+                catalog.Profiles.Single(profile => profile.Profile.Digest == v1.Profile.Digest).SchemaVersion);
             Assert.Equal(v1.EntryPointPath,
                 catalog.Profiles.Single(profile => profile.Profile.Digest == v1.Profile.Digest).EntryPointPath);
             Assert.True(second.Success);
@@ -222,7 +224,9 @@ public sealed class FilingProfileResolverTests
             var manifestPath = Path.Combine(duplicate.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
             var json = File.ReadAllText(manifestPath);
             File.WriteAllText(manifestPath,
-                json.Replace("\"schemaVersion\":1,", "\"schemaVersion\":1,\"SchemaVersion\":1,", StringComparison.Ordinal));
+                json.Replace($"\"schemaVersion\":{FilingProfileManifest.CurrentSchemaVersion},",
+                    $"\"schemaVersion\":{FilingProfileManifest.CurrentSchemaVersion},\"SchemaVersion\":{FilingProfileManifest.CurrentSchemaVersion},",
+                    StringComparison.Ordinal));
 
             var changed = WriteInstalledProfile(root, "fixture-changed-profile", "1.0.0", "Revenue");
             var changedManifestPath = Path.Combine(changed.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
