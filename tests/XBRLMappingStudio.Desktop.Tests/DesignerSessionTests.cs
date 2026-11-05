@@ -603,6 +603,8 @@ public sealed class DesignerSessionTests
 
             var suggestion = Assert.Single(viewModel.AiSuggestions,
                 row => row.Concept == "synthetic:Revenue");
+            Assert.Contains("urn:synthetic:finance:1.0", suggestion.TaxonomyEvidenceDisplay);
+            Assert.Contains(SyntheticProfile.PresentationRole, suggestion.TaxonomyEvidenceDisplay);
             viewModel.SelectedSuggestion = suggestion;
             var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
             viewModel.ApplySuggestedMappingCommand.Execute(null);

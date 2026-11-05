@@ -18,10 +18,15 @@ public sealed record ChatRequest(
     string UserPrompt,
     IReadOnlyList<string> AllowedConcepts,
     IReadOnlyList<SourceFieldDescriptor> SourceFields,
-    int? MaxOutputTokens = null);
+    int? MaxOutputTokens = null,
+    IReadOnlyDictionary<string, IReadOnlyList<RankedCandidate>>? CandidatesBySourceField = null);
 
-/// <summary>A stable source identity and only the reviewed metadata safe to send for mapping.</summary>
-public sealed record SourceFieldDescriptor(string Id, string Name, string? Unit = null);
+/// <summary>A stable source identity and bounded context safe to use for concept retrieval.</summary>
+public sealed record SourceFieldDescriptor(
+    string Id,
+    string Name,
+    string? Unit = null,
+    string? PeriodType = null);
 
 /// <summary>A provider proposal tied to the exact source identity it addresses.</summary>
 public sealed record ProposedMapping(string SourceFieldId, string Concept);
@@ -166,7 +171,9 @@ public sealed class MicrosoftAiChatProvider(IChatClient client, string name = "M
 
     public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken)
     {
-        var prompt = $"{request.SystemPrompt}\nAllowed concepts:\n{string.Join("\n", request.AllowedConcepts)}\nSource fields:\n{request.UserPrompt}";
+        var perFieldCandidates = JsonSerializer.Serialize(request.CandidatesBySourceField ??
+            new Dictionary<string, IReadOnlyList<RankedCandidate>>(StringComparer.Ordinal));
+        var prompt = $"{request.SystemPrompt}\nAllowed concepts by source field (JSON):\n{perFieldCandidates}\nSource fields:\n{request.UserPrompt}";
         try
         {
             var response = await client.GetResponseAsync<ProposedMapping[]>(prompt,

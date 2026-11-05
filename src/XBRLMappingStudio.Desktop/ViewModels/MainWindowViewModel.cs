@@ -113,6 +113,20 @@ public sealed class SuggestionRow : ViewModelBase
     }
     public int Score { get; init; }
     public string Basis { get; init; } = "";
+    public TaxonomyCandidateEvidence? TaxonomyEvidence { get; init; }
+    public string TaxonomyEvidenceDisplay
+    {
+        get
+        {
+            if (TaxonomyEvidence is not { } evidence) return "";
+            var roles = evidence.PresentationRoles.Count == 0
+                ? "none loaded"
+                : string.Join(", ", evidence.PresentationRoles);
+            if (evidence.TotalPresentationRoleCount > evidence.PresentationRoles.Count)
+                roles += $" (+{evidence.TotalPresentationRoleCount - evidence.PresentationRoles.Count} more)";
+            return $"{evidence.Label} · {{{evidence.NamespaceUri}}}{evidence.LocalName} · {evidence.DataType}/{evidence.PeriodType} · {evidence.ProfileId} {evidence.TaxonomyVersion} · roles: {roles}";
+        }
+    }
     public SuggestionState ReviewState
     {
         get => _reviewState;
@@ -2620,10 +2634,13 @@ public sealed class MainWindowViewModel : ViewModelBase
             var sourceColumn = SelectedSourceColumn;
             var id = $"{sourceBindingId}:{sourceColumn}";
             var targetNodeId = SelectedNode.NodeId;
+            var targetFact = Session.Project.Nodes.Single(node => node.NodeId == targetNodeId);
+            var contextUnit = targetFact.Parameters.GetValueOrDefault("unit")?.ToString();
+            var contextPeriod = targetFact.Parameters.GetValueOrDefault("periodType")?.ToString();
             var projectDigest = Session.Project.ComputeSemanticDigest();
             var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
             var batch = await service.SuggestAsync(
-                new[] { new SourceFieldDescriptor(id, sourceColumn) }, CancellationToken.None);
+                new[] { new SourceFieldDescriptor(id, sourceColumn, contextUnit, contextPeriod) }, CancellationToken.None);
             if (!string.Equals(SelectedSourceBindingId, sourceBindingId, StringComparison.Ordinal)
                 || !string.Equals(SelectedSourceColumn, sourceColumn, StringComparison.Ordinal)
                 || !string.Equals(SelectedNode?.NodeId, targetNodeId, StringComparison.Ordinal)
@@ -2659,6 +2676,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Concept = s.Draft.Concept ?? "",
                 Score = s.Score,
                 Basis = s.Basis,
+                TaxonomyEvidence = s.TaxonomyEvidence,
                 ReviewState = session.StateOf(s.SuggestionId)
             }));
             SelectedSuggestion = AiSuggestions.FirstOrDefault();

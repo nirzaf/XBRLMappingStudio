@@ -74,7 +74,68 @@ public class ProviderContractTests
         Assert.NotEmpty(provider.LastRequest!.AllowedConcepts);
         Assert.All(provider.LastRequest.AllowedConcepts, name =>
             Assert.Contains(name, new[] { "synthetic:Revenue" }));
+        Assert.Equal(new[] { "synthetic:Revenue" }, provider.LastRequest.CandidatesBySourceField!["f1"]
+            .Select(candidate => candidate.QualifiedName));
         Assert.Equal(1000, provider.LastRequest.MaxOutputTokens);
+    }
+
+    [Fact]
+    public async Task ProviderCannotReuseAnotherFieldsCandidate()
+    {
+        var provider = new FakeProvider
+        {
+            Completer = _ => new ChatResponse(
+                new[] { new ProposedMapping("assets-field", "synthetic:Revenue") }, false, false)
+        };
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("sales-field", "Sales"),
+            new SourceFieldDescriptor("assets-field", "Assets")
+        }, default);
+
+        Assert.Empty(batch.Suggestions);
+        Assert.Contains(batch.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("this field's ranked candidates", StringComparison.Ordinal));
+        Assert.Contains("synthetic:Revenue", provider.LastRequest!.CandidatesBySourceField!["sales-field"]
+            .Select(candidate => candidate.QualifiedName));
+        Assert.DoesNotContain("synthetic:Revenue", provider.LastRequest.CandidatesBySourceField["assets-field"]
+            .Select(candidate => candidate.QualifiedName));
+    }
+
+    [Fact]
+    public async Task OfflineSuggestionCarriesExpandedNameProfileAndRoleEvidence()
+    {
+        var service = new AiSuggestionService(AiPolicy.Offline, TestProjects.Taxonomy());
+
+        var suggestion = Assert.Single((await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("f1", "Revenue", "USD", "duration")
+        }, default)).Suggestions);
+
+        Assert.Equal("synthetic:Revenue", suggestion.Draft.Concept);
+        Assert.Equal("urn:synthetic:finance:1.0", suggestion.TaxonomyEvidence!.NamespaceUri);
+        Assert.Equal("Revenue", suggestion.TaxonomyEvidence.LocalName);
+        Assert.Equal(SyntheticProfile.ProfileId, suggestion.TaxonomyEvidence.ProfileId);
+        Assert.Contains(SyntheticProfile.PresentationRole, suggestion.TaxonomyEvidence.PresentationRoles);
+        Assert.Contains("income-statement", string.Join(" ", suggestion.TaxonomyEvidence.PresentationRoles));
+    }
+
+    [Fact]
+    public async Task UnsupportedPeriodContextAbstainsBeforeProviderProbe()
+    {
+        var provider = new FakeProvider();
+        var service = Managed(new AiPolicy(AiMode.ManagedProvider), provider);
+
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("f1", "Revenue", "USD", "rolling")
+        }, default);
+
+        Assert.Empty(batch.Suggestions);
+        Assert.Equal(0, provider.ProbeCalls);
+        Assert.Contains(batch.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.AiInvalidDraft);
     }
 
     [Fact]

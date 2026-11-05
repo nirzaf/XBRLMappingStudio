@@ -56,6 +56,7 @@ public sealed class TaxonomyIndex
     private readonly IReadOnlyList<ConceptMetadata> _orderedConcepts;
     private readonly IReadOnlyDictionary<string, ConceptMetadata> _byQualifiedName;
     private readonly IReadOnlyDictionary<ExpandedConceptName, ConceptMetadata> _byExpandedName;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _presentationRolesByConcept;
 
     public TaxonomyIndex(FilingProfile profile, IEnumerable<PresentationLink>? links = null)
     {
@@ -80,6 +81,23 @@ public sealed class TaxonomyIndex
         _links = (links ?? (StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)
             ? SyntheticProfile.PresentationLinks
             : Array.Empty<PresentationLink>())).ToList();
+        var rolesByConcept = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (var link in _links)
+        {
+            AddRole(link.ParentQName, link.RoleUri);
+            AddRole(link.ChildQName, link.RoleUri);
+        }
+        _presentationRolesByConcept = rolesByConcept.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<string>)Array.AsReadOnly(pair.Value.Order(StringComparer.Ordinal).ToArray()),
+            StringComparer.Ordinal);
+
+        void AddRole(string qualifiedName, string roleUri)
+        {
+            if (!rolesByConcept.TryGetValue(qualifiedName, out var roles))
+                rolesByConcept.Add(qualifiedName, roles = new HashSet<string>(StringComparer.Ordinal));
+            roles.Add(roleUri);
+        }
     }
 
     public string ProfileId => _profile.ProfileId;
@@ -98,6 +116,12 @@ public sealed class TaxonomyIndex
         _byExpandedName.TryGetValue(new ExpandedConceptName(namespaceUri, localName), out var concept)
             ? concept
             : null;
+
+    /// <summary>Presentation roles in which this concept occurs as a parent or child.</summary>
+    public IReadOnlyList<string> PresentationRolesFor(string qualifiedName) =>
+        _presentationRolesByConcept.TryGetValue(qualifiedName, out var roles)
+            ? roles
+            : Array.Empty<string>();
 
     /// <summary>Whether this index is bound to the exact installed profile version.</summary>
     public bool IsCurrentFor(FilingProfile profile) =>
