@@ -80,7 +80,10 @@ def is_expired(req):
 
 def within_root(path, root):
     root_path = Path(root).resolve(strict=True)
-    target = Path(path).resolve(strict=True)
+    target_path = Path(path)
+    if not target_path.is_absolute():
+        target_path = root_path / target_path
+    target = target_path.resolve(strict=True)
     if os.path.commonpath((str(root_path), str(target))) != str(root_path):
         raise ValueError("Path escapes the configured taxonomy root")
     return target

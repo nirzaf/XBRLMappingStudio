@@ -58,7 +58,8 @@ public sealed class ArelleExecutionTests
             var stdout = await standardOutput;
             var stderr = await standardError;
 
-            Assert.Contains(process.ExitCode, new[] { 0, 1 });
+            Assert.True(new[] { 0, 1 }.Contains(process.ExitCode),
+                $"CLI exited with {process.ExitCode}. stdout: {stdout}{Environment.NewLine}stderr: {stderr}");
             Assert.Contains(SyntheticProfile.TaxonomyFileName, stdout, StringComparison.Ordinal);
             Assert.DoesNotContain("Arelle validation could not start", stderr, StringComparison.Ordinal);
         }
@@ -111,7 +112,8 @@ public sealed class ArelleExecutionTests
                 preview: false,
                 CancellationToken.None);
 
-            Assert.Contains(result.Manifest.Outcome, new[] { RunOutcome.Success, RunOutcome.SuccessWithWarnings });
+            Assert.True(result.Manifest.Outcome is RunOutcome.Success or RunOutcome.SuccessWithWarnings,
+                $"Run outcome was {result.Manifest.Outcome}. Diagnostics: {string.Join(Environment.NewLine, result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}"))}");
             Assert.Single(result.Facts);
             Assert.DoesNotContain(result.Manifest.Diagnostics, diagnostic => diagnostic.IsBlocking);
             using var report = JsonDocument.Parse(result.XbrlJson);
