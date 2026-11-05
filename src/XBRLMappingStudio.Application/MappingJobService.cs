@@ -452,6 +452,20 @@ public sealed class MappingJobService
             });
         }
 
+        if (facts.Count == 0)
+        {
+            context.Diagnostics.Error(
+                DiagnosticCodes.XbrRequiredCheckMissing,
+                DiagnosticSubsystem.XBRL,
+                DiagnosticStage.Validation,
+                "The mapping produced no XBRL facts. Verify the selected source rows and reporting-year filters before validation.",
+                operationId: opId);
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, facts, "");
+        }
+
         string json;
         try
         {
