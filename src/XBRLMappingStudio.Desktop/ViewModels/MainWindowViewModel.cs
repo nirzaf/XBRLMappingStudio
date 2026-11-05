@@ -117,6 +117,18 @@ public sealed record DestinationKeyOption(IReadOnlyList<string> Columns)
 
 public sealed record DestinationKindOption(string Kind, string Display);
 
+public sealed record AdapterCapabilityOption(
+    string Kind,
+    string Display,
+    bool Allowed,
+    string OperationSummary,
+    string? Reason)
+{
+    public string Summary => Allowed
+        ? $"{Display}: {OperationSummary}."
+        : $"{Display}: unavailable — {Reason}";
+}
+
 /// <summary>
 /// Root window view model. Hosts a real <see cref="DesignerSession"/> over a
 /// <see cref="MappingProject"/>, a paged <see cref="TaxonomyIndex"/>-backed explorer, and
@@ -145,6 +157,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private bool _isSourceLoading;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
     private static readonly DestinationKindOption SqliteDestinationKind = new("sqlite", "SQLite fact table");
+    private string _destinationCapabilityStatus = "SQLite fact table: transactional fact publication.";
     private DestinationKindOption _selectedDestinationKind = SqliteDestinationKind;
     private string? _destinationPath;
     private string? _destinationTable;
@@ -231,20 +244,36 @@ public sealed class MainWindowViewModel : ViewModelBase
     public bool IsProjectDirty => !StringComparer.Ordinal.Equals(
         _savedProjectSnapshot, ProjectSerializer.Serialize(Session.Project));
     public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
-    public IReadOnlyList<DestinationKindOption> DestinationKindOptions { get; } = Array.AsReadOnly(new[]
+    public IReadOnlyList<AdapterCapabilityOption> SourceCapabilities { get; } = BuildSourceCapabilities();
+    public IReadOnlyList<AdapterCapabilityOption> TargetCapabilities { get; } = BuildTargetCapabilities();
+    public string SourceCapabilitySummary => FormatCapabilitySummary(SourceCapabilities);
+    public string TargetCapabilitySummary => FormatCapabilitySummary(TargetCapabilities);
+    public IReadOnlyList<DestinationKindOption> DestinationKindOptions { get; } = BuildDestinationKindOptions();
+    public string DestinationCapabilityStatus
     {
-        SqliteDestinationKind,
-        new DestinationKindOption("csv", "CSV records"),
-        new DestinationKindOption("excel", "Excel workbook"),
-        new DestinationKindOption("json", "JSON records"),
-        new DestinationKindOption("xml", "XML records")
-    });
+        get => _destinationCapabilityStatus;
+        private set => Set(ref _destinationCapabilityStatus, value);
+    }
     public DestinationKindOption SelectedDestinationKind
     {
         get => _selectedDestinationKind;
         set
         {
-            if (!Set(ref _selectedDestinationKind, value)) return;
+            var suitability = MappingJobService.DescribeTargetSuitability(
+                new SourceConnection("destination", value.Kind, Path: null));
+            if (!suitability.Allowed)
+            {
+                DestinationCapabilityStatus = $"Cannot use {value.Display} as a target. {suitability.Reason}";
+                StatusText = DestinationCapabilityStatus;
+                return;
+            }
+
+            DestinationCapabilityStatus = DescribeSelectedTarget(value, suitability);
+            if (!Set(ref _selectedDestinationKind, value))
+            {
+                Raise(nameof(DestinationCapabilityStatus));
+                return;
+            }
             ClearDestinationSelection();
             Raise(nameof(IsSqliteDestination));
             Raise(nameof(IsFileDestination));
@@ -374,6 +403,120 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string SelectedFactPeriodType { get => _selectedFactPeriodType; set => Set(ref _selectedFactPeriodType, value); }
     public string SelectedFactDecimals { get => _selectedFactDecimals; set => Set(ref _selectedFactDecimals, value); }
     public IReadOnlyList<string> FactPeriodTypes { get; } = new[] { "duration", "instant" };
+
+    private static IReadOnlyList<AdapterCapabilityOption> BuildSourceCapabilities()
+    {
+        var definitions = new (string Kind, string Display)[]
+        {
+            ("excel", "Excel"),
+            ("csv", "CSV"),
+            ("json", "JSON"),
+            ("xml", "XML"),
+            ("xbrl-report", "xBRL-JSON"),
+            ("sqlite", "SQLite"),
+            ("pdf-digital", "Digital PDF"),
+            ("oracle", "Oracle database")
+        };
+        return Array.AsReadOnly(definitions.Select(definition =>
+        {
+            var suitability = MappingJobService.DescribeSourceSuitability(
+                new SourceConnection("capability", definition.Kind, Path: null));
+            return new AdapterCapabilityOption(definition.Kind, definition.Display, suitability.Allowed,
+                suitability.Capabilities is null ? string.Empty : DescribeOperations(suitability.Capabilities, source: true),
+                suitability.Reason);
+        }).ToArray());
+    }
+
+    private static IReadOnlyList<AdapterCapabilityOption> BuildTargetCapabilities()
+    {
+        var definitions = new (string Kind, string Display)[]
+        {
+            ("sqlite", "SQLite"),
+            ("csv", "CSV"),
+            ("excel", "Excel"),
+            ("json", "JSON"),
+            ("xml", "XML"),
+            ("xbrl-report", "xBRL-JSON"),
+            ("pdf-digital", "PDF output"),
+            ("oracle", "Oracle database")
+        };
+        return Array.AsReadOnly(definitions.Select(definition =>
+        {
+            var suitability = MappingJobService.DescribeTargetSuitability(
+                new SourceConnection("capability", definition.Kind, Path: null));
+            return new AdapterCapabilityOption(definition.Kind, definition.Display, suitability.Allowed,
+                suitability.Capabilities is null ? string.Empty
+                    : DescribeTargetOperations(suitability.Capabilities, definition.Kind),
+                suitability.Reason);
+        }).ToArray());
+    }
+
+    private static IReadOnlyList<DestinationKindOption> BuildDestinationKindOptions()
+    {
+        var definitions = new[]
+        {
+            SqliteDestinationKind,
+            new DestinationKindOption("csv", "CSV records"),
+            new DestinationKindOption("excel", "Excel workbook"),
+            new DestinationKindOption("json", "JSON records"),
+            new DestinationKindOption("xml", "XML records")
+        };
+        return Array.AsReadOnly(definitions.Where(option =>
+            MappingJobService.DescribeTargetSuitability(
+                new SourceConnection("destination", option.Kind, Path: null)).Allowed).ToArray());
+    }
+
+    private static string DescribeOperations(AdapterCapabilities capabilities, bool source)
+    {
+        var operations = source
+            ? new[]
+            {
+                (capabilities.SupportsSchemaInspection, "inspect"),
+                (capabilities.SupportsSampling, "sample"),
+                (capabilities.SupportsReading, "read"),
+                (capabilities.SupportsLineage, "lineage")
+            }
+            : new[]
+            {
+                (capabilities.SupportsStagedWrite, "staged output"),
+                (capabilities.SupportsPublication, "publish"),
+                (capabilities.SupportsLineage, "lineage")
+            };
+        return string.Join(", ", operations.Where(operation => operation.Item1).Select(operation => operation.Item2));
+    }
+
+    private static string DescribeTargetOperations(AdapterCapabilities capabilities, string kind)
+        => StringComparer.Ordinal.Equals(kind, DestinationPlanValidator.SupportedKind)
+            ? "transactional fact upsert"
+            : DescribeOperations(capabilities, source: false);
+
+    private static string DescribeSelectedTarget(DestinationKindOption option, TargetSuitability suitability)
+        => $"{option.Display}: {DescribeTargetOperations(suitability.Capabilities!, suitability.Kind)}.";
+
+    private static string FormatCapabilitySummary(IReadOnlyList<AdapterCapabilityOption> capabilities)
+    {
+        var available = capabilities.Where(option => option.Allowed)
+            .GroupBy(option => option.OperationSummary, StringComparer.Ordinal)
+            .Select(group => $"{string.Join("/", group.Select(option => option.Display))} ({group.Key})");
+        var unavailable = capabilities.Where(option => !option.Allowed)
+            .Select(option => $"{option.Display} — {FormatCapabilityReason(option)}");
+        var parts = new List<string>();
+        var ready = string.Join("; ", available);
+        if (ready.Length > 0) parts.Add($"Ready: {ready}.");
+        var notReady = string.Join("; ", unavailable);
+        if (notReady.Length > 0) parts.Add($"Unavailable: {notReady}.");
+        return string.Join(" ", parts);
+    }
+
+    private static string FormatCapabilityReason(AdapterCapabilityOption option) => option.Kind switch
+    {
+        "xbrl-report" => "input only; no report output contract",
+        "pdf-digital" when StringComparer.Ordinal.Equals(option.Display, "Digital PDF") =>
+            "not qualified (PDF-01 through PDF-08)",
+        "pdf" or "pdf-digital" => "no qualified PDF writer",
+        "oracle" => "provider not qualified",
+        _ => option.Reason ?? "operation unavailable"
+    };
 
     public DesignerSession Session => _session;
 
@@ -923,6 +1066,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         get
         {
+            if (!MappingJobService.DescribeTargetSuitability(
+                    new SourceConnection("destination", SelectedDestinationKind.Kind, Path: _destinationPath)).Allowed)
+                return false;
             if (ProjectPath is null || IsDestinationLoading || _destinationPath is null
                 || !DestinationSchemaIsValid || !IsDestinationSchemaConfirmed)
                 return false;
@@ -975,6 +1121,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(DestinationPreviewButtonText));
         Raise(nameof(DestinationPublishButtonText));
         Raise(nameof(DestinationGuidance));
+        Raise(nameof(DestinationCapabilityStatus));
     }
 
     private void SaveDestinationPlan()

@@ -841,6 +841,46 @@ public sealed class DesignerSessionTests
         }
     }
 
+    [Fact]
+    public void AdapterCapabilities_AreVisibleBeforeSourceAndTargetSelection()
+    {
+        var viewModel = new MainWindowViewModel(Project());
+
+        Assert.Contains("Excel/CSV/JSON/XML/xBRL-JSON/SQLite", viewModel.SourceCapabilitySummary,
+            StringComparison.Ordinal);
+        Assert.Contains("Digital PDF", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("PDF-01 through PDF-08", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("Oracle database", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("inspect, sample, read, lineage", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("Ready: SQLite (transactional fact upsert)", viewModel.TargetCapabilitySummary,
+            StringComparison.Ordinal);
+        Assert.Contains("CSV/Excel/JSON/XML (staged output, publish, lineage)",
+            viewModel.TargetCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("xBRL-JSON", viewModel.TargetCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("input only", viewModel.TargetCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("PDF output", viewModel.TargetCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("Oracle database", viewModel.TargetCapabilitySummary, StringComparison.Ordinal);
+
+        Assert.Equal(new[] { "sqlite", "csv", "excel", "json", "xml" },
+            viewModel.DestinationKindOptions.Select(option => option.Kind));
+    }
+
+    [Fact]
+    public void UnsupportedDestinationSelection_IsRefusedWithVisibleCapabilityReason()
+    {
+        var viewModel = new MainWindowViewModel(Project());
+        var selected = viewModel.SelectedDestinationKind;
+
+        viewModel.SelectedDestinationKind = new DestinationKindOption("oracle", "Oracle database");
+
+        Assert.Equal(selected, viewModel.SelectedDestinationKind);
+        Assert.Contains("Cannot use Oracle database as a target", viewModel.DestinationCapabilityStatus,
+            StringComparison.Ordinal);
+        Assert.Contains("not implemented or qualified", viewModel.DestinationCapabilityStatus,
+            StringComparison.Ordinal);
+        Assert.Equal(viewModel.DestinationCapabilityStatus, viewModel.StatusText);
+    }
+
     private static async Task CreateFactDatabaseAsync(string path)
     {
         await using var database = new SqliteConnection($"Data Source={path};Pooling=False");

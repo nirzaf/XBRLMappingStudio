@@ -12,14 +12,16 @@ namespace XBRLMappingStudio.Ops.Tests;
 public sealed class AdapterCapabilitySurfacingTests
 {
     [Theory]
-    // Write-capable kinds: CSV, Excel output, JSON (IO05 writer) and XML (IO06 writer).
+    // Supported sinks: transactional SQLite publication and staged CSV/XLSX/JSON/XML files.
+    [InlineData("sqlite", true)]
     [InlineData("csv", true)]
     [InlineData("excel", true)]
     [InlineData("json", true)]
     [InlineData("xml", true)]
-    // Read-only kinds exposed by the pipeline today.
+    // Read-only kinds exposed by the pipeline today, plus conditional/unknown providers.
     [InlineData("xbrl-report", false)]
-    [InlineData("sqlite", false)]
+    [InlineData("pdf-digital", false)]
+    [InlineData("oracle", false)]
     // Unknown kind: no target adapter exists.
     [InlineData("db2", false)]
     public void DescribeTargetSuitability_ReflectsDeclaredCapabilities(string kind, bool expected)
@@ -51,17 +53,51 @@ public sealed class AdapterCapabilitySurfacingTests
     }
 
     [Fact]
+    public void DescribeTargetSuitability_UsesDedicatedTransactionalPublisherForSqlite()
+    {
+        var result = MappingJobService.DescribeTargetSuitability(
+            new SourceConnection("b1", "sqlite", Path: null));
+
+        Assert.True(result.Allowed);
+        Assert.Null(result.Reason);
+        Assert.NotNull(result.Capabilities);
+        Assert.True(result.Capabilities!.AllowsWriteTarget);
+        Assert.True(result.Capabilities.SupportsPublication);
+    }
+
+    [Fact]
     public void DescribeSourceSuitability_ReflectsDeclaredCapabilities()
     {
-        // Every built-in kind supports reading; the sqlite target publisher does not
-        // advertise itself as a source.
         foreach (var kind in new[] { "excel", "csv", "json", "xml", "xbrl-report", "sqlite" })
         {
             var conn = new SourceConnection("b1", kind, Path: null);
-            Assert.True(MappingJobService.DescribeSourceSuitability(conn).Allowed,
-                $"Expected '{kind}' to be readable.");
+            var result = MappingJobService.DescribeSourceSuitability(conn);
+            Assert.True(result.Allowed, $"Expected '{kind}' to be readable.");
+            Assert.Null(result.Reason);
+            Assert.NotNull(result.Capabilities);
+            Assert.True(result.Capabilities!.SupportsReading);
         }
+
+        var digitalPdf = MappingJobService.DescribeSourceSuitability(
+            new SourceConnection("b1", "pdf-digital", Path: null));
+        Assert.False(digitalPdf.Allowed);
+        Assert.Contains("PDF-01 through PDF-08", digitalPdf.Reason, StringComparison.Ordinal);
+
         var unknown = new SourceConnection("b1", "oracle", Path: null);
-        Assert.False(MappingJobService.DescribeSourceSuitability(unknown).Allowed);
+        var unavailableProvider = MappingJobService.DescribeSourceSuitability(unknown);
+        Assert.False(unavailableProvider.Allowed);
+        Assert.Contains("not implemented or qualified", unavailableProvider.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DescribeSuitability_EnforcesDirectionForReportAndSqlite()
+    {
+        var report = new SourceConnection("b1", "xbrl-report", Path: null);
+        Assert.True(MappingJobService.DescribeSourceSuitability(report).Allowed);
+        Assert.False(MappingJobService.DescribeTargetSuitability(report).Allowed);
+
+        var sqlite = new SourceConnection("b1", "sqlite", Path: null);
+        Assert.True(MappingJobService.DescribeSourceSuitability(sqlite).Allowed);
+        Assert.True(MappingJobService.DescribeTargetSuitability(sqlite).Allowed);
     }
 }

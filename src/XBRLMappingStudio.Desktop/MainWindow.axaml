@@ -60,6 +60,9 @@
       <Border Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
         <DockPanel>
           <TextBlock DockPanel.Dock="Top" Text="Source" FontWeight="Bold" />
+          <TextBlock DockPanel.Dock="Top" Text="{Binding SourceCapabilitySummary}"
+                     TextWrapping="Wrap" MaxHeight="112" Margin="0,3,0,6"
+                     AutomationProperties.Name="Source adapter capabilities and unavailable providers" />
           <Button DockPanel.Dock="Top" Content="Choose source file…" Command="{Binding ChooseSourceCommand}"
                   AutomationProperties.Name="Choose source file" />
           <ComboBox DockPanel.Dock="Top" ItemsSource="{Binding SourceTables}"
@@ -125,6 +128,7 @@
       <Grid Grid.Column="1" RowDefinitions="*,220">
         <controls:GraphCanvas x:Name="Canvas"
                               Grid.Row="0"
+                              ClipToBounds="True"
                               Session="{Binding Session}"
                               Nodes="{Binding Nodes}"
                               Edges="{Binding Edges}"
@@ -161,6 +165,9 @@
                        AutomationProperties.Name="Fact decimals" />
               <Button Content="Apply fact properties" Command="{Binding ApplyFactPropertiesCommand}" />
             </StackPanel>
+            <TextBlock Text="{Binding TargetCapabilitySummary}" TextWrapping="Wrap"
+                       MaxHeight="108" Margin="0,4,0,0"
+                       AutomationProperties.Name="Target adapter capabilities and refusal reasons" />
             <Expander Header="Destination" IsExpanded="False" Margin="0,8,0,0">
               <ScrollViewer MaxHeight="300">
                 <StackPanel Spacing="6" Margin="0,6,0,0">
@@ -174,6 +181,8 @@
                       </DataTemplate>
                     </ComboBox.ItemTemplate>
                   </ComboBox>
+                  <TextBlock Text="{Binding DestinationCapabilityStatus}" TextWrapping="Wrap"
+                             AutomationProperties.Name="Selected destination capability status" />
                   <TextBlock Text="{Binding DestinationFormatDisplay}" TextWrapping="Wrap" />
                   <Button Content="{Binding DestinationPickerButtonText}"
                           Command="{Binding ChooseDestinationCommand}"

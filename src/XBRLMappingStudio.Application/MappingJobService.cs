@@ -879,23 +879,27 @@ public sealed class MappingJobService
     /// IO01 capability surfacing. The designer asks this before mapping starts so a
     /// read-only connector is visibly disabled as a target and an uncertified operation
     /// is described with a stable reason. The gate never throws: the desktop pane uses
-    /// <see cref="TargetSuitability.Reason"/> to decorate the option in place, and the
-    /// CLI refuses the binding pre-flight rather than at publication.
+    /// <see cref="TargetSuitability.Reason"/> to decorate unsupported options. SQLite
+    /// publication is handled by <see cref="SqliteTargetPublisher"/>, not by a file
+    /// <see cref="ITargetAdapter"/>, so its supported target capability is described here.
     /// </summary>
     public static TargetSuitability DescribeTargetSuitability(SourceConnection conn)
     {
+        if (StringComparer.Ordinal.Equals(conn.Kind, DestinationPlanValidator.SupportedKind))
+            return new TargetSuitability(true, conn.Kind, Reason: null, AdapterCapabilities.WriteOnly);
+
         try
         {
             var adapter = BuildTargetAdapter(conn);
             var caps = adapter.Capabilities;
             if (!caps.AllowsWriteTarget)
                 return new TargetSuitability(false, adapter.Kind,
-                    $"Adapter '{adapter.Kind}' does not declare a staged write or publication path.");
-            return new TargetSuitability(true, adapter.Kind, Reason: null);
+                    $"Adapter '{adapter.Kind}' does not declare a staged write or publication path.", caps);
+            return new TargetSuitability(true, adapter.Kind, Reason: null, caps);
         }
         catch (NotSupportedException ex)
         {
-            return new TargetSuitability(false, conn.Kind, ex.Message);
+            return new TargetSuitability(false, conn.Kind, DescribeUnsupportedTarget(conn.Kind, ex.Message));
         }
         catch (AdapterException ex)
         {
@@ -910,13 +914,32 @@ public sealed class MappingJobService
         ISourceAdapter adapter;
         try { adapter = BuildAdapter(conn); }
         catch (NotSupportedException ex)
+        { return new SourceSuitability(false, conn.Kind, DescribeUnsupportedSource(conn.Kind, ex.Message)); }
+        catch (AdapterException ex)
         { return new SourceSuitability(false, conn.Kind, ex.Message); }
         var caps = adapter.Capabilities;
         if (!caps.SupportsReading)
             return new SourceSuitability(false, adapter.Kind,
-                $"Adapter '{adapter.Kind}' does not declare a read path.");
-        return new SourceSuitability(true, adapter.Kind, Reason: null);
+                $"Adapter '{adapter.Kind}' does not declare a read path.", caps);
+        return new SourceSuitability(true, adapter.Kind, Reason: null, caps);
     }
+
+    private static string DescribeUnsupportedTarget(string kind, string fallback) => kind switch
+    {
+        "xbrl-report" => "xBRL-JSON reports are input-only; no report target contract exists.",
+        "pdf" or "pdf-digital" => "PDF output is unsupported; no qualified writer exists.",
+        "oracle" or "postgresql" or "sqlserver" or "mysql" or "mariadb" =>
+            $"The {kind} database target is not implemented or qualified in this build.",
+        _ => fallback
+    };
+
+    private static string DescribeUnsupportedSource(string kind, string fallback) => kind switch
+    {
+        "pdf" or "pdf-digital" => "PDF extraction and evidence review are pending qualification (PDF-01 through PDF-08).",
+        "oracle" or "postgresql" or "sqlserver" or "mysql" or "mariadb" =>
+            $"The {kind} database source is not implemented or qualified in this build.",
+        _ => fallback
+    };
 
     private static async Task<IReadOnlyList<InputIdentity>> RecordInputIdentities(
         IReadOnlyDictionary<string, SourceConnection> connections,
@@ -996,10 +1019,12 @@ public sealed record CompileOutcome(
 /// <summary>IO01 result of <see cref="MappingJobService.DescribeTargetSuitability"/>.
 /// A false <see cref="Allowed"/> carries a stable reason the desktop renders inline
 /// so the analyst sees "this connector cannot be chosen as a target" before mapping.</summary>
-public sealed record TargetSuitability(bool Allowed, string Kind, string? Reason);
+public sealed record TargetSuitability(bool Allowed, string Kind, string? Reason,
+    AdapterCapabilities? Capabilities = null);
 
 /// <summary>IO01 source-side analogue.</summary>
-public sealed record SourceSuitability(bool Allowed, string Kind, string? Reason);
+public sealed record SourceSuitability(bool Allowed, string Kind, string? Reason,
+    AdapterCapabilities? Capabilities = null);
 
 public sealed record JobResult(
     RunManifest Manifest,
