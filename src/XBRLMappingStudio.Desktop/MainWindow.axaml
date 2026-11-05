@@ -138,31 +138,161 @@
         </DockPanel>
       </Border>
 
-      <!-- Center: graph canvas + preview -->
-      <Grid Grid.Column="1" RowDefinitions="*,220">
-        <controls:GraphCanvas x:Name="Canvas"
-                              Grid.Row="0"
-                              Focusable="True"
-                              ClipToBounds="True"
-                              Session="{Binding Session}"
-                              Nodes="{Binding Nodes}"
-                              Edges="{Binding Edges}"
-                              AutomationProperties.Name="Mapping graph" />
-        <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
-          <DockPanel>
-            <TextBlock DockPanel.Dock="Top" Text="Preview facts" FontWeight="Bold" />
-            <ScrollViewer>
-              <ItemsControl ItemsSource="{Binding PreviewFacts}">
-                <ItemsControl.ItemTemplate>
-                  <DataTemplate x:DataType="vm:FactRow">
-                    <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
-                  </DataTemplate>
-                </ItemsControl.ItemTemplate>
-              </ItemsControl>
-            </ScrollViewer>
-          </DockPanel>
-        </Border>
-      </Grid>
+      <!-- Center: mapping workspace and evidence-focused PDF review -->
+      <TabControl Grid.Column="1">
+        <TabItem Header="Mapping">
+          <Grid RowDefinitions="*,220">
+            <controls:GraphCanvas x:Name="Canvas"
+                                  Grid.Row="0"
+                                  Focusable="True"
+                                  ClipToBounds="True"
+                                  Session="{Binding Session}"
+                                  Nodes="{Binding Nodes}"
+                                  Edges="{Binding Edges}"
+                                  AutomationProperties.Name="Mapping graph" />
+            <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
+              <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="Preview facts" FontWeight="Bold" />
+                <ScrollViewer>
+                  <ItemsControl ItemsSource="{Binding PreviewFacts}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:FactRow">
+                        <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </ScrollViewer>
+              </DockPanel>
+            </Border>
+          </Grid>
+        </TabItem>
+        <TabItem Header="PDF review" IsVisible="{Binding HasPdfDocument}"
+                 IsEnabled="{Binding CanEditPdfReview}">
+          <Grid RowDefinitions="Auto,*" ColumnDefinitions="300,*">
+            <Border Grid.ColumnSpan="2" Background="#FFF5D7" Padding="8">
+              <TextBlock Text="Digital PDF text is a review proposal, not a verified report. Check every value against its page evidence before approval."
+                         TextWrapping="Wrap" FontWeight="SemiBold"
+                         AutomationProperties.Name="PDF extraction and review disclaimer" />
+            </Border>
+            <Border Grid.Row="1" Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
+              <ScrollViewer>
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Table template" FontWeight="Bold" />
+                  <TextBlock Text="Row-label header" />
+                  <TextBox Text="{Binding PdfRowLabelHeader, Mode=TwoWay}"
+                           Watermark="Visible header, for example Description"
+                           AutomationProperties.Name="PDF row-label header" />
+                  <TextBlock Text="Visible year headers mapped to reporting years (header=year; separate with semicolons)" TextWrapping="Wrap" />
+                  <TextBox Text="{Binding PdfPeriodHeaders, Mode=TwoWay}"
+                           Watermark="2024=2024; 2023=2023"
+                           AutomationProperties.Name="PDF year header to reporting year declarations" />
+                  <ComboBox ItemsSource="{Binding PdfRowDirections}"
+                            SelectedItem="{Binding SelectedPdfRowDirection, Mode=TwoWay}"
+                            PlaceholderText="Choose row direction"
+                            AutomationProperties.Name="PDF table row direction">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:PdfRowDirectionOption">
+                        <TextBlock Text="{Binding Display}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
+                  <Expander Header="Explicit numeric policy" IsExpanded="True">
+                    <StackPanel Spacing="5" Margin="0,6,0,0">
+                      <TextBox Text="{Binding PdfDecimalSeparator, Mode=TwoWay}" Watermark="Decimal separator (one character)"
+                               AutomationProperties.Name="PDF decimal separator" />
+                      <TextBox Text="{Binding PdfGroupSeparator, Mode=TwoWay}" Watermark="Group separator (optional, one character)"
+                               AutomationProperties.Name="PDF group separator" />
+                      <CheckBox Content="Allow digit grouping" IsChecked="{Binding PdfAllowGrouping, Mode=TwoWay}"
+                                AutomationProperties.Name="Allow PDF numeric grouping" />
+                      <TextBox Text="{Binding PdfScaleFactor, Mode=TwoWay}" Watermark="Scale factor: 1, 1000, or 1000000"
+                               AutomationProperties.Name="PDF numeric scale factor" />
+                      <TextBox Text="{Binding PdfCurrencyCode, Mode=TwoWay}" Watermark="Currency code, for example EUR"
+                               AutomationProperties.Name="PDF currency code" />
+                      <CheckBox Content="Allow leading plus or minus sign" IsChecked="{Binding PdfAllowLeadingSign, Mode=TwoWay}"
+                                AutomationProperties.Name="Allow PDF leading sign" />
+                      <CheckBox Content="Allow parenthesized negative values" IsChecked="{Binding PdfAllowParenthesizedNegative, Mode=TwoWay}"
+                                AutomationProperties.Name="Allow PDF parenthesized negative values" />
+                      <CheckBox Content="Allow trailing minus sign" IsChecked="{Binding PdfAllowTrailingMinus, Mode=TwoWay}"
+                                AutomationProperties.Name="Allow PDF trailing minus sign" />
+                    </StackPanel>
+                  </Expander>
+                  <Button Content="Build value proposal" Command="{Binding BuildPdfTemplateCommand}"
+                          IsEnabled="{Binding HasPdfDocument}"
+                          AutomationProperties.Name="Build PDF table proposal from declared anchors" />
+                  <TextBlock Text="{Binding PdfTemplateStatus}" TextWrapping="Wrap"
+                             AutomationProperties.Name="PDF template reconstruction status" />
+                  <TextBlock Text="Reviewer identity to record" />
+                  <TextBox Text="{Binding PdfReviewer, Mode=TwoWay}" Watermark="Enter the reviewing person's identity"
+                           AutomationProperties.Name="PDF reviewer identity" />
+                  <TextBlock Text="This local entry records an identity; it does not authenticate the reviewer."
+                             TextWrapping="Wrap" FontSize="11" />
+                  <Button Content="Save approved values and validate review" Command="{Binding SavePdfReviewCommand}"
+                          AutomationProperties.Name="Save explicitly approved PDF review" />
+                  <TextBlock Text="{Binding PdfReviewStatus}" TextWrapping="Wrap"
+                             AutomationProperties.Name="PDF review status" />
+                  <TextBlock Text="Extracted value proposals" FontWeight="Bold" Margin="0,8,0,0" />
+                  <ListBox ItemsSource="{Binding PdfReviewValues}"
+                           SelectedItem="{Binding SelectedPdfReviewValue, Mode=TwoWay}"
+                           MinHeight="180" MaxHeight="300"
+                           AutomationProperties.Name="PDF value proposals; use arrow keys to inspect evidence">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:PdfReviewValueRow">
+                        <StackPanel Spacing="2" Margin="2,4">
+                          <TextBlock Text="{Binding Display}" TextWrapping="Wrap"
+                                     AutomationProperties.Name="{Binding Display}" />
+                          <TextBlock Text="{Binding EvidenceSummary}" TextWrapping="Wrap" FontSize="11"
+                                     AutomationProperties.Name="{Binding EvidenceSummary}" />
+                          <CheckBox Content="I checked this raw value against the highlighted page region"
+                                    IsChecked="{Binding IsApproved, Mode=TwoWay}"
+                                    IsEnabled="{Binding CanApprove}"
+                                    AutomationProperties.Name="{Binding ApprovalStatus}" />
+                        </StackPanel>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+            <Grid Grid.Row="1" Grid.Column="1" RowDefinitions="Auto,*,Auto">
+              <StackPanel Orientation="Horizontal" Spacing="6" Margin="6">
+                <Button Content="‹ Previous page" Command="{Binding PreviousPdfPageCommand}"
+                        IsEnabled="{Binding HasPreviousPdfPage}" AutomationProperties.Name="Previous PDF page" />
+                <ComboBox ItemsSource="{Binding PdfPageNumbers}"
+                          SelectedItem="{Binding CurrentPdfPageNumber, Mode=TwoWay}"
+                          AutomationProperties.Name="PDF page number" />
+                <Button Content="Next page ›" Command="{Binding NextPdfPageCommand}"
+                        IsEnabled="{Binding HasNextPdfPage}" AutomationProperties.Name="Next PDF page" />
+                <TextBlock Text="{Binding PdfPageSummary}" VerticalAlignment="Center"
+                           AutomationProperties.Name="Current PDF page and source digest" />
+              </StackPanel>
+              <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                            AutomationProperties.Name="PDF page preview scroll area">
+                <controls:PdfPagePreview Page="{Binding CurrentPdfPage}"
+                                         Highlight="{Binding SelectedPdfEvidence}"
+                                         ZoomFactor="{Binding PdfReviewZoom}"
+                                         Focusable="False"
+                                         AutomationProperties.Name="Extracted PDF text with selected evidence region highlighted" />
+              </ScrollViewer>
+              <DockPanel Grid.Row="2" Margin="6">
+                <TextBlock DockPanel.Dock="Top" Text="Page zoom" AutomationProperties.Name="PDF page zoom" />
+                <Slider Minimum="0.5" Maximum="3" Value="{Binding PdfReviewZoom, Mode=TwoWay}"
+                        AutomationProperties.Name="PDF page zoom level" />
+                <Expander DockPanel.Dock="Bottom" Header="Keyboard-accessible extracted words">
+                  <ListBox ItemsSource="{Binding PdfPageWords}" Height="150"
+                           AutomationProperties.Name="Extracted evidence text for the current PDF page">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:PdfReviewWord">
+                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                   AutomationProperties.Name="{Binding AccessibleName}" />
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                </Expander>
+              </DockPanel>
+            </Grid>
+          </Grid>
+        </TabItem>
+      </TabControl>
 
       <!-- Right: properties + diagnostics (UI04) -->
       <Border Grid.Column="2" BorderBrush="#33000000" BorderThickness="1,0,0,0" Padding="8">

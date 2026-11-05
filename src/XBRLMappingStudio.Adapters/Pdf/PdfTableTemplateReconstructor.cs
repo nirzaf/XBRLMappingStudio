@@ -517,7 +517,7 @@ public static class PdfTableTemplateReconstructor
         occurrence++;
         return new PdfTableRow(occurrence,
             string.Join(" ", labelWords.Select(word => word.Text)),
-            Evidence(page, line.Words),
+            Evidence(page, labelWords),
             cells);
     }
 
