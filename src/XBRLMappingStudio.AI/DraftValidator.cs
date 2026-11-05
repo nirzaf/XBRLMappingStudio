@@ -46,8 +46,10 @@ public sealed class DraftValidator
         FilingProfile profile,
         IReadOnlySet<string>? knownDimensionMembers = null)
     {
-        _taxonomy = taxonomy;
-        _profile = profile;
+        _taxonomy = taxonomy ?? throw new ArgumentNullException(nameof(taxonomy));
+        _profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        if (!_taxonomy.IsCurrentFor(_profile))
+            throw new ArgumentException("Draft validation requires the exact selected taxonomy profile and digest.", nameof(profile));
         _knownDimensionMembers = knownDimensionMembers;
     }
 
@@ -62,7 +64,7 @@ public sealed class DraftValidator
         }
 
         // Structural pass: build the proposed subgraph and run the ordinary graph validator.
-        var project = BuildDraftGraph(drafts);
+        var project = BuildDraftGraph(drafts, _profile);
         var structural = new GraphValidator(FunctionCatalog.Default).Validate(new MappingGraph(project));
         foreach (var diag in structural.Items)
             bag.Error(diag.Code, diag.Subsystem, diag.Stage, diag.Message,
@@ -141,14 +143,14 @@ public sealed class DraftValidator
     /// incompatible <see cref="DraftMapping.SourceShape"/>; those flow through the same
     /// graph construction so the structural validator rejects them.
     /// </summary>
-    private static MappingProject BuildDraftGraph(IReadOnlyList<DraftMapping> drafts)
+    private static MappingProject BuildDraftGraph(IReadOnlyList<DraftMapping> drafts, FilingProfile profile)
     {
         var project = new MappingProject
         {
             ProjectId = "draft-" + Guid.Empty.ToString("N"),
             Name = "ai-draft",
-            ProfileId = SyntheticProfile.ProfileId,
-            ProfileDigest = "draft",
+            ProfileId = profile.ProfileId,
+            ProfileDigest = profile.Digest,
         };
 
         project.Nodes.Add(new MappingNode

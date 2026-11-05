@@ -1,5 +1,6 @@
 using System.Text.Json;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.AI;
@@ -13,7 +14,44 @@ public sealed record Suggestion(
     int Score)
 {
     public TaxonomyCandidateEvidence? TaxonomyEvidence { get; init; }
+    public MappingRecommendation? Recommendation { get; init; }
+    public bool IsAnalystEdited { get; init; }
 }
+
+public enum MappingAspectReviewStatus
+{
+    Provided,
+    FromTaxonomy,
+    NeedsReview,
+    NotProposed,
+    RunContext
+}
+
+/// <summary>One explicit fact, assumption or unresolved aspect in an AI recommendation (AIM03).</summary>
+public sealed record MappingAspectAssessment(
+    string Aspect,
+    string? Value,
+    MappingAspectReviewStatus Status,
+    string Explanation);
+
+/// <summary>A non-executable, deterministic function proposal. Current retrieval creates none.</summary>
+public sealed record DeterministicTransformationProposal(
+    string FunctionId,
+    IReadOnlyDictionary<string, string> Parameters,
+    string Rationale);
+
+/// <summary>
+/// Review data kept separate from <see cref="DraftMapping"/> and the executable graph.
+/// Transformations are proposals only; graph mutation uses the separately validated draft.
+/// </summary>
+public sealed record MappingRecommendation(
+    string SourceFieldId,
+    string SourceFieldName,
+    TaxonomyCandidateEvidence Candidate,
+    IReadOnlyList<TaxonomyCandidateEvidence> Alternatives,
+    IReadOnlyList<MappingAspectAssessment> AspectAssessments,
+    IReadOnlyList<DeterministicTransformationProposal> ProposedTransformations,
+    IReadOnlyList<string> AllowedDeterministicTransformationIds);
 
 /// <summary>A full suggestion round plus any subsystem diagnostics raised producing it.</summary>
 public sealed record SuggestionBatch(
@@ -37,6 +75,23 @@ public sealed class AiSuggestionService
     private const int MaxCandidateConceptsPerField = 10;
     private const int MaxProviderRequestBytes = 1_048_576;
     private const int MaxProviderResponseBytes = 1_048_576;
+    private static readonly IReadOnlySet<string> DeterministicTransformationNodeTypes =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            NodeTypeConstants.ParseDecimal,
+            NodeTypeConstants.Scale,
+            NodeTypeConstants.ChangeSign,
+            NodeTypeConstants.Coalesce,
+            NodeTypeConstants.Round,
+            NodeTypeConstants.Ratio
+        };
+    private static readonly IReadOnlyList<string> AllowedDeterministicTransformationIds =
+        Array.AsReadOnly(FunctionCatalog.Default.All
+            .Where(signature => signature.IsDeterministic
+                && DeterministicTransformationNodeTypes.Contains(signature.NodeType))
+            .Select(signature => signature.NodeType)
+            .Order(StringComparer.Ordinal)
+            .ToArray());
 
     private readonly AiPolicy _policy;
     private readonly IChatClientProvider _provider;
@@ -288,7 +343,11 @@ public sealed class AiSuggestionService
                 Basis: "provider via " + candidate.Basis,
                 Score: candidate.Score)
             {
-                TaxonomyEvidence = candidate.Evidence
+                TaxonomyEvidence = candidate.Evidence,
+                Recommendation = CreateRecommendation(
+                    sourceField,
+                    candidate,
+                    rankedCandidatesByField[sourceField.Id])
             });
         }
 
@@ -329,9 +388,69 @@ public sealed class AiSuggestionService
                 Basis: candidate.Basis,
                 Score: candidate.Score)
             {
-                TaxonomyEvidence = candidate.Evidence
+                TaxonomyEvidence = candidate.Evidence,
+                Recommendation = CreateRecommendation(field, candidate, candidates)
             };
         }
+    }
+
+    private MappingRecommendation CreateRecommendation(
+        SourceFieldDescriptor field,
+        RankedCandidate candidate,
+        IReadOnlyList<RankedCandidate> rankedCandidates)
+    {
+        var concept = _taxonomy.Get(candidate.QualifiedName)!;
+        var unitKnown = concept.DataType != "monetary" || !string.IsNullOrWhiteSpace(field.Unit);
+        var periodKnown = field.PeriodType is not null;
+        var assessments = new[]
+        {
+            new MappingAspectAssessment(
+                "source field", field.Name, MappingAspectReviewStatus.Provided,
+                $"Bound to source identity '{field.Id}'."),
+            new MappingAspectAssessment(
+                "concept", candidate.QualifiedName, MappingAspectReviewStatus.FromTaxonomy,
+                $"Resolved in profile '{candidate.Evidence.ProfileId}' at digest '{candidate.Evidence.ProfileDigest}'."),
+            new MappingAspectAssessment(
+                "unit", concept.DataType == "monetary" ? field.Unit : null,
+                concept.DataType != "monetary" ? MappingAspectReviewStatus.FromTaxonomy
+                    : unitKnown ? MappingAspectReviewStatus.Provided : MappingAspectReviewStatus.NeedsReview,
+                concept.DataType != "monetary" ? "This concept is not monetary."
+                    : unitKnown ? "Uses the supplied unit context; verify it matches the source values."
+                    : "A monetary unit is required and was not supplied."),
+            new MappingAspectAssessment(
+                "scale", null, MappingAspectReviewStatus.NeedsReview,
+                "Scale was not inferred; verify source headings and raw values before acceptance."),
+            new MappingAspectAssessment(
+                "transformation", null, MappingAspectReviewStatus.NotProposed,
+                "No executable transformation was proposed by the suggestion service."),
+            new MappingAspectAssessment(
+                "entity", null, MappingAspectReviewStatus.RunContext,
+                "The entity identifier must come from the project's run context; it is not inferred here."),
+            new MappingAspectAssessment(
+                "period", candidate.Evidence.PeriodType,
+                periodKnown ? MappingAspectReviewStatus.Provided : MappingAspectReviewStatus.NeedsReview,
+                periodKnown ? "Matches the supplied source period context."
+                    : "Uses the concept period type; confirm it matches the source report."),
+            new MappingAspectAssessment(
+                "dimensions", null, MappingAspectReviewStatus.NeedsReview,
+                "No dimensions were proposed; verify the selected profile's disclosure requirements."),
+            new MappingAspectAssessment(
+                "decimals", null, MappingAspectReviewStatus.NeedsReview,
+                "Reported precision was not inferred and must be reviewed before filing.")
+        };
+        var alternatives = rankedCandidates
+            .Where(item => !StringComparer.Ordinal.Equals(item.QualifiedName, candidate.QualifiedName))
+            .Select(item => item.Evidence)
+            .ToArray();
+
+        return new MappingRecommendation(
+            field.Id,
+            field.Name,
+            candidate.Evidence,
+            alternatives,
+            assessments,
+            Array.Empty<DeterministicTransformationProposal>(),
+            AllowedDeterministicTransformationIds);
     }
 
     private void AddLocalSuggestions(

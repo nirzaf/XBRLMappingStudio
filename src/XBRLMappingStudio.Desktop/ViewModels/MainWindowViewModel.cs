@@ -102,6 +102,7 @@ public sealed class SuggestionRow : ViewModelBase
 {
     private string _concept = "";
     private SuggestionState _reviewState = SuggestionState.Pending;
+    private bool _isAnalystEdited;
     public string SuggestionId { get; init; } = "";
     public string SourceFieldId { get; init; } = "";
     public string TargetNodeId { get; init; } = "";
@@ -114,6 +115,20 @@ public sealed class SuggestionRow : ViewModelBase
     public int Score { get; init; }
     public string Basis { get; init; } = "";
     public TaxonomyCandidateEvidence? TaxonomyEvidence { get; init; }
+    public MappingRecommendation? Recommendation { get; init; }
+    public bool IsAnalystEdited
+    {
+        get => _isAnalystEdited;
+        set
+        {
+            if (Set(ref _isAnalystEdited, value))
+            {
+                Raise(nameof(Display));
+                Raise(nameof(TaxonomyEvidenceDisplay));
+                Raise(nameof(RecommendationDisplay));
+            }
+        }
+    }
     public string TaxonomyEvidenceDisplay
     {
         get
@@ -124,7 +139,32 @@ public sealed class SuggestionRow : ViewModelBase
                 : string.Join(", ", evidence.PresentationRoles);
             if (evidence.TotalPresentationRoleCount > evidence.PresentationRoles.Count)
                 roles += $" (+{evidence.TotalPresentationRoleCount - evidence.PresentationRoles.Count} more)";
-            return $"{evidence.Label} · {{{evidence.NamespaceUri}}}{evidence.LocalName} · {evidence.DataType}/{evidence.PeriodType} · {evidence.ProfileId} {evidence.TaxonomyVersion} · roles: {roles}";
+            var prefix = IsAnalystEdited ? "Original candidate evidence (draft edited): " : "";
+            return $"{prefix}{evidence.Label} · {{{evidence.NamespaceUri}}}{evidence.LocalName} · {evidence.DataType}/{evidence.PeriodType} · {evidence.ProfileId} {evidence.TaxonomyVersion} · roles: {roles}";
+        }
+    }
+    public string RecommendationDisplay
+    {
+        get
+        {
+            if (Recommendation is not { } recommendation) return "";
+            var aspects = string.Join("; ", recommendation.AspectAssessments
+                .Select(aspect =>
+                {
+                    var value = string.IsNullOrWhiteSpace(aspect.Value) ? "" : $" ({aspect.Value})";
+                    var explanation = aspect.Status is MappingAspectReviewStatus.NeedsReview
+                        or MappingAspectReviewStatus.NotProposed or MappingAspectReviewStatus.RunContext
+                        ? $" — {aspect.Explanation}"
+                        : "";
+                    return $"{aspect.Aspect}: {aspect.Status}{value}{explanation}";
+                }));
+            var alternatives = recommendation.Alternatives.Count == 0
+                ? "none"
+                : string.Join(", ", recommendation.Alternatives.Take(3).Select(candidate => candidate.QualifiedName))
+                    + (recommendation.Alternatives.Count > 3 ? $", +{recommendation.Alternatives.Count - 3} more" : "");
+            var prefix = IsAnalystEdited ? "Edited draft; original assessment: " : "Review before acceptance: ";
+            var functions = string.Join(", ", recommendation.AllowedDeterministicTransformationIds);
+            return $"{prefix}{aspects} Alternatives: {alternatives}. Deterministic functions available: {functions}; none proposed.";
         }
     }
     public SuggestionState ReviewState
@@ -132,7 +172,7 @@ public sealed class SuggestionRow : ViewModelBase
         get => _reviewState;
         set { if (Set(ref _reviewState, value)) Raise(nameof(Display)); }
     }
-    public string Display => $"{Concept}  ·  score {Score}  ·  {Basis}  ·  {ReviewState}";
+    public string Display => $"{Concept}  ·  score {Score}  ·  {Basis}  ·  {ReviewState}" + (IsAnalystEdited ? "  ·  edited" : "");
 }
 
 /// <summary>Row surfaced by the taxonomy explorer (UI03).</summary>
@@ -2677,6 +2717,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Score = s.Score,
                 Basis = s.Basis,
                 TaxonomyEvidence = s.TaxonomyEvidence,
+                Recommendation = s.Recommendation,
+                IsAnalystEdited = s.IsAnalystEdited,
                 ReviewState = session.StateOf(s.SuggestionId)
             }));
             SelectedSuggestion = AiSuggestions.FirstOrDefault();
@@ -2803,6 +2845,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
         selected.Concept = editedDraft.Concept ?? "";
+        selected.IsAnalystEdited = true;
         StatusText = "Suggestion edit saved to the review session and audit trail. Acceptance will validate it against the current mapping.";
     }
 

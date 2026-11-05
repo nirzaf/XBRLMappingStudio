@@ -94,6 +94,11 @@
           <TextBlock DockPanel.Dock="Top" Text="{Binding SelectedSuggestion.TaxonomyEvidenceDisplay}"
                      TextWrapping="Wrap" MaxHeight="72" Margin="0,2,0,6"
                      AutomationProperties.Name="Selected concept taxonomy evidence" />
+          <ScrollViewer DockPanel.Dock="Top" MaxHeight="120" VerticalScrollBarVisibility="Auto"
+                        Margin="0,0,0,6"
+                        AutomationProperties.Name="Selected mapping assumptions and alternatives">
+            <TextBlock Text="{Binding SelectedSuggestion.RecommendationDisplay}" TextWrapping="Wrap" />
+          </ScrollViewer>
           <TextBox DockPanel.Dock="Top" Text="{Binding SelectedSuggestionConcept}"
                    Watermark="Proposed taxonomy concept"
                    AutomationProperties.Name="Edited suggestion concept" />

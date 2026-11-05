@@ -164,7 +164,7 @@ public sealed class SuggestionSession
 
         var old = _suggestions[index];
         var previousFaultCount = Audit.PersistenceFaults.Count;
-        var updated = old with { Draft = edited };
+        var updated = old with { Draft = edited, IsAnalystEdited = true };
         _suggestions[index] = updated;
         var seq = Audit.NextSequence;
         _pendingPayloads[seq] = (SerializeDraft(old.Draft), SerializeDraft(edited),

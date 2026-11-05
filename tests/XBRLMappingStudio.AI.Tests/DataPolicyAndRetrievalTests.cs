@@ -221,6 +221,59 @@ public class RetrievalDeterminismTests
     }
 
     [Fact]
+    public async Task Recommendation_SeparatesDraftListsAlternativesAndSurfacesUnresolvedAspects()
+    {
+        var profile = new XBRL.FilingProfile
+        {
+            ProfileId = "recommendation-profile",
+            Digest = "sha256:recommendation-profile-v1",
+            TaxonomyVersion = "2026.1",
+            Concepts = new[]
+            {
+                new XBRL.ConceptMetadata("ex:Revenue", "urn:example", "Revenue", "Revenue",
+                    "monetary", "duration", IsAbstract: false),
+                new XBRL.ConceptMetadata("ext:Revenue", "urn:extension", "Revenue", "Revenue",
+                    "monetary", "duration", IsAbstract: false)
+            },
+            SupportedUnits = new HashSet<string>(StringComparer.Ordinal) { "USD" }
+        };
+        var taxonomy = new XBRL.TaxonomyIndex(profile);
+        var service = new AiSuggestionService(AiPolicy.Offline, taxonomy);
+
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("source-binding:Revenue", "Revenue")
+        }, default);
+
+        Assert.Equal(2, batch.Suggestions.Count);
+        foreach (var suggestion in batch.Suggestions)
+        {
+            var recommendation = Assert.IsType<MappingRecommendation>(suggestion.Recommendation);
+            Assert.Equal("source-binding:Revenue", recommendation.SourceFieldId);
+            Assert.Equal(suggestion.Draft.Concept, recommendation.Candidate.QualifiedName);
+            Assert.Single(recommendation.Alternatives);
+            Assert.NotEqual(recommendation.Candidate.QualifiedName, recommendation.Alternatives[0].QualifiedName);
+            Assert.Empty(recommendation.ProposedTransformations);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "unit" && aspect.Status == MappingAspectReviewStatus.NeedsReview);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "scale" && aspect.Status == MappingAspectReviewStatus.NeedsReview);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "period" && aspect.Status == MappingAspectReviewStatus.NeedsReview);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "entity" && aspect.Status == MappingAspectReviewStatus.RunContext);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "dimensions" && aspect.Status == MappingAspectReviewStatus.NeedsReview);
+            Assert.Contains(recommendation.AspectAssessments, aspect =>
+                aspect.Aspect == "transformation" && aspect.Status == MappingAspectReviewStatus.NotProposed);
+            Assert.NotEmpty(recommendation.AllowedDeterministicTransformationIds);
+            Assert.All(recommendation.AllowedDeterministicTransformationIds, id =>
+                Assert.True(Engine.FunctionCatalog.Default.Find(id)?.IsDeterministic));
+            Assert.DoesNotContain("runShellCommand", recommendation.AllowedDeterministicTransformationIds);
+        }
+    }
+
+    [Fact]
     public void Aliases_LoadFromProjectDirectory_OverrideDefaults()
     {
         var dir = Path.Combine(Path.GetTempPath(), "ai-alias-" + Guid.NewGuid().ToString("N"));

@@ -103,8 +103,34 @@ public class AnalystWorkflowTests
 
         var edited = Mapping("s1", "Sales", "synthetic:Revenue", "USD", "duration");
         Assert.True(session.Edit("s1", edited).Applied);
+        Assert.True(Assert.Single(session.Suggestions).IsAnalystEdited);
         Assert.True(session.Accept("s1").Applied);
         Assert.Equal(SuggestionState.Accepted, session.StateOf("s1"));
+    }
+
+    [Fact]
+    public async Task Edit_PreservesOriginalRecommendationAndMarksDraftAsEdited()
+    {
+        var taxonomy = TestProjects.Taxonomy();
+        var service = new AiSuggestionService(AiPolicy.Offline, taxonomy);
+        var session = new SuggestionSession(
+            TestProjects.Empty(),
+            new DraftValidator(taxonomy, TestProjects.Profile()));
+        var batch = await service.SuggestAsync(new[]
+        {
+            new SourceFieldDescriptor("sales-id", "Sales", "USD", "duration")
+        }, default);
+        var original = Assert.Single(batch.Suggestions);
+        session.LoadSuggestions(batch.Suggestions);
+
+        var edited = original.Draft with { Concept = "synthetic:NetIncome" };
+        Assert.True(session.Edit(original.SuggestionId, edited).Applied);
+
+        var updated = Assert.Single(session.Suggestions);
+        Assert.True(updated.IsAnalystEdited);
+        Assert.Equal("synthetic:NetIncome", updated.Draft.Concept);
+        Assert.Equal(original.Draft.Concept, updated.Recommendation!.Candidate.QualifiedName);
+        Assert.Empty(updated.Recommendation.ProposedTransformations);
     }
 
     [Fact]

@@ -605,6 +605,11 @@ public sealed class DesignerSessionTests
                 row => row.Concept == "synthetic:Revenue");
             Assert.Contains("urn:synthetic:finance:1.0", suggestion.TaxonomyEvidenceDisplay);
             Assert.Contains(SyntheticProfile.PresentationRole, suggestion.TaxonomyEvidenceDisplay);
+            Assert.Contains("scale: NeedsReview", suggestion.RecommendationDisplay);
+            Assert.Contains("entity: RunContext", suggestion.RecommendationDisplay);
+            Assert.Contains("period: Provided (duration)", suggestion.RecommendationDisplay);
+            Assert.Contains("dimensions: NeedsReview", suggestion.RecommendationDisplay);
+            Assert.Contains("none proposed", suggestion.RecommendationDisplay);
             viewModel.SelectedSuggestion = suggestion;
             var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
             viewModel.ApplySuggestedMappingCommand.Execute(null);
