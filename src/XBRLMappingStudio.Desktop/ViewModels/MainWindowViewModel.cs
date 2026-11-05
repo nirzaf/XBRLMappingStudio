@@ -95,6 +95,8 @@ public sealed class DiagnosticRow : ViewModelBase
 
 public sealed class FactRow : ViewModelBase
 {
+    /// <summary>The semantic fact represented by this preview row, retained for full-aspect review.</summary>
+    public XbrlFact? SemanticFact { get; init; }
     public string Display { get; init; } = "";
     public string StageSummary { get; init; } = "Mapping stage is unavailable.";
     public IReadOnlyList<PreviewEvidenceRow> Evidence { get; init; } = Array.Empty<PreviewEvidenceRow>();
@@ -4666,6 +4668,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             };
             PreviewFacts.Add(new FactRow
             {
+                SemanticFact = fact,
                 Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
                 StageSummary = stage,
                 Evidence = fact.ContributingSources.Select(source => new PreviewEvidenceRow(source)).ToArray()

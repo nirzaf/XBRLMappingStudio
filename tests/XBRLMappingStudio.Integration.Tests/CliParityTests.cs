@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
+using XBRLMappingStudio.Worker;
 using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Integration.Tests;
@@ -114,6 +116,31 @@ public sealed class CliParityTests : IAsyncLifetime
 
         // Reopen and compare with the in-process service result.
         var cliJson = await File.ReadAllTextAsync(outputPath);
+        var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
+        Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, cliJson));
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle,
+            Assert.Single(OimSerializer.ReadFacts(cliJson)), requireSourceEvidence: false));
+
+        var profile = SyntheticProfile.Build();
+        var inProcess = await new MappingJobService(profile, new LocalSyntheticWorker(profile)).RunAsync(
+            project,
+            new Dictionary<string, SourceConnection>
+            {
+                [project.Bindings[0].BindingId] = new SourceConnection(
+                    project.Bindings[0].BindingId,
+                    project.Bindings[0].Kind,
+                    _workbookPath,
+                    project.Bindings[0].Configuration.ToDictionary(
+                        pair => pair.Key,
+                        pair => pair.Value?.ToString() ?? "",
+                        StringComparer.Ordinal))
+            },
+            new Dictionary<string, string>(),
+            preview: false,
+            CancellationToken.None);
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, Assert.Single(inProcess.Facts)));
+        Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, inProcess.XbrlJson));
+
         using var doc = JsonDocument.Parse(cliJson);
         Assert.True(doc.RootElement.TryGetProperty("facts", out var facts));
         var first = facts.EnumerateObject().First();

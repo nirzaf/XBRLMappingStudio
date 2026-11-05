@@ -278,17 +278,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Exact-head GitHub Actions run [41976559279](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41976559279) passed the Ubuntu and Windows Release build/test matrix and repository hygiene on `6f6bf6d08aa2665fedebb22a3ffb8fdff258487a`. Each OS passed 388 tests and skipped the same 3 Arelle-gated subprocess cases. The pinned worker job passed 20 Python tests and all 3 gated .NET Arelle cases. The table shows current checkout totals:
+On 2026-11-06, the local Windows Release solution run on the working tree based on `b539b9f2d4e40270f23552eb5883bd1d5c330f28` passed **505 tests** and skipped **5** Arelle-gated .NET subprocess tests (510 total). The pinned Arelle runtime was not configured locally, so those five subprocess cases and the Python worker suite were not run in this session. The table shows totals from that solution run; exact-head CI for the pending FND-02 update will be recorded after push.
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 33 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
-| XBRL.Tests | 49 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
-| AI.Tests | 47 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 55 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
-| Ops.Tests | 56 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 98 | 95 pass; 3 Arelle-gated cases run with the pinned worker. Covers CLI parity, destination workflows, staged report validation, preserved output on incomplete validation, profile gates, receipts and worker failures |
-| Desktop.Tests | 45 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, suggestion review and audit persistence |
+| Engine.Tests | 34 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
+| XBRL.Tests | 59 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
+| AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
+| Adapters.Tests | 89 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
+| Ops.Tests | 68 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 119 | 114 passed; 5 Arelle-gated subprocess cases skipped locally. Covers CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, profile gates, receipts and worker failures |
+| Desktop.Tests | 61 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, suggestion review and audit persistence |
 | Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash

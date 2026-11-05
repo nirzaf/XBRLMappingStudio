@@ -60,6 +60,9 @@ public sealed class ArelleExecutionTests
                 preview: false, CancellationToken.None);
             Assert.True(result.IsPublishable,
                 $"Run outcome was {result.Manifest.Outcome}. Diagnostics: {string.Join(Environment.NewLine, result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}"))}");
+            var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
+            Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, Assert.Single(result.Facts)));
+            Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, result.XbrlJson));
 
             var destination = Path.Combine(workspace, "published-report.xbrl.json");
             var prior = System.Text.Encoding.UTF8.GetBytes("previous-accepted-report");
@@ -191,7 +194,9 @@ public sealed class ArelleExecutionTests
 
             Assert.True(result.Manifest.Outcome is RunOutcome.Success or RunOutcome.SuccessWithWarnings,
                 $"Run outcome was {result.Manifest.Outcome}. Diagnostics: {string.Join(Environment.NewLine, result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}"))}");
-            Assert.Single(result.Facts);
+            var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
+            Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, Assert.Single(result.Facts)));
+            Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, result.XbrlJson));
             Assert.DoesNotContain(result.Manifest.Diagnostics, diagnostic => diagnostic.IsBlocking);
             using var report = JsonDocument.Parse(result.XbrlJson);
             Assert.Equal(SyntheticProfile.TaxonomyFileName,

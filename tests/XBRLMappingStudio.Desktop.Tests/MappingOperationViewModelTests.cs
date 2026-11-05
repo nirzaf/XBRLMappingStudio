@@ -18,7 +18,8 @@ public sealed class MappingOperationViewModelTests
         Directory.CreateDirectory(directory);
         try
         {
-            var workbookPath = TestFixtures.MaterializeWorkbook(directory);
+            var workbookPath = IndependentAcceptanceFixtures.Materialize(directory, "revenue.xlsx");
+            var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
             var project = TestFixtures.BuildRevenueMappingProject(workbookPath);
             var viewModel = new MainWindowViewModel(project, null,
                 (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
@@ -40,6 +41,13 @@ public sealed class MappingOperationViewModelTests
             Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             Assert.Contains("partial", viewModel.PreviewResultSummary, StringComparison.OrdinalIgnoreCase);
             var fact = Assert.Single(viewModel.PreviewFacts);
+            Assert.Contains($"{mappingOracle.Concept} = {mappingOracle.ValueLexical}", fact.Display, StringComparison.Ordinal);
+            Assert.Contains(mappingOracle.Unit, fact.Display, StringComparison.Ordinal);
+            Assert.Contains($"{mappingOracle.PeriodStart:yyyy-MM-dd}/{mappingOracle.PeriodEnd:yyyy-MM-dd}",
+                fact.Display, StringComparison.Ordinal);
+            Assert.NotNull(fact.SemanticFact);
+            Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, fact.SemanticFact!));
+            Assert.Equal(mappingOracle.SourceLocator, Assert.Single(fact.Evidence).Source.Locator);
             Assert.Contains("Fact construction", fact.StageSummary, StringComparison.Ordinal);
             Assert.Contains("Scale to units", fact.StageSummary, StringComparison.Ordinal);
             Assert.NotEmpty(fact.Evidence);

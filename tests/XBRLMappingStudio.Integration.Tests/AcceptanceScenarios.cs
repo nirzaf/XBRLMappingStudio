@@ -70,6 +70,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Single(result.Facts);
 
         var expected = TestFixtures.GoldenRevenueFacts().Single();
+        var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
         var actual = result.Facts.Single();
 
         Assert.Equal(expected.ConceptName, actual.ConceptName);
@@ -78,6 +79,8 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(expected.Unit, actual.Unit);
         Assert.Equal(expected.Value, actual.Value);
         Assert.Equal(expected.Decimals, actual.Decimals);
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, actual));
+        Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, result.XbrlJson));
     }
 
     [Fact]

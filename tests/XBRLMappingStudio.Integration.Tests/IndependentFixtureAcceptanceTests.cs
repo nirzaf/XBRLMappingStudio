@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Csv;
@@ -27,10 +28,14 @@ public sealed class IndependentFixtureAcceptanceTests
         Assert.Equal(profile.Digest, root.GetProperty("profileDigest").GetString());
         Assert.Equal(SyntheticProfile.TaxonomyPackageDigest, root.GetProperty("taxonomyDigest").GetString());
 
-        var expected = root.GetProperty("expectedFacts")[0];
-        var expectedConcept = expected.GetProperty("concept").GetString();
-        var expectedValue = expected.GetProperty("valueLexical").GetString();
-        var expectedRows = root.GetProperty("expectedRowOccurrences").GetInt32();
+        var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
+        var reportOracle = IndependentAcceptanceFixtures.ReadFactOracle("importedReport");
+        Assert.NotNull(mappingOracle.SourceValueLexical);
+        Assert.NotNull(mappingOracle.ScaleFactorLexical);
+        Assert.Equal(mappingOracle.Value,
+            decimal.Parse(mappingOracle.SourceValueLexical!, CultureInfo.InvariantCulture)
+            * decimal.Parse(mappingOracle.ScaleFactorLexical!, CultureInfo.InvariantCulture));
+        var expectedRows = root.GetProperty("expectedRowOccurrences");
 
         using var workspace = new FixtureWorkspace();
 
@@ -42,10 +47,12 @@ public sealed class IndependentFixtureAcceptanceTests
         var workbookRows = new List<XBRLMappingStudio.Engine.DataRecord>();
         await foreach (var row in workbookAdapter.ReadFullAsync(workbookConnection, workbookSchema, CancellationToken.None))
             workbookRows.Add(row);
-        Assert.Equal(expectedRows, workbookRows.Count);
+        Assert.Equal(expectedRows.GetProperty("workbook").GetInt32(), workbookRows.Count);
         var revenueRow = Assert.Single(workbookRows, row => row["Line"].AsString() == "Revenue");
-        Assert.Equal("Financials!B4", revenueRow.CellSources?.GetValueOrDefault("Current")?.Locator);
-        Assert.Equal(1250.0000m, revenueRow["Current"].AsDecimal());
+        Assert.Equal(mappingOracle.SourceLocator, revenueRow.CellSources?.GetValueOrDefault(mappingOracle.SourceField!)?.Locator);
+        Assert.Equal(mappingOracle.WorkbookDisplayLexical, revenueRow[mappingOracle.SourceField!].LexicalSource);
+        Assert.Equal(decimal.Parse(mappingOracle.SourceValueLexical!, CultureInfo.InvariantCulture),
+            revenueRow[mappingOracle.SourceField!].AsDecimal());
 
         var csvPath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "source.csv");
         var csvConnection = new SourceConnection("csv", "csv", csvPath);
@@ -54,8 +61,9 @@ public sealed class IndependentFixtureAcceptanceTests
         var csvRows = new List<XBRLMappingStudio.Engine.DataRecord>();
         await foreach (var row in csvAdapter.ReadFullAsync(csvConnection, csvSchema, CancellationToken.None))
             csvRows.Add(row);
-        Assert.Equal(expectedRows, csvRows.Count);
-        Assert.Equal("1250.0000", Assert.Single(csvRows, row => row["Line"].AsString() == "Revenue")["Current"].AsString());
+        Assert.Equal(expectedRows.GetProperty("csv").GetInt32(), csvRows.Count);
+        Assert.Equal(mappingOracle.SourceValueLexical,
+            Assert.Single(csvRows, row => row["Line"].AsString() == "Revenue")[mappingOracle.SourceField!].AsString());
 
         var nestedJsonPath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "nested.json");
         var jsonSource = new SourceConnection("nested-json", "json", nestedJsonPath);
@@ -66,7 +74,8 @@ public sealed class IndependentFixtureAcceptanceTests
             nestedJsonRows.Add(row);
         var nestedJson = Assert.Single(nestedJsonRows);
         Assert.Equal("ABC123", nestedJson["entity.identifier"].AsString());
-        Assert.Equal("1250000.0000", nestedJson["amount.lexical"].AsString());
+        Assert.Equal(reportOracle.ValueLexical, nestedJson["amount.lexical"].AsString());
+        Assert.Equal(expectedRows.GetProperty("nestedJson").GetInt32(), nestedJsonRows.Count);
 
         var nestedXmlPath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "nested.xml");
         var xmlSource = new SourceConnection("nested-xml", "xml", nestedXmlPath);
@@ -77,11 +86,16 @@ public sealed class IndependentFixtureAcceptanceTests
             nestedXmlRows.Add(row);
         var nestedXml = Assert.Single(nestedXmlRows);
         Assert.Equal("ABC123", nestedXml["[urn:xms:acceptance:v1]entity.[urn:xms:acceptance:v1]identifier"].AsString());
-        Assert.Equal("1250000.0000", nestedXml["[urn:xms:acceptance:v1]amount.[urn:xms:acceptance:v1]lexical"].AsString());
-        var namespaceFields = root.GetProperty("expectedNamespaceFields").EnumerateArray()
-            .Select(field => field.GetString()!).ToArray();
-        Assert.Equal("1", nestedXml[namespaceFields[0]].AsString());
-        Assert.Equal("2", nestedXml[namespaceFields[1]].AsString());
+        Assert.Equal(reportOracle.ValueLexical,
+            nestedXml["[urn:xms:acceptance:v1]amount.[urn:xms:acceptance:v1]lexical"].AsString());
+        Assert.Equal(expectedRows.GetProperty("nestedXml").GetInt32(), nestedXmlRows.Count);
+        var ambiguity = Assert.Single(root.GetProperty("ambiguousCases").EnumerateArray());
+        Assert.Equal("value", ambiguity.GetProperty("localName").GetString());
+        var namespaceFields = ambiguity.GetProperty("fields").EnumerateArray().ToArray();
+        Assert.Equal(2, namespaceFields.Length);
+        foreach (var field in namespaceFields)
+            Assert.Equal(field.GetProperty("valueLexical").GetString(),
+                nestedXml[field.GetProperty("path").GetString()!].AsString());
 
         var databasePath = workspace.PathFor("sqlite-source.db");
         await using (var database = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
@@ -98,38 +112,63 @@ public sealed class IndependentFixtureAcceptanceTests
         var sqliteRows = new List<XBRLMappingStudio.Engine.DataRecord>();
         await foreach (var row in sqliteAdapter.ReadFullAsync(sqliteSource, sqliteSchema, CancellationToken.None))
             sqliteRows.Add(row);
-        Assert.Equal(expectedRows, sqliteRows.Count);
-        Assert.Equal("1250.0000", Assert.Single(sqliteRows, row => row["Line"].AsString() == "Revenue")["Current"].LexicalSource);
+        Assert.Equal(expectedRows.GetProperty("sqlite").GetInt32(), sqliteRows.Count);
+        Assert.Equal(mappingOracle.SourceValueLexical,
+            Assert.Single(sqliteRows, row => row["Line"].AsString() == "Revenue")[mappingOracle.SourceField!].LexicalSource);
 
         var xbrlJsonPath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "revenue-report.json");
         var xbrlXmlPath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "revenue-report.xml");
+        using (var sourceJson = JsonDocument.Parse(await File.ReadAllTextAsync(xbrlJsonPath)))
+        {
+            var sourceFact = Assert.Single(sourceJson.RootElement.GetProperty("facts").EnumerateObject()).Value;
+            Assert.Equal(reportOracle.ValueLexical, sourceFact.GetProperty("value").GetString());
+        }
+        var sourceXml = XDocument.Load(xbrlXmlPath);
+        var sourceXmlFact = Assert.Single(sourceXml.Descendants(XName.Get("Revenue", "urn:synthetic:finance:1.0")));
+        Assert.Equal(reportOracle.ValueLexical, sourceXmlFact.Value);
         var xbrlAdapter = new XbrlReportAdapter();
         var reportJson = await ReadXbrlRows(new SourceConnection("xbrl-json", "xbrl-report", xbrlJsonPath));
         var reportXml = await ReadXbrlRows(new SourceConnection("xbrl-xml", "xbrl-report", xbrlXmlPath));
-        Assert.Single(reportJson);
-        Assert.Single(reportXml);
+        Assert.Equal(expectedRows.GetProperty("importedReportJson").GetInt32(), reportJson.Count);
+        Assert.Equal(expectedRows.GetProperty("importedReportXml").GetInt32(), reportXml.Count);
         Assert.Equal(reportJson[0].SemanticKey(), reportXml[0].SemanticKey());
-        Assert.Equal(expectedConcept, reportJson[0].ConceptName);
-        Assert.Equal(expectedValue, reportJson[0].Value?.ToString(CultureInfo.InvariantCulture));
-        Assert.Equal(expected.GetProperty("decimals").GetInt32(), reportJson[0].Decimals);
-        Assert.Equal(expected.GetProperty("period").GetString(), reportJson[0].Period.ToIsoString());
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(reportOracle, reportJson[0]));
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(reportOracle, reportXml[0]));
 
         var reportJsonRows = await ReadXbrlAdapterRows(xbrlAdapter,
             new SourceConnection("xbrl-json", "xbrl-report", xbrlJsonPath));
-        Assert.Single(reportJsonRows);
-        Assert.Equal(expectedValue, reportJsonRows[0]["value"].LexicalSource);
+        Assert.Equal(expectedRows.GetProperty("importedReportJson").GetInt32(), reportJsonRows.Count);
+        Assert.Equal(reportOracle.ValueLexical, reportJsonRows[0]["value"].LexicalSource);
         Assert.Contains("xbrl-json#f1", reportJsonRows[0].RowId, StringComparison.Ordinal);
+        var reportXmlRows = await ReadXbrlAdapterRows(xbrlAdapter,
+            new SourceConnection("xbrl-xml", "xbrl-report", xbrlXmlPath));
+        Assert.Equal(expectedRows.GetProperty("importedReportXml").GetInt32(), reportXmlRows.Count);
+        Assert.Equal(reportOracle.ValueLexical, reportXmlRows[0]["value"].LexicalSource);
 
         var duplicatePath = IndependentAcceptanceFixtures.Materialize(workspace.Directory, "duplicate-key.json");
         var duplicateConnection = new SourceConnection("negative-json", "json", duplicatePath);
+        var negative = Assert.Single(root.GetProperty("negativeCases").EnumerateArray());
+        Assert.Equal("duplicate-key.json", negative.GetProperty("file").GetString());
         var duplicate = await Assert.ThrowsAsync<AdapterException>(
             () => jsonAdapter.InspectSchemaAsync(duplicateConnection, CancellationToken.None));
+        Assert.Equal(negative.GetProperty("diagnostic").GetString(), duplicate.Code);
         Assert.Equal(DiagnosticCodes.IoDuplicateKey, duplicate.Code);
 
-        var changedBytes = IndependentAcceptanceFixtures.ReadBytes("source.csv");
-        changedBytes[0] ^= 0x01;
+        var tamperedFixtureDirectory = workspace.PathFor("tampered-fixtures");
+        System.IO.Directory.CreateDirectory(tamperedFixtureDirectory);
         var files = root.GetProperty("files");
-        Assert.NotEqual(files.GetProperty("source.csv").GetString(), IndependentAcceptanceFixtures.Digest(changedBytes));
+        File.WriteAllBytes(Path.Combine(tamperedFixtureDirectory, "fixture-manifest.json"),
+            IndependentAcceptanceFixtures.ReadBytes("fixture-manifest.json"));
+        foreach (var file in files.EnumerateObject())
+            File.WriteAllBytes(Path.Combine(tamperedFixtureDirectory, file.Name),
+                IndependentAcceptanceFixtures.ReadBytes(file.Name));
+        Assert.Empty(IndependentAcceptanceFixtures.VerifyIntegrity(tamperedFixtureDirectory));
+
+        var changedBytes = File.ReadAllBytes(Path.Combine(tamperedFixtureDirectory, "source.csv"));
+        changedBytes[0] ^= 0x01;
+        File.WriteAllBytes(Path.Combine(tamperedFixtureDirectory, "source.csv"), changedBytes);
+        Assert.Contains(IndependentAcceptanceFixtures.VerifyIntegrity(tamperedFixtureDirectory),
+            error => error.Contains("source.csv digest differs", StringComparison.Ordinal));
     }
 
     private sealed class FixtureWorkspace : IDisposable
