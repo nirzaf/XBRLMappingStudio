@@ -1,3 +1,4 @@
+using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
 
@@ -212,6 +213,33 @@ public sealed class SuggestionSession
             .Where(s => _states[s.SuggestionId] == SuggestionState.Pending)
             .ToList();
         if (pending.Count == 0) return new SessionOutcome(false, "Nothing pending.", null);
+
+        var competing = pending
+            .GroupBy(suggestion => suggestion.Draft.SourceField, StringComparer.Ordinal)
+            .Where(group => group.Select(suggestion => (
+                suggestion.Draft.Concept,
+                suggestion.Draft.Unit,
+                suggestion.Draft.PeriodType,
+                suggestion.Draft.Decimals,
+                suggestion.Draft.Language,
+                suggestion.Draft.DimensionName,
+                suggestion.Draft.DimensionMember)).Distinct().Count() > 1)
+            .ToArray();
+        if (competing.Length > 0)
+        {
+            var conflicts = competing.Select(group => new Diagnostic
+            {
+                Code = DiagnosticCodes.AiInvalidDraft,
+                Subsystem = DiagnosticSubsystem.AI,
+                Stage = DiagnosticStage.Validation,
+                Severity = DiagnosticSeverity.Error,
+                IsBlocking = true,
+                Message = $"Source field '{group.Key}' has competing pending mapping alternatives; keep one candidate before batch acceptance."
+            }).ToArray();
+            return new SessionOutcome(false,
+                "Batch contains competing suggestions for one or more source fields; nothing applied.",
+                new DraftValidationResult(false, conflicts));
+        }
 
         var validation = _validator.Validate(pending.Select(p => p.Draft).ToList());
         if (!validation.Accepted)

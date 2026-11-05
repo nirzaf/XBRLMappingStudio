@@ -615,6 +615,12 @@ public sealed class DesignerSessionTests
             Assert.Contains("period: Provided (duration)", suggestion.RecommendationDisplay);
             Assert.Contains("dimensions: NeedsReview", suggestion.RecommendationDisplay);
             Assert.Contains("none proposed", suggestion.RecommendationDisplay);
+            viewModel.SuggestionFilter = "local-name";
+            Assert.Single(viewModel.FilteredAiSuggestions);
+            viewModel.SuggestionFilter = "does-not-match";
+            Assert.Empty(viewModel.FilteredAiSuggestions);
+            Assert.Null(viewModel.SelectedSuggestion);
+            viewModel.SuggestionFilter = "";
             viewModel.SelectedSuggestion = suggestion;
             var beforeApply = viewModel.Session.Project.ComputeSemanticDigest();
             viewModel.ApplySuggestedMappingCommand.Execute(null);

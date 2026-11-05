@@ -291,6 +291,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private Task _destinationSchemaTask = Task.CompletedTask;
     private ConceptRow? _selectedConcept;
     private SuggestionRow? _selectedSuggestion;
+    private string _suggestionFilter = "";
     private string _selectedSuggestionConcept = "";
     private string _selectedSuggestionUnit = "";
     private string _selectedSuggestionPeriodType = "duration";
@@ -547,6 +548,14 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (Set(ref _selectedSuggestion, value)) LoadSelectedSuggestionEditor();
         }
     }
+    public string SuggestionFilter
+    {
+        get => _suggestionFilter;
+        set
+        {
+            if (Set(ref _suggestionFilter, value)) RefreshFilteredSuggestions();
+        }
+    }
     public string SelectedSuggestionConcept { get => _selectedSuggestionConcept; set => Set(ref _selectedSuggestionConcept, value); }
     public string SelectedSuggestionUnit { get => _selectedSuggestionUnit; set => Set(ref _selectedSuggestionUnit, value); }
     public string SelectedSuggestionPeriodType { get => _selectedSuggestionPeriodType; set => Set(ref _selectedSuggestionPeriodType, value); }
@@ -790,6 +799,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         && PdfReviewValues.Count > 0 && PdfReviewValues.All(row => row.CanApprove && row.IsApproved && !row.HasPendingCorrectionDraft)
         && TryGetPdfReviewer(out _);
     public ObservableCollection<SuggestionRow> AiSuggestions { get; } = new();
+    public ObservableCollection<SuggestionRow> FilteredAiSuggestions { get; } = new();
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
     public ObservableCollection<FactRow> PreviewFacts { get; } = new();
 
@@ -2664,6 +2674,19 @@ public sealed class MainWindowViewModel : ViewModelBase
         StatusText = "Fact properties updated.";
     }
 
+    private void RefreshFilteredSuggestions()
+    {
+        var query = _suggestionFilter.Trim();
+        var filtered = AiSuggestions.Where(suggestion => string.IsNullOrEmpty(query)
+            || suggestion.Display.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || suggestion.TaxonomyEvidenceDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || suggestion.RecommendationDisplay.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        ReplaceItems(FilteredAiSuggestions, filtered);
+        if (SelectedSuggestion is not null && !FilteredAiSuggestions.Contains(SelectedSuggestion))
+            SelectedSuggestion = null;
+    }
+
     public async Task SuggestMappingsAsync()
     {
         if (!TryResolveProfile(AllowSyntheticProfile, out var profile)) return;
@@ -2717,6 +2740,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                     ProviderConfigId: "local-retrieval"));
             session.LoadSuggestions(sessionSuggestions);
             _suggestionSession = session;
+            SuggestionFilter = "";
             ReplaceItems(AiSuggestions, sessionSuggestions.Select(s => new SuggestionRow
             {
                 SuggestionId = s.SuggestionId,
@@ -2731,7 +2755,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                 IsAnalystEdited = s.IsAnalystEdited,
                 ReviewState = session.StateOf(s.SuggestionId)
             }));
-            SelectedSuggestion = AiSuggestions.FirstOrDefault();
+            RefreshFilteredSuggestions();
+            SelectedSuggestion = FilteredAiSuggestions.FirstOrDefault();
             Raise(nameof(AiSuggestions));
             StatusText = batch.Abstentions.Count > 0
                 ? string.Join(" ", batch.Abstentions.Select(abstention =>
@@ -3134,6 +3159,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         SourceTables.Clear();
         SourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
         AiSuggestions.Clear();
+        FilteredAiSuggestions.Clear();
+        SuggestionFilter = "";
         PreviewFacts.Clear();
         Diagnostics.Clear();
         Raise(nameof(SourceColumns));
@@ -3141,6 +3168,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(HasSourceTables));
         Raise(nameof(SelectedSourceTable));
         Raise(nameof(AiSuggestions));
+        Raise(nameof(FilteredAiSuggestions));
         Raise(nameof(PreviewFacts));
         Raise(nameof(Diagnostics));
     }

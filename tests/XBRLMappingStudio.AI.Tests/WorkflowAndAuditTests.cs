@@ -164,6 +164,36 @@ public class AnalystWorkflowTests
         Assert.True(outcome.Applied, outcome.Reason);
         Assert.Equal(SuggestionState.Accepted, session.StateOf("s1"));
         Assert.Equal(SuggestionState.Accepted, session.StateOf("s2"));
+        Assert.Equal(new[] { "batch-accept" }, session.Audit.Records.Select(record => record.Action));
+
+        Assert.True(session.Undo().Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s1"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s2"));
+        Assert.Equal(new[] { "batch-accept", "undo" }, session.Audit.Records.Select(record => record.Action));
+    }
+
+    [Fact]
+    public void AcceptAllValid_CompetingConceptsForSameSource_BlockWholeBatch()
+    {
+        var (session, _) = CreateSession();
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("revenue", "sales-id", Mapping("revenue", "sales-id", "synthetic:Revenue", "USD", "duration"), "local", 9),
+            new Suggestion("net-income", "sales-id", Mapping("net-income", "sales-id", "synthetic:NetIncome", "USD", "duration"), "local", 8),
+            new Suggestion("debt", "debt-id", Mapping("debt", "debt-id", "synthetic:Liabilities", "USD", "instant"), "local", 7),
+        });
+
+        var outcome = session.AcceptAllValid();
+
+        Assert.False(outcome.Applied);
+        Assert.Empty(session.Draft.Nodes);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("revenue"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("net-income"));
+        Assert.Equal(SuggestionState.Pending, session.StateOf("debt"));
+        Assert.Contains(outcome.Validation!.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("competing pending mapping alternatives", StringComparison.Ordinal));
+        Assert.DoesNotContain(session.Audit.Records, record => record.Action == "batch-accept");
     }
 
     [Fact]

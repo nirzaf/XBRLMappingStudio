@@ -81,7 +81,10 @@
           <Button DockPanel.Dock="Top" Content="Suggest concepts offline"
                   Command="{Binding SuggestMappingsCommand}"
                   AutomationProperties.Name="Suggest concepts offline" />
-          <ListBox DockPanel.Dock="Top" ItemsSource="{Binding AiSuggestions}"
+          <TextBox DockPanel.Dock="Top" Text="{Binding SuggestionFilter}"
+                   Watermark="Filter by field, concept, evidence or review status…"
+                   AutomationProperties.Name="Filter mapping suggestions" />
+          <ListBox DockPanel.Dock="Top" ItemsSource="{Binding FilteredAiSuggestions}"
                    SelectedItem="{Binding SelectedSuggestion}" MaxHeight="110"
                    AutomationProperties.Name="Offline concept suggestions">
             <ListBox.ItemTemplate>
