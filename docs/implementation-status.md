@@ -1,8 +1,9 @@
 # Implementation status
 
-This matrix records repository evidence as of 2026-11-05. Checkout snapshots and
-verification are recorded in [`verification-baseline-2026-11-04.md`](verification-baseline-2026-11-04.md)
-and [`verification-baseline-2026-11-05.md`](verification-baseline-2026-11-05.md).
+This matrix records repository evidence as of 2026-11-06. Checkout snapshots and
+verification are recorded in [`verification-baseline-2026-11-04.md`](verification-baseline-2026-11-04.md),
+[`verification-baseline-2026-11-05.md`](verification-baseline-2026-11-05.md), and
+[`verification-baseline-2026-11-06.md`](verification-baseline-2026-11-06.md).
 “Verified” means code and tests in this checkout cover the stated subset; it does not
 imply regulator acceptance, production qualification, or a complete end-to-end feature
 where explicitly narrowed below.
@@ -15,9 +16,9 @@ where explicitly narrowed below.
 | BASE04 | Implemented and verified | `src/XBRLMappingStudio.Diagnostics/`; adapter and integration tests. |
 | MAP01 | Implemented and verified | `src/XBRLMappingStudio.Engine/MappingGraph.cs`, `PlanCompiler.cs`; engine tests. |
 | MAP02 | Implemented and verified for supported graph shapes | `src/XBRLMappingStudio.Engine/GraphValidator.cs` and `EngineTests.cs` cover stable diagnostics for cycles, dangling required ports, collection-to-single cardinality mismatches, and unsupported nodes. |
-| MAP03 | Partially implemented | Deterministic plan compilation/execution and cancellation are covered by `tests/XBRLMappingStudio.Engine.Tests/EngineTests.cs` and `tests/XBRLMappingStudio.Integration.Tests/AcceptanceScenarios.cs`; `PlanCompiler` now propagates source contributors across transform outputs, while broader qualification and connector coverage remain open under IO07–IO12. |
+| MAP03 | Partially implemented | `MappingJobService` retains the existing in-memory path for bounded small inputs and adds a qualified large path for one streamed SQLite binding, row-scoped plans, no `MappingProject.Destination` plan, and xBRL-JSON output. A bounded row/byte probe selects the path; large facts and order-independent source digest rows spill to private SQLite storage, the report is streamed in semantic order, and cancellation removes private artifacts. `LargeRunExecutionTests.cs` verifies 100k-row byte equivalence against the same service small-mode oracle, bounded steady-state managed heap, digest parity, adapter-failure/cancellation outcomes, cleanup, unsupported-target refusal, staged publication success/rejection and the small set-phase path. The CLI/Desktop explicit file-publication path is covered; larger-source support remains fail-closed for non-SQLite adapters, multiple bindings, set-phase plans and project-configured destination plans. A single large SQLite TEXT/BLOB cell may be materialized by `GetValue` before the 4 MiB row check, so that limit is not a strict peak-allocation bound. The Arelle worker receives a constant-size path/digest request and streams a bounded header/facts copy, but Arelle's in-process report model may still use memory proportional to report size; end-to-end worker memory is not qualified, so ENG-01 remains partial. See `docs/verification-baseline-2026-11-06.md` for evidence and limits. |
 | MAP04 | Partially implemented | Scalar and conditional functions exist in `src/XBRLMappingStudio.Engine/`; numeric support is bounded by CLR `decimal` and does not yet qualify a profile-specific precision domain. |
-| MAP05 | Partially implemented | `CollectionAndJoinTests.cs` covers collection aggregation and group-by; guide-level memory/spill budgets and failure qualification remain incomplete. |
+| MAP05 | Partially implemented | `CollectionAndJoinTests.cs` covers collection aggregation and group-by. The qualified large path rejects set-phase/group plans before execution; group spill, aggregate memory budgets and large set-phase qualification remain open. |
 | MAP06 | Partially implemented | `CollectionAndJoinTests.cs` covers keyed joins and lookup outcomes; only the implemented cardinality and duplicate policies are supported. |
 | MAP07 | Partially implemented | Project reusable function metadata exists; graphical authoring and full reuse lifecycle are incomplete. |
 | MAP08 | Partially implemented | `PreviewReconciliationTests.cs` verifies an independent full-run oracle and labels previews as partial. Desktop results now show an explicit preview-only/full-run status, the fact construction and value path, and every contributing source reference; selecting PDF evidence navigates to its page and highlights the recorded region. Independent preview/full reconciliation in the UI and one-to-many/null/duplicate UI qualification remain open. |

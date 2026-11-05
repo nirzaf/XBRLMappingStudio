@@ -1907,7 +1907,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
-            var result = await service.RunAsync(
+            using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
             if (!IsMappingOperationCurrent(operation))
@@ -2043,7 +2043,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
-            var result = await service.RunAsync(project, connections, ReadParameters(),
+            using var result = await service.RunAsync(project, connections, ReadParameters(),
                 preview: false, cancellationToken, CreateMappingProgress(operation));
             if (!IsMappingOperationCurrent(operation))
             {
@@ -4439,7 +4439,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var result = await new MappingJobService(profile, worker).RunAsync(
+            using var result = await new MappingJobService(profile, worker).RunAsync(
                 project, connections, ReadParameters(), preview: true, cancellationToken,
                 CreateMappingProgress(operation));
             if (!IsMappingOperationCurrent(operation))
@@ -4511,7 +4511,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker);
-            var result = await service.RunAsync(
+            using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
             if (!IsMappingOperationCurrent(operation))
@@ -4527,12 +4527,24 @@ public sealed class MainWindowViewModel : ViewModelBase
                     : $"Execution ended with {result.Manifest.Outcome}. No artifact was published.";
                 return;
             }
-            var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
-            var receipt = await new PublicationService(new RunJournal()).PublishAuthorizedAsync(
-                outputPath, payload, root,
-                project, profile, AllowSyntheticProfile, result,
-                (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                    stagedPath, outputPath, result, token), cancellationToken);
+            var publisher = new PublicationService(new RunJournal());
+            PublicationReceipt receipt;
+            if (result.LargeArtifact is { } largeArtifact)
+            {
+                receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
+                    outputPath, largeArtifact, root, project, profile, AllowSyntheticProfile, result,
+                    (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                        stagedPath, outputPath, result, token), cancellationToken);
+            }
+            else
+            {
+                var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+                receipt = await publisher.PublishAuthorizedAsync(
+                    outputPath, payload, root,
+                    project, profile, AllowSyntheticProfile, result,
+                    (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                        stagedPath, outputPath, result, token), cancellationToken);
+            }
             StatusText = $"Published {Path.GetFileName(receipt.DestinationPath)}; digest {receipt.FinalDigest}.";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -4634,7 +4646,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedPreviewEvidence = null;
         _selectedPreviewPdfEvidence = null;
         Raise(nameof(SelectedPdfEvidence));
-        foreach (var fact in result.Facts)
+        foreach (var fact in result.Facts.Take(500))
         {
             var value = fact.IsNil ? "nil" : fact.Value?.ToString() ?? fact.TextValue ?? "(empty)";
             var unit = fact.Unit?.ToString() ?? fact.CompoundUnit?.CanonicalKey;
@@ -4661,10 +4673,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
         var errors = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
         var warnings = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning);
+        var resultFactCount = result.LargeArtifact?.FactCount ?? result.Facts.Count;
+        var truncationNote = resultFactCount > PreviewFacts.Count
+            ? $" Showing the first {PreviewFacts.Count} of {resultFactCount} fact(s)."
+            : "";
         PreviewResultSummary = result.Manifest.IsPreview
             ? $"Preview only · {PreviewFacts.Count} sampled fact(s). "
                 + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published."
-            : $"Full run · {PreviewFacts.Count} fact(s) · {errors} error(s), {warnings} warning(s). See Diagnostics for details.";
+            : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s).{truncationNote} See Diagnostics for details.";
         SelectedPreviewFact = PreviewFacts.FirstOrDefault();
         Raise(nameof(Diagnostics));
         Raise(nameof(PreviewFacts));

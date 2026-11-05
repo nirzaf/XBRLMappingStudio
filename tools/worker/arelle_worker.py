@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import time
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -22,6 +23,8 @@ MAX_PROFILE_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_PROFILE_FILE_BYTES = 512 * 1024 * 1024
 MAX_PROFILE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PROFILE_FILES = 16384
+MAX_DOCUMENT_INFO_BYTES = 4 * 1024 * 1024
+MAX_LARGE_REPORT_BYTES = 2 * 1024 * 1024 * 1024
 
 try:
     from arelle.api.Session import Session
@@ -242,6 +245,150 @@ def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_f
     return report
 
 
+def reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key: " + str(key)[:120])
+        result[key] = value
+    return result
+
+
+def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offline_references, package_files,
+                                 expected_digest):
+    """Validate the bounded documentInfo header and stream-copy the large facts object."""
+    with report_path.open("rb") as source:
+        raw_prefix = source.read(MAX_DOCUMENT_INFO_BYTES + 64 * 1024)
+        prefix = None
+        for trim in range(4):
+            try:
+                prefix = raw_prefix[:len(raw_prefix) - trim if trim else None].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                continue
+        if prefix is None:
+            raise ValueError("Report documentInfo header is not valid bounded UTF-8")
+
+        decoder = json.JSONDecoder(object_pairs_hook=reject_duplicate_json_keys,
+                                   parse_constant=lambda value: (_ for _ in ()).throw(
+                                       ValueError("Invalid JSON constant: " + value)))
+        position = 0
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        if position >= len(prefix) or prefix[position] != "{":
+            raise ValueError("Report root must be a JSON object")
+        position += 1
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        key, position = decoder.raw_decode(prefix, position)
+        if key != "documentInfo":
+            raise ValueError("Large report must begin with documentInfo")
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        if position >= len(prefix) or prefix[position] != ":":
+            raise ValueError("Report documentInfo member is malformed")
+        position += 1
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        document_info, position = decoder.raw_decode(prefix, position)
+        header_bytes = len(prefix[:position].encode("utf-8"))
+        if header_bytes > MAX_DOCUMENT_INFO_BYTES:
+            raise ValueError("Report documentInfo exceeds its size limit")
+        safe_report = safe_taxonomy_urls({"documentInfo": document_info}, taxonomy_root,
+                                         offline_references, package_files)
+        document_info = safe_report["documentInfo"]
+
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        if position >= len(prefix) or prefix[position] != ",":
+            raise ValueError("Large report must contain a facts member after documentInfo")
+        position += 1
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        facts_key, position = decoder.raw_decode(prefix, position)
+        if facts_key != "facts":
+            raise ValueError("Large report facts member is missing")
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        if position >= len(prefix) or prefix[position] != ":":
+            raise ValueError("Report facts member is malformed")
+        position += 1
+        while position < len(prefix) and prefix[position].isspace():
+            position += 1
+        if position >= len(prefix) or prefix[position] != "{":
+            raise ValueError("Report facts member must be a JSON object")
+        facts_start = len(prefix[:position].encode("utf-8"))
+        if facts_start >= len(raw_prefix):
+            raise ValueError("Report facts object did not begin within the bounded header probe")
+
+        digest = hashlib.sha256(raw_prefix)
+        with output_path.open("wb") as target:
+            target.write(b'{"documentInfo":')
+            target.write(json.dumps(document_info, ensure_ascii=False,
+                                    separators=(",", ":")).encode("utf-8"))
+            target.write(b',"facts":')
+            stack = []
+            in_string = False
+            escaped = False
+            facts_ended = False
+            report_ended = False
+            def process_report_structure_byte(byte):
+                nonlocal in_string, escaped, facts_ended, report_ended
+                if report_ended:
+                    if byte not in b" \t\r\n":
+                        raise ValueError("Report contains trailing data after its root object")
+                    return
+                if facts_ended:
+                    if byte in b" \t\r\n":
+                        return
+                    if byte != ord("}"):
+                        raise ValueError("Report contains an unexpected top-level member after facts")
+                    report_ended = True
+                    return
+                if not stack:
+                    if byte != ord("{"):
+                        raise ValueError("Report facts member must begin with an object")
+                    stack.append(ord("}"))
+                    return
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif byte == ord("\\"):
+                        escaped = True
+                    elif byte == ord('"'):
+                        in_string = False
+                    return
+                if byte == ord('"'):
+                    in_string = True
+                elif byte == ord("{"):
+                    stack.append(ord("}"))
+                elif byte == ord("["):
+                    stack.append(ord("]"))
+                elif byte in (ord("}"), ord("]")):
+                    if not stack or stack[-1] != byte:
+                        raise ValueError("Report facts member contains mismatched JSON delimiters")
+                    stack.pop()
+                    if not stack:
+                        facts_ended = True
+
+            chunk = raw_prefix[facts_start:]
+            target.write(chunk)
+            for byte in chunk:
+                process_report_structure_byte(byte)
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                target.write(chunk)
+                for byte in chunk:
+                    process_report_structure_byte(byte)
+            if not facts_ended or not report_ended:
+                raise ValueError("Report is truncated or has a malformed top-level object")
+        if "sha256:" + digest.hexdigest() != expected_digest:
+            raise ValueError("Staged xBRL-JSON changed while it was streamed to the validator")
+
+
 def run_arelle(entrypoint, args, temporary_path=None):
     if not ARELLE_AVAILABLE:
         raise RuntimeError("arelle-release is not installed in this worker environment")
@@ -412,7 +559,40 @@ def handle(req, args):
             return response(op_id, "incompleteValidation", diagnostics=[diagnostic(
                 op_id, "XBR010", "warning", "arelle-release is not installed; report validation is incomplete.")])
         report_text = payload if isinstance(payload, str) else payload.get("xbrlJson") if isinstance(payload, dict) else None
-        if not isinstance(report_text, str) or not report_text:
+        large_report_path = None
+        if isinstance(payload, dict) and isinstance(payload.get("xbrlJsonPath"), str):
+            expected_digest = payload.get("sha256")
+            if not isinstance(expected_digest, str) or not expected_digest.startswith("sha256:"):
+                return response(op_id, "domainFailure", error="Missing staged xBRL-JSON digest")
+            try:
+                report_path = Path(payload["xbrlJsonPath"])
+                if not report_path.is_absolute() or not report_path.is_file():
+                    raise ValueError("Staged xBRL-JSON path is not an existing absolute file")
+                resolved_path = report_path.resolve(strict=True)
+                temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+                if (report_path.is_symlink() or report_path.parent.is_symlink()
+                        or resolved_path.parent.parent != temp_root
+                        or not resolved_path.parent.name.startswith("xms-large-")
+                        or resolved_path.name != "report.json"
+                        or (os.name != "nt" and stat.S_IMODE(resolved_path.parent.stat().st_mode) != 0o700)):
+                    raise ValueError("Staged xBRL-JSON path is outside the private artifact directory")
+                if resolved_path.stat().st_size <= 0 or resolved_path.stat().st_size > MAX_LARGE_REPORT_BYTES:
+                    raise ValueError("Staged xBRL-JSON exceeds the worker report size budget")
+                digest = hashlib.sha256()
+                hashed_bytes = 0
+                with report_path.open("rb") as report_file:
+                    for chunk in iter(lambda: report_file.read(1024 * 1024), b""):
+                        hashed_bytes += len(chunk)
+                        if hashed_bytes > MAX_LARGE_REPORT_BYTES:
+                            raise ValueError("Staged xBRL-JSON exceeds the worker report size budget")
+                        digest.update(chunk)
+                actual_digest = "sha256:" + digest.hexdigest()
+                if actual_digest != expected_digest:
+                    raise ValueError("Staged xBRL-JSON digest did not match the requested digest")
+                large_report_path = resolved_path
+            except (OSError, UnicodeError, ValueError) as ex:
+                return response(op_id, "domainFailure", error=str(ex)[:1000])
+        if large_report_path is None and (not isinstance(report_text, str) or not report_text):
             return response(op_id, "domainFailure", error="Missing xBRL-JSON report text")
         try:
             if getattr(args, "profile_error", None):
@@ -420,14 +600,20 @@ def handle(req, args):
             profile = getattr(args, "profile_manifest_data", None)
             if profile is not None and req["profileDigest"] != profile.get("profileDigest"):
                 raise ValueError("Worker request profile digest does not match the installed profile")
-            report = json.loads(report_text)
-            report = safe_taxonomy_urls(report, args.taxonomy_root,
-                                        profile.get("offlineReferences") if profile else None,
-                                        profile.get("packageFiles") if profile else None)
             with tempfile.TemporaryDirectory(prefix="xms-arelle-") as workdir:
                 os.chmod(workdir, 0o700)
                 path = Path(workdir) / "report.json"
-                path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+                if large_report_path is not None:
+                    rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
+                        profile.get("offlineReferences") if profile else None,
+                        profile.get("packageFiles") if profile else None,
+                        payload.get("sha256"))
+                else:
+                    report = json.loads(report_text, object_pairs_hook=reject_duplicate_json_keys)
+                    report = safe_taxonomy_urls(report, args.taxonomy_root,
+                        profile.get("offlineReferences") if profile else None,
+                        profile.get("packageFiles") if profile else None)
+                    path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
                 ok, logs, concept_count = run_arelle(path, args, workdir)
                 plugin_failures = required_plugin_load_failures(
                     logs, profile.get("requiredPlugins", []) if profile else [])

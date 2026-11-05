@@ -50,6 +50,9 @@ public sealed class ProvenanceTracker
 
     public IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Snapshot()
         => _sources.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<SourceReference>)kv.Value.ToArray());
+
+    /// <summary>Release row-local provenance after a bounded row batch has been emitted.</summary>
+    public void Clear() => _sources.Clear();
 }
 
 /// <summary>

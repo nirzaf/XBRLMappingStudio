@@ -32,17 +32,21 @@ public sealed class MappingJobService
     private readonly FunctionCatalog _catalog;
     private readonly IWorkerClient _worker;
     private readonly Func<LocalApplicationDatabase> _applicationDatabaseFactory;
+    private readonly ExecutionBudget _executionBudget;
 
     public MappingJobService(
         FilingProfile profile,
         IWorkerClient worker,
         FunctionCatalog? catalog = null,
-        Func<LocalApplicationDatabase>? applicationDatabaseFactory = null)
+        Func<LocalApplicationDatabase>? applicationDatabaseFactory = null,
+        ExecutionBudget? executionBudget = null)
     {
         _profile = profile;
         _worker = worker;
         _catalog = catalog ?? FunctionCatalog.Default;
         _applicationDatabaseFactory = applicationDatabaseFactory ?? (() => new LocalApplicationDatabase());
+        _executionBudget = executionBudget ?? ExecutionBudget.Default;
+        _executionBudget.Validate();
     }
 
     /// <summary>Validate + compile the graph in a project. Does not execute.</summary>
@@ -328,19 +332,21 @@ public sealed class MappingJobService
             CancellationToken = cancellationToken
         };
 
-        // Load each source binding into the context.
+        // Bounded probe. Small and preview runs retain the existing in-memory plan;
+        // only a single streamed SQLite source may enter the qualified large path.
+        await using var sourceReadersOwner = new BufferedSourceReaderSet();
+        var sourceReaders = sourceReadersOwner.Readers;
+        var sourceConnections = new Dictionary<string, SourceConnection>(StringComparer.Ordinal);
+        var sourceSchemas = new Dictionary<string, ISourceSchema>(StringComparer.Ordinal);
         var bindingIndex = 0;
         foreach (var binding in project.Bindings)
         {
             bindingIndex++;
             if (!connections.TryGetValue(binding.BindingId, out var conn))
             {
-                context.Diagnostics.Error(
-                    DiagnosticCodes.IoSchemaMismatch,
-                    DiagnosticSubsystem.Adapter,
-                    DiagnosticStage.Introspection,
-                    $"No connection supplied for binding '{binding.BindingId}'.",
-                    operationId: opId);
+                context.Diagnostics.Error(DiagnosticCodes.IoSchemaMismatch,
+                    DiagnosticSubsystem.Adapter, DiagnosticStage.Introspection,
+                    $"No connection supplied for binding '{binding.BindingId}'.", operationId: opId);
                 manifest.Outcome = RunOutcome.IncompleteConfiguration;
                 manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
@@ -348,18 +354,26 @@ public sealed class MappingJobService
 
             try
             {
+                if (!StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite")
+                    && !IsBoundedInMemorySource(conn, out var sourceLimitReason))
+                {
+                    context.Diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget,
+                        DiagnosticSubsystem.Adapter, DiagnosticStage.Introspection,
+                        sourceLimitReason, operationId: opId);
+                    manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
                 progress?.Report(new MappingJobProgress(
                     $"Inspecting source {binding.DisplayName}", bindingIndex, project.Bindings.Count));
                 var adapter = BuildExecutionAdapter(conn);
                 var schema = await adapter.InspectSchemaAsync(conn, cancellationToken);
-
                 if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
                     && !string.Equals(binding.SchemaFingerprint, schema.Fingerprint, StringComparison.Ordinal))
                 {
-                    context.Diagnostics.Error(
-                        DiagnosticCodes.IoSchemaMismatch,
-                        DiagnosticSubsystem.Adapter,
-                        DiagnosticStage.Introspection,
+                    context.Diagnostics.Error(DiagnosticCodes.IoSchemaMismatch,
+                        DiagnosticSubsystem.Adapter, DiagnosticStage.Introspection,
                         $"Source '{binding.DisplayName}' schema changed since the mapping was saved. Remap before running.",
                         operationId: opId);
                     manifest.Outcome = RunOutcome.DataError;
@@ -367,61 +381,9 @@ public sealed class MappingJobService
                     manifest.Diagnostics = context.Diagnostics.Items;
                     return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
                 }
-
-                var records = new List<DataRecord>();
-                await foreach (var r in adapter.ReadFullAsync(conn, schema, cancellationToken))
-                {
-                    records.Add(r);
-                    if (records.Count % 500 == 0)
-                        progress?.Report(new MappingJobProgress($"Reading source {binding.DisplayName}", records.Count));
-                    if (preview && records.Count >= context.PreviewRowLimit) break;
-                }
-                progress?.Report(new MappingJobProgress($"Read source {binding.DisplayName}", records.Count));
-                if (StringComparer.Ordinal.Equals(conn.Kind, "pdf-digital")
-                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, conn, manifest.Inputs, cancellationToken))
-                {
-                    context.Diagnostics.Error(
-                        DiagnosticCodes.IoPdfReviewManifestInvalid,
-                        DiagnosticSubsystem.Adapter,
-                        DiagnosticStage.Validation,
-                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
-                        source: new SourceReference(binding.BindingId, "pdf-input-identity"),
-                        operationId: opId);
-                    manifest.Outcome = RunOutcome.DataError;
-                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
-                    manifest.Diagnostics = context.Diagnostics.Items;
-                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-                }
-                if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
-                {
-                    var digest = DigestRecords(conn, records);
-                    var hasDeclaredPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
-                    var identityStrategy = hasDeclaredPrimaryKey
-                        ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
-                        : SqliteSourceAdapter.PositionalIdentityStrategy;
-                    if (!hasDeclaredPrimaryKey)
-                    {
-                        context.Diagnostics.Warn(
-                            DiagnosticCodes.IoStableRowIdentityUnavailable,
-                            DiagnosticSubsystem.Adapter,
-                            DiagnosticStage.Execution,
-                            "The selected SQLite table has no declared primary key. "
-                            + "SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; "
-                            + "use a declared primary key or immutable extract if durable row-level identity is required.",
-                            operationId: opId);
-                    }
-                    manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
-                        ? input with
-                        {
-                            Kind = preview ? "sqlite-preview" : "sqlite-table",
-                            Digest = digest,
-                            IsReplayable = false,
-                            RowIdentityStrategy = identityStrategy,
-                            SnapshotStrategy = "sqlite-read-transaction"
-                        }
-                        : input).ToArray();
-                }
-                context.LoadedSources[binding.BindingId] = records;
+                sourceConnections.Add(binding.BindingId, conn);
+                sourceSchemas.Add(binding.BindingId, schema);
+                sourceReadersOwner.Add(binding.BindingId, adapter.ReadFullAsync(conn, schema, cancellationToken), cancellationToken);
             }
             catch (AdapterException ex)
             {
@@ -430,6 +392,184 @@ public sealed class MappingJobService
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
                 manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                manifest.Outcome = RunOutcome.Cancelled;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+        }
+
+        var isLargeRun = false;
+        long probedBytes = 0;
+        string? activeBindingId = null;
+        try
+        {
+            if (preview)
+            {
+                foreach (var binding in project.Bindings)
+                {
+                    activeBindingId = binding.BindingId;
+                    var rows = await sourceReaders[binding.BindingId]
+                        .ReadBatchAsync(context.PreviewRowLimit, cancellationToken);
+                    context.LoadedSources[binding.BindingId] = rows;
+                    progress?.Report(new MappingJobProgress($"Read source {binding.DisplayName}", rows.Count));
+                }
+            }
+            else
+            {
+                var probedRecords = 0;
+                while (probedRecords <= _executionBudget.InMemorySourceRecordLimit)
+                {
+                    var progressed = false;
+                    foreach (var binding in project.Bindings)
+                    {
+                        activeBindingId = binding.BindingId;
+                        var reader = sourceReaders[binding.BindingId];
+                        if (reader.IsEnded) continue;
+                        if (await reader.BufferNextAsync(cancellationToken))
+                        {
+                            probedRecords++;
+                            var rowBytes = BufferedSourceReader.EstimateRecordBytes(reader.Buffer[^1]);
+                            if (rowBytes > _executionBudget.MaxRowBytes)
+                            {
+                                context.Diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget,
+                                    DiagnosticSubsystem.Adapter, DiagnosticStage.Introspection,
+                                    $"A source row exceeded the {_executionBudget.MaxRowBytes} byte row budget.",
+                                    operationId: opId);
+                                manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                                manifest.Diagnostics = context.Diagnostics.Items;
+                                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                            }
+                            probedBytes = checked(probedBytes + rowBytes);
+                            progressed = true;
+                            if (probedRecords > _executionBudget.InMemorySourceRecordLimit
+                                || probedBytes > _executionBudget.MaxProbeBytes)
+                            {
+                                isLargeRun = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (isLargeRun || !progressed) break;
+                }
+
+                if (!isLargeRun)
+                {
+                    foreach (var binding in project.Bindings)
+                    {
+                        activeBindingId = binding.BindingId;
+                        context.LoadedSources[binding.BindingId] = sourceReaders[binding.BindingId].Buffer;
+                        progress?.Report(new MappingJobProgress(
+                            $"Read source {binding.DisplayName}", sourceReaders[binding.BindingId].Buffer.Count));
+                    }
+                }
+            }
+        }
+        catch (AdapterException ex)
+        {
+            context.Diagnostics.Add(ex.ToDiagnostic(activeBindingId, opId));
+            manifest.Outcome = RunOutcome.DataError;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
+        if (isLargeRun)
+        {
+            var binding = project.Bindings.SingleOrDefault();
+            if (binding is null || project.Bindings.Count != 1
+                || compile.Plan!.SetSteps.Count != 0
+                || !StringComparer.OrdinalIgnoreCase.Equals(sourceConnections[binding.BindingId].Kind, "sqlite")
+                || project.Destination is not null
+                || !StringComparer.Ordinal.Equals(_profile.OutputFormat, "xbrl-json"))
+            {
+                context.Diagnostics.Error(DiagnosticCodes.IoUnsupportedOperation,
+                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                    "Large-run execution is currently qualified only for one streamed SQLite source, a row-scoped plan, no configured destination, and xBRL-JSON output.",
+                    operationId: opId);
+                manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+
+            var connection = sourceConnections[binding.BindingId];
+            var schema = sourceSchemas[binding.BindingId];
+            var hasPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
+            if (!hasPrimaryKey)
+            {
+                context.Diagnostics.Warn(DiagnosticCodes.IoStableRowIdentityUnavailable,
+                    DiagnosticSubsystem.Adapter, DiagnosticStage.Execution,
+                    "The selected SQLite table has no declared primary key. SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; use a declared primary key or immutable extract if durable row-level identity is required.",
+                    operationId: opId);
+            }
+            context.Diagnostics.SetMaximumRetainedItems(255);
+            return await RunLargeRowScopedAsync(project, binding, connection, schema,
+                sourceReaders[binding.BindingId], compile.Plan!, context, manifest, runId, opId, probedBytes,
+                progress, cancellationToken, hasPrimaryKey);
+        }
+
+        if (preview)
+        {
+            foreach (var binding in project.Bindings)
+            {
+                var connection = sourceConnections[binding.BindingId];
+                if (StringComparer.Ordinal.Equals(connection.Kind, "pdf-digital")
+                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, connection, manifest.Inputs, cancellationToken))
+                {
+                    context.Diagnostics.Error(DiagnosticCodes.IoPdfReviewManifestInvalid,
+                        DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
+                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
+                        source: new SourceReference(binding.BindingId, "pdf-input-identity"), operationId: opId);
+                    manifest.Outcome = RunOutcome.DataError;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+                if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
+                {
+                    AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
+                    UpdateSqliteInputIdentity(manifest, binding.BindingId, connection,
+                        DigestRecords(connection, context.LoadedSources[binding.BindingId]), schema: sourceSchemas[binding.BindingId], preview: true);
+                }
+            }
+        }
+        else
+        {
+            foreach (var binding in project.Bindings)
+            {
+                var connection = sourceConnections[binding.BindingId];
+                if (StringComparer.Ordinal.Equals(connection.Kind, "pdf-digital")
+                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, connection, manifest.Inputs, cancellationToken))
+                {
+                    context.Diagnostics.Error(DiagnosticCodes.IoPdfReviewManifestInvalid,
+                        DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
+                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
+                        source: new SourceReference(binding.BindingId, "pdf-input-identity"), operationId: opId);
+                    manifest.Outcome = RunOutcome.DataError;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+                if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
+                {
+                    AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
+                    UpdateSqliteInputIdentity(manifest, binding.BindingId, connection,
+                        DigestRecords(connection, context.LoadedSources[binding.BindingId]), schema: sourceSchemas[binding.BindingId], preview: false);
+                }
             }
         }
 
@@ -597,6 +737,342 @@ public sealed class MappingJobService
         return JobResult.FromManifest(manifest, facts, json, context.SampledTotals);
     }
 
+    private async Task<JobResult> RunLargeRowScopedAsync(
+        MappingProject project,
+        SourceBinding binding,
+        SourceConnection connection,
+        ISourceSchema schema,
+        BufferedSourceReader reader,
+        ExecutionPlan plan,
+        RunContext context,
+        RunManifest manifest,
+        string runId,
+        string operationId,
+        long probeBytes,
+        IProgress<MappingJobProgress>? progress,
+        CancellationToken cancellationToken,
+        bool hasPrimaryKey)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-large-" + Guid.NewGuid().ToString("N"));
+        LargeRunFactStore? store = null;
+        LargeRunArtifact? artifact = null;
+        var ownershipTransferred = false;
+        try
+        {
+            CreatePrivateArtifactDirectory(directory);
+            store = new LargeRunFactStore(Path.Combine(directory, "facts.sqlite"),
+                _executionBudget.SqliteCacheKiB, _executionBudget.MaxSpoolBytes);
+            long sourceRows = 0;
+            var table = connection.Configuration is not null
+                && connection.Configuration.TryGetValue("table", out var configuredTable) ? configuredTable : "";
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var rows = await reader.ReadBatchAsync(_executionBudget.RowBatchSize,
+                    _executionBudget.MaxBatchBytes, BufferedSourceReader.EstimateRecordBytes, cancellationToken);
+                if (rows.Count == 0) break;
+                sourceRows = checked(sourceRows + rows.Count);
+                foreach (var row in rows)
+                    store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
+
+                context.LoadedSources[binding.BindingId] = rows;
+                var execution = await plan.ExecuteAsync(context);
+                if (execution.Outcome == RunOutcome.Cancelled || cancellationToken.IsCancellationRequested)
+                {
+                    manifest.Outcome = RunOutcome.Cancelled;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+                if (execution.Outcome != RunOutcome.Success || context.Diagnostics.HasBlockingErrors)
+                {
+                    manifest.Outcome = context.Diagnostics.HasBlockingErrors
+                        ? RunOutcome.InvalidMapping : execution.Outcome;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+
+                foreach (var pending in execution.Facts)
+                {
+                    if (pending.ConceptName is null || pending.EntityIdentifier is null || pending.Period is null)
+                    {
+                        context.Diagnostics.Error(DiagnosticCodes.XbrPeriodInvalid,
+                            DiagnosticSubsystem.XBRL, DiagnosticStage.Serialization,
+                            "Fact is missing required aspects (concept, entity, or period).", operationId: operationId);
+                        manifest.Outcome = RunOutcome.InvalidMapping;
+                        manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                        manifest.Diagnostics = context.Diagnostics.Items;
+                        return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                    }
+                    store.Add(new XbrlFact
+                    {
+                        ConceptName = pending.ConceptName,
+                        EntityScheme = pending.EntityScheme!,
+                        EntityIdentifier = pending.EntityIdentifier,
+                        Period = pending.Period,
+                        Unit = pending.Unit,
+                        Value = pending.Value,
+                        IsNil = pending.IsNil,
+                        Decimals = pending.Decimals,
+                        Language = pending.Language,
+                        Dimensions = pending.Dimensions,
+                        ContributingSources = pending.Sources
+                    }, _executionBudget.MaxFactBytes);
+                }
+
+                context.Provenance.Clear();
+                context.LoadedSources.Remove(binding.BindingId);
+                progress?.Report(new MappingJobProgress("Executing bounded row batch", checked((int)Math.Min(sourceRows, int.MaxValue))));
+            }
+
+            if (sourceRows <= _executionBudget.InMemorySourceRecordLimit
+                && probeBytes <= _executionBudget.MaxProbeBytes)
+                throw new InvalidOperationException("The large-run path was selected without exceeding its probe threshold.");
+            context.Provenance.Clear();
+            context.LoadedSources.Remove(binding.BindingId);
+            if (context.Diagnostics.HasBlockingErrors)
+            {
+                manifest.Outcome = RunOutcome.InvalidMapping;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+            if (store.Count == 0)
+            {
+                context.Diagnostics.Error(DiagnosticCodes.XbrRequiredCheckMissing,
+                    DiagnosticSubsystem.XBRL, DiagnosticStage.Validation,
+                    "The mapping produced no XBRL facts. Verify the selected source rows and reporting-year filters before validation.",
+                    operationId: operationId);
+                manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+
+            var digest = store.ComputeSourceDigest(table);
+            UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
+            var reportPath = Path.Combine(directory, "report.json");
+            long reportBytes;
+            try
+            {
+                using var report = new FileStream(reportPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
+                    64 * 1024, FileOptions.SequentialScan);
+                reportBytes = OimSerializer.WriteLargeReport(_profile, store, store.InSemanticOrderWithOccurrences(),
+                    report, _executionBudget.MaxReportBytes, _executionBudget.MaxNamespaces, cancellationToken);
+                report.Flush(flushToDisk: true);
+            }
+            catch (XbrlExportException ex)
+            {
+                context.Diagnostics.Error(ex.Code, DiagnosticSubsystem.XBRL, DiagnosticStage.Serialization,
+                    ex.Message, operationId: operationId);
+                manifest.Outcome = RunOutcome.InvalidMapping;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+            catch (InvalidDataException ex)
+            {
+                context.Diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget,
+                    DiagnosticSubsystem.XBRL, DiagnosticStage.Serialization,
+                    ex.Message, operationId: operationId);
+                manifest.Outcome = RunOutcome.IncompleteConfiguration;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                manifest.Diagnostics = context.Diagnostics.Items;
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+
+            using (var report = new FileStream(reportPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                64 * 1024, FileOptions.SequentialScan))
+            {
+                var actualDigest = RunManifest.ComputeSha256(report);
+                var actualBytes = new FileInfo(reportPath).Length;
+                if (actualBytes != reportBytes)
+                    throw new InvalidDataException("The streamed report byte count changed before worker validation.");
+                artifact = new LargeRunArtifact(directory, store, reportPath, actualDigest, actualBytes);
+                store = null;
+            }
+
+            var validatePayload = JsonSerializer.SerializeToElement(new
+            {
+                xbrlJsonPath = artifact.XbrlJsonPath,
+                sha256 = artifact.Sha256
+            });
+            var request = new WorkerRequest(WorkerOperations.ValidateReport,
+                OperationId: operationId + "-validate", JobId: runId,
+                ProfileDigest: _profile.Digest, DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
+                Payload: validatePayload);
+            progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
+            var workerResponse = await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+            var workerDiagnostics = (workerResponse.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+            var workerBlocking = workerDiagnostics.Any(diagnostic => diagnostic.IsBlocking);
+            manifest.Outcome = workerResponse.Status switch
+            {
+                WorkerStatus.Success when !workerBlocking
+                    => context.Diagnostics.Items.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning)
+                        ? RunOutcome.SuccessWithWarnings : RunOutcome.Success,
+                WorkerStatus.Cancelled => RunOutcome.Cancelled,
+                WorkerStatus.IncompleteValidation => RunOutcome.IncompleteConfiguration,
+                WorkerStatus.TimedOut or WorkerStatus.Crash => RunOutcome.OperationalFailure,
+                _ => RunOutcome.InvalidMapping
+            };
+            if (workerResponse.Status is WorkerStatus.TimedOut or WorkerStatus.Crash
+                && !workerDiagnostics.Any(diagnostic => diagnostic.Code is DiagnosticCodes.WkrTimeout or DiagnosticCodes.WkrCrash))
+            {
+                var timeout = workerResponse.Status == WorkerStatus.TimedOut;
+                workerDiagnostics.Add(new Diagnostic
+                {
+                    Code = timeout ? DiagnosticCodes.WkrTimeout : DiagnosticCodes.WkrCrash,
+                    Subsystem = DiagnosticSubsystem.Worker,
+                    Severity = DiagnosticSeverity.Error,
+                    Stage = DiagnosticStage.Worker,
+                    IsBlocking = true,
+                    Message = timeout
+                        ? "Worker exceeded its per-request deadline and did not respond."
+                        : "Worker terminated unexpectedly; no response was received.",
+                    OperationId = operationId
+                });
+            }
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiagnostics).ToArray();
+            if (workerResponse.Status != WorkerStatus.Success || workerBlocking)
+            {
+                manifest.Outputs = Array.Empty<OutputIdentity>();
+                progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
+                return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+            }
+            manifest.ValidatedArtifactDigest = artifact.Sha256;
+            manifest.Outputs = new[]
+            {
+                new OutputIdentity(artifact.XbrlJsonPath, artifact.Sha256, artifact.Bytes, "xbrl-json")
+            };
+            progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
+            ownershipTransferred = true;
+            return JobResult.FromManifest(manifest, artifact.Facts, "", context.SampledTotals, artifact);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            manifest.Outcome = RunOutcome.Cancelled;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            progress?.Report(new MappingJobProgress("Run ended: Cancelled"));
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (AdapterException ex)
+        {
+            context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, operationId));
+            manifest.Outcome = RunOutcome.DataError;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (LargeRunBudgetExceededException ex)
+        {
+            context.Diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget,
+                DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                ex.Message, operationId: operationId);
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        finally
+        {
+            if (!ownershipTransferred)
+            {
+                artifact?.Dispose();
+                store?.Dispose();
+                try { Directory.Delete(directory, recursive: true); }
+                catch (DirectoryNotFoundException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    private static void UpdateSqliteInputIdentity(RunManifest manifest, string bindingId,
+        SourceConnection connection, string digest, ISourceSchema schema, bool preview, bool? hasPrimaryKey = null)
+    {
+        var declaredPrimaryKey = hasPrimaryKey ?? schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
+        manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == bindingId
+            ? input with
+            {
+                Kind = preview ? "sqlite-preview" : "sqlite-table",
+                Digest = digest,
+                IsReplayable = false,
+                RowIdentityStrategy = declaredPrimaryKey
+                    ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
+                    : SqliteSourceAdapter.PositionalIdentityStrategy,
+                SnapshotStrategy = "sqlite-read-transaction"
+            }
+            : input).ToArray();
+    }
+
+    private static void AddSqliteRowIdentityWarning(RunContext context, ISourceSchema schema, string operationId)
+    {
+        if (schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0)) return;
+        context.Diagnostics.Warn(DiagnosticCodes.IoStableRowIdentityUnavailable,
+            DiagnosticSubsystem.Adapter, DiagnosticStage.Execution,
+            "The selected SQLite table has no declared primary key. SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; use a declared primary key or immutable extract if durable row-level identity is required.",
+            operationId: operationId);
+    }
+
+    private static void CreatePrivateArtifactDirectory(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(directory);
+        else
+            Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    private bool IsBoundedInMemorySource(SourceConnection connection, out string reason)
+    {
+        reason = "";
+        if (string.IsNullOrWhiteSpace(connection.Path))
+        {
+            reason = $"Source '{connection.SourceId}' has no file path that can be size-checked before schema inspection.";
+            return false;
+        }
+        try
+        {
+            var path = connection.Path;
+            var info = new FileInfo(path);
+            if (!info.Exists)
+            {
+                reason = $"Source '{connection.SourceId}' is missing and cannot be size-checked before schema inspection.";
+                return false;
+            }
+            if (info.Length > _executionBudget.MaxInMemorySourceBytes)
+            {
+                reason = $"Source '{connection.SourceId}' exceeds the {_executionBudget.MaxInMemorySourceBytes} byte in-memory source limit; use a streamed SQLite source for large runs.";
+                return false;
+            }
+            if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "excel"))
+            {
+                using var file = File.OpenRead(path);
+                using var archive = new System.IO.Compression.ZipArchive(file, System.IO.Compression.ZipArchiveMode.Read);
+                long expandedBytes = 0;
+                foreach (var entry in archive.Entries)
+                {
+                    expandedBytes = checked(expandedBytes + entry.Length);
+                    if (expandedBytes > _executionBudget.MaxExpandedInMemorySourceBytes)
+                    {
+                        reason = $"Excel source '{connection.SourceId}' exceeds the {_executionBudget.MaxExpandedInMemorySourceBytes} byte expanded in-memory source limit.";
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or OverflowException)
+        {
+            reason = $"Source '{connection.SourceId}' could not be size-checked safely before schema inspection: {ex.Message}";
+            return false;
+        }
+    }
+
     /// <summary>
     /// Validate the exact bytes reread from the publisher's private staging file. This
     /// is a second profile-worker adjudication at the final publication boundary; the
@@ -616,39 +1092,103 @@ public sealed class MappingJobService
                 "The completed run has no xBRL-JSON output identity to validate.",
                 manifest.RunId, destinationPath);
 
-        byte[] bytes;
-        try
+        string digest;
+        JsonElement workerPayload;
+        string? workerScratch = null;
+        if (result.LargeArtifact is not null)
         {
-            bytes = await File.ReadAllBytesAsync(stagedPath, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await using var stagedStream = new FileStream(stagedPath, FileMode.Open, FileAccess.Read,
+                    FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                digest = RunManifest.ComputeSha256(stagedStream);
+                var stagedBytes = new FileInfo(stagedPath).Length;
+                if (!StringComparer.Ordinal.Equals(output.Digest, digest) || output.Bytes != stagedBytes)
+                    throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                        "Staged report bytes do not match the artifact recorded by the completed run.",
+                        manifest.RunId, destinationPath);
+
+                workerScratch = Path.Combine(Path.GetTempPath(), "xms-large-stage-" + Guid.NewGuid().ToString("N"));
+                CreatePrivateArtifactDirectory(workerScratch);
+                var workerPath = Path.Combine(workerScratch, "report.json");
+                await using var source = new FileStream(stagedPath, FileMode.Open, FileAccess.Read,
+                    FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                await using var target = new FileStream(workerPath, FileMode.CreateNew, FileAccess.Write,
+                    FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var buffer = new byte[64 * 1024];
+                long copied = 0;
+                int read;
+                while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    copied = checked(copied + read);
+                    if (copied > output.Bytes)
+                        throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                            "Staged report grew while it was copied for profile validation.", manifest.RunId, destinationPath);
+                    await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                }
+                if (copied != output.Bytes)
+                    throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                        "Staged report changed while it was copied for profile validation.", manifest.RunId, destinationPath);
+                await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                workerPayload = JsonSerializer.SerializeToElement(new { xbrlJsonPath = workerPath, sha256 = digest });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                if (workerScratch is not null) TryDeleteDirectory(workerScratch);
+                throw;
+            }
+            catch (PublicationException)
+            {
+                if (workerScratch is not null) TryDeleteDirectory(workerScratch);
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (workerScratch is not null) TryDeleteDirectory(workerScratch);
+                throw new PublicationException(DiagnosticCodes.PubStagingFailed,
+                    $"Could not stream the staged artifact for profile validation: {ex.Message}",
+                    manifest.RunId, destinationPath);
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        else
         {
-            throw;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            throw new PublicationException(DiagnosticCodes.PubStagingFailed,
-                $"Could not read the staged artifact for profile validation: {ex.Message}",
-                manifest.RunId, destinationPath);
+            byte[] bytes;
+            try
+            {
+                bytes = await File.ReadAllBytesAsync(stagedPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new PublicationException(DiagnosticCodes.PubStagingFailed,
+                    $"Could not read the staged artifact for profile validation: {ex.Message}",
+                    manifest.RunId, destinationPath);
+            }
+            digest = RunManifest.ComputeSha256(bytes);
+            if (!StringComparer.Ordinal.Equals(output.Digest, digest) || output.Bytes != bytes.Length)
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    "Staged report bytes do not match the artifact recorded by the completed run.",
+                    manifest.RunId, destinationPath);
+            string reportJson;
+            try
+            {
+                reportJson = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                    .GetString(bytes);
+            }
+            catch (DecoderFallbackException ex)
+            {
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    $"Staged xBRL-JSON is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
+            }
+            workerPayload = JsonSerializer.SerializeToElement(reportJson);
         }
 
-        var digest = RunManifest.ComputeSha256(bytes);
-        if (!StringComparer.Ordinal.Equals(output.Digest, digest) || output.Bytes != bytes.Length)
+        if (!StringComparer.Ordinal.Equals(output.Digest, digest))
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                "Staged report bytes do not match the artifact recorded by the completed run.",
-                manifest.RunId, destinationPath);
-
-        string reportJson;
-        try
-        {
-            reportJson = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
-                .GetString(bytes);
-        }
-        catch (DecoderFallbackException ex)
-        {
-            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                $"Staged xBRL-JSON is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
-        }
+                "Staged report bytes do not match the artifact recorded by the completed run.", manifest.RunId, destinationPath);
 
         var operationId = manifest.OperationId + "-staged-" + Guid.NewGuid().ToString("N");
         WorkerResponse response;
@@ -660,7 +1200,7 @@ public sealed class MappingJobService
                 JobId: manifest.RunId,
                 ProfileDigest: _profile.Digest,
                 DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-                Payload: JsonSerializer.SerializeToElement(reportJson)), cancellationToken)
+                Payload: workerPayload), cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -677,6 +1217,10 @@ public sealed class MappingJobService
             throw new PublicationException(DiagnosticCodes.WkrCrash,
                 $"Validation worker failed while checking the staged artifact: {ex.Message}",
                 manifest.RunId, destinationPath);
+        }
+        finally
+        {
+            if (workerScratch is not null) TryDeleteDirectory(workerScratch);
         }
 
         if (!StringComparer.Ordinal.Equals(response.OperationId, operationId))
@@ -1103,6 +1647,13 @@ public sealed class MappingJobService
         { /* keep the primary publication outcome */ }
     }
 
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { /* keep the primary publication outcome */ }
+    }
+
     private static object? ToExcelCell(DataValue value)
         => value.Presence switch
         {
@@ -1448,8 +1999,13 @@ public sealed record JobResult(
     DiagnosticBag Diagnostics,
     // MAP08: aggregates computed during a preview run, each flagged IsPartial so a
     // reviewer cannot mistake a sampled total for a full-run figure.
-    IReadOnlyList<SampledTotal> SampledTotals)
+    IReadOnlyList<SampledTotal> SampledTotals) : IDisposable
 {
+    /// <summary>Disk-backed large-run report and facts. Owned by this result.</summary>
+    public LargeRunArtifact? LargeArtifact { get; init; }
+
+    public void Dispose() => LargeArtifact?.Dispose();
+
     /// <summary>
     /// OG01 fail-closed publishing: only a completed, full-run (non-preview) execution
     /// whose outcome is an unqualified success or success-with-warnings is eligible to
@@ -1463,10 +2019,13 @@ public sealed record JobResult(
         && Manifest.Outcome is RunOutcome.Success or RunOutcome.SuccessWithWarnings;
 
     internal static JobResult FromManifest(RunManifest manifest, IReadOnlyList<XbrlFact> facts, string json,
-        IReadOnlyList<SampledTotal>? sampledTotals = null)
+        IReadOnlyList<SampledTotal>? sampledTotals = null, LargeRunArtifact? largeArtifact = null)
     {
         var bag = new DiagnosticBag();
         foreach (var d in manifest.Diagnostics) bag.Add(d);
-        return new JobResult(manifest, facts, json, bag, sampledTotals ?? Array.Empty<SampledTotal>());
+        return new JobResult(manifest, facts, json, bag, sampledTotals ?? Array.Empty<SampledTotal>())
+        {
+            LargeArtifact = largeArtifact
+        };
     }
 }

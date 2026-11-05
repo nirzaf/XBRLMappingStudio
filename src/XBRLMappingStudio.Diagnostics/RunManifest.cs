@@ -135,16 +135,57 @@ public sealed record OutputIdentity(
 public sealed class DiagnosticBag
 {
     private readonly List<Diagnostic> _items = new();
+    private int _maximumRetainedItems = int.MaxValue;
+    private int _suppressedWarnings;
+    private int _suppressedErrors;
+    private int _suppressedOther;
+    private bool _hasBlockingErrors;
+    private bool _suppressedBlockingErrors;
 
-    public IReadOnlyList<Diagnostic> Items => _items;
+    public IReadOnlyList<Diagnostic> Items
+    {
+        get
+        {
+            if (_suppressedWarnings + _suppressedErrors + _suppressedOther == 0) return _items;
+            var summary = new Diagnostic
+            {
+                Code = DiagnosticCodes.MapDiagnosticsTruncated,
+                Subsystem = DiagnosticSubsystem.Mapping,
+                Severity = _suppressedErrors > 0 ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,
+                Stage = DiagnosticStage.Execution,
+                IsBlocking = _suppressedBlockingErrors,
+                Message = $"Diagnostic retention limit reached; {_suppressedErrors} error(s), {_suppressedWarnings} warning(s), and {_suppressedOther} informational finding(s) were summarized.",
+            };
+            return _items.Append(summary).ToArray();
+        }
+    }
 
-    public bool HasBlockingErrors => _items.Any(d => d.IsBlocking);
+    public bool HasBlockingErrors => _hasBlockingErrors;
 
-    public void Add(Diagnostic diagnostic) => _items.Add(diagnostic);
+    public void SetMaximumRetainedItems(int maximumRetainedItems)
+    {
+        if (maximumRetainedItems < 2) throw new ArgumentOutOfRangeException(nameof(maximumRetainedItems));
+        if (maximumRetainedItems >= _maximumRetainedItems) return;
+        _maximumRetainedItems = maximumRetainedItems;
+        while (_items.Count > _maximumRetainedItems)
+        {
+            var removed = _items[^1];
+            _items.RemoveAt(_items.Count - 1);
+            RecordSuppressed(removed);
+        }
+    }
+
+    public void Add(Diagnostic diagnostic)
+    {
+        ArgumentNullException.ThrowIfNull(diagnostic);
+        _hasBlockingErrors |= diagnostic.IsBlocking;
+        if (_items.Count < _maximumRetainedItems) _items.Add(diagnostic);
+        else RecordSuppressed(diagnostic);
+    }
 
     public void Info(string code, string subsystem, string stage, string message,
         string? nodeId = null, SourceReference? source = null, string? operationId = null)
-        => _items.Add(new Diagnostic
+        => Add(new Diagnostic
         {
             Code = code,
             Subsystem = subsystem,
@@ -160,7 +201,7 @@ public sealed class DiagnosticBag
     public void Warn(string code, string subsystem, string stage, string message,
         string? nodeId = null, SourceReference? source = null, string? operationId = null,
         IReadOnlyDictionary<string, string>? details = null)
-        => _items.Add(new Diagnostic
+        => Add(new Diagnostic
         {
             Code = code,
             Subsystem = subsystem,
@@ -179,7 +220,7 @@ public sealed class DiagnosticBag
         string? operationId = null,
         IReadOnlyDictionary<string, string>? details = null,
         string? edgeId = null)
-        => _items.Add(new Diagnostic
+        => Add(new Diagnostic
         {
             Code = code,
             Subsystem = subsystem,
@@ -196,6 +237,14 @@ public sealed class DiagnosticBag
         });
 
     public IEnumerable<Diagnostic> OfCode(string code) => _items.Where(d => d.Code == code);
+
+    private void RecordSuppressed(Diagnostic diagnostic)
+    {
+        _suppressedBlockingErrors |= diagnostic.IsBlocking;
+        if (diagnostic.Severity == DiagnosticSeverity.Warning) _suppressedWarnings++;
+        else if (diagnostic.Severity == DiagnosticSeverity.Error) _suppressedErrors++;
+        else _suppressedOther++;
+    }
 }
 
 [JsonSerializable(typeof(RunManifest))]

@@ -28,6 +28,7 @@ public static class DiagnosticCodes
     public const string MapInvalidRoundingMode = "MAP018";
     public const string MapInvalidComparisonOp = "MAP019";
     public const string MapFunctionRevisionMissing = "MAP020";
+    public const string MapDiagnosticsTruncated = "MAP021";
 
     // PRJ - Project schema and lifecycle
     public const string PrjSchemaVersionUnsupported = "PRJ001";

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Xml;
 using XBRLMappingStudio.Diagnostics;
 
@@ -57,6 +58,79 @@ public static class OimSerializer
             WriteIndented = true,
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
         });
+    }
+
+    /// <summary>
+    /// Writes the same deterministic OIM JSON shape as <see cref="Serialize"/> while
+    /// retaining only one fact node at a time. The caller supplies semantic-order
+    /// occurrences from its disk-backed index so IDs remain stable without a
+    /// row-count-sized in-memory occurrence map.
+    /// </summary>
+    public static long WriteLargeReport(
+        FilingProfile profile,
+        IEnumerable<XbrlFact> facts,
+        IEnumerable<(XbrlFact Fact, int Occurrence)> semanticOrder,
+        Stream destination,
+        long maxOutputBytes,
+        int maxNamespaces,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(semanticOrder);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (maxOutputBytes < 1) throw new ArgumentOutOfRangeException(nameof(maxOutputBytes));
+        if (maxNamespaces < 1) throw new ArgumentOutOfRangeException(nameof(maxNamespaces));
+
+        foreach (var fact in facts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var concept = profile.FindConcept(fact.ConceptName)
+                ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
+            if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
+        }
+        var ns = BuildNamespaces(profile, facts, maxNamespaces, cancellationToken);
+        using var bounded = new BoundedWriteStream(destination, maxOutputBytes);
+        using (var writer = new Utf8JsonWriter(bounded, new JsonWriterOptions
+        {
+            Indented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        }))
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("documentInfo");
+            writer.WriteStartObject();
+            writer.WriteString("documentType", DocumentType);
+            writer.WritePropertyName("namespaces");
+            writer.WriteStartObject();
+            foreach (var entry in ns.Output.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                writer.WriteString(entry.Key, entry.Value);
+            writer.WriteEndObject();
+            writer.WritePropertyName("taxonomy");
+            writer.WriteStartArray();
+            foreach (var url in profile.TaxonomyUrls) writer.WriteStringValue(url);
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+
+            writer.WritePropertyName("facts");
+            writer.WriteStartObject();
+            foreach (var (fact, occurrence) in semanticOrder)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (occurrence < 1) throw new InvalidDataException("A fact occurrence index must be positive.");
+                var key = fact.SemanticKey();
+                var id = "f" + Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(key + "\u001f" + occurrence.ToString(CultureInfo.InvariantCulture))))
+                    .ToLowerInvariant();
+                writer.WritePropertyName(id);
+                FactToJson(fact, ns).WriteTo(writer);
+                writer.Flush();
+            }
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+            writer.Flush();
+        }
+        return bounded.BytesWritten;
     }
 
     private static JsonObject FactToJson(XbrlFact fact, NamespaceContext ns)
@@ -385,7 +459,8 @@ public static class OimSerializer
         }
     }
 
-    private static NamespaceContext BuildNamespaces(FilingProfile profile, IReadOnlyList<XbrlFact> facts)
+    private static NamespaceContext BuildNamespaces(FilingProfile profile, IEnumerable<XbrlFact> facts,
+        int maxNamespaces = int.MaxValue, CancellationToken cancellationToken = default)
     {
         var output = new Dictionary<string, string>(StringComparer.Ordinal);
         var sourceUris = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -408,6 +483,8 @@ public static class OimSerializer
             output[prefix] = uri;
             outputForSource[prefix] = prefix;
             aliasForUri[uri] = prefix;
+            if (output.Count > maxNamespaces)
+                throw Unsupported($"The report exceeded its {maxNamespaces} namespace budget.");
         }
 
         Add("xbrl", "https://xbrl.org/2021");
@@ -432,6 +509,7 @@ public static class OimSerializer
 
         foreach (var fact in facts)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             _ = QName(fact.ConceptName);
             foreach (var dimension in fact.Dimensions)
             {
@@ -447,6 +525,9 @@ public static class OimSerializer
         var entityPrefixByScheme = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var scheme in facts.Select(f => f.EntityScheme).Distinct(StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (entityPrefixByScheme.Count >= maxNamespaces)
+                throw Unsupported($"The report exceeded its {maxNamespaces} entity namespace budget.");
             if (!Uri.TryCreate(scheme, UriKind.Absolute, out _)) throw Unsupported($"Entity scheme '{scheme}' is not an absolute URI.");
             if (!aliasForUri.TryGetValue(scheme, out var prefix))
             {
@@ -511,6 +592,49 @@ public static class OimSerializer
             if (value is "shares" or "pure" or "monetary" or "integer" or "percent")
                 return QName("xbrli:" + value);
             throw Unsupported($"Unit measure '{value}' must be a qualified name or a supported currency.");
+        }
+    }
+
+    private sealed class BoundedWriteStream(Stream inner, long maximumBytes) : Stream
+    {
+        public long BytesWritten { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => BytesWritten;
+        public override long Position { get => BytesWritten; set => throw new NotSupportedException(); }
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            EnsureCapacity(count);
+            inner.Write(buffer, offset, count);
+            BytesWritten += count;
+        }
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            EnsureCapacity(buffer.Length);
+            inner.Write(buffer);
+            BytesWritten += buffer.Length;
+        }
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            EnsureCapacity(buffer.Length);
+            await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+            BytesWritten += buffer.Length;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            // The caller owns the underlying artifact stream.
+            base.Dispose(disposing);
+        }
+        private void EnsureCapacity(int count)
+        {
+            if (count > maximumBytes - BytesWritten)
+                throw new InvalidDataException($"The xBRL-JSON report exceeded its {maximumBytes} byte budget.");
         }
     }
 }

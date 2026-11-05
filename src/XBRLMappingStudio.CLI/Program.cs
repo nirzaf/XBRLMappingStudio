@@ -820,7 +820,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-        var result = await service.RunAsync(p, conns, parameters, preview, cts.Token);
+        using var result = await service.RunAsync(p, conns, parameters, preview, cts.Token);
         PrintDiagnostics(result.Diagnostics.Items);
 
         void RecordDestinationFailure(Diagnostic diagnostic, RunOutcome outcome)
@@ -921,20 +921,27 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                 try
                 {
                     var publisher = new PublicationService(new RunJournal());
-                    var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
-                    var receipt = await publisher.PublishAuthorizedAsync(
-                        output,
-                        payload,
-                        workspaceRoot,
-                        p,
-                        profile,
-                        allowSyntheticProfile,
-                        result,
-                        (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                            stagedPath, output, result, token),
-                        cts.Token);
+                    PublicationReceipt receipt;
+                    long payloadBytes;
+                    if (result.LargeArtifact is { } largeArtifact)
+                    {
+                        receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
+                            output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
+                            (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                                stagedPath, output, result, token), cts.Token);
+                        payloadBytes = largeArtifact.Bytes;
+                    }
+                    else
+                    {
+                        var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+                        receipt = await publisher.PublishAuthorizedAsync(
+                            output, payload, workspaceRoot, p, profile, allowSyntheticProfile, result,
+                            (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                                stagedPath, output, result, token), cts.Token);
+                        payloadBytes = payload.Length;
+                    }
                     Console.Error.WriteLine(
-                        $"Published {receipt.DestinationPath} ({payload.Length} bytes) "
+                        $"Published {receipt.DestinationPath} ({payloadBytes} bytes) "
                         + $"run={receipt.RunId} digest={receipt.FinalDigest}.");
                 }
                 catch (PublicationException ex)

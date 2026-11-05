@@ -239,6 +239,104 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertTrue(result["result"]["completed"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
 
+    def test_large_path_payload_rehashes_and_streams_report_to_arelle_file_loader(self):
+        temporary = tempfile.mkdtemp(prefix="xms-large-")
+        directory = Path(temporary)
+        if sys.platform != "win32":
+            directory.chmod(0o700)
+        path = directory / "report.json"
+        raw = json.dumps(report(), ensure_ascii=False).encode("utf-8")
+        path.write_bytes(raw)
+        request = {
+            "operation": "validate-report", "operationId": "large-op", "jobId": "large-job",
+            "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
+            "payload": {"xbrlJsonPath": str(path), "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+        }
+        observed = {}
+
+        def fake_arelle(entrypoint, args, temporary_path=None):
+            observed["path"] = Path(entrypoint)
+            observed["temporary_path"] = temporary_path
+            observed["report"] = json.loads(Path(entrypoint).read_text(encoding="utf-8"))
+            return True, [], 1
+
+        try:
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "run_arelle", side_effect=fake_arelle):
+                result = arelle_worker.handle(request, self.args)
+            self.assertEqual("success", result["status"], result["error"])
+            self.assertNotEqual(path, observed["path"])
+            sanitized = observed["report"]
+            expected_taxonomy = str(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd") \
+                if sys.platform == "win32" else (TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()
+            self.assertEqual([expected_taxonomy], sanitized["documentInfo"]["taxonomy"])
+        finally:
+            import shutil
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_large_path_rejects_bad_digest_and_paths_outside_private_temp_directory(self):
+        outside_directory = Path(tempfile.mkdtemp(prefix="xms-unqualified-"))
+        outside = outside_directory / "report.json"
+        outside_raw = json.dumps(report()).encode("utf-8")
+        outside.write_bytes(outside_raw)
+        payloads = [
+            {"xbrlJsonPath": str(outside),
+             "sha256": "sha256:" + hashlib.sha256(outside_raw).hexdigest()},
+        ]
+        private = Path(tempfile.mkdtemp(prefix="xms-large-"))
+        if sys.platform != "win32":
+            private.chmod(0o700)
+        try:
+            path = private / "report.json"
+            raw = json.dumps(report()).encode("utf-8")
+            path.write_bytes(raw)
+            payloads.append({"xbrlJsonPath": str(path), "sha256": "sha256:" + "0" * 64})
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True):
+                for payload in payloads:
+                    request = {
+                        "operation": "validate-report", "operationId": "large-op", "jobId": "large-job",
+                        "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
+                        "payload": payload,
+                    }
+                    result = arelle_worker.handle(request, self.args)
+                    self.assertEqual("domainFailure", result["status"])
+        finally:
+            import shutil
+            shutil.rmtree(private, ignore_errors=True)
+            shutil.rmtree(outside_directory, ignore_errors=True)
+
+    def test_large_path_rejects_duplicate_root_member_extra_member_and_trailing_data(self):
+        valid = json.dumps(report(), separators=(",", ":"))
+        document_info = json.dumps(report()["documentInfo"], separators=(",", ":"))
+        malformed_reports = [
+            "{" + json.dumps("documentInfo") + ":" + document_info + "," + json.dumps("documentInfo")
+            + ":" + document_info + ',"facts":{}}',
+            valid[:-1] + ',"unexpected":true}',
+            valid + " trailing",
+        ]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+            for raw_text in malformed_reports:
+                directory = Path(tempfile.mkdtemp(prefix="xms-large-"))
+                if sys.platform != "win32":
+                    directory.chmod(0o700)
+                try:
+                    path = directory / "report.json"
+                    raw = raw_text.encode("utf-8")
+                    path.write_bytes(raw)
+                    request = {
+                        "operation": "validate-report", "operationId": "large-op", "jobId": "large-job",
+                        "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
+                        "payload": {"xbrlJsonPath": str(path),
+                                    "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+                    }
+                    result = arelle_worker.handle(request, self.args)
+                    self.assertEqual("domainFailure", result["status"])
+                finally:
+                    import shutil
+                    shutil.rmtree(directory, ignore_errors=True)
+        run_arelle.assert_not_called()
+
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
     def test_product_generated_report_fixture_passes_arelle(self):

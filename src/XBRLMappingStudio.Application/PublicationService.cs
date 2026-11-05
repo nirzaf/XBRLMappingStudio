@@ -77,14 +77,66 @@ public sealed class PublicationService
                 manifest.RunId, destinationPath);
 
         var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
-        var receipt = await PublishCoreAsync(safeDestination, payload, manifest.RunId,
-            validateStagedArtifactAsync, cancellationToken).ConfigureAwait(false);
+        var payloadDigest = RunManifest.ComputeSha256(payload);
+        var receipt = await PublishCoreAsync(safeDestination,
+            async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
+            payloadDigest, payload.LongLength, manifest.RunId, validateStagedArtifactAsync,
+            cancellationToken).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs
             .Select(output => output.Kind == "xbrl-json"
                 ? output with { Path = safeDestination }
                 : output)
             .ToArray();
+        return receipt;
+    }
+
+    /// <summary>Authorize and stream a disk-backed xBRL-JSON artifact through the same staged publication boundary.</summary>
+    public async Task<PublicationReceipt> PublishAuthorizedLargeArtifactAsync(
+        string destinationPath,
+        LargeRunArtifact artifact,
+        string workspaceRoot,
+        MappingProject project,
+        FilingProfile profile,
+        bool allowSyntheticProfile,
+        JobResult result,
+        Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
+        var manifest = result.Manifest;
+        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
+        if (gate.HasBlockingErrors)
+        {
+            var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
+            throw PublicationFailed(first.Code, string.Join(Environment.NewLine, gate.Items.Select(diagnostic => diagnostic.Message)),
+                manifest.RunId, destinationPath);
+        }
+        var graphDigest = project.ComputeSemanticDigest();
+        if (manifest.ProjectId != project.ProjectId
+            || manifest.SemanticRevision != project.SemanticRevision
+            || manifest.ProjectSemanticDigest != graphDigest
+            || manifest.ProfileDigest != profile.Digest
+            || manifest.IsPreview
+            || manifest.Outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+            throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
+                "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
+                manifest.RunId, destinationPath);
+
+        if (!manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+                && output.Digest == artifact.Sha256 && output.Bytes == artifact.Bytes))
+            throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                "Publication artifact does not match the report recorded by the run.", manifest.RunId, destinationPath);
+
+        var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
+        var receipt = await PublishCoreAsync(safeDestination,
+            (stream, token) => artifact.CopyReportToAsync(stream, token),
+            artifact.Sha256, artifact.Bytes, manifest.RunId, validateStagedArtifactAsync,
+            cancellationToken).ConfigureAwait(false);
+        manifest.PublishedArtifactDigest = receipt.FinalDigest;
+        manifest.Outputs = manifest.Outputs.Select(output => output.Kind == "xbrl-json"
+            ? output with { Path = safeDestination } : output).ToArray();
         return receipt;
     }
 
@@ -102,12 +154,16 @@ public sealed class PublicationService
         TimeSpan? lockTimeout = null,
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync = null,
         CancellationToken cancellationToken = default)
-        => PublishCoreAsync(destinationPath, payload, runId, validateStagedArtifactAsync,
+        => PublishCoreAsync(destinationPath,
+            async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
+            RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
             cancellationToken, beforeReplaceFault, lockTimeout).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
-        byte[] payload,
+        Func<Stream, CancellationToken, Task> writePayloadAsync,
+        string expectedPayloadDigest,
+        long expectedPayloadBytes,
         string? runId,
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync,
         CancellationToken cancellationToken,
@@ -125,8 +181,15 @@ public sealed class PublicationService
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            File.WriteAllBytes(stagedPath, payload);
+            await using (var output = new FileStream(stagedPath, FileMode.Create, FileAccess.Write,
+                FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await writePayloadAsync(output, cancellationToken).ConfigureAwait(false);
             stagedDigest = DestinationLock.DigestFile(stagedPath);
+        }
+        catch (OperationCanceledException)
+        {
+            TryDelete(stagedPath);
+            throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -147,12 +210,12 @@ public sealed class PublicationService
         }
 
         // ---- Verify: re-open the staged bytes and confirm the digest matches the intent.
-        var expectedDigest = DestinationLock.DigestBytes(payload);
-        if (stagedDigest != expectedDigest)
+        var stagedBytes = new FileInfo(stagedPath).Length;
+        if (stagedDigest != expectedPayloadDigest || stagedBytes != expectedPayloadBytes)
         {
             Abort(runId, full, stagedPath, stagedDigest, null);
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
-                $"Staged artifact digest {stagedDigest} does not match the payload digest {expectedDigest}.",
+                $"Staged artifact digest or byte count does not match the expected payload {expectedPayloadDigest} ({expectedPayloadBytes} bytes).",
                 runId, full);
         }
         try
