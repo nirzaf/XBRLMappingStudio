@@ -77,15 +77,14 @@ test matrix. They do not close the external filing-authority/taxonomy-rights,
 reviewer-authority, Windows signing/hardware, PDF/OCR-rights or production database
 gates recorded in `docs/decisions/OPEN.md`.
 
-## Local staged-publication slice before push
+## Exact-head staged-publication verification
 
 | Item | Evidence |
 |---|---|
-| Base head | `c1557d3b46208bff7e1db00088afaebd43dfab45`; this slice is currently in the local worktree |
-| Release build | `dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1 --verbosity minimal`: 0 warnings, 0 errors |
-| Full .NET suite | 388 passed, 3 gated Arelle cases skipped (391 total) across 8 projects |
-| Gated Arelle verification | All 3 .NET Arelle integration cases passed with the pinned local Python 3.12 runtime |
-| Python worker suite | 19 passed; Windows symlink-privilege case skipped |
+| Verified implementation commit | `main` at `6f6bf6d08aa2665fedebb22a3ffb8fdff258487a`; `origin/main` matched and the worktree was clean after push |
+| Exact-head CI | [Run 41976559279](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41976559279) completed successfully on the verified commit |
+| Release builds and hygiene | Ubuntu and Windows Release builds passed; repository hygiene passed and `XBRL_Mapping_Studio.md` is unchanged |
+| .NET test matrix | Ubuntu and Windows each passed 388 tests and skipped 3 gated Arelle cases (391 total) across 8 projects |
+| Pinned worker job | All 20 Python tests and all 3 gated .NET Arelle integration cases passed |
+| Local pinned worker run | 19 passed; Windows symlink-privilege case skipped; all 3 gated .NET Arelle tests passed |
 | Scope | Exact staged xBRL-JSON validation, digest rechecks, terminal abort/recovery, durable validated-digest columns, CLI/Desktop publication, and README/status reconciliation |
-
-Remote exact-head CI for the staged-publication slice is pending the authorized push.

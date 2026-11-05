@@ -141,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Local Release suite: 388 passed and 3 Arelle-gated cases skipped; all 3 gated cases passed locally with the pinned worker runtime. |
+| Tests | xUnit 2.9.3 | Exact-head CI: 388 passed and 3 gated Arelle cases skipped per OS; all 3 gated cases passed in the pinned worker job. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -278,7 +278,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-The latest local Release run reports 388 passed and 3 Arelle-gated subprocess cases skipped. With the pinned Python 3.12 runtime, all 3 gated .NET Arelle cases pass; the worker suite passes 19 tests and skips its Windows symlink-privilege case. The table shows current checkout totals; exact-head GitHub Actions verification will run after this slice is pushed:
+Exact-head GitHub Actions run [41976559279](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/41976559279) passed the Ubuntu and Windows Release build/test matrix and repository hygiene on `6f6bf6d08aa2665fedebb22a3ffb8fdff258487a`. Each OS passed 388 tests and skipped the same 3 Arelle-gated subprocess cases. The pinned worker job passed 20 Python tests and all 3 gated .NET Arelle cases. The table shows current checkout totals:
 
 | Suite | Count | Covers |
 |---|---:|---|
