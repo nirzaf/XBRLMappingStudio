@@ -36,6 +36,19 @@ public sealed class PdfNumericInterpreterTests
     }
 
     [Fact]
+    public void RemovedNegativeSignChangesTheProposalAndStillRequiresReviewerAcknowledgment()
+    {
+        var negative = PdfNumericInterpreter.Parse("(125.00)", 2025, Evidence, Policy());
+        var signMissing = PdfNumericInterpreter.Parse("125.00", 2025, Evidence, Policy());
+
+        Assert.Equal(-125.00m, negative.Value);
+        Assert.Equal(125.00m, signMissing.Value);
+        Assert.True(negative.RequiresReviewerApproval);
+        Assert.True(signMissing.RequiresReviewerApproval);
+        Assert.NotEqual(negative.CanonicalValue, signMissing.CanonicalValue);
+    }
+
+    [Fact]
     public void TrailingMinusAndLeadingMinusRequireExplicitPolicies()
     {
         var trailing = PdfNumericInterpreter.Parse("1,250.50-", 2025, Evidence, Policy());

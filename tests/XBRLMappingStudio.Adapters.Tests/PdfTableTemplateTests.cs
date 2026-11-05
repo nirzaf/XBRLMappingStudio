@@ -67,12 +67,12 @@ public sealed class PdfTableTemplateTests
     }
 
     [Fact]
-    public void MovedYearColumns_FailClosedInsteadOfSilentlySwappingValues()
+    public void ReorderedYearColumns_FailClosedInsteadOfSilentlySwappingValues()
     {
         var seed = Document(Page(1, 0, Header(900), Row(800, "Revenue", ("100", 450), ("200", 800))));
         var template = PdfTableTemplate.CreateFromFirstPage(seed, 1, "Description", PeriodHeaders, true);
-        var drifted = Document(Page(1, 0, Header(900, year2025X: 540, year2026X: 875),
-            Row(800, "Revenue", ("200", 540), ("100", 875))));
+        var drifted = Document(Page(1, 0, Header(900, year2025X: 800, year2026X: 450),
+            Row(800, "Revenue", ("200", 450), ("100", 800))));
 
         var result = PdfTableTemplateReconstructor.Reconstruct(drifted, template);
 
@@ -97,6 +97,52 @@ public sealed class PdfTableTemplateTests
 
         Assert.Equal(PdfTableReconstructionState.LayoutDrift, result.State);
         Assert.Empty(result.Rows);
+    }
+
+    [Fact]
+    public void MovedTableHeaderLine_FailsClosedBeforeRowsCanBeReused()
+    {
+        var seed = Document(Page(1, 0, Header(900), Row(800, "Revenue", ("100", 450), ("200", 800))));
+        var template = PdfTableTemplate.CreateFromFirstPage(seed, 1, "Description", PeriodHeaders, true);
+        var moved = Document(Page(1, 0, Header(700), Row(600, "Revenue", ("100", 450), ("200", 800))));
+
+        var result = PdfTableTemplateReconstructor.Reconstruct(moved, template);
+
+        Assert.Equal(PdfTableReconstructionState.LayoutDrift, result.State);
+        Assert.Empty(result.Rows);
+        Assert.Contains("page-layout anchor", Assert.Single(result.Diagnostics).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingDeclaredTemplatePage_FailsClosed()
+    {
+        var seed = Document(
+            Page(1, 0, Header(900), Row(800, "Revenue", ("100", 450), ("200", 800))),
+            Page(2, 0, Header(900), Row(800, "Profit", ("40", 450), ("110", 800))));
+        var template = PdfTableTemplate.CreateFromFirstPage(seed, 2, "Description", PeriodHeaders, true);
+        var missingPage = Document(Page(1, 0, Header(900), Row(800, "Revenue", ("100", 450), ("200", 800))));
+
+        var result = PdfTableTemplateReconstructor.Reconstruct(missingPage, template);
+
+        Assert.Equal(PdfTableReconstructionState.LayoutDrift, result.State);
+        Assert.Empty(result.Rows);
+        Assert.Contains("missing the declared template page", Assert.Single(result.Diagnostics).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DuplicateTableHeaderOccurrenceOnOnePage_FailsClosed()
+    {
+        var seed = Document(Page(1, 0, Header(900), Row(800, "Revenue", ("100", 450), ("200", 800))));
+        var template = PdfTableTemplate.CreateFromFirstPage(seed, 1, "Description", PeriodHeaders, true);
+        var duplicate = Document(Page(1, 0,
+            Header(900), Row(800, "Revenue", ("100", 450), ("200", 800)),
+            Header(600), Row(500, "Revenue", ("100", 450), ("200", 800))));
+
+        var result = PdfTableTemplateReconstructor.Reconstruct(duplicate, template);
+
+        Assert.Equal(PdfTableReconstructionState.LayoutDrift, result.State);
+        Assert.Empty(result.Rows);
+        Assert.Contains("multiple occurrences", Assert.Single(result.Diagnostics).Message, StringComparison.Ordinal);
     }
 
     [Fact]

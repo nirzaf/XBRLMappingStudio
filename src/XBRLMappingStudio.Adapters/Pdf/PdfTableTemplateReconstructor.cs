@@ -320,6 +320,11 @@ public static class PdfTableTemplateReconstructor
         {
             return Drift(document, template, "The PDF document or declared year-column template is invalid.");
         }
+        if (template.SeedPageNumber > document.Pages.Count
+            || document.Pages[template.SeedPageNumber - 1].PageNumber != template.SeedPageNumber
+            || document.Pages[template.SeedPageNumber - 1].RotationDegrees != template.SeedPageRotationDegrees)
+            return Drift(document, template,
+                "The PDF document is missing the declared template page or its page orientation has changed.");
 
         var rows = new List<PdfTableRow>();
         var alternatives = new List<PdfTableAlternative>();
@@ -333,6 +338,8 @@ public static class PdfTableTemplateReconstructor
             catch (AdapterException ex) { return Drift(document, template, ex.Message); }
             if (page.PageNumber != pageIndex + 1)
                 return Drift(document, template, "PDF page numbering is not one-based and sequential.");
+            if (page.RotationDegrees != template.SeedPageRotationDegrees)
+                return Drift(document, template, "A PDF page orientation differs from the declared template orientation.");
 
             var lines = PdfTableTemplate.BuildVisualLines(
                 page, template.LineGroupingToleranceNormalized, template.ColumnAxis);
@@ -389,6 +396,18 @@ public static class PdfTableTemplateReconstructor
 
                 repeatedHeaderLines.Add(line);
                 matchedHeaderCount++;
+            }
+
+            if (repeatedHeaderLines.Count > 1)
+                return Drift(document, template,
+                    "A PDF page contains multiple occurrences of the declared table header.");
+
+            if (repeatedHeaderLines.Count == 1
+                && Math.Abs(repeatedHeaderLines[0].CenterLineNormalized - template.HeaderLineCoordinateNormalized)
+                    > template.AnchorToleranceNormalized)
+            {
+                return Drift(document, template,
+                    "The PDF table header moved outside its declared page-layout anchor.");
             }
 
             var headerLineCoordinate = repeatedHeaderLines.Count == 0

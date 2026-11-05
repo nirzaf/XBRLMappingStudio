@@ -80,6 +80,19 @@ public sealed class PdfReviewViewModelTests
             viewModel.PdfReviewZoom = 1.75;
             Assert.Equal(1.75, viewModel.PdfReviewZoom);
 
+            viewModel.PdfScaleFactor = "1000";
+            Assert.Empty(viewModel.PdfReviewValues);
+            Assert.False(viewModel.CanSavePdfReview);
+            viewModel.BuildPdfTemplateCommand.Execute(null);
+            var rescaled = Assert.Single(viewModel.PdfReviewValues,
+                value => value.RowLabel == "Revenue" && value.ReportingYear == 2025);
+            Assert.Equal(1_250_000.00m, rescaled.ParseResult.Value);
+            Assert.False(rescaled.IsApproved);
+
+            viewModel.PdfScaleFactor = "1";
+            Assert.Empty(viewModel.PdfReviewValues);
+            viewModel.BuildPdfTemplateCommand.Execute(null);
+
             foreach (var value in viewModel.PdfReviewValues) value.IsApproved = true;
             Assert.All(viewModel.PdfReviewValues, value => Assert.False(value.IsApproved));
             Assert.False(viewModel.CanSavePdfReview);
