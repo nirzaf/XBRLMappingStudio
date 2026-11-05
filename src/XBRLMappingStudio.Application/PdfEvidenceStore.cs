@@ -53,7 +53,7 @@ public sealed record PdfEvidenceResolution(
 /// as private, content-addressed files; SQLite contains only bounded metadata and
 /// references. Every resolution rechecks both the immutable copy and the live source.
 /// </summary>
-public sealed class PdfEvidenceStore
+public sealed class PdfEvidenceStore : IPdfEvidenceCatalog
 {
     public const string DigitalExtractionMethod = "pdfpig:0.1.16/digital-text-v1";
     private const int MaxCapturesPerCall = 5_000;
@@ -219,6 +219,90 @@ public sealed class PdfEvidenceStore
         return new PdfEvidenceResolution(stored.Evidence, PdfEvidenceResolutionState.Current, null);
     }
 
+    /// <summary>
+    /// Batch-checks source lineage before PDF records enter mapping. The live PDF and
+    /// content-addressed snapshot are each hashed once; evidence ids are then checked
+    /// in bounded SQLite queries rather than reopening the document for every cell.
+    /// </summary>
+    public bool AreCurrent(
+        IReadOnlyList<PdfEvidenceExpectation> expectedReferences,
+        string currentSourcePath,
+        string expectedSourceSha256)
+    {
+        if (expectedReferences is null || expectedReferences.Count is < 1 or > 200_000
+            || !IsSha256(expectedSourceSha256) || string.IsNullOrWhiteSpace(currentSourcePath))
+            return false;
+
+        var expected = new Dictionary<string, PdfEvidenceExpectation>(StringComparer.Ordinal);
+        foreach (var reference in expectedReferences)
+        {
+            if (reference is null || reference.Region is null
+                || !Guid.TryParseExact(reference.EvidenceId, "N", out _)
+                || !ValidEvidenceRegion(reference.Region)
+                || (reference.TemplateRevision is not null && !IsSha256(reference.TemplateRevision))
+                || !expected.TryAdd(reference.EvidenceId, reference))
+                return false;
+        }
+
+        var sourcePath = Path.GetFullPath(currentSourcePath);
+        if (!StringComparer.Ordinal.Equals(TryComputeFileDigest(sourcePath), expectedSourceSha256))
+            return false;
+        var sourceInfo = new FileInfo(sourcePath);
+        if (!sourceInfo.Exists || sourceInfo.Length is <= 0 or > PdfDigitalExtractionOptions.AbsoluteMaxFileBytes)
+            return false;
+        var sourceByteLength = sourceInfo.Length;
+        var managedFileName = expectedSourceSha256[7..] + ".pdf";
+        var managedPath = Path.Combine(_managedDirectory, managedFileName);
+        if (!StringComparer.Ordinal.Equals(TryComputeFileDigest(managedPath), expectedSourceSha256))
+            return false;
+
+        var matched = new HashSet<string>(StringComparer.Ordinal);
+        using var connection = _database.OpenConnection();
+        foreach (var chunk in expected.Values.Chunk(400))
+        {
+            using var command = connection.CreateCommand();
+            var parameterNames = new string[chunk.Length];
+            for (var index = 0; index < chunk.Length; index++)
+            {
+                parameterNames[index] = "$id" + index.ToString(CultureInfo.InvariantCulture);
+                command.Parameters.AddWithValue(parameterNames[index], chunk[index].EvidenceId);
+            }
+            command.CommandText = $"""
+                SELECT e.evidence_id, e.source_sha256, d.source_byte_length, d.managed_file_name,
+                       e.page_number, e.left_normalized, e.bottom_normalized,
+                       e.right_normalized, e.top_normalized, e.template_revision, e.extracted_text,
+                       e.extraction_method, d.extraction_method
+                FROM pdf_source_evidence e
+                JOIN pdf_source_documents d ON d.source_sha256=e.source_sha256
+                WHERE e.evidence_id IN ({string.Join(",", parameterNames)});
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var id = reader.GetString(0);
+                if (!expected.TryGetValue(id, out var expectation)
+                    || !StringComparer.Ordinal.Equals(reader.GetString(1), expectedSourceSha256)
+                    || reader.GetInt64(2) != sourceByteLength
+                    || !StringComparer.Ordinal.Equals(reader.GetString(3), managedFileName))
+                    return false;
+
+                var region = new PdfEvidenceRegion(reader.GetInt32(4), reader.GetDouble(5), reader.GetDouble(6),
+                    reader.GetDouble(7), reader.GetDouble(8));
+                var storedRevision = reader.IsDBNull(9) ? null : reader.GetString(9);
+                if (region != expectation.Region
+                    || !StringComparer.Ordinal.Equals(storedRevision, expectation.TemplateRevision)
+                    || (expectation.ExpectedExtractedText is not null
+                        && !StringComparer.Ordinal.Equals(reader.GetString(10), expectation.ExpectedExtractedText))
+                    || !StringComparer.Ordinal.Equals(reader.GetString(11), DigitalExtractionMethod)
+                    || !StringComparer.Ordinal.Equals(reader.GetString(12), DigitalExtractionMethod)
+                    || !matched.Add(id))
+                    return false;
+            }
+        }
+
+        return matched.Count == expected.Count;
+    }
+
     private StoredReference ReadReference(string evidenceId)
     {
         using var connection = _database.OpenConnection();
@@ -358,6 +442,15 @@ public sealed class PdfEvidenceStore
             && double.IsFinite(bounds.Left) && double.IsFinite(bounds.Bottom)
             && double.IsFinite(bounds.Right) && double.IsFinite(bounds.Top)
             && bounds.Left < bounds.Right && bounds.Bottom < bounds.Top;
+
+    private static bool ValidEvidenceRegion(PdfEvidenceRegion region)
+        => region.PageNumber > 0
+            && double.IsFinite(region.LeftNormalized) && region.LeftNormalized >= 0
+            && double.IsFinite(region.BottomNormalized) && region.BottomNormalized >= 0
+            && double.IsFinite(region.RightNormalized) && region.RightNormalized <= 1
+            && double.IsFinite(region.TopNormalized) && region.TopNormalized <= 1
+            && region.LeftNormalized < region.RightNormalized
+            && region.BottomNormalized < region.TopNormalized;
 
     private static void AddBounds(SqliteCommand command, string prefix, PdfDigitalPageBounds bounds)
     {

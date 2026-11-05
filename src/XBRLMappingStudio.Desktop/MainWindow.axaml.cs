@@ -78,7 +78,7 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
     };
     private static readonly FilePickerFileType SourceType = new("Supported source files")
     {
-        Patterns = new[] { "*.xlsx", "*.csv", "*.json", "*.xml", "*.db", "*.sqlite", "*.sqlite3" }
+        Patterns = new[] { "*.xlsx", "*.csv", "*.json", "*.xml", "*.pdf", "*.db", "*.sqlite", "*.sqlite3" }
     };
     private static readonly FilePickerFileType SqliteDatabaseType = new("SQLite databases")
     {

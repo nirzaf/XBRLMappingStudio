@@ -64,6 +64,8 @@ public static class DiagnosticCodes
     public const string IoPdfEvidenceStale = "IO025";
     public const string IoPdfEvidenceSnapshotInvalid = "IO026";
     public const string IoPdfEvidenceReferenceInvalid = "IO027";
+    public const string IoPdfReviewRequired = "IO028";
+    public const string IoPdfReviewManifestInvalid = "IO029";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

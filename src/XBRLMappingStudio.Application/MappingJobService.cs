@@ -9,6 +9,7 @@ using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Adapters.Sqlite;
+using XBRLMappingStudio.Adapters.Pdf;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -27,12 +28,18 @@ public sealed class MappingJobService
     private readonly FilingProfile _profile;
     private readonly FunctionCatalog _catalog;
     private readonly IWorkerClient _worker;
+    private readonly Func<LocalApplicationDatabase> _applicationDatabaseFactory;
 
-    public MappingJobService(FilingProfile profile, IWorkerClient worker, FunctionCatalog? catalog = null)
+    public MappingJobService(
+        FilingProfile profile,
+        IWorkerClient worker,
+        FunctionCatalog? catalog = null,
+        Func<LocalApplicationDatabase>? applicationDatabaseFactory = null)
     {
         _profile = profile;
         _worker = worker;
         _catalog = catalog ?? FunctionCatalog.Default;
+        _applicationDatabaseFactory = applicationDatabaseFactory ?? (() => new LocalApplicationDatabase());
     }
 
     /// <summary>Validate + compile the graph in a project. Does not execute.</summary>
@@ -325,59 +332,86 @@ public sealed class MappingJobService
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
 
-            var adapter = BuildAdapter(conn);
-            var schema = await adapter.InspectSchemaAsync(conn, cancellationToken);
-
-            if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
-                && !string.Equals(binding.SchemaFingerprint, schema.Fingerprint, StringComparison.Ordinal))
+            try
             {
-                context.Diagnostics.Error(
-                    DiagnosticCodes.IoSchemaMismatch,
-                    DiagnosticSubsystem.Adapter,
-                    DiagnosticStage.Introspection,
-                    $"Source '{binding.DisplayName}' schema changed since the mapping was saved. Remap before running.",
-                    operationId: opId);
+                var adapter = BuildExecutionAdapter(conn);
+                var schema = await adapter.InspectSchemaAsync(conn, cancellationToken);
+
+                if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
+                    && !string.Equals(binding.SchemaFingerprint, schema.Fingerprint, StringComparison.Ordinal))
+                {
+                    context.Diagnostics.Error(
+                        DiagnosticCodes.IoSchemaMismatch,
+                        DiagnosticSubsystem.Adapter,
+                        DiagnosticStage.Introspection,
+                        $"Source '{binding.DisplayName}' schema changed since the mapping was saved. Remap before running.",
+                        operationId: opId);
+                    manifest.Outcome = RunOutcome.DataError;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+
+                var records = new List<DataRecord>();
+                await foreach (var r in adapter.ReadFullAsync(conn, schema, cancellationToken))
+                {
+                    records.Add(r);
+                    if (preview && records.Count >= context.PreviewRowLimit) break;
+                }
+                if (StringComparer.Ordinal.Equals(conn.Kind, "pdf-digital")
+                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, conn, manifest.Inputs, cancellationToken))
+                {
+                    context.Diagnostics.Error(
+                        DiagnosticCodes.IoPdfReviewManifestInvalid,
+                        DiagnosticSubsystem.Adapter,
+                        DiagnosticStage.Validation,
+                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
+                        source: new SourceReference(binding.BindingId, "pdf-input-identity"),
+                        operationId: opId);
+                    manifest.Outcome = RunOutcome.DataError;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
+                if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
+                {
+                    var digest = DigestRecords(conn, records);
+                    var hasDeclaredPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
+                    var identityStrategy = hasDeclaredPrimaryKey
+                        ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
+                        : SqliteSourceAdapter.PositionalIdentityStrategy;
+                    if (!hasDeclaredPrimaryKey)
+                    {
+                        context.Diagnostics.Warn(
+                            DiagnosticCodes.IoStableRowIdentityUnavailable,
+                            DiagnosticSubsystem.Adapter,
+                            DiagnosticStage.Execution,
+                            "The selected SQLite table has no declared primary key. "
+                            + "SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; "
+                            + "use a declared primary key or immutable extract if durable row-level identity is required.",
+                            operationId: opId);
+                    }
+                    manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
+                        ? input with
+                        {
+                            Kind = preview ? "sqlite-preview" : "sqlite-table",
+                            Digest = digest,
+                            IsReplayable = false,
+                            RowIdentityStrategy = identityStrategy,
+                            SnapshotStrategy = "sqlite-read-transaction"
+                        }
+                        : input).ToArray();
+                }
+                context.LoadedSources[binding.BindingId] = records;
+            }
+            catch (AdapterException ex)
+            {
+                context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, opId));
                 manifest.Outcome = RunOutcome.DataError;
+                manifest.CompletedUtc = DateTimeOffset.UtcNow;
                 manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
-
-            var records = new List<DataRecord>();
-            await foreach (var r in adapter.ReadFullAsync(conn, schema, cancellationToken))
-            {
-                records.Add(r);
-                if (preview && records.Count >= context.PreviewRowLimit) break;
-            }
-            if (StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite"))
-            {
-                var digest = DigestRecords(conn, records);
-                var hasDeclaredPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
-                var identityStrategy = hasDeclaredPrimaryKey
-                    ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
-                    : SqliteSourceAdapter.PositionalIdentityStrategy;
-                if (!hasDeclaredPrimaryKey)
-                {
-                    context.Diagnostics.Warn(
-                        DiagnosticCodes.IoStableRowIdentityUnavailable,
-                        DiagnosticSubsystem.Adapter,
-                        DiagnosticStage.Execution,
-                        "The selected SQLite table has no declared primary key. "
-                        + "SQLite does not guarantee row ordering, so positional row provenance may shift between reads even when visible rows are unchanged; "
-                        + "use a declared primary key or immutable extract if durable row-level identity is required.",
-                        operationId: opId);
-                }
-                manifest.Inputs = manifest.Inputs.Select(input => input.SourceId == binding.BindingId
-                    ? input with
-                    {
-                        Kind = preview ? "sqlite-preview" : "sqlite-table",
-                        Digest = digest,
-                        IsReplayable = false,
-                        RowIdentityStrategy = identityStrategy,
-                        SnapshotStrategy = "sqlite-read-transaction"
-                    }
-                    : input).ToArray();
-            }
-            context.LoadedSources[binding.BindingId] = records;
         }
 
         if (context.Diagnostics.HasBlockingErrors)
@@ -1088,9 +1122,15 @@ public sealed class MappingJobService
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
+        "pdf-digital" => new PdfSourceAdapter(),
         "sqlite" => new SqliteSourceAdapter(),
         _ => throw new NotSupportedException($"Adapter kind '{conn.Kind}' is not supported in this build.")
     };
+
+    private ISourceAdapter BuildExecutionAdapter(SourceConnection conn)
+        => StringComparer.Ordinal.Equals(conn.Kind, "pdf-digital")
+            ? new PdfSourceAdapter(new PdfEvidenceStore(_applicationDatabaseFactory()))
+            : BuildAdapter(conn);
 
     /// <summary>
     /// Resolve the write-path adapter for a destination connection and enforce the IO01
@@ -1192,7 +1232,7 @@ public sealed class MappingJobService
 
     private static string DescribeUnsupportedSource(string kind, string fallback) => kind switch
     {
-        "pdf" or "pdf-digital" => "PDF extraction and evidence review are pending qualification (PDF-01 through PDF-08).",
+        "pdf" or "pdf-digital" => "A current approved PDF review manifest and persisted evidence references are required.",
         "oracle" or "postgresql" or "sqlserver" or "mysql" or "mariadb" =>
             $"The {kind} database source is not implemented or qualified in this build.",
         _ => fallback
@@ -1211,7 +1251,15 @@ public sealed class MappingJobService
                 list.Add(new InputIdentity(kv.Key, "sqlite-table", null, IsReplayable: false, kv.Value.Path));
                 continue;
             }
-            if (kv.Value.Path is not null && File.Exists(kv.Value.Path))
+            if (StringComparer.Ordinal.Equals(kv.Value.Kind, "pdf-digital"))
+            {
+                var pdfDigest = kv.Value.Path is null
+                    ? null
+                    : await ComputeBoundedFileDigestAsync(kv.Value.Path,
+                        PdfDigitalExtractionOptions.AbsoluteMaxFileBytes, ct);
+                list.Add(new InputIdentity(kv.Key, "file", pdfDigest, pdfDigest is not null, kv.Value.Path));
+            }
+            else if (kv.Value.Path is not null && File.Exists(kv.Value.Path))
             {
                 await using var fs = File.OpenRead(kv.Value.Path);
                 var digest = RunManifest.ComputeSha256(fs);
@@ -1221,8 +1269,72 @@ public sealed class MappingJobService
             {
                 list.Add(new InputIdentity(kv.Key, kv.Value.Kind, null, IsReplayable: false, kv.Value.Path));
             }
+
+            if (StringComparer.Ordinal.Equals(kv.Value.Kind, "pdf-digital") && kv.Value.Path is not null)
+            {
+                var reviewPath = PdfSourceAdapter.ResolveReviewManifestPath(kv.Value);
+                var reviewDigest = await ComputeBoundedFileDigestAsync(reviewPath,
+                    PdfSourceAdapter.MaxReviewManifestBytes, ct);
+                list.Add(new InputIdentity(kv.Key + ":review-manifest", "pdf-review-manifest",
+                    reviewDigest, reviewDigest is not null, reviewPath));
+            }
         }
         return list;
+    }
+
+    private static async Task<bool> PdfInputsMatchRecordedIdentityAsync(
+        string bindingId,
+        SourceConnection connection,
+        IReadOnlyList<InputIdentity> recordedInputs,
+        CancellationToken cancellationToken)
+    {
+        if (connection.Path is null) return false;
+        var sourceInput = recordedInputs.FirstOrDefault(input =>
+            StringComparer.Ordinal.Equals(input.SourceId, bindingId));
+        var reviewInput = recordedInputs.FirstOrDefault(input =>
+            StringComparer.Ordinal.Equals(input.SourceId, bindingId + ":review-manifest"));
+        if (sourceInput is null || reviewInput is null
+            || !sourceInput.IsReplayable || string.IsNullOrWhiteSpace(sourceInput.Digest)
+            || !reviewInput.IsReplayable || string.IsNullOrWhiteSpace(reviewInput.Digest))
+            return false;
+
+        var sourceDigest = await ComputeBoundedFileDigestAsync(connection.Path,
+            PdfDigitalExtractionOptions.AbsoluteMaxFileBytes, cancellationToken);
+        var reviewDigest = await ComputeBoundedFileDigestAsync(
+            PdfSourceAdapter.ResolveReviewManifestPath(connection),
+            PdfSourceAdapter.MaxReviewManifestBytes, cancellationToken);
+        return StringComparer.Ordinal.Equals(sourceDigest, sourceInput.Digest)
+            && StringComparer.Ordinal.Equals(reviewDigest, reviewInput.Digest);
+    }
+
+    private static async Task<string?> ComputeBoundedFileDigestAsync(
+        string path,
+        long maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length is <= 0 || info.Length > maximumBytes) return null;
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[64 * 1024];
+            long total = 0;
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                total += read;
+                if (total > maximumBytes) return null;
+                hash.AppendData(buffer, 0, read);
+            }
+            if (total != stream.Length || total != info.Length) return null;
+            return "sha256:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (ArgumentException) { return null; }
+        catch (NotSupportedException) { return null; }
     }
 
     private static string DigestRecords(SourceConnection connection, IReadOnlyList<DataRecord> records)

@@ -68,7 +68,7 @@ public sealed class AdapterCapabilitySurfacingTests
     [Fact]
     public void DescribeSourceSuitability_ReflectsDeclaredCapabilities()
     {
-        foreach (var kind in new[] { "excel", "csv", "json", "xml", "xbrl-report", "sqlite" })
+        foreach (var kind in new[] { "excel", "csv", "json", "xml", "xbrl-report", "sqlite", "pdf-digital" })
         {
             var conn = new SourceConnection("b1", kind, Path: null);
             var result = MappingJobService.DescribeSourceSuitability(conn);
@@ -77,11 +77,6 @@ public sealed class AdapterCapabilitySurfacingTests
             Assert.NotNull(result.Capabilities);
             Assert.True(result.Capabilities!.SupportsReading);
         }
-
-        var digitalPdf = MappingJobService.DescribeSourceSuitability(
-            new SourceConnection("b1", "pdf-digital", Path: null));
-        Assert.False(digitalPdf.Allowed);
-        Assert.Contains("PDF-01 through PDF-08", digitalPdf.Reason, StringComparison.Ordinal);
 
         var unknown = new SourceConnection("b1", "oracle", Path: null);
         var unavailableProvider = MappingJobService.DescribeSourceSuitability(unknown);

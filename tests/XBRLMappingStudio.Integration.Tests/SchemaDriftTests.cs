@@ -125,4 +125,30 @@ public sealed class SchemaDriftTests : IAsyncLifetime
         Assert.Equal(JournalState.Finalized, journal.Load(firstRun.Manifest.RunId)!.State);
         Assert.Null(journal.Load(driftRun.Manifest.RunId));
     }
+
+    [Fact]
+    public async Task UnreviewedPdfInputReturnsBlockingDataErrorWithoutRunningMapping()
+    {
+        var profile = SyntheticProfile.Build();
+        var sourcePath = Path.Combine(_dir, "unreviewed.pdf");
+        await File.WriteAllBytesAsync(sourcePath, Encoding.ASCII.GetBytes("%PDF synthetic source"));
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var binding = project.Bindings[0] with { Kind = "pdf-digital", SchemaFingerprint = null };
+        project.Bindings[0] = binding;
+        var connections = new Dictionary<string, SourceConnection>
+        {
+            [binding.BindingId] = new SourceConnection(binding.BindingId, "pdf-digital", sourcePath)
+        };
+        var service = new MappingJobService(profile, new LocalSyntheticWorker(profile),
+            applicationDatabaseFactory: () => new LocalApplicationDatabase(Path.Combine(_dir, "pdf-state.db")));
+
+        var result = await service.RunAsync(project, connections,
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.DataError, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Diagnostics.Items,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoPdfReviewRequired && diagnostic.IsBlocking);
+        Assert.NotNull(result.Manifest.CompletedUtc);
+    }
 }

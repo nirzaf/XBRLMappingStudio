@@ -10,6 +10,7 @@ using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Adapters.Sqlite;
+using XBRLMappingStudio.Adapters.Pdf;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -554,8 +555,6 @@ public sealed class MainWindowViewModel : ViewModelBase
     private static string FormatCapabilityReason(AdapterCapabilityOption option) => option.Kind switch
     {
         "xbrl-report" => "input only; no report output contract",
-        "pdf-digital" when StringComparer.Ordinal.Equals(option.Display, "Digital PDF") =>
-            "not qualified (PDF-01 through PDF-08)",
         "pdf" or "pdf-digital" => "no qualified PDF writer",
         "oracle" => "provider not qualified",
         _ => option.Reason ?? "operation unavailable"
@@ -1483,6 +1482,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ".csv" => "csv",
                 ".json" => safePath.EndsWith(".xbrl.json", StringComparison.OrdinalIgnoreCase) ? "xbrl-report" : "json",
                 ".xml" => "xml",
+                ".pdf" => "pdf-digital",
                 ".db" or ".sqlite" or ".sqlite3" => "sqlite",
                 _ => throw new InvalidOperationException("The selected file type is not supported.")
             };
@@ -2001,6 +2001,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(connection.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
+        "pdf-digital" => new PdfSourceAdapter(new PdfEvidenceStore(new LocalApplicationDatabase())),
         _ => throw new NotSupportedException($"Adapter '{connection.Kind}' is not supported for source browsing.")
     };
 

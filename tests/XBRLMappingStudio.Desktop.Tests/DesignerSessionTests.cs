@@ -1135,8 +1135,9 @@ public sealed class DesignerSessionTests
 
         Assert.Contains("Excel/CSV/JSON/XML/xBRL-JSON/SQLite", viewModel.SourceCapabilitySummary,
             StringComparison.Ordinal);
-        Assert.Contains("Digital PDF", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
-        Assert.Contains("PDF-01 through PDF-08", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
+        Assert.Contains("Digital PDF (inspect, sample, read, lineage)", viewModel.SourceCapabilitySummary,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("PDF-01 through PDF-08", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
         Assert.Contains("Oracle database", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
         Assert.Contains("inspect, sample, read, lineage", viewModel.SourceCapabilitySummary, StringComparison.Ordinal);
         Assert.Contains("Ready: SQLite (transactional fact upsert)", viewModel.TargetCapabilitySummary,

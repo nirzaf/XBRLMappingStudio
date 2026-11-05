@@ -125,6 +125,33 @@ public sealed class PdfEvidenceStoreTests
         Assert.True(resolution.Diagnostic.IsBlocking);
     }
 
+    [Fact]
+    public async Task BatchEvidenceReconciliationChecksSourceRegionTextAndTemplateRevision()
+    {
+        using var workspace = new TemporaryDirectory();
+        var sourcePath = Path.Combine(workspace.Path, "source.pdf");
+        var bytes = BuildCroppedRotatedPdf("1250000");
+        await File.WriteAllBytesAsync(sourcePath, bytes);
+        var extraction = PdfDigitalDocumentExtractor.Extract(bytes);
+        var page = Assert.Single(extraction.Pages);
+        var region = Region(page, page.Words.Where(candidate => candidate.Text.Length == 1).ToArray());
+        var templateRevision = RunManifest.ComputeSha256("template-v1");
+        var store = new PdfEvidenceStore(new LocalApplicationDatabase(Path.Combine(workspace.Path, "state.db")));
+        var reference = Assert.Single(await store.CaptureAsync(sourcePath, extraction,
+            new[] { new PdfEvidenceCapture(region, "1250000") }, templateRevision));
+        var expectation = new PdfEvidenceExpectation(reference.EvidenceId, region, templateRevision, "1250000");
+
+        Assert.True(store.AreCurrent(new[] { expectation }, sourcePath, reference.SourceSha256));
+        Assert.False(store.AreCurrent(new[] { expectation with { ExpectedExtractedText = "1250001" } },
+            sourcePath, reference.SourceSha256));
+        Assert.False(store.AreCurrent(new[] { expectation with { TemplateRevision = RunManifest.ComputeSha256("other-template") } },
+            sourcePath, reference.SourceSha256));
+        Assert.False(store.AreCurrent(new[] { expectation with { Region = region with { RightNormalized = 0.95 } } },
+            sourcePath, reference.SourceSha256));
+        Assert.False(store.AreCurrent(new[] { expectation }, sourcePath,
+            "sha256:" + new string('0', 64)));
+    }
+
     private static PdfEvidenceRegion Region(PdfDigitalPage page, PdfDigitalWord word)
         => Region(page, new[] { word });
 
