@@ -58,6 +58,9 @@ public static class DiagnosticCodes
     public const string IoPdfTemplateDrift = "IO019";
     public const string IoPdfTemplateAmbiguous = "IO020";
     public const string IoPdfTemplateInvalid = "IO021";
+    public const string IoPdfNumericAmbiguous = "IO022";
+    public const string IoPdfNumericInvalid = "IO023";
+    public const string IoPdfNumericPolicyInvalid = "IO024";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";
