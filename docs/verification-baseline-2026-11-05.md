@@ -23,3 +23,21 @@ The local Release run exercised the current checkout on Windows. The workflow ru
 is evidence for its exact remote SHA only; it does not qualify the current local
 commits or establish real filing-profile, customer-data rights, signed-release,
 accessibility-certification or customer-hardware performance acceptance.
+
+## Follow-up verification for profile worker preflight
+
+This follow-up records the local `main` head after the TAX-05 worker handshake and
+taxonomy preflight change. It supplements the earlier snapshot above.
+
+| Item | Evidence |
+|---|---|
+| Local commit | `c37d9337111fe6df741401e36cfe747bb0a43a7d` |
+| Remote head after push attempt | Still `c68cc816f8acd157a1afc3080ccd4d06c3b029c2`; ordinary push rejected with `fatal error in commit_refs` |
+| Local Release test result | 375 passed, 0 failed, 2 gated Arelle subprocess tests skipped (377 total) |
+| Worker unit tests | Python 3.14.8: 15 passed; four Arelle-runtime tests skipped because `arelle-release` is unavailable, one symlink test skipped because Windows denied symlink creation |
+| Focused profile/worker tests | 29 passed, 0 failed |
+| Static and whitespace checks | `ruff check --select E4,E7,E9,F` and `git diff --check` passed |
+
+The Python suite ran protocol, profile metadata, offline path/hash, plugin-option
+and taxonomy-load fixtures. The pinned Python 3.12/Arelle integration suite was
+not available in this local environment, so its runtime cases remain pending CI.
