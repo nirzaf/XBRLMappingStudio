@@ -592,7 +592,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
     }
 
-    public MainWindowViewModel(IProjectFileDialog fileDialog) : this(BuildSampleProject(), fileDialog)
+    public MainWindowViewModel(IProjectFileDialog fileDialog)
+        : this(BuildSampleProject(), fileDialog,
+            new SqliteSourceAdapter().InspectSchemaAsync,
+            FilingProfileResolver.FromDefaultCatalog())
     {
     }
 
@@ -613,7 +616,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
-        _workerFactory = workerFactory ?? new FilingProfileWorkerFactory();
+        _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
         _profile = SyntheticProfile.Build();
         _taxonomy = new TaxonomyIndex(_profile);
         RefreshProfileForProject(project);

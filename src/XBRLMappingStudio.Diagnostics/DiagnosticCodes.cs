@@ -77,6 +77,8 @@ public static class DiagnosticCodes
     /// <summary>XG01: the synthetic placeholder profile was selected for a production
     /// run without the caller explicitly opting in; publication is refused.</summary>
     public const string XbrSyntheticProfileNotAuthorized = "XBR017";
+    /// <summary>A locally installed profile has not passed the owner and rights gates.</summary>
+    public const string XbrProfileNotAuthorized = "XBR018";
 
     // WKR - Worker process protocol
     public const string WkrHandshakeFailed = "WKR001";

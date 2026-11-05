@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
@@ -452,6 +453,46 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Contains("XBR015", stderr, StringComparison.Ordinal);
         Assert.Contains("no source data was read", stderr, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("IO001", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteBlocksUnqualifiedCatalogProfileBeforeOpeningSource()
+    {
+        var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();
+        try
+        {
+            var installed = FilingProfileResolverTests.WriteInstalledProfile(
+                catalogRoot, "fixture-unqualified-cli-profile", "1.0.0", "Revenue");
+            var source = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+            var project = FilingProfileResolverTests.WithProfile(
+                source, installed.Profile.ProfileId, installed.Profile.Digest);
+            project.Bindings[0] = project.Bindings[0] with
+            {
+                Locator = Path.Combine(_dir, "missing-source.xlsx")
+            };
+            var projectPath = Path.Combine(_dir, "unqualified-profile-before-source.xmap");
+            new ProjectManager(projectPath).Save(project);
+
+            var psi = BuildStartInfo(LocateCli(), "execute", projectPath,
+                "--output", Path.Combine(_dir, "must-not-be-created.json"));
+            psi.Environment[InstalledFilingProfileCatalog.CatalogEnvironmentVariable] = catalogRoot;
+            using var process = Process.Start(psi)
+                ?? throw new InvalidOperationException("CLI process failed to start.");
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            Assert.Equal(4, process.ExitCode);
+            Assert.Contains("XBR018", stderr, StringComparison.Ordinal);
+            Assert.Contains("GAT-01 and GAT-02", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("IO001", stderr, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(_dir, "must-not-be-created.json")),
+                $"The unqualified profile created output. stdout:\n{stdout}\nstderr:\n{stderr}");
+        }
+        finally
+        {
+            Directory.Delete(catalogRoot, recursive: true);
+        }
     }
 
     // ---- OG01/OG02: fail-closed publishing through the real CLI process. --------

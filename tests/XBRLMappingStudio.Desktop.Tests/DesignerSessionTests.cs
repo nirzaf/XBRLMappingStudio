@@ -525,6 +525,39 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void DesktopBlocksUnknownProfileBeforeProfileBoundValidation()
+    {
+        var source = Project();
+        var project = new MappingProject
+        {
+            ProjectId = source.ProjectId,
+            Name = source.Name,
+            ProfileId = "uninstalled-desktop-profile",
+            ProfileDigest = "sha256:missing",
+            SchemaVersion = source.SchemaVersion,
+            FunctionCatalogVersion = source.FunctionCatalogVersion,
+            SemanticRevision = source.SemanticRevision,
+            LayoutGeneration = source.LayoutGeneration,
+            Metadata = source.Metadata,
+            Nodes = source.Nodes,
+            Edges = source.Edges,
+            Bindings = source.Bindings,
+            Functions = source.Functions,
+            Approvals = source.Approvals
+        };
+        var viewModel = new MainWindowViewModel(project, null,
+            (_, _) => Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                new InvalidOperationException("Source inspection must not run.")),
+            FilingProfileResolver.DevelopmentOnly());
+
+        viewModel.ValidateCommand.Execute(null);
+
+        Assert.Equal("Operation blocked by filing-profile resolution.", viewModel.StatusText);
+        Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR015", StringComparison.Ordinal));
+        Assert.DoesNotContain(viewModel.Diagnostics, row => row.Display.Contains("Source inspection must not run.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void FactPropertyEdit_IsOneUndoableChange()
     {
         var viewModel = new MainWindowViewModel();

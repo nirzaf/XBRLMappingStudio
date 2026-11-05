@@ -21,17 +21,115 @@ public sealed class FilingProfileWorkerFactory
     {
         ArgumentNullException.ThrowIfNull(profile);
 
-        if (useArelle)
+        var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
+        if (useArelle || !isSynthetic)
         {
             return _arelleFactory?.Invoke(profile)
                 ?? throw new InvalidOperationException(
-                    $"Arelle is required for profile '{profile.ProfileId}', but no Arelle worker is configured.");
+                    $"Profile '{profile.ProfileId}' requires Arelle, but no Arelle worker is configured.");
         }
 
-        if (string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal))
-            return new LocalSyntheticWorker(profile);
+        return new LocalSyntheticWorker(profile);
+    }
 
-        throw new InvalidOperationException(
-            $"Profile '{profile.ProfileId}' has no configured validation worker; execution is blocked.");
+    /// <summary>
+    /// Creates the same fail-closed worker routing for CLI and desktop clients. A
+    /// non-synthetic profile is bound to its hash-verified installation and offline
+    /// reference map. It also requires a caller-supplied owner-approved qualification
+    /// policy; without the external GAT-01/GAT-02 decision, real-profile execution stays
+    /// blocked. Synthetic profiles use the local worker unless Arelle is explicitly
+    /// requested for them.
+    /// </summary>
+    public static FilingProfileWorkerFactory ForInstalledProfiles(
+        FilingProfileResolver resolver,
+        string? pythonExecutablePath = null,
+        string? workerScriptPath = null,
+        string? taxonomyRootOverride = null,
+        Func<InstalledFilingProfile, bool>? authorizeInstallation = null)
+    {
+        ArgumentNullException.ThrowIfNull(resolver);
+        return new FilingProfileWorkerFactory(profile =>
+        {
+            var script = FindWorkerScript(workerScriptPath);
+            if (script is null)
+                throw new InvalidOperationException("The Arelle worker script is not installed with this application.");
+
+            var root = taxonomyRootOverride;
+            InstalledFilingProfile? installation = null;
+            if (!StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId))
+            {
+                installation = resolver.FindInstallation(profile.ProfileId, profile.Digest)
+                    ?? throw new InvalidOperationException(
+                        $"The exact installation for profile '{profile.ProfileId}' is unavailable.");
+                if (authorizeInstallation?.Invoke(installation) != true)
+                    throw new InvalidOperationException(
+                        $"Profile '{profile.ProfileId}' has not passed the owner, filing-authority, and redistribution-rights gates. "
+                        + "Close GAT-01 and GAT-02 before starting Arelle.");
+                if (root is not null && !PathsEqual(root, installation.InstallationDirectory))
+                    throw new InvalidOperationException(
+                        "A qualified profile can only use the taxonomy package verified from its installed profile directory.");
+                root = installation.InstallationDirectory;
+            }
+            else
+            {
+                root ??= FindSyntheticTaxonomyRoot(script);
+            }
+
+            if (root is null || !Directory.Exists(root))
+                throw new InvalidOperationException("Arelle requires an installed, offline taxonomy directory.");
+
+            var args = new List<string> { script, "--taxonomy-root", Path.GetFullPath(root) };
+            if (installation is not null)
+            {
+                args.Add("--profile-manifest");
+                args.Add(Path.Combine(installation.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName));
+                args.Add("--profile-manifest-sha256");
+                args.Add(installation.ManifestFileDigest);
+                foreach (var package in profile.PackageHashes.Keys.Where(path =>
+                             Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase)))
+                {
+                    args.Add("--package");
+                    args.Add(Path.Combine(installation.InstallationDirectory,
+                        package.Replace('/', Path.DirectorySeparatorChar)));
+                }
+            }
+
+            var executable = pythonExecutablePath
+                ?? Environment.GetEnvironmentVariable("XMS_PYTHON")
+                ?? (OperatingSystem.IsWindows() ? "python" : "python3");
+            return new ArelleWorker(executable, args.ToArray());
+        });
+
+        static string? FindWorkerScript(string? configured)
+        {
+            if (!string.IsNullOrWhiteSpace(configured))
+                return File.Exists(configured) ? Path.GetFullPath(configured) : null;
+            var bundled = Path.Combine(AppContext.BaseDirectory, "worker", "arelle_worker.py");
+            if (File.Exists(bundled)) return bundled;
+            for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+            {
+                var candidate = Path.Combine(directory.FullName, "tools", "worker", "arelle_worker.py");
+                if (File.Exists(candidate)) return candidate;
+            }
+            return null;
+        }
+
+        static string? FindSyntheticTaxonomyRoot(string script)
+        {
+            var bundled = Path.Combine(AppContext.BaseDirectory, "worker", "taxonomy");
+            if (File.Exists(Path.Combine(bundled, SyntheticProfile.TaxonomyFileName))) return bundled;
+            for (var directory = new DirectoryInfo(Path.GetDirectoryName(script)!); directory is not null; directory = directory.Parent)
+            {
+                var candidate = Path.Combine(directory.FullName, "taxonomy");
+                if (File.Exists(Path.Combine(candidate, SyntheticProfile.TaxonomyFileName))) return candidate;
+                candidate = Path.Combine(directory.FullName, "tools", "worker", "taxonomy");
+                if (File.Exists(Path.Combine(candidate, SyntheticProfile.TaxonomyFileName))) return candidate;
+            }
+            return null;
+        }
+
+        static bool PathsEqual(string left, string right)
+            => (OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .Equals(Path.GetFullPath(left), Path.GetFullPath(right));
     }
 }

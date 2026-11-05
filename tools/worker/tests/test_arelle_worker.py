@@ -1,12 +1,14 @@
+import hashlib
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKER_DIR))
-import arelle_worker
+import arelle_worker  # noqa: E402
 
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "XBRLMappingStudio.XBRL.Tests" / "fixtures"
@@ -103,6 +105,90 @@ class ArelleWorkerTests(unittest.TestCase):
                 {"documentInfo": {"taxonomy": ["../../../README.md"]}},
                 str(TAXONOMY_ROOT),
             )
+
+    def test_external_taxonomy_uri_requires_exact_offline_mapping(self):
+        value = {"documentInfo": {"taxonomy": ["https://example.invalid/taxonomy.xsd"]}}
+        with self.assertRaisesRegex(ValueError, "no approved offline package mapping"):
+            arelle_worker.safe_taxonomy_urls(value, str(TAXONOMY_ROOT))
+
+    def test_external_taxonomy_uri_maps_only_to_local_package_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "taxonomy").mkdir()
+            schema = root / "taxonomy" / "entry.xsd"
+            schema.write_text("<schema/>", encoding="utf-8")
+            value = {"documentInfo": {"taxonomy": ["https://example.invalid/taxonomy.xsd"]}}
+
+            result = arelle_worker.safe_taxonomy_urls(
+                value, str(root),
+                {"https://example.invalid/taxonomy.xsd": "taxonomy/entry.xsd"},
+                {"taxonomy/entry.xsd": "sha256:fixture"},
+            )
+
+            expected = str(schema.resolve()) if sys.platform == "win32" else schema.resolve().as_uri()
+            self.assertEqual(expected, result["documentInfo"]["taxonomy"][0])
+
+    def test_profile_manifest_rejects_tampered_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile = root / "fixture-profile" / "1.0.0"
+            profile.mkdir(parents=True)
+            entry = profile / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+            manifest = {
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "packageFiles": {"entry.xsd": "sha256:" + digest},
+                "offlineReferences": {"https://example.invalid/taxonomy.xsd": "entry.xsd"},
+            }
+            path = profile / "profile.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            entry.write_text("<schema tampered='true'/>", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                arelle_worker.load_profile_manifest(path, profile)
+
+    def test_profile_manifest_must_match_application_verified_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+            manifest = {
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "packageFiles": {"entry.xsd": "sha256:" + digest},
+                "offlineReferences": {},
+            }
+            path = root / "profile.json"
+            original = json.dumps(manifest).encode("utf-8")
+            path.write_bytes(original)
+            expected = "sha256:" + hashlib.sha256(original).hexdigest()
+
+            arelle_worker.load_profile_manifest(path, root, expected)
+            path.write_bytes(original + b" ")
+
+            with self.assertRaisesRegex(ValueError, "changed after the application verified it"):
+                arelle_worker.load_profile_manifest(path, root, expected)
+
+    def test_profile_package_symlinks_are_rejected_when_supported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.xsd"
+            link = root / "link.xsd"
+            target.write_text("<schema/>", encoding="utf-8")
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest("Symbolic links are unavailable in this environment: " + str(ex))
+
+            with self.assertRaisesRegex(ValueError, "symbolic links"):
+                arelle_worker.safe_package_path("link.xsd", root)
 
 
 if __name__ == "__main__":

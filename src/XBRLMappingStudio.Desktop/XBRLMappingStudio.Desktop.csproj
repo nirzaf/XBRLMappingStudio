@@ -12,6 +12,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\..\tools\worker\arelle_worker.py" Link="worker\arelle_worker.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\tools\worker\taxonomy\**\*" Link="worker\taxonomy\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <PackageReference Include="Avalonia" Version="11.1.0" />
     <PackageReference Include="Avalonia.Desktop" Version="11.1.0" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.0" />

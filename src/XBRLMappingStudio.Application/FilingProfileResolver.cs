@@ -13,27 +13,67 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed class FilingProfileResolver
 {
-    private readonly IReadOnlyDictionary<string, FilingProfile> _profiles;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<FilingProfile>> _profiles;
+    private readonly IReadOnlyDictionary<(string ProfileId, string Digest), InstalledFilingProfile> _installations;
+    private readonly IReadOnlyList<FilingProfileCatalogIssue> _catalogIssues;
 
     public FilingProfileResolver(IEnumerable<FilingProfile> installedProfiles)
+        : this(installedProfiles, Array.Empty<InstalledFilingProfile>(), Array.Empty<FilingProfileCatalogIssue>())
+    {
+    }
+
+    private FilingProfileResolver(
+        IEnumerable<FilingProfile> installedProfiles,
+        IEnumerable<InstalledFilingProfile> installations,
+        IReadOnlyList<FilingProfileCatalogIssue> catalogIssues)
     {
         ArgumentNullException.ThrowIfNull(installedProfiles);
 
-        var profiles = new Dictionary<string, FilingProfile>(StringComparer.Ordinal);
+        var profiles = new Dictionary<string, List<FilingProfile>>(StringComparer.Ordinal);
+        var identities = new HashSet<(string ProfileId, string Digest)>();
         foreach (var profile in installedProfiles)
         {
             ArgumentNullException.ThrowIfNull(profile);
             if (string.IsNullOrWhiteSpace(profile.ProfileId))
                 throw new ArgumentException("An installed profile must have a profile ID.", nameof(installedProfiles));
-            if (!profiles.TryAdd(profile.ProfileId, profile))
-                throw new ArgumentException($"Profile ID '{profile.ProfileId}' is registered more than once.", nameof(installedProfiles));
+            if (string.IsNullOrWhiteSpace(profile.Digest))
+                throw new ArgumentException($"Installed profile '{profile.ProfileId}' must have a digest.", nameof(installedProfiles));
+            if (!identities.Add((profile.ProfileId, profile.Digest)))
+                throw new ArgumentException(
+                    $"Profile identity '{profile.ProfileId}' with digest '{profile.Digest}' is registered more than once.",
+                    nameof(installedProfiles));
+            if (!profiles.TryGetValue(profile.ProfileId, out var versions))
+                profiles[profile.ProfileId] = versions = new List<FilingProfile>();
+            versions.Add(profile);
         }
 
-        _profiles = profiles;
+        _profiles = profiles.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<FilingProfile>)pair.Value.AsReadOnly(),
+            StringComparer.Ordinal);
+        _installations = installations.ToDictionary(
+            installation => (installation.Profile.ProfileId, installation.Profile.Digest));
+        _catalogIssues = catalogIssues.ToArray();
     }
 
     public static FilingProfileResolver DevelopmentOnly()
         => new(new[] { SyntheticProfile.Build() });
+
+    public static FilingProfileResolver FromInstalledDirectory(string directory)
+    {
+        var catalog = InstalledFilingProfileCatalog.Load(directory);
+        return new FilingProfileResolver(
+            catalog.Profiles.Select(installation => installation.Profile)
+                .Append(SyntheticProfile.Build()),
+            catalog.Profiles,
+            catalog.Issues);
+    }
+
+    public static FilingProfileResolver FromDefaultCatalog()
+        => FromInstalledDirectory(InstalledFilingProfileCatalog.DefaultDirectory);
+
+    public InstalledFilingProfile? FindInstallation(string profileId, string digest)
+        => _installations.TryGetValue((profileId, digest), out var installation) ? installation : null;
 
     public FilingProfileResolution Resolve(
         MappingProject project,
@@ -45,14 +85,30 @@ public sealed class FilingProfileResolver
 
         var diagnostics = new DiagnosticBag();
         if (string.IsNullOrWhiteSpace(project.ProfileId)
-            || !_profiles.TryGetValue(project.ProfileId, out var profile))
+            || !_profiles.TryGetValue(project.ProfileId, out var versions))
         {
             diagnostics.Error(
                 DiagnosticCodes.XbrProfileMismatch,
                 DiagnosticSubsystem.XBRL,
                 stage,
                 $"No installed filing profile is registered for '{project.ProfileId}'. "
-                + "Install the exact profile declared by the project; no source data was read.",
+                + "Install the exact profile declared by the project; no source data was read."
+                + CatalogIssueContext(project.ProfileId),
+                operationId: operationId);
+            return new FilingProfileResolution(null, diagnostics);
+        }
+
+        var profile = versions.FirstOrDefault(candidate =>
+            StringComparer.Ordinal.Equals(candidate.Digest, project.ProfileDigest));
+        if (profile is null)
+        {
+            diagnostics.Error(
+                DiagnosticCodes.XbrProfileMismatch,
+                DiagnosticSubsystem.XBRL,
+                stage,
+                $"No installed version of profile '{project.ProfileId}' matches digest '{project.ProfileDigest}'. "
+                + "Install the exact version declared by the project; no source data was read."
+                + CatalogIssueContext(project.ProfileId),
                 operationId: operationId);
             return new FilingProfileResolution(null, diagnostics);
         }
@@ -61,6 +117,17 @@ public sealed class FilingProfileResolver
             project, profile, stage, operationId).Items)
         {
             diagnostics.Add(diagnostic);
+        }
+
+        if (_installations.ContainsKey((profile.ProfileId, profile.Digest)))
+        {
+            diagnostics.Error(
+                DiagnosticCodes.XbrProfileNotAuthorized,
+                DiagnosticSubsystem.XBRL,
+                stage,
+                $"Profile '{profile.ProfileId}' is installed and hash-verified, but has not passed the owner, filing-authority, and redistribution-rights gates. "
+                + "Close GAT-01 and GAT-02 before using it; no source data was read.",
+                operationId: operationId);
         }
 
         var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
@@ -78,6 +145,16 @@ public sealed class FilingProfileResolver
         return diagnostics.HasBlockingErrors
             ? new FilingProfileResolution(null, diagnostics)
             : new FilingProfileResolution(profile, diagnostics);
+    }
+
+    private string CatalogIssueContext(string? profileId)
+    {
+        var issues = _catalogIssues.Where(issue => issue.ProfileId is null
+                || StringComparer.Ordinal.Equals(issue.ProfileId, profileId))
+            .Take(2)
+            .Select(issue => issue.Message)
+            .ToArray();
+        return issues.Length == 0 ? string.Empty : " Catalog issue: " + string.Join(" ", issues);
     }
 }
 

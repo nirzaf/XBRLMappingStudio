@@ -599,7 +599,7 @@ static async Task<int> ValidateAsync(string[] args)
     try
     {
         var p = new ProjectManager(args[0]).Load();
-        var resolution = FilingProfileResolver.DevelopmentOnly().Resolve(p, allowSyntheticProfile);
+        var resolution = FilingProfileResolver.FromDefaultCatalog().Resolve(p, allowSyntheticProfile);
         if (!resolution.Success)
         {
             PrintDiagnostics(resolution.Diagnostics.Items);
@@ -711,8 +711,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     {
         var pm = new ProjectManager(projectPath);
         var p = pm.Load();
-        var profileResolution = FilingProfileResolver.DevelopmentOnly().Resolve(
-            p, allowSyntheticProfile, DiagnosticStage.Validation);
+        var profileResolver = FilingProfileResolver.FromDefaultCatalog();
+        var profileResolution = profileResolver.Resolve(p, allowSyntheticProfile, DiagnosticStage.Validation);
         if (!profileResolution.Success)
         {
             PrintDiagnostics(profileResolution.Diagnostics.Items);
@@ -801,23 +801,11 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             }
         }
 
-        IWorkerClient CreateArelleWorker(FilingProfile selectedProfile)
-        {
-            var script = FindArelleWorkerScript();
-            var root = taxonomyRoot ?? FindArelleTaxonomyRoot();
-            if (script is null || root is null)
-            {
-                throw new InvalidOperationException(
-                    "Arelle worker or taxonomy package was not found; provide --taxonomy-root and run from a checkout or packaged CLI.");
-            }
-            return new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"),
-                new[] { script, "--taxonomy-root", Path.GetFullPath(root) });
-        }
-
         IWorkerClient worker;
         try
         {
-            worker = new FilingProfileWorkerFactory(CreateArelleWorker).Create(profile, useArelle);
+            worker = FilingProfileWorkerFactory.ForInstalledProfiles(
+                profileResolver, python, FindArelleWorkerScript(), taxonomyRoot).Create(profile, useArelle);
         }
         catch (InvalidOperationException ex)
         {
