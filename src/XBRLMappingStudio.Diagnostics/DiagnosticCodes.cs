@@ -55,6 +55,9 @@ public static class DiagnosticCodes
     public const string IoPdfInvalid = "IO016";
     public const string IoPdfBudgetExceeded = "IO017";
     public const string IoPdfEncrypted = "IO018";
+    public const string IoPdfTemplateDrift = "IO019";
+    public const string IoPdfTemplateAmbiguous = "IO020";
+    public const string IoPdfTemplateInvalid = "IO021";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";
