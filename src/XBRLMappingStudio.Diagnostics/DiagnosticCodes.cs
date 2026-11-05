@@ -52,6 +52,9 @@ public static class DiagnosticCodes
     public const string IoDepthExceeded = "IO013";
     public const string IoNumberOutOfBudget = "IO014";
     public const string IoStableRowIdentityUnavailable = "IO015";
+    public const string IoPdfInvalid = "IO016";
+    public const string IoPdfBudgetExceeded = "IO017";
+    public const string IoPdfEncrypted = "IO018";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

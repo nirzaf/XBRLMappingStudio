@@ -97,4 +97,20 @@ public class SupervisionTests
         Assert.Equal(SupervisedOutcome.Completed, result.Outcome);
         Assert.Contains("hello-supervisor", string.Join('\n', result.CapturedLog));
     }
+
+    [Fact]
+    public async Task WatchdogDeadline_CoversBlockedStdinWrite()
+    {
+        var supervisor = new WorkerSupervisor();
+        var (exe, args) = Shell("sleep 30", "Start-Sleep -Seconds 30");
+        var started = DateTimeOffset.UtcNow;
+
+        var result = await supervisor.RunAsync(exe, args, TimeSpan.FromMilliseconds(400),
+            stdinPayload: new string('x', 32 * 1024 * 1024));
+
+        Assert.Equal(SupervisedOutcome.TimedOut, result.Outcome);
+        Assert.Equal(DiagnosticCodes.WkrTimeout, result.Failure!.Code);
+        Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
+        Assert.False(result.OrphanDetected);
+    }
 }

@@ -10,6 +10,7 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="PdfPig" Version="0.1.16" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
   </ItemGroup>
@@ -23,6 +24,7 @@
     <ProjectReference Include="..\..\src\XBRLMappingStudio.CLI\XBRLMappingStudio.CLI.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Adapters\XBRLMappingStudio.Adapters.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Diagnostics\XBRLMappingStudio.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\src\XBRLMappingStudio.Desktop\XBRLMappingStudio.Desktop.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Engine\XBRLMappingStudio.Engine.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Worker\XBRLMappingStudio.Worker.csproj" />

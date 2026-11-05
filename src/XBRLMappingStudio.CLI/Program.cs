@@ -14,6 +14,9 @@ using ExitCodesLocal = XBRLMappingStudio.CLI.ExitCodes;
 // reserved for machine-readable results when requested; standard error carries
 // diagnostics (per section 9 "CLI contract").
 
+if (PdfExtractionWorkerProtocol.IsInternalCommand(args))
+    return await PdfExtractionWorkerProtocol.RunAsync();
+
 if (args.Length == 0)
 {
     PrintUsage();

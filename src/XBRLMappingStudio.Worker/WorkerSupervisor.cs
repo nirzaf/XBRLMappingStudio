@@ -46,6 +46,11 @@ public sealed class WorkerSupervisor
         string? stdinPayload = null,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var watchdog = new CancellationTokenSource(deadline);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            watchdog.Token, cancellationToken);
+
         var psi = new ProcessStartInfo
         {
             FileName = executable,
@@ -65,20 +70,17 @@ public sealed class WorkerSupervisor
         var stdoutTask = PumpAsync(process.StandardOutput);
         var stderrTask = PumpAsync(process.StandardError);
 
-        if (stdinPayload is not null)
-        {
-            await process.StandardInput.WriteAsync(stdinPayload);
-            process.StandardInput.Flush();
-        }
-        try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
-
-        using var watchdog = new CancellationTokenSource(deadline);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            watchdog.Token, cancellationToken);
-
         bool timedOut = false;
+        bool callerCancelled = false;
         try
         {
+            if (stdinPayload is not null)
+            {
+                await process.StandardInput.WriteAsync(stdinPayload.AsMemory(), linked.Token);
+                await process.StandardInput.FlushAsync(linked.Token);
+            }
+            try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
+
             await process.WaitForExitAsync(linked.Token);
         }
         catch (OperationCanceledException) when (watchdog.IsCancellationRequested)
@@ -86,10 +88,23 @@ public sealed class WorkerSupervisor
             timedOut = true;
             KillTree(process);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Caller cancellation: same terminal treatment as the watchdog.
+            callerCancelled = true;
             KillTree(process);
+        }
+        catch
+        {
+            KillTree(process);
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(2));
+            }
+            catch { /* the failure below remains authoritative */ }
+            try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* the failure below remains authoritative */ }
             throw;
         }
 
@@ -106,6 +121,9 @@ public sealed class WorkerSupervisor
         }
 
         var exitCode = process.HasExited ? (int?)process.ExitCode : null;
+
+        if (callerCancelled)
+            throw new OperationCanceledException(cancellationToken);
 
         if (timedOut)
             return new SupervisionResult(SupervisedOutcome.TimedOut, exitCode, log.Lines,
