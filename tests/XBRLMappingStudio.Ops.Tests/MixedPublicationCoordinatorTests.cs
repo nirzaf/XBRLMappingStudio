@@ -123,6 +123,53 @@ public sealed class MixedPublicationCoordinatorTests
         Assert.Equal(DiagnosticCodes.PubPartialFailure, unavailable.SqliteFailureCode);
     }
 
+    [Fact]
+    public async Task RestartWithUnconfirmedFileWrite_RemainsUnknownAndBlocksBothRetryLegs()
+    {
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "state.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var targetPath = Path.Combine(workspace.Path, "target.db");
+        var bytes = Encoding.UTF8.GetBytes("intended report bytes");
+        var intent = Intent(filePath, bytes, targetPath, "mixed-interrupted-before-file-confirmation");
+
+        var originalStore = new MixedPublicationStore(new LocalApplicationDatabase(statePath));
+        _ = originalStore.GetOrCreate(intent);
+        _ = originalStore.SetFile(intent.OperationKey, DestinationPublicationState.InProgress);
+
+        // Reopen the local database and coordinator as a fresh process would after a crash.
+        var restartedStore = new MixedPublicationStore(new LocalApplicationDatabase(statePath));
+        var restartedCoordinator = new MixedPublicationCoordinator(restartedStore);
+        var recovered = await restartedCoordinator.ReconcileAsync(intent.OperationKey);
+
+        Assert.NotNull(recovered);
+        Assert.Equal(DestinationPublicationState.Unknown, recovered!.FileState);
+        Assert.Equal(DiagnosticCodes.PubPartialFailure, recovered.FileFailureCode);
+        Assert.Equal(DestinationPublicationState.Pending, recovered.SqliteState);
+        Assert.False(File.Exists(filePath));
+
+        var fileAttempts = 0;
+        var sqliteAttempts = 0;
+        var retry = await restartedCoordinator.PublishAsync(intent,
+            _ =>
+            {
+                fileAttempts++;
+                return Task.FromResult(new PublicationReceipt("run", filePath,
+                    intent.FileDigest, intent.FileDigest, "lock", DateTimeOffset.UtcNow));
+            },
+            (_, _) =>
+            {
+                sqliteAttempts++;
+                return Task.FromResult(new XBRLMappingStudio.Adapters.Sqlite.SqlitePublishReceipt(
+                    "db-key", "sha256:db-intent", 1, DateTimeOffset.UtcNow));
+            });
+
+        Assert.NotNull(retry.Failure);
+        Assert.Equal(DiagnosticCodes.PubPartialFailure, ((PublicationException)retry.Failure!).Code);
+        Assert.Equal(0, fileAttempts);
+        Assert.Equal(0, sqliteAttempts);
+    }
+
     private static MixedPublicationIntent Intent(string filePath, byte[] bytes, string sqlitePath, string? operationKey = null)
     {
         var digest = DestinationLock.DigestBytes(bytes);
