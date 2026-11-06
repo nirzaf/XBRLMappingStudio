@@ -4,8 +4,8 @@ using XBRLMappingStudio.Diagnostics;
 namespace XBRLMappingStudio.Engine;
 
 /// <summary>
-/// Tracks which source occurrences contributed to each output slot value per section 2
-/// (Execution and reproducibility) and MAP03 acceptance.
+/// Tracks which source occurrences and connected transformations contributed to each
+/// row- or set-phase output slot per section 2 (Execution and reproducibility) and MAP03.
 /// </summary>
 public sealed class ProvenanceTracker
 {

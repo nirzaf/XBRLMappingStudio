@@ -104,9 +104,9 @@ public sealed class XbrlFact
     public IReadOnlyList<string> TransformationIds { get; init; } = Array.Empty<string>();
 
     /// <summary>
-    /// Connected row-phase transformation IDs grouped by source occurrence. These paths
-    /// describe graph connectivity; nodes that merge alternatives may include inputs
-    /// that did not determine the selected value.
+    /// Connected row- and supported set-phase transformation IDs grouped by source
+    /// occurrence. These paths describe graph connectivity; nodes that merge alternatives
+    /// may include inputs that did not determine the selected value.
     /// </summary>
     public IReadOnlyList<SourceTransformationPath> SourceTransformationPaths { get; init; }
         = Array.Empty<SourceTransformationPath>();

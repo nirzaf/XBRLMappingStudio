@@ -105,6 +105,40 @@ public sealed class FactSerializationTests
     }
 
     [Fact]
+    public void OimJson_FactLocatorsAreStableAndDistinctForDuplicateOccurrences()
+    {
+        var template = GoldenFacts()[0];
+        XbrlFact Copy() => new()
+        {
+            ConceptName = template.ConceptName,
+            EntityScheme = template.EntityScheme,
+            EntityIdentifier = template.EntityIdentifier,
+            Period = template.Period,
+            Unit = template.Unit,
+            Value = template.Value,
+            Decimals = template.Decimals
+        };
+        var facts = new[] { Copy(), Copy() };
+
+        var json = OimSerializer.Serialize(Profile, facts);
+        var entries = OimSerializer.ReadFactEntries(json);
+        var locators = OimSerializer.GetFactLocators(facts);
+        var locatorMap = OimSerializer.GetFactLocatorMap(facts);
+
+        Assert.Equal(2, locators.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(locators, OimSerializer.GetFactLocators(facts));
+        Assert.Equal(locators, entries.Select(entry => entry.Locator));
+        Assert.Equal(2, locatorMap.Count);
+
+        var reversed = facts.Reverse().ToArray();
+        var reversedLocators = OimSerializer.GetFactLocators(reversed);
+        Assert.Equal(locators.Order(StringComparer.Ordinal), reversedLocators.Order(StringComparer.Ordinal));
+        Assert.Equal(reversedLocators,
+            OimSerializer.ReadFactEntries(OimSerializer.Serialize(Profile, reversed))
+                .Select(entry => entry.Locator));
+    }
+
+    [Fact]
     public void Xml_RoundTrip_PreservesSemanticIdentity()
     {
         var facts = GoldenFacts();

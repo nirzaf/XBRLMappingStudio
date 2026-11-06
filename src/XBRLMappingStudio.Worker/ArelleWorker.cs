@@ -84,7 +84,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         }
 
         var diags = new List<Diagnostic>();
-        var facts = OimSerializer.ReadFacts(payload);
+        var factEntries = OimSerializer.ReadFactEntries(payload);
+        var facts = factEntries.Select(entry => entry.Fact).ToArray();
         var knownDimensionMembers = _profile.DimensionDomains.Values
             .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
         var filingValidation = new FilingRuleValidator(_profile, knownDimensionMembers).Validate(facts);
@@ -108,9 +109,10 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             requiredRules,
             requiredPlugins);
         int i = 0;
-        foreach (var fact in facts)
+        foreach (var entry in factEntries)
         {
             i++;
+            var fact = entry.Fact;
             var concept = _profile.FindConcept(fact.ConceptName);
             if (concept is null)
             {
@@ -123,7 +125,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Concept '{fact.ConceptName}' is not defined in profile '{_profile.ProfileId}'.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:concept-exists"
+                    RuleIdentifier = "synthetic:concept-exists",
+                    FactLocator = entry.Locator
                 });
                 continue;
             }
@@ -138,7 +141,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Concept '{fact.ConceptName}' is abstract and cannot carry a fact value.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:abstract-concept-not-used"
+                    RuleIdentifier = "synthetic:abstract-concept-not-used",
+                    FactLocator = entry.Locator
                 });
             }
             if (!fact.ValidateValueAgainst(concept, out var valueReason)
@@ -153,7 +157,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = valueReason,
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:fact-value-contract"
+                    RuleIdentifier = "synthetic:fact-value-contract",
+                    FactLocator = entry.Locator
                 });
             }
             if (concept.DataType == "monetary" && fact.Unit is null)
@@ -167,7 +172,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Fact {i} on monetary concept '{fact.ConceptName}' has no unit.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:monetary-unit-required"
+                    RuleIdentifier = "synthetic:monetary-unit-required",
+                    FactLocator = entry.Locator
                 });
             }
             if (fact.Unit is not null && !_profile.SupportedUnits.Contains(fact.Unit.Measure))
@@ -181,7 +187,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Unit '{fact.Unit.Measure}' is not supported by profile '{_profile.ProfileId}'.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:unit-allowed"
+                    RuleIdentifier = "synthetic:unit-allowed",
+                    FactLocator = entry.Locator
                 });
             }
             if (concept.PeriodType == "instant" && fact.Period.Kind != PeriodKind.Instant)
@@ -195,7 +202,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Fact {i} on instant concept '{fact.ConceptName}' carries a duration period.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:period-type-match"
+                    RuleIdentifier = "synthetic:period-type-match",
+                    FactLocator = entry.Locator
                 });
             }
             if (concept.PeriodType == "duration" && fact.Period.Kind != PeriodKind.Duration)
@@ -209,7 +217,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     IsBlocking = true,
                     Message = $"Fact {i} on duration concept '{fact.ConceptName}' carries an instant period.",
                     OperationId = request.OperationId,
-                    RuleIdentifier = "synthetic:period-type-match"
+                    RuleIdentifier = "synthetic:period-type-match",
+                    FactLocator = entry.Locator
                 });
             }
         }
@@ -225,7 +234,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             status,
             JsonSerializer.SerializeToElement(new
             {
-                factCount = facts.Count,
+                factCount = facts.Length,
                 errorCount = diags.Count(d => d.IsBlocking),
                 validationCompletion = completion
             }, WorkerJson.Options),

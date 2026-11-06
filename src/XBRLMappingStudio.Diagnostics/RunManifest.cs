@@ -74,10 +74,12 @@ public sealed class RunManifest
     public RunOutcome Outcome { get; set; } = RunOutcome.Unknown;
 
     /// <summary>
-    /// Conservative evidence-completeness marker. Current runs record connected
-    /// row-phase paths on facts and blocking FactConstruct diagnostics, but do not cover
-    /// set-phase paths, complete input identity coverage, worker finding-to-fact links,
-    /// or embed paths in the xBRL-JSON report artifact, so this remains Incomplete.
+    /// Conservative evidence-completeness marker. Current runs record connected row- and
+    /// supported set-phase paths on facts and blocking FactConstruct diagnostics, and
+    /// link in-memory synthetic-worker findings by exact xBRL-JSON fact key. They do not
+    /// cover joined/derived set-phase paths, complete input identity coverage, Arelle or
+    /// large-report finding-to-fact links, or embed paths in the report artifact, so this
+    /// remains Incomplete.
     /// </summary>
     [JsonConverter(typeof(JsonStringEnumConverter<RunProvenanceStatus>))]
     public RunProvenanceStatus ProvenanceStatus { get; set; } = RunProvenanceStatus.Incomplete;

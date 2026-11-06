@@ -743,6 +743,7 @@ public sealed class MappingJobService
         // (support bundle, inspect-run-result, scheduler alerting) see the specific cause
         // even when the worker returned no diagnostics of its own (fake or truncated pipe).
         var workerDiags = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+        EnrichWorkerDiagnosticsWithFactPaths(workerDiags, facts);
         if (completion.State == ValidationCompletionState.Failed
             || (completion.State == ValidationCompletionState.Incomplete
                 && workerResp.Status is (WorkerStatus.Success or WorkerStatus.IncompleteValidation)))
@@ -1145,6 +1146,28 @@ public sealed class MappingJobService
         _profile.Digest,
         _profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
         _profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray());
+
+    private static void EnrichWorkerDiagnosticsWithFactPaths(
+        IList<Diagnostic> diagnostics,
+        IReadOnlyList<XbrlFact> facts)
+    {
+        if (diagnostics.Count == 0 || facts.Count == 0) return;
+        var factsByLocator = OimSerializer.GetFactLocatorMap(facts);
+        for (var index = 0; index < diagnostics.Count; index++)
+        {
+            var diagnostic = diagnostics[index];
+            if (string.IsNullOrEmpty(diagnostic.FactLocator)
+                || !factsByLocator.TryGetValue(diagnostic.FactLocator, out var fact)
+                || fact.SourceTransformationPaths.Count == 0)
+                continue;
+
+            diagnostics[index] = diagnostic with
+            {
+                Source = diagnostic.Source ?? fact.SourceTransformationPaths[0].Source,
+                SourceTransformationPaths = fact.SourceTransformationPaths
+            };
+        }
+    }
 
     private static Diagnostic CompletionDiagnostic(
         ValidationCompletionAssessment assessment,

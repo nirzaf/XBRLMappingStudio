@@ -87,6 +87,10 @@ public sealed record Diagnostic
     /// <summary>Optional source cell/row reference for evidence navigation.</summary>
     public SourceReference? Source { get; init; }
 
+    /// <summary>Exact xBRL-JSON facts-object key for a worker finding tied to one fact.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FactLocator { get; init; }
+
     /// <summary>Optional connected source paths that contributed to this diagnostic.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<SourceTransformationPath>? SourceTransformationPaths

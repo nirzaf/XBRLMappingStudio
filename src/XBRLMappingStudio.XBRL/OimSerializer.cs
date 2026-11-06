@@ -9,6 +9,9 @@ using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.XBRL;
 
+/// <summary>A parsed xBRL-JSON fact together with its exact facts-object member key.</summary>
+public sealed record OimFactEntry(string Locator, XbrlFact Fact);
+
 /// <summary>Reads and writes the supported XBRL Open Information Model JSON subset.</summary>
 public static class OimSerializer
 {
@@ -47,9 +50,7 @@ public static class OimSerializer
             var key = fact.SemanticKey();
             occurrences.TryGetValue(key, out var occurrence);
             occurrences[key] = ++occurrence;
-            var id = "f" + Convert.ToHexString(SHA256.HashData(
-                Encoding.UTF8.GetBytes(key + "\u001f" + occurrence.ToString(CultureInfo.InvariantCulture))))
-                .ToLowerInvariant();
+            var id = CreateFactLocator(key, occurrence);
             factObject[id] = FactToJson(fact, ns);
         }
 
@@ -119,9 +120,7 @@ public static class OimSerializer
                 cancellationToken.ThrowIfCancellationRequested();
                 if (occurrence < 1) throw new InvalidDataException("A fact occurrence index must be positive.");
                 var key = fact.SemanticKey();
-                var id = "f" + Convert.ToHexString(SHA256.HashData(
-                    Encoding.UTF8.GetBytes(key + "\u001f" + occurrence.ToString(CultureInfo.InvariantCulture))))
-                    .ToLowerInvariant();
+                var id = CreateFactLocator(key, occurrence);
                 writer.WritePropertyName(id);
                 FactToJson(fact, ns).WriteTo(writer);
                 writer.Flush();
@@ -132,6 +131,44 @@ public static class OimSerializer
         }
         return bounded.BytesWritten;
     }
+
+    /// <summary>
+    /// Returns the exact facts-object keys Serialize assigns to each input occurrence.
+    /// The returned array is aligned with the supplied facts; duplicate semantic facts
+    /// receive distinct deterministic keys in stable input order, matching Serialize's
+    /// stable semantic sort. No report fields or bytes are changed.
+    /// </summary>
+    public static IReadOnlyList<string> GetFactLocators(IReadOnlyList<XbrlFact> facts)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var locators = new string[facts.Count];
+        var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (fact, index) in facts.Select((fact, index) => (fact, index))
+            .OrderBy(item => item.fact.SemanticKey(), StringComparer.Ordinal))
+        {
+            var key = fact.SemanticKey();
+            occurrences.TryGetValue(key, out var occurrence);
+            occurrences[key] = ++occurrence;
+            locators[index] = CreateFactLocator(key, occurrence);
+        }
+        return locators;
+    }
+
+    /// <summary>Builds an exact locator-to-original-fact index for an in-memory report.</summary>
+    public static IReadOnlyDictionary<string, XbrlFact> GetFactLocatorMap(IReadOnlyList<XbrlFact> facts)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        var locators = GetFactLocators(facts);
+        var map = new Dictionary<string, XbrlFact>(StringComparer.Ordinal);
+        for (var index = 0; index < facts.Count; index++)
+            map.Add(locators[index], facts[index]);
+        return map;
+    }
+
+    private static string CreateFactLocator(string semanticKey, int occurrence)
+        => "f" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(semanticKey + "\u001f" + occurrence.ToString(CultureInfo.InvariantCulture))))
+            .ToLowerInvariant();
 
     private static JsonObject FactToJson(XbrlFact fact, NamespaceContext ns)
     {
@@ -219,6 +256,13 @@ public static class OimSerializer
 
     /// <summary>Read the supported OIM fact subset. Unsupported report constructs fail closed.</summary>
     public static IReadOnlyList<XbrlFact> ReadFacts(string json)
+        => ReadFactEntries(json).Select(entry => entry.Fact).ToArray();
+
+    /// <summary>
+    /// Reads facts while preserving their exact xBRL-JSON object member keys. Worker
+    /// findings use these keys as fact locators; they are not derived from report order.
+    /// </summary>
+    public static IReadOnlyList<OimFactEntry> ReadFactEntries(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
         using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
@@ -240,11 +284,11 @@ public static class OimSerializer
         var namespaces = namespacesNode.EnumerateObject().ToDictionary(
             p => p.Name, p => p.Value.GetString() ?? throw Unsupported("Namespace URI must be a string."),
             StringComparer.Ordinal);
-        if (!root.TryGetProperty("facts", out var factsNode)) return Array.Empty<XbrlFact>();
+        if (!root.TryGetProperty("facts", out var factsNode)) return Array.Empty<OimFactEntry>();
         if (factsNode.ValueKind != JsonValueKind.Object)
             throw Unsupported("The xBRL-JSON facts member must be an object.");
 
-        var facts = new List<XbrlFact>();
+        var facts = new List<OimFactEntry>();
         foreach (var property in factsNode.EnumerateObject())
         {
             VerifyNcName(property.Name, "fact identifier");
@@ -330,7 +374,7 @@ public static class OimSerializer
                 else textValue = lexical;
             }
 
-            facts.Add(new XbrlFact
+            facts.Add(new OimFactEntry(property.Name, new XbrlFact
             {
                 ConceptName = concept,
                 EntityScheme = entityScheme,
@@ -345,7 +389,7 @@ public static class OimSerializer
                 Decimals = decimals,
                 Language = language,
                 ContributingSources = Array.Empty<SourceReference>()
-            });
+            }));
         }
         return facts;
     }

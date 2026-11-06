@@ -82,6 +82,122 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MappingJobService_LinksRecognizedWorkerFactLocatorToExactMultiSourcePaths()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var bindingId = project.Bindings.Single().BindingId;
+        var current = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
+        var scale = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+        var factConstruct = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        project.Nodes.Remove(scale);
+        project.Edges.RemoveAll(edge => edge.SourceNodeId == scale.NodeId || edge.TargetNodeId == scale.NodeId);
+        var prior = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Prior revenue",
+            Parameters = new()
+            {
+                ["bindingId"] = bindingId,
+                ["column"] = "Prior",
+                ["rowFilterColumn"] = "Line",
+                ["rowFilterValue"] = "Revenue"
+            },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        };
+        var ratio = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.Ratio,
+            DisplayName = "Current to prior ratio",
+            Parameters = new() { ["divideByZero"] = "Diagnostic" },
+            InputPorts = new()
+            {
+                new PortDefinition("numerator", PortShape.Decimal, PortCardinality.Single),
+                new PortDefinition("denominator", PortShape.Decimal, PortCardinality.Single)
+            },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        };
+        project.Nodes.Add(prior);
+        project.Nodes.Add(ratio);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = current.NodeId, SourcePortName = "value",
+            TargetNodeId = ratio.NodeId, TargetPortName = "numerator"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = prior.NodeId, SourcePortName = "value",
+            TargetNodeId = ratio.NodeId, TargetPortName = "denominator"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = ratio.NodeId, SourcePortName = "value",
+            TargetNodeId = factConstruct.NodeId, TargetPortName = "value"
+        });
+
+        var existingPrimarySource = new SourceReference("worker-validator", "rule-engine:primary");
+        string? emittedLocator = null;
+        Diagnostic Finding(string message, string? locator, SourceReference? source = null) => new()
+        {
+            Code = DiagnosticCodes.XbrValidationFailed,
+            Subsystem = DiagnosticSubsystem.XBRL,
+            Severity = DiagnosticSeverity.Error,
+            Stage = DiagnosticStage.Validation,
+            IsBlocking = true,
+            Message = message,
+            OperationId = "worker-op",
+            RuleIdentifier = "synthetic:test-finding",
+            FactLocator = locator,
+            Source = source
+        };
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+
+            var report = request.Payload?.Deserialize<string>()
+                ?? throw new InvalidOperationException("The in-memory worker request has no report string.");
+            emittedLocator = Assert.Single(OimSerializer.ReadFactEntries(report)).Locator;
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success,
+                CompletionResult(request.ValidationRequirements!),
+                new[]
+                {
+                    Finding("linked without primary source", emittedLocator),
+                    Finding("linked with primary source", emittedLocator, existingPrimarySource),
+                    Finding("unrecognized locator", "f-not-in-this-report")
+                }, null);
+        });
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.InvalidMapping, result.Manifest.Outcome);
+        var fact = Assert.Single(result.Facts);
+        Assert.Equal(2, fact.SourceTransformationPaths.Count);
+        Assert.Equal(2, fact.SourceTransformationPaths.Select(path => path.Source).Distinct().Count());
+        Assert.NotNull(emittedLocator);
+        var linkedWithoutSource = Assert.Single(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Message == "linked without primary source");
+        Assert.Equal(emittedLocator, linkedWithoutSource.FactLocator);
+        Assert.Equal(fact.SourceTransformationPaths, linkedWithoutSource.SourceTransformationPaths);
+        Assert.Equal(fact.SourceTransformationPaths[0].Source, linkedWithoutSource.Source);
+
+        var linkedWithSource = Assert.Single(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Message == "linked with primary source");
+        Assert.Equal(existingPrimarySource, linkedWithSource.Source);
+        Assert.Equal(fact.SourceTransformationPaths, linkedWithSource.SourceTransformationPaths);
+
+        var unrecognized = Assert.Single(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Message == "unrecognized locator");
+        Assert.Equal("f-not-in-this-report", unrecognized.FactLocator);
+        Assert.Null(unrecognized.Source);
+        Assert.Null(unrecognized.SourceTransformationPaths);
+    }
+
+    [Fact]
     public async Task WorkerSuccess_WithoutCompletionReport_IsIncompleteAndNotPublishable()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
@@ -286,6 +402,43 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.Equal(WorkerStatus.Success, response.Status);
         var assessment = ValidationCompletionReportValidator.Evaluate(response.Result, profile);
         Assert.Equal(ValidationCompletionState.Complete, assessment.State);
+    }
+
+    [Fact]
+    public async Task LocalSyntheticWorker_AttachesExactDistinctFactLocatorsToDuplicateFindings()
+    {
+        var profile = SyntheticProfile.Build();
+        var facts = Enumerable.Range(0, 2).Select(_ => new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "locator-fixture",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("iso4217:ZZZ"),
+            Value = 123m,
+            Decimals = 0
+        }).ToArray();
+        var report = OimSerializer.Serialize(profile, facts);
+        var entries = OimSerializer.ReadFactEntries(report);
+        var request = new WorkerRequest(WorkerOperations.ValidateReport, "locator-op", "locator-job",
+            profile.Digest, DateTimeOffset.UtcNow.AddMinutes(1),
+            JsonSerializer.SerializeToElement(report))
+        {
+            ValidationRequirements = new ValidationRequirements(profile.ProfileId, profile.Digest,
+                profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+                profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray())
+        };
+        await using var worker = new LocalSyntheticWorker(profile);
+
+        var response = await worker.RequestAsync(request, CancellationToken.None);
+
+        var unitFindings = (response.Diagnostics ?? Array.Empty<Diagnostic>())
+            .Where(diagnostic => diagnostic.RuleIdentifier == "synthetic:unit-allowed")
+            .ToArray();
+        Assert.Equal(2, unitFindings.Length);
+        Assert.Equal(entries.Select(entry => entry.Locator), unitFindings.Select(diagnostic => diagnostic.FactLocator));
+        Assert.Equal(2, unitFindings.Select(diagnostic => diagnostic.FactLocator)
+            .Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]
