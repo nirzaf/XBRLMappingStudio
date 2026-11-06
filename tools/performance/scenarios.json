@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "status_note": "All entries are proposed scenarios until a raw benchmark record is captured. The catalog does not establish that any target threshold passed.",
+  "scenarios": [
+    {
+      "id": "desktop-startup-cold",
+      "status": "proposed",
+      "depends_on": "BEN-02",
+      "fixture": "clean Windows VM with a documented cold-cache procedure",
+      "interaction": "launch Avalonia Desktop and record workspace-interactive readiness",
+      "automation_status": "native readiness instrumentation required"
+    },
+    {
+      "id": "desktop-startup-warm",
+      "status": "proposed",
+      "depends_on": "BEN-02",
+      "fixture": "same release artifact and machine as cold-start run",
+      "interaction": "30 launches with workspace-interactive readiness recorded",
+      "automation_status": "native readiness instrumentation required"
+    },
+    {
+      "id": "sqlite-source-100k",
+      "status": "proposed",
+      "depends_on": "BEN-03",
+      "fixture": "synthetic-financials-sqlite-v1 with 100000 rows",
+      "interaction": "Release CLI execution or the tracked 100k-row integration scenario",
+      "automation_status": "command-level process-tree capture available"
+    },
+    {
+      "id": "graph-canvas-100-2000",
+      "status": "proposed",
+      "depends_on": "BEN-04,BEN-06",
+      "fixture": "deterministic graph sizes 100, 500, 1000, and 2000 nodes",
+      "interaction": "pan, zoom, drag, connect, and property commit with frame timing",
+      "automation_status": "native gesture replay and frame capture required"
+    },
+    {
+      "id": "taxonomy-search-20k",
+      "status": "proposed",
+      "depends_on": "BEN-05",
+      "fixture": "synthetic digest-bound profile with 20000 concepts",
+      "interaction": "100 warm searches, lazy role expansion, cancellation, and rapid superseding queries",
+      "automation_status": "process-tree capture available; the 20k fixture generator and repeated-query runner are pending"
+    },
+    {
+      "id": "arelle-foreground-validation",
+      "status": "proposed",
+      "depends_on": "BEN-07",
+      "fixture": "authorized fixed report and pinned Arelle environment",
+      "interaction": "repeat graph gestures during validation, then cancel and verify worker exit",
+      "automation_status": "requires approved profile and native Windows evidence"
+    }
+  ]
+}

@@ -66,17 +66,23 @@ where explicitly narrowed below.
 | OPS06 | Partially implemented | All 19 .NET projects have checked-in NuGet lock files with win-x64/linux-x64/osx-x64 dependency graphs and content hashes; Desktop also has a Release-specific lock because its Debug-only diagnostics reference changes the graph. CI and release restores run locked mode; release publish consumes the Release-config multi-RID restore with `--no-restore`, excluding `Avalonia.Diagnostics` from the publish. `tools/dependency_inventory.py` emits SPDX 2.3 for CLI/Desktop locked dependencies and the pinned Arelle worker; it embeds publisher-provided license files as exact `LicenseRef` text with file hashes and preserves unresolved terms as `NOASSERTION`. CI and release verification upload it, and the draft release includes `SHA256SUMS.txt`. Complete per-file license obligations and redistribution review, any remaining native/OCR inventory, signed/locked release bundles, and clean-machine installation remain open. |
 | OPS07 | Partially implemented | Versioned SQLite migrations and non-overwriting backups are tested; installed-release upgrade, compatible project restore and rollback are not qualified. |
 | OPS08 | Partially implemented | Structured diagnostics and redacted support bundles exist; scheduler integration and unattended recovery qualification are absent. |
-| PERF01 | Missing | No cold/warm startup measurements. |
-| PERF02 | Missing | No idle/peak resource measurements. |
-| PERF03 | Missing | No graph scale benchmark at 100–2,000 nodes. |
-| PERF04 | Missing | No real taxonomy benchmark at 20,000 concepts. |
-| PERF05 | Missing | No interaction latency measurements. |
-| PERF06 | Missing | No background validation responsiveness benchmark. |
+| PERF01 | Missing | No cold/warm startup measurements. BEN-01 now provides a command-level process-tree harness, but native workspace-ready timing remains unmeasured. |
+| PERF02 | Missing | No idle/peak resource measurements. BEN-01 now records process-tree working set, private memory, cumulative CPU and hardware, but no product workload has been benchmarked. |
+| PERF03 | Missing | No graph scale benchmark at 100–2,000 nodes; BEN-01's proposed gesture scenario still needs native fixture loading, replay and frame instrumentation. |
+| PERF04 | Missing | No real taxonomy benchmark at 20,000 concepts; BEN-01's proposed synthetic search scenario has not been run. |
+| PERF05 | Missing | No interaction latency measurements; process duration is not UI input-to-frame latency. |
+| PERF06 | Missing | No background validation responsiveness benchmark; native concurrent gesture and Arelle evidence is still required. |
 | PERF07 | Missing | No Windows recovery and clean-install qualification. |
 | EXT01 | Missing pending profile selection | No native-XML preservation path for a named OIM-incompatible filing profile. |
 | EXT02 | Missing pending profile selection | No XHTML authoring/tagging workflow or regulator transformation rules. |
 | EXT03 | Missing pending profile selection | No governed extension taxonomy authoring. |
 | EXT04 | Missing pending profile selection | No collector-specific report package assembler. |
+
+## Pending atomic ticket evidence
+
+| Ticket | Status | Evidence and limitation |
+|---|---|---|
+| BEN-01 | Partially implemented | `tools/performance/benchmark_harness.py` captures Windows/Linux process-tree samples, hardware, clock calibration, optional artifact/fixture digests and raw records validated against `benchmark_result.schema.json`; a deterministic SQLite fixture and proposed scenario catalog are included. The self-test and unit tests verify clock calibration, fixture stability, process-tree capture, no-overwrite behavior and schema enforcement. Native UI gesture replay, graph/taxonomy fixture integration, workspace-ready instrumentation and product benchmark runs remain unmeasured; this does not complete PERF01–PERF07. |
 
 ## Baseline verification before pending-feature implementation
 

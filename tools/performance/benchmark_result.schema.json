@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xbrlmappingstudio.example/schemas/performance-record-v1.json",
+  "title": "XBRLMappingStudio process-tree benchmark record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "measurement_status", "captured_utc", "scenario_id", "command_id",
+    "executable_name", "repository_revision", "build_configuration", "build_configuration_is_declared",
+    "artifact_sha256", "fixture_sha256", "hardware", "clock", "measurement_policy", "execution", "summary", "samples"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "measurement_status": { "const": "measured" },
+    "captured_utc": { "type": "string", "format": "date-time" },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "command_id": { "type": "string", "minLength": 1 },
+    "executable_name": { "type": "string", "minLength": 1 },
+    "repository_revision": { "type": ["string", "null"] },
+    "build_configuration": { "enum": ["Release", "Debug", "unspecified", "self-test"] },
+    "build_configuration_is_declared": { "type": "boolean" },
+    "artifact_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "fixture_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "cpu_model", "logical_cpu_count", "total_memory_bytes"],
+      "properties": {
+        "os": { "type": "string" },
+        "architecture": { "type": "string" },
+        "cpu_model": { "type": "string" },
+        "logical_cpu_count": { "type": ["integer", "null"], "minimum": 1 },
+        "total_memory_bytes": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation", "resolution_seconds", "monotonic", "adjustable", "observed_minimum_tick_seconds"],
+      "properties": {
+        "implementation": { "type": "string", "minLength": 1 },
+        "resolution_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "monotonic": { "const": true },
+        "adjustable": { "type": "boolean" },
+        "observed_minimum_tick_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+      }
+    },
+    "measurement_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_interval_seconds", "working_set_definition", "private_memory_kind", "cpu_measurement_definition", "command_arguments_recorded", "threshold_pass_claimed"],
+      "properties": {
+        "sample_interval_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "working_set_definition": { "type": "string" },
+        "private_memory_kind": { "enum": ["private_commit_bytes", "private_resident_bytes"] },
+        "cpu_measurement_definition": { "type": "string", "minLength": 1 },
+        "command_arguments_recorded": { "const": false },
+        "threshold_pass_claimed": { "const": false }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_seconds", "exit_code", "timed_out", "sample_count"],
+      "properties": {
+        "duration_seconds": { "type": "number", "minimum": 0 },
+        "exit_code": { "type": "integer" },
+        "timed_out": { "type": "boolean" },
+        "sample_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["working_set_peak_bytes", "working_set_p95_bytes", "private_peak_bytes", "private_p95_bytes", "cpu_seconds_peak", "process_count_peak", "complete_sample_count"],
+      "properties": {
+        "working_set_peak_bytes": { "type": ["number", "null"], "minimum": 0 },
+        "working_set_p95_bytes": { "type": ["number", "null"], "minimum": 0 },
+        "private_peak_bytes": { "type": ["number", "null"], "minimum": 0 },
+        "private_p95_bytes": { "type": ["number", "null"], "minimum": 0 },
+        "cpu_seconds_peak": { "type": ["number", "null"], "minimum": 0 },
+        "process_count_peak": { "type": "integer", "minimum": 0 },
+        "complete_sample_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["elapsed_seconds", "process_count", "working_set_bytes", "private_bytes", "cpu_seconds", "complete"],
+        "properties": {
+          "elapsed_seconds": { "type": "number", "minimum": 0 },
+          "process_count": { "type": "integer", "minimum": 0 },
+          "working_set_bytes": { "type": ["integer", "null"], "minimum": 0 },
+          "private_bytes": { "type": ["integer", "null"], "minimum": 0 },
+          "cpu_seconds": { "type": ["number", "null"], "minimum": 0 },
+          "complete": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
