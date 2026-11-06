@@ -141,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Exact-head CI: 388 passed and 3 gated Arelle cases skipped per OS; all 3 gated cases passed in the pinned worker job. |
+| Tests | xUnit 2.9.3 | Exact-head CI: 723 passed and 5 gated Arelle cases skipped per OS; the pinned worker job passed 68 Python tests and all 11 gated .NET Arelle execution tests. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -281,17 +281,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. The archived TRX artifacts and per-suite totals for that baseline are recorded in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 
-The latest exact-head run [42292750869](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42292750869) verified `fbf34ca20e1b977f64d83b9a953bf0f8527643c0`: repository hygiene, Ubuntu and Windows Release build/tests, and the pinned Arelle worker integration all passed. The latest local full Release solution run passed **717 tests** with **5** environment-gated skips.
+The XBR-04 set-collected text implementation run [42298685658](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42298685658) verified source commit `0cac3fee5dfad0a0c8879b12c8366ddb3f291041`: repository hygiene, Ubuntu and Windows Release build/tests, and the pinned Arelle worker integration all passed. Each .NET OS matrix passed **723 tests** and skipped **5** environment-gated cases; the worker job passed **53 protocol/offline-validation Python tests**, **15 locked-inventory Python tests**, and **11 .NET Arelle execution tests**. Local focused Release verification passed **117 Engine tests** and **78 Desktop tests**.
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 65 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps |
-| XBRL.Tests | 77 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
+| Engine.Tests | 117 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text facts |
+| XBRL.Tests | 85 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 89 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
-| Ops.Tests | 72 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 158 passed; 5 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 64 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
+| Adapters.Tests | 94 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
+| Ops.Tests | 76 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 186 passed; 5 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 78 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
 | Project.Tests | 15 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash

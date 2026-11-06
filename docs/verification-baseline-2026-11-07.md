@@ -15,7 +15,7 @@ the same row are rejected as an ambiguous fact value.
 
 Verification:
 
-- Focused `CollectTextValues` engine tests passed 2/2, including repeated values,
+- Focused `CollectTextValues` engine tests passed 3/3, including repeated values,
   missing/blank entries, explicit nil, per-item provenance and unsupported-language
   diagnostics, plus rejection of simultaneous scalar and set-collected values.
 - The final Release Engine suite passed 117/117; the focused tests passed 3/3.
@@ -24,6 +24,15 @@ Verification:
   the checkout's shared Release DLLs. The first shared-output attempt failed on
   those file locks; the running desktop process was left untouched.
 - `git diff --check` passed after the implementation and documentation changes.
+
+Exact-head GitHub Actions run
+[42298685658](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42298685658)
+verified source commit `0cac3fee5dfad0a0c8879b12c8366ddb3f291041`. Repository
+hygiene, Ubuntu and Windows Release build/test, and pinned Arelle worker
+integration all passed. Each .NET OS matrix passed 723 tests and skipped 5 gated
+Arelle subprocess cases; the worker job passed 53 protocol/offline-validation
+Python tests, 15 locked-inventory Python tests, and all 11 gated .NET Arelle
+execution tests.
 
 Remaining XBR-04/UX-06 work includes FactConstruct compound-unit creation, typed
 dimensions and default-member handling, complete concept-specific dimension and
