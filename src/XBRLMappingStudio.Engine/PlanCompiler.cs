@@ -361,6 +361,24 @@ public sealed class PlanCompiler
                     .ToArray();
             }
 
+            IReadOnlyList<SourceTransformationPath> ReadSetFieldPaths(
+                MappingEdge? inputEdge, int itemIndex, string fieldName)
+            {
+                if (inputEdge is null) return Array.Empty<SourceTransformationPath>();
+                var inputSlotKey = ProvenanceTracker.SlotKey(
+                    inputEdge.SourceNodeId, inputEdge.SourcePortName);
+                if (setSlots.TryGetValue(inputSlotKey, out var setValue))
+                {
+                    if (setValue.Raw is not IReadOnlyList<DataValue> items || itemIndex >= items.Count)
+                        return Array.Empty<SourceTransformationPath>();
+                    return ctx.Provenance.GetSourceTransformationPaths(ProvenanceTracker.SetSlotKey(
+                        inputEdge.SourceNodeId, inputEdge.SourcePortName, itemIndex, fieldName));
+                }
+
+                return ctx.Provenance.GetSourceTransformationPaths(ProvenanceTracker.SlotKey(
+                    inputEdge.SourceNodeId, inputEdge.SourcePortName, itemIndex));
+            }
+
             void StoreSetPaths(string port, int? itemIndex, IEnumerable<SourceTransformationPath> paths,
                 string? fieldName = null)
             {
@@ -550,13 +568,9 @@ public sealed class PlanCompiler
                 {
                     var items = ReadSetInput("items");
                     var inputEdge = graph.IncomingEdge(nodeId, "items");
-                    // GroupBy can currently attribute source rows safely when its
-                    // records came directly from CollectRows, which records
-                    // field-specific adapter sources. Joined record lineage is not
-                    // reconstructed here because the current join record shape does
-                    // not preserve field-to-source paths.
-                    var collectRowsInput = inputEdge is not null
-                        && graph.Nodes[inputEdge.SourceNodeId].NodeType == NodeTypeConstants.CollectRows;
+                    // CollectRows and record-preserving set operators such as Join
+                    // publish field-specific paths. Other derived record shapes remain
+                    // untraced unless they explicitly preserve this metadata.
                     var keyFields = (GetString(node, "keys") ?? "")
                         .Split(',', StringSplitOptions.TrimEntries);
                     var sumField = GetString(node, "sumField") ?? "";
@@ -575,13 +589,11 @@ public sealed class PlanCompiler
                             groupKeyPaths[bk] = new List<SourceTransformationPath>();
                             groupValuePaths[bk] = new List<SourceTransformationPath>();
                         }
-                        if (collectRowsInput && inputEdge is not null)
+                        if (inputEdge is not null)
                         {
                             foreach (var keyField in keyFields)
                             {
-                                var paths = ctx.Provenance.GetSourceTransformationPaths(
-                                    ProvenanceTracker.SetSlotKey(inputEdge.SourceNodeId,
-                                        inputEdge.SourcePortName, itemIndex, keyField));
+                                var paths = ReadSetFieldPaths(inputEdge, itemIndex, keyField);
                                 AddDistinctPaths(groupKeyPaths[bk], paths);
                                 AddDistinctPaths(groupValuePaths[bk], paths);
                             }
@@ -591,11 +603,10 @@ public sealed class PlanCompiler
                         try { totals[bk] += v.AsDecimal(); }
                         catch (OverflowException)
                         { throw new NumericOverflowException($"GroupBy sum overflow on node '{node.DisplayName}'."); }
-                        if (collectRowsInput && inputEdge is not null)
+                        if (inputEdge is not null)
                         {
-                            AddDistinctPaths(groupValuePaths[bk], ctx.Provenance.GetSourceTransformationPaths(
-                                ProvenanceTracker.SetSlotKey(inputEdge.SourceNodeId,
-                                    inputEdge.SourcePortName, itemIndex, sumField)));
+                            AddDistinctPaths(groupValuePaths[bk],
+                                ReadSetFieldPaths(inputEdge, itemIndex, sumField));
                         }
                     }
                     var valueList = new List<DataValue>();
@@ -619,6 +630,8 @@ public sealed class PlanCompiler
                 {
                     var left = ReadSetInput("left");
                     var right = ReadSetInput("right");
+                    var leftEdge = graph.IncomingEdge(nodeId, "left");
+                    var rightEdge = graph.IncomingEdge(nodeId, "right");
                     var leftKey = GetString(node, "leftKey") ?? "";
                     var rightKey = GetString(node, "rightKey") ?? "";
                     var cardinality = GetString(node, "cardinality") ?? "Inner";
@@ -632,15 +645,15 @@ public sealed class PlanCompiler
                     }
 
                     // Build right-hand index keyed by rightKey, honouring the duplicate policy.
-                    var index = new Dictionary<string, List<Dictionary<string, DataValue>>>(StringComparer.Ordinal);
+                    var index = new Dictionary<string, List<(Dictionary<string, DataValue> Fields, int ItemIndex)>>(StringComparer.Ordinal);
                     var rightOrder = new List<string>();
-                    foreach (var rec in right)
+                    foreach (var (rec, itemIndex) in right.Select((record, index) => (record, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
                         var rk = GetField(fields, rightKey).AsString();
                         if (!index.TryGetValue(rk, out var bucket))
                         {
-                            bucket = new List<Dictionary<string, DataValue>>();
+                            bucket = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
                             index[rk] = bucket;
                             rightOrder.Add(rk);
                         }
@@ -656,16 +669,19 @@ public sealed class PlanCompiler
                             }
                             continue; // First: keep only the first per key
                         }
-                        bucket.Add(fields);
+                        bucket.Add((fields, itemIndex));
                     }
 
                     var joined = new List<DataValue>();
                     var matchedRights = new HashSet<string>(StringComparer.Ordinal);
-                    void AddRow(Dictionary<string, DataValue>? l, Dictionary<string, DataValue>? r)
+                    void AddRow(
+                        Dictionary<string, DataValue>? l, int? leftItemIndex,
+                        Dictionary<string, DataValue>? r, int? rightItemIndex)
                     {
                         var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                         if (l is not null) foreach (var kv in l) merged[kv.Key] = kv.Value;
                         if (r is not null) foreach (var kv in r) merged[kv.Key] = kv.Value;
+                        var outputIndex = joined.Count;
                         joined.Add(DataValue.Record(merged));
                         if (joined.Count > ctx.MaxJoinExpansionRows)
                         {
@@ -674,21 +690,49 @@ public sealed class PlanCompiler
                                 DiagnosticStage.Execution,
                                 $"Join expansion exceeded MaxJoinExpansionRows={ctx.MaxJoinExpansionRows}. "
                                 + "Publication is blocked before output.", nodeId: nodeId);
+                            return;
+                        }
+
+                        var leftJoinKeyPaths = leftItemIndex is { } leftIndex
+                            ? ReadSetFieldPaths(leftEdge, leftIndex, leftKey)
+                            : Array.Empty<SourceTransformationPath>();
+                        var rightJoinKeyPaths = rightItemIndex is { } rightIndex
+                            ? ReadSetFieldPaths(rightEdge, rightIndex, rightKey)
+                            : Array.Empty<SourceTransformationPath>();
+                        foreach (var fieldName in merged.Keys)
+                        {
+                            var fieldPaths = new List<SourceTransformationPath>();
+                            var comesFromRight = r is not null && r.ContainsKey(fieldName);
+                            if (comesFromRight && rightItemIndex is { } rightFieldIndex)
+                                AddDistinctPaths(fieldPaths,
+                                    ReadSetFieldPaths(rightEdge, rightFieldIndex, fieldName));
+                            else if (!comesFromRight && leftItemIndex is { } leftFieldIndex)
+                                AddDistinctPaths(fieldPaths,
+                                    ReadSetFieldPaths(leftEdge, leftFieldIndex, fieldName));
+                            AddDistinctPaths(fieldPaths, leftJoinKeyPaths);
+                            AddDistinctPaths(fieldPaths, rightJoinKeyPaths);
+                            var extendedPaths = ExtendPaths(fieldPaths, nodeId);
+                            StoreSetPaths("rows", outputIndex, extendedPaths);
+                            StoreSetPaths("rows", outputIndex, extendedPaths, fieldName);
                         }
                     }
 
-                    foreach (var rec in left)
+                    foreach (var (rec, itemIndex) in left.Select((record, index) => (record, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
                         var lk = GetField(fields, leftKey).AsString();
                         var hasMatch = index.TryGetValue(lk, out var bucket) && bucket.Count > 0;
                         if (hasMatch)
                         {
-                            foreach (var rrow in bucket!) { AddRow(fields, rrow); matchedRights.Add(lk); }
+                            foreach (var rrow in bucket!)
+                            {
+                                AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex);
+                                matchedRights.Add(lk);
+                            }
                         }
                         else if (cardinality is "Left" or "Full")
                         {
-                            AddRow(fields, null);
+                            AddRow(fields, itemIndex, null, null);
                         }
                     }
 
@@ -698,7 +742,7 @@ public sealed class PlanCompiler
                         {
                             var bucket = index[rk];
                             if (matchedRights.Contains(rk)) continue;
-                            foreach (var rrow in bucket) AddRow(null, rrow);
+                            foreach (var rrow in bucket) AddRow(null, null, rrow.Fields, rrow.ItemIndex);
                         }
                     }
 

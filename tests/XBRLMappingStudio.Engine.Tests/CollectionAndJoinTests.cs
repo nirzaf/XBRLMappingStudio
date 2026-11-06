@@ -1,6 +1,7 @@
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Engine.Tests;
 
@@ -327,6 +328,107 @@ public class CollectionAndJoinTests
 
         var values = result!.Facts.Select(f => f.Value!.Value).OrderBy(v => v).ToList();
         Assert.Equal(new[] { 15m, 20m }, values);
+    }
+
+    [Fact]
+    public void JoinThenGroup_PreservesJoinedKeyAndValueFieldPathsPerMemberRow()
+    {
+        const string Left = "L";
+        const string Right = "R";
+
+        var leftRows = new[]
+        {
+            GraphHarness.Row(
+                ("k", DataValue.StringValue("1", new SourceReference(Left, "left:1:key"))),
+                ("a", DataValue.DecimalValue(10m, new SourceReference(Left, "left:1:amount")))),
+            GraphHarness.Row(
+                ("k", DataValue.StringValue("1", new SourceReference(Left, "left:2:key"))),
+                ("a", DataValue.DecimalValue(5m, new SourceReference(Left, "left:2:amount")))),
+            GraphHarness.Row(
+                ("k", DataValue.StringValue("2", new SourceReference(Left, "left:3:key"))),
+                ("a", DataValue.DecimalValue(20m, new SourceReference(Left, "left:3:amount"))))
+        };
+        var rightRows = new[]
+        {
+            GraphHarness.Row(
+                ("k", DataValue.StringValue("1", new SourceReference(Right, "right:1:key"))),
+                ("name", DataValue.StringValue("alpha", new SourceReference(Right, "right:1:name")))),
+            GraphHarness.Row(
+                ("k", DataValue.StringValue("2", new SourceReference(Right, "right:2:key"))),
+                ("name", DataValue.StringValue("beta", new SourceReference(Right, "right:2:name"))))
+        };
+
+        var leftCollect = GraphHarness.Node(NodeTypeConstants.CollectRows, "Left",
+            new() { ["binding"] = Left },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var rightCollect = GraphHarness.Node(NodeTypeConstants.CollectRows, "Right",
+            new() { ["binding"] = Right },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var join = GraphHarness.Node(NodeTypeConstants.Join, "Join",
+            new() { ["leftKey"] = "k", ["rightKey"] = "k", ["cardinality"] = "Inner", ["duplicateKey"] = "All" },
+            inputs: new[]
+            {
+                GraphHarness.P("left", PortShape.Record, PortCardinality.Collection),
+                GraphHarness.P("right", PortShape.Record, PortCardinality.Collection)
+            },
+            outputs: new[] { GraphHarness.P("rows", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By name",
+            new() { ["keys"] = "name", ["sumField"] = "a" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection)
+            });
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(leftCollect, "items", join, "left"),
+            GraphHarness.Link(rightCollect, "items", join, "right"),
+            GraphHarness.Link(join, "rows", group, "items")
+        };
+        var sink = GraphHarness.FactSink(out var sinkEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        var factConstruct = sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        var project = GraphHarness.Project(new[] { leftCollect, rightCollect, join, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Left), GraphHarness.Binding(Right) });
+
+        var result = GraphHarness.Run(project, GraphHarness.Ctx(new[]
+        {
+            (Left, leftRows as IReadOnlyList<DataRecord>),
+            (Right, rightRows as IReadOnlyList<DataRecord>)
+        }), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        var alpha = Assert.Single(result!.Facts, fact => fact.Value == 15m);
+        var beta = Assert.Single(result.Facts, fact => fact.Value == 20m);
+        AssertPaths(alpha, new[]
+        {
+            (new SourceReference(Left, "left:1:key"), leftCollect.NodeId),
+            (new SourceReference(Left, "left:1:amount"), leftCollect.NodeId),
+            (new SourceReference(Left, "left:2:key"), leftCollect.NodeId),
+            (new SourceReference(Left, "left:2:amount"), leftCollect.NodeId),
+            (new SourceReference(Right, "right:1:key"), rightCollect.NodeId),
+            (new SourceReference(Right, "right:1:name"), rightCollect.NodeId)
+        });
+        AssertPaths(beta, new[]
+        {
+            (new SourceReference(Left, "left:3:key"), leftCollect.NodeId),
+            (new SourceReference(Left, "left:3:amount"), leftCollect.NodeId),
+            (new SourceReference(Right, "right:2:key"), rightCollect.NodeId),
+            (new SourceReference(Right, "right:2:name"), rightCollect.NodeId)
+        });
+
+        void AssertPaths(PendingFact fact, (SourceReference Source, string CollectNodeId)[] expected)
+        {
+            Assert.Equal(expected.Select(item => item.Source).OrderBy(source => source.Locator),
+                fact.SourceTransformationPaths.Select(path => path.Source).OrderBy(source => source.Locator));
+            foreach (var item in expected)
+            {
+                var path = Assert.Single(fact.SourceTransformationPaths, candidate => candidate.Source == item.Source);
+                Assert.Equal(new[] { item.CollectNodeId, join.NodeId, group.NodeId, factConstruct.NodeId },
+                    path.TransformationIds);
+            }
+        }
     }
 
     [Fact]
