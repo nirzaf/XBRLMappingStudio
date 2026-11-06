@@ -252,7 +252,11 @@ public sealed class FunctionCatalog
             new Dictionary<string, ParameterRequirement>
             {
                 ["divideByZero"] = new("divideByZero", PortShape.String, false, "Diagnostic",
-                    Description: "Missing | NaN | Diagnostic")
+                    Description: "Missing | NaN | Diagnostic"),
+                ["digits"] = new("digits", PortShape.Integer, false,
+                    Description: "Optional 0..28 output scale; configure with mode to round the quotient."),
+                ["mode"] = new("mode", PortShape.String, false,
+                    Description: "Optional HalfUp | HalfEven | Truncate; configure with digits.")
             }),
 
         // Conditional: boolean gate that passes a value only when the condition holds.

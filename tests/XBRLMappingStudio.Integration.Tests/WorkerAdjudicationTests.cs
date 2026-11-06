@@ -110,7 +110,12 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
             NodeId = Id.New(),
             NodeType = NodeTypeConstants.Ratio,
             DisplayName = "Current to prior ratio",
-            Parameters = new() { ["divideByZero"] = "Diagnostic" },
+            Parameters = new()
+            {
+                ["divideByZero"] = "Diagnostic",
+                ["digits"] = "2",
+                ["mode"] = "HalfEven"
+            },
             InputPorts = new()
             {
                 new PortDefinition("numerator", PortShape.Decimal, PortCardinality.Single),

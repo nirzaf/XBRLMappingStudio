@@ -277,3 +277,18 @@ classification, unavailable-target unknown state, and receipt matching after an
 ambiguous response. `git diff --check` passed. Process-kill coverage at every replace
 and journal transition and cross-process crash qualification remain open; this is a
 local SQLite implementation and does not imply cross-filesystem atomicity.
+
+## MAP04 exact Ratio division
+
+Ratio preserves a quotient without rounding only when an exact base-10 round
+trip confirms the result. An inexact quotient without explicit parameters blocks
+with MAP008. Providing both `digits` (0..28) and `mode` (HalfUp, HalfEven, or
+Truncate) rounds the exact integer-rational quotient directly, without first
+accepting CLR division rounding; partial or invalid settings block with MAP018,
+including when inputs are nil. Divide-by-zero policy remains independent.
+
+Verification: Engine Release tests passed 112/112. The targeted large-run Ratio
+provenance and worker-adjudication integration tests passed 2/2; the run used
+`BuildProjectReferences=false` because a running Desktop process held shared
+Release output files. Profile-specific precision and default division scale
+remain open.

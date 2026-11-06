@@ -1196,6 +1196,42 @@ public sealed class PlanCompiler
                     break;
                 }
 
+                var digitsStr = GetString(node, "digits");
+                var roundingMode = GetString(node, "mode");
+                int? resultScale = null;
+                if (digitsStr is not null || roundingMode is not null)
+                {
+                    if (digitsStr is null || roundingMode is null)
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            "Ratio digits and mode must be configured together to round an inexact quotient.",
+                            nodeId: node.NodeId);
+                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                        break;
+                    }
+                    if (!int.TryParse(digitsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits)
+                        || digits < 0 || digits > DecimalDomain.MaximumScale)
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            $"Ratio digits '{digitsStr}' is outside the supported range 0..{DecimalDomain.MaximumScale}.",
+                            nodeId: node.NodeId);
+                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                        break;
+                    }
+                    if (roundingMode is not ("HalfUp" or "HalfEven" or "Truncate"))
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                            DiagnosticStage.Execution,
+                            $"Unknown Ratio rounding mode '{roundingMode}'.",
+                            nodeId: node.NodeId);
+                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                        break;
+                    }
+                    resultScale = digits;
+                }
+
                 var n = inputs.GetValueOrDefault("numerator", DataValue.Missing(PortShape.Decimal));
                 var d = inputs.GetValueOrDefault("denominator", DataValue.Missing(PortShape.Decimal));
                 if (n.IsMissing || d.IsMissing)
@@ -1238,11 +1274,18 @@ public sealed class PlanCompiler
                 try
                 {
                     var numerator = n.AsDecimal();
-                    var result = numerator / dv;
-                    if (numerator != 0m && result == 0m)
+                    var result = resultScale is int digits
+                        ? DecimalDomain.DivideToScale(numerator, dv, digits, roundingMode!)
+                        : numerator / dv;
+                    if (resultScale is null && numerator != 0m && result == 0m)
                     {
                         throw new NumericOverflowException(
                             $"Ratio division underflowed CLR decimal range on node '{node.DisplayName}'.");
+                    }
+                    if (resultScale is null && !DecimalDomain.QuotientIsExact(numerator, dv, result))
+                    {
+                        throw new NumericOverflowException(
+                            $"Ratio division would round beyond exact CLR decimal precision on node '{node.DisplayName}'.");
                     }
                     outputs["value"] = DataValue.DecimalValue(result, n.Source ?? d.Source);
                 }

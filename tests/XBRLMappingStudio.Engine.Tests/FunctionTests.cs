@@ -420,6 +420,91 @@ public class FunctionTests
         Assert.Empty(result.Facts);
     }
 
+    [Fact]
+    public void Ratio_ExactQuotientPreservesDecimalValue()
+    {
+        var (project, ctx) = RatioGraph("Diagnostic", 1m, 8m);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Empty(result!.Diagnostics);
+        Assert.Equal(0.125m, Assert.Single(result.Facts).Value);
+    }
+
+    [Fact]
+    public void Ratio_InexactQuotientFailsInsteadOfSilentlyRounding()
+    {
+        var (project, ctx) = RatioGraph("Diagnostic", 1m, 3m);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapNumericOverflow
+            && diagnostic.Message.Contains("would round beyond exact CLR decimal precision", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void Ratio_DeclaredScaleUsesExactRationalRounding()
+    {
+        var cases = new[]
+        {
+            (Mode: "HalfEven", Numerator: 1m, Denominator: 3m, Digits: "2", Expected: 0.33m),
+            (Mode: "HalfEven", Numerator: 1m, Denominator: 3m, Digits: "28",
+                Expected: 0.3333333333333333333333333333m),
+            (Mode: "HalfEven", Numerator: 5m, Denominator: 2m, Digits: "0", Expected: 2m),
+            (Mode: "HalfEven", Numerator: 7m, Denominator: 2m, Digits: "0", Expected: 4m),
+            (Mode: "HalfUp", Numerator: 5m, Denominator: 2m, Digits: "0", Expected: 3m),
+            (Mode: "Truncate", Numerator: -5m, Denominator: 2m, Digits: "0", Expected: -2m)
+        };
+
+        foreach (var testCase in cases)
+        {
+            var (project, ctx) = RatioGraph("Diagnostic", testCase.Numerator, testCase.Denominator);
+            var ratio = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Ratio);
+            ratio.Parameters["digits"] = testCase.Digits;
+            ratio.Parameters["mode"] = testCase.Mode;
+            var result = GraphHarness.Run(project, ctx, out var compile);
+
+            Assert.True(compile.Success);
+            Assert.Empty(result!.Diagnostics);
+            Assert.Equal(testCase.Expected, Assert.Single(result.Facts).Value);
+        }
+    }
+
+    [Fact]
+    public void Ratio_RejectsPartialRoundingConfigurationEvenForNilInputs()
+    {
+        var (project, ctx) = RatioGraph("Diagnostic",
+            DataValue.ExplicitNil(PortShape.Decimal), DataValue.DecimalValue(3m));
+        var ratio = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Ratio);
+        ratio.Parameters["digits"] = "2";
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
+            && diagnostic.Message.Contains("must be configured together", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void Ratio_RejectsScaleBeyondClrDecimalPrecision()
+    {
+        var (project, ctx) = RatioGraph("Diagnostic", 1m, 3m);
+        var ratio = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Ratio);
+        ratio.Parameters["digits"] = "29";
+        ratio.Parameters["mode"] = "HalfEven";
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
+            && diagnostic.Message.Contains("0..28", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

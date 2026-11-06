@@ -208,6 +208,68 @@ internal static class DecimalDomain
             == productCoefficient * BigInteger.Pow(10, exactScale);
     }
 
+    /// <summary>Checks whether a decimal quotient survives an exact base-10 round trip.</summary>
+    public static bool QuotientIsExact(decimal numerator, decimal denominator, decimal quotient)
+    {
+        try
+        {
+            var roundTrip = quotient * denominator;
+            return ProductIsExact(quotient, denominator, roundTrip)
+                && roundTrip == numerator;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Divides and rounds the exact base-10 quotient to a declared scale.</summary>
+    public static decimal DivideToScale(
+        decimal numerator, decimal denominator, int scale, string roundingMode)
+    {
+        if (scale < 0 || scale > MaximumScale)
+            throw new ArgumentOutOfRangeException(nameof(scale));
+
+        var numeratorCoefficient = GetCoefficient(numerator, out var numeratorScale);
+        var denominatorCoefficient = GetCoefficient(denominator, out var denominatorScale);
+        if (denominatorCoefficient.IsZero)
+            throw new DivideByZeroException("A ratio denominator cannot be zero.");
+
+        var negative = numeratorCoefficient.Sign != denominatorCoefficient.Sign;
+        var scaledNumerator = BigInteger.Abs(numeratorCoefficient)
+            * BigInteger.Pow(10, denominatorScale + scale);
+        var scaledDenominator = BigInteger.Abs(denominatorCoefficient)
+            * BigInteger.Pow(10, numeratorScale);
+        var coefficient = BigInteger.DivRem(scaledNumerator, scaledDenominator, out var remainder);
+
+        var comparison = (remainder * 2).CompareTo(scaledDenominator);
+        var roundUp = roundingMode switch
+        {
+            "HalfUp" => comparison >= 0,
+            "HalfEven" => comparison > 0 || (comparison == 0 && !coefficient.IsEven),
+            "Truncate" => false,
+            _ => throw new ArgumentOutOfRangeException(nameof(roundingMode))
+        };
+        if (roundUp)
+            coefficient++;
+
+        var resultScale = scale;
+        var maxCoefficient = (BigInteger.One << 96) - BigInteger.One;
+        while (coefficient > maxCoefficient && resultScale > 0 && coefficient % 10 == 0)
+        {
+            coefficient /= 10;
+            resultScale--;
+        }
+
+        if (coefficient > maxCoefficient)
+            throw new OverflowException("The rounded quotient exceeds the CLR decimal coefficient range.");
+
+        var low = unchecked((int)(uint)(coefficient & uint.MaxValue));
+        var middle = unchecked((int)(uint)((coefficient >> 32) & uint.MaxValue));
+        var high = unchecked((int)(uint)((coefficient >> 64) & uint.MaxValue));
+        return new decimal(low, middle, high, negative && !coefficient.IsZero, (byte)resultScale);
+    }
+
     private static BigInteger GetCoefficient(decimal value, out int scale)
     {
         var bits = decimal.GetBits(value);
