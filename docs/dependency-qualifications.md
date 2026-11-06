@@ -20,8 +20,11 @@ changing the pin.
 - `tools/dependency_inventory.py` builds an SPDX 2.3 component inventory from the
   CLI/Desktop release lock graphs and worker lock. NuGet package hashes and
   machine-readable license expressions are included where declared; Python SPDX
-  expressions are copied only from installed wheel `License-Expression` metadata.
-  Missing license assertions stay `NOASSERTION`, and accepted worker distribution hashes
+  expressions come from installed wheel `License-Expression` metadata or a legacy
+  `License` value that passes SPDX syntax validation.
+  Nuspec-declared license files and installed Python license files are embedded as
+  exact SPDX `LicenseRef` text with source-file SHA-256 evidence. Legacy URLs or
+  ambiguous/missing terms remain `NOASSERTION`; accepted worker distribution hashes
   remain listed in each Python component's evidence comment.
 - CI and release verification upload the SPDX document. The draft GitHub Release
   includes the SBOM and `SHA256SUMS.txt` covering the release assets. CI also uploads

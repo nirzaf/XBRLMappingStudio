@@ -172,12 +172,22 @@ artifact hashes, and locked release bundles remain open.
 
 `tools/dependency_inventory.py` and its standard-library tests generate an SPDX
 2.3 document for the CLI/Release-Desktop package graphs and pinned worker requirements.
-The local generation parsed 69 unique components and 147 dependency/document
-relationships; all referenced SPDX IDs resolved. The current local Python 3.14
-environment does not contain the pinned worker packages, so its output retained
-`NOASSERTION` for unavailable wheel license metadata. CI and release verification
+Generation with the exact hash-locked worker dependencies parsed 69 unique
+components and 147 dependency/document relationships; all referenced SPDX IDs
+resolved. It embedded 40 extracted license texts, with source-file SHA-256
+evidence, and retained `NOASSERTION` for 11 packages. CI and release verification
 install the exact hash-locked worker dependencies before generation, and preserve
 any remaining unknown licenses as `NOASSERTION` for review.
+
+Artifact review found that NuGet package cache paths preserve periods in package
+IDs; the first generator version applied PyPI normalization and therefore missed
+NuGet nuspec metadata. The lookup now uses NuGet's lowercase-but-not-normalized
+folder name. License text declared by a nuspec or present in an installed Python
+distribution is embedded verbatim as SPDX `LicenseRef` evidence with its source
+SHA-256. Ten SkiaSharp/HarfBuzzSharp packages retain legacy license URLs, and
+`Avalonia.BuildServices` has no machine-readable license metadata or captured
+license file; all 11 remain `NOASSERTION`. The corrected local document contains
+69 components, 40 extracted license texts, and 11 unresolved license assertions.
 
 Release packaging now hashes every uploaded archive and the SPDX document into
 `SHA256SUMS.txt`. This provides package/artifact provenance evidence, not per-file
