@@ -206,7 +206,7 @@ public sealed class MappingProject
     public required string ProfileDigest { get; init; }
 
     /// <summary>Function catalog version used by the project.</summary>
-    public string FunctionCatalogVersion { get; init; } = "1.0";
+    public string FunctionCatalogVersion { get; init; } = FunctionCatalogVersions.Current;
 
     /// <summary>Changes only when executable content changes (nodes, edges, bindings, functions).</summary>
     public int SemanticRevision { get; set; } = 1;

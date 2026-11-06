@@ -140,7 +140,7 @@ public sealed class FunctionCatalog
     /// Catalog for G1: source bindings, transform (scale, parse, constant), conditional
     /// (coalesce), and fact construction. Aggregation, joins, group are deferred (MAP05/06).
     /// </summary>
-    public static FunctionCatalog Default { get; } = new("1.0", new[]
+    public static FunctionCatalog Default { get; } = new(FunctionCatalogVersions.Current, new[]
     {
         // Source binding: emits one field per row from an Excel/DB source.
         new FunctionSignature(

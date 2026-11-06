@@ -634,6 +634,17 @@ public class FunctionTests
     }
 
     [Fact]
+    public void FunctionCall_LegacyProjectCatalogDefaultRemainsCompatible()
+    {
+        var project = CallingProject("scale", 1, new[] { ScaleFunction("scale", 1, "10") }, catalogVersion: "1");
+
+        var result = GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Equal(new[] { 50m }, result!.Facts.Select(fact => fact.Value!.Value));
+    }
+
+    [Fact]
     public void FunctionCall_DuplicatePinnedRevisionBlocksCompilation()
     {
         var first = ScaleFunction("scale", 1, "10");

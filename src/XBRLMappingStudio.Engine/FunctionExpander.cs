@@ -63,7 +63,7 @@ internal static class FunctionExpander
             if (calls.Count == 0) return _source;
             if (_diagnostics.HasBlockingErrors) return _source;
 
-            if (!string.Equals(_source.Source.FunctionCatalogVersion, _catalogVersion, StringComparison.Ordinal))
+            if (!FunctionCatalogVersions.IsCompatible(_source.Source.FunctionCatalogVersion, _catalogVersion))
             {
                 Error(DiagnosticCodes.MapFunctionCatalogMismatch,
                     $"Project function catalog '{_source.Source.FunctionCatalogVersion}' is incompatible with "
@@ -139,7 +139,7 @@ internal static class FunctionExpander
                 return null;
             }
 
-            if (!string.Equals(definition.CatalogVersion, _catalogVersion, StringComparison.Ordinal))
+            if (!FunctionCatalogVersions.IsCompatible(definition.CatalogVersion, _catalogVersion))
             {
                 Error(DiagnosticCodes.MapFunctionCatalogMismatch,
                     $"Function '{key.FunctionId}@{key.Revision}' was created for catalog "
