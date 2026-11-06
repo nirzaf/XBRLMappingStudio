@@ -62,5 +62,7 @@ index build is therefore not bounded.
 The current checkout also preflights project-bound non-SQLite file sizes before reading
 source identities, limits identity hashing to those bindings, and caps/cancels the digest
 read. Local Windows Release verification on the checkout based on `e5e303c` passed 510
-.NET tests and skipped five Arelle-gated integration tests; exact-head CI for this
-follow-up remains pending.
+.NET tests and skipped five Arelle-gated integration tests. Exact-head CI [42136073636](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42136073636)
+passed on `ae15a9072cde61a6bef4d5e5a7b4de3582cf8230`: Windows and Ubuntu each passed
+510 tests and skipped the same five gated cases; the pinned worker passed 23 Python
+tests and all five gated .NET Arelle integration cases.

@@ -278,7 +278,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Exact-head GitHub Actions run [42132498946](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42132498946) passed repository hygiene and the Windows/Ubuntu Release build/test matrix on `e5e303c6d9aab38a0f7b32b20733cdc9192d32d2`. Each .NET matrix passed **505 tests** and skipped **5** Arelle-gated subprocess cases. The pinned worker job passed **23 Python tests** and **5 gated .NET Arelle integration tests**. The current Windows Release run on this checkout (based on that SHA, with TAX-01 and ENG-01 follow-up changes) passed **510 tests** and skipped the same **5** gated cases. The table shows the current local suite totals; exact-head CI for these follow-up changes is pending:
+Exact-head GitHub Actions run [42136073636](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42136073636) passed repository hygiene and the Windows/Ubuntu Release build/test matrix on `ae15a9072cde61a6bef4d5e5a7b4de3582cf8230`. Each .NET matrix passed **510 tests** and skipped **5** Arelle-gated subprocess cases. The pinned worker job passed **23 Python tests** and all **5 gated .NET Arelle integration tests**. The table shows the exact-head suite totals:
 
 | Suite | Count | Covers |
 |---|---:|---|
