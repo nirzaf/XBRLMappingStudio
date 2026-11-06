@@ -1,7 +1,10 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
@@ -153,6 +156,172 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RepeatedReportOccurrences_PublishDistinctExcelAndSqliteRowsAgainstOccurrenceOracle()
+    {
+        var selectedPeriod = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        var nextPeriod = XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1));
+        var axis = SyntheticProfile.Qualified("RegionAxis");
+        var north = SyntheticProfile.Qualified("NorthMember");
+        var south = SyntheticProfile.Qualified("SouthMember");
+        var sourceFacts = new[]
+        {
+            ReverseFact(100.00m, selectedPeriod, "QAR", axis, north),
+            ReverseFact(100.00m, selectedPeriod, "QAR", axis, north),
+            ReverseFact(125.00m, nextPeriod, "QAR", axis, north),
+            ReverseFact(100.00m, selectedPeriod, "USD", axis, north),
+            ReverseFact(100.00m, selectedPeriod, "QAR", axis, south)
+        };
+        var reportPath = Path.Combine(_directory, "repeated-report.xbrl.xml");
+        await File.WriteAllTextAsync(reportPath, XmlSerializer.Serialize(_profile, sourceFacts));
+
+        // Hand-authored occurrence oracle: only the first two report facts have every
+        // selected aspect; repeats remain two occurrences, never one set member.
+        var occurrenceOracle = new[]
+        {
+            new { Locator = "report#f1", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Value = "100.00" },
+            new { Locator = "report#f2", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Value = "100.00" }
+        };
+        var selector = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["concept"] = SyntheticProfile.Qualified("Revenue"),
+            ["period"] = selectedPeriod.ToIsoString(),
+            ["unit"] = "QAR",
+            ["dimensionAxis"] = axis,
+            ["dimensionMember"] = north
+        };
+        var reportAdapter = new XbrlReportAdapter();
+        var reportConnection = new SourceConnection("report", reportAdapter.Kind, reportPath, selector);
+        var reportSchema = await reportAdapter.InspectSchemaAsync(reportConnection, CancellationToken.None);
+        var selectedRows = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var row in reportAdapter.ReadFullAsync(reportConnection, reportSchema, CancellationToken.None))
+            selectedRows.Add(row);
+
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator), selectedRows.Select(row => row.RowId));
+        Assert.Equal(occurrenceOracle.Select(item => item.Period), selectedRows.Select(row => row["period"].AsString()));
+        Assert.Equal(occurrenceOracle.Select(item => item.Unit), selectedRows.Select(row => row["unit"].AsString()));
+        Assert.Equal(occurrenceOracle.Select(item => item.Value), selectedRows.Select(row => row["value"].LexicalSource));
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator), selectedRows.Select(row => row["occurrenceId"].AsString()));
+        Assert.All(selectedRows, row => Assert.Contains(north, row["dimensionsJson"].AsString(), StringComparison.Ordinal));
+
+        // Exercise adapter rows directly through the existing CSV-like target contracts.
+        // The occurrence ID is a selected source row identity, so duplicates are upserted
+        // separately without deriving or inventing ledger records.
+        var outputColumns = reportSchema.Columns.Select(column => column.Name).ToArray();
+        var directExcelPath = Path.Combine(_directory, "reverse-source-rows.xlsx");
+        var directExcel = new ExcelOutputAdapter();
+        var directExcelConnection = new SourceConnection("report-output", "excel", directExcelPath);
+        var directExcelPayload = directExcel.WriteWorkbook(outputColumns,
+            selectedRows.Select(row => outputColumns.Select(column => ToExcelOutputValue(row[column]))));
+        var directExcelStage = await directExcel.StageArtifactAsync(directExcelConnection, directExcelPayload,
+            ".xlsx", CancellationToken.None);
+        await directExcel.PublishAsync(directExcelStage, directExcelConnection, CancellationToken.None);
+        var directExcelReader = new ExcelAdapter();
+        var directExcelSchema = await directExcelReader.InspectSchemaAsync(
+            new SourceConnection("report-output", "excel", directExcelPath), CancellationToken.None);
+        var directExcelRows = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var row in directExcelReader.ReadFullAsync(
+                           new SourceConnection("report-output", "excel", directExcelPath), directExcelSchema, CancellationToken.None))
+            directExcelRows.Add(row);
+        Assert.Equal(occurrenceOracle.Length, directExcelRows.Count);
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator), directExcelRows.Select(row => row["occurrenceId"].AsString()));
+
+        var sqliteTarget = new SourceConnection("report-output", "sqlite", _databasePath,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = "report_occurrences" });
+        var directSqlite = await new SqliteTargetPublisher().PublishAsync(sqliteTarget, selectedRows,
+            new[] { "occurrenceId" }, "xms-report-occurrences", "sha256:report-occurrences-fixture");
+        Assert.Equal(occurrenceOracle.Length, directSqlite.WrittenRows);
+        await using (var reportDatabase = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly"))
+        {
+            await reportDatabase.OpenAsync();
+            await using var command = reportDatabase.CreateCommand();
+            command.CommandText = "SELECT occurrenceId,period,unit,dimensionsJson FROM report_occurrences ORDER BY occurrenceId";
+            await using var reader = await command.ExecuteReaderAsync();
+            var outputOccurrences = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                outputOccurrences.Add(reader.GetString(0));
+                Assert.Equal(selectedPeriod.ToIsoString(), reader.GetString(1));
+                Assert.Equal("QAR", reader.GetString(2));
+                Assert.Contains(north, reader.GetString(3), StringComparison.Ordinal);
+            }
+            Assert.Equal(occurrenceOracle.Select(item => item.Locator), outputOccurrences);
+        }
+
+        var selectedLocators = occurrenceOracle.Select(item => item.Locator).ToHashSet(StringComparer.Ordinal);
+        var parsedSourceFacts = XmlSerializer.ReadFacts(await File.ReadAllTextAsync(reportPath));
+        var selectedFacts = parsedSourceFacts.Select((fact, index) => (fact, index))
+            .Where(item => selectedLocators.Contains($"report#f{item.index + 1}"))
+            .Select(item => CopyWithSource(item.fact, "report", $"report#f{item.index + 1}"))
+            .ToArray();
+
+        Assert.Equal(occurrenceOracle.Length, selectedFacts.Length);
+        var selectedRecords = XbrlFactRecordMapper.ToRecords(selectedFacts, _profile.Digest);
+        Assert.Equal(occurrenceOracle.Length,
+            selectedRecords.Select(record => record["fact_key"].AsString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator).Order(StringComparer.Ordinal),
+            selectedRecords.SelectMany(record => ReadProvenanceLocators(record["provenance_json"].AsString())).Order(StringComparer.Ordinal));
+        var keysByLocator = selectedRecords.ToDictionary(
+            record => Assert.Single(ReadProvenanceLocators(record["provenance_json"].AsString())),
+            record => record["fact_key"].AsString(), StringComparer.Ordinal);
+        var reorderedRecords = XbrlFactRecordMapper.ToRecords(selectedFacts.Reverse().ToArray(), _profile.Digest);
+        var reorderedKeysByLocator = reorderedRecords.ToDictionary(
+            record => Assert.Single(ReadProvenanceLocators(record["provenance_json"].AsString())),
+            record => record["fact_key"].AsString(), StringComparer.Ordinal);
+        Assert.Equal(keysByLocator.OrderBy(pair => pair.Key, StringComparer.Ordinal),
+            reorderedKeysByLocator.OrderBy(pair => pair.Key, StringComparer.Ordinal));
+
+        var sqliteProject = ReversePublicationProject("sqlite", "destination.db", reportPath, selector);
+        var sqliteResult = PublishableResult(sqliteProject, selectedFacts,
+            OimSerializer.Serialize(_profile, selectedFacts), new InputIdentity("report", "xbrl-report",
+                RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath)), true, reportPath, "report-fact-index"));
+        var sqliteReceipt = await NewService().PublishDestinationAsync(sqliteProject, sqliteResult, _directory,
+            allowSyntheticProfile: true);
+        Assert.Equal(occurrenceOracle.Length, sqliteReceipt.WrittenRows);
+
+        await using (var database = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly"))
+        {
+            await database.OpenAsync();
+            await using var command = database.CreateCommand();
+            command.CommandText = "SELECT fact_key,provenance_json,period_start,period_end FROM facts ORDER BY fact_key";
+            await using var reader = await command.ExecuteReaderAsync();
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            var locators = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                keys.Add(reader.GetString(0));
+                using var provenance = JsonDocument.Parse(reader.GetString(1));
+                locators.Add(provenance.RootElement[0].GetProperty("Locator").GetString()!);
+                Assert.Equal("2025-01-01", reader.GetString(2));
+                Assert.Equal("2026-01-01", reader.GetString(3));
+            }
+            Assert.Equal(occurrenceOracle.Length, keys.Count);
+            Assert.Equal(occurrenceOracle.Select(item => item.Locator).Order(StringComparer.Ordinal),
+                locators.Order(StringComparer.Ordinal));
+        }
+
+        var excelProject = ReversePublicationProject("excel", "reverse-occurrences.xlsx", reportPath, selector);
+        var excelResult = PublishableResult(excelProject, selectedFacts,
+            OimSerializer.Serialize(_profile, selectedFacts), new InputIdentity("report", "xbrl-report",
+                RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath)), true, reportPath, "report-fact-index"));
+        var excelReceipt = await NewService().PublishFileDestinationAsync(excelProject, excelResult, _directory,
+            allowSyntheticProfile: true, CancellationToken.None);
+        Assert.Equal("xlsx", excelReceipt.Kind);
+
+        var excelAdapter = new ExcelAdapter();
+        var excelConnection = new SourceConnection("reverse-output", "excel", excelReceipt.Path);
+        var excelSchema = await excelAdapter.InspectSchemaAsync(excelConnection, CancellationToken.None);
+        var excelRows = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var row in excelAdapter.ReadFullAsync(excelConnection, excelSchema, CancellationToken.None))
+            excelRows.Add(row);
+        Assert.Equal(occurrenceOracle.Length, excelRows.Count);
+        Assert.Equal(occurrenceOracle.Length,
+            excelRows.Select(row => row["fact_key"].AsString()).Distinct(StringComparer.Ordinal).Count());
+        var excelLocators = excelRows.SelectMany(row =>
+            ReadProvenanceLocators(row["provenance_json"].AsString())).Order(StringComparer.Ordinal);
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator).Order(StringComparer.Ordinal), excelLocators);
+    }
+
+    [Fact]
     public async Task PreviewPublicationIsRejectedWithoutChangingDatabaseBytes()
     {
         var project = ConfiguredProject(_workbookPath);
@@ -232,6 +401,100 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         return new JobResult(manifest, facts, json, new DiagnosticBag(), Array.Empty<XBRLMappingStudio.Engine.SampledTotal>());
     }
 
+    private MappingProject ReversePublicationProject(
+        string destinationKind,
+        string destinationLocator,
+        string reportPath,
+        IReadOnlyDictionary<string, string> selection)
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+        var binding = Assert.Single(project.Bindings);
+        project.Bindings[0] = binding with
+        {
+            Kind = "xbrl-report",
+            Locator = Path.GetFileName(reportPath),
+            Configuration = selection.ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.Ordinal)
+        };
+        project.Destination = destinationKind switch
+        {
+            "sqlite" => new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.SupportedKind,
+                Locator = destinationLocator,
+                Table = "facts",
+                BusinessKey = new List<string> { "fact_key" }
+            },
+            "excel" => new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.ExcelKind,
+                Locator = destinationLocator,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "xlsx-records-v1",
+                WriteMode = "replace"
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(destinationKind))
+        };
+        project.Approvals.Clear();
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = _profile.Digest
+        });
+        return project;
+    }
+
+    private static XbrlFact ReverseFact(decimal value, XbrlPeriod period, string unit, string axis, string member)
+        => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = period,
+            Unit = new XbrlUnit(unit),
+            Value = value,
+            Decimals = -2,
+            Dimensions = new[] { new Dimension(axis, member) }
+        };
+
+    private static object? ToExcelOutputValue(XBRLMappingStudio.Engine.DataValue value)
+        => value.Presence switch
+        {
+            XBRLMappingStudio.Engine.ValuePresence.Missing or XBRLMappingStudio.Engine.ValuePresence.ExplicitNil => null,
+            XBRLMappingStudio.Engine.ValuePresence.Blank => string.Empty,
+            _ when value.Raw is decimal number => value.LexicalSource ?? number.ToString(CultureInfo.InvariantCulture),
+            _ => value.Raw
+        };
+
+    private static XbrlFact CopyWithSource(XbrlFact fact, string sourceId, string locator)
+        => new()
+        {
+            ConceptName = fact.ConceptName,
+            EntityScheme = fact.EntityScheme,
+            EntityIdentifier = fact.EntityIdentifier,
+            Period = fact.Period,
+            Unit = fact.Unit,
+            CompoundUnit = fact.CompoundUnit,
+            Value = fact.Value,
+            TextValue = fact.TextValue,
+            IsNil = fact.IsNil,
+            Decimals = fact.Decimals,
+            Language = fact.Language,
+            Dimensions = fact.Dimensions,
+            ContributingSources = new[] { new SourceReference(sourceId, locator) }
+        };
+
+    private static IReadOnlyList<string> ReadProvenanceLocators(string provenanceJson)
+    {
+        using var document = JsonDocument.Parse(provenanceJson);
+        return document.RootElement.EnumerateArray()
+            .Select(source => source.GetProperty("Locator").GetString()!)
+            .ToArray();
+    }
+
     private static async Task CreateDestinationDatabase(string path)
     {
         await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
@@ -257,6 +520,22 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
                 language TEXT NULL,
                 dimensions_json TEXT NOT NULL,
                 provenance_json TEXT NOT NULL
+            );
+            CREATE TABLE report_occurrences (
+                occurrenceId TEXT NOT NULL PRIMARY KEY,
+                concept TEXT NOT NULL,
+                entityScheme TEXT NOT NULL,
+                entityIdentifier TEXT NOT NULL,
+                period TEXT NOT NULL,
+                unit TEXT NULL,
+                compoundUnit TEXT NULL,
+                value TEXT NULL,
+                textValue TEXT NULL,
+                decimals TEXT NOT NULL,
+                lang TEXT NULL,
+                nil INTEGER NOT NULL,
+                dimensions TEXT NOT NULL,
+                dimensionsJson TEXT NOT NULL
             );
             """;
         await command.ExecuteNonQueryAsync();

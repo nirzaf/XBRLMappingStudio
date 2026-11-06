@@ -31,13 +31,13 @@ public static class XbrlFactRecordMapper
         ArgumentNullException.ThrowIfNull(facts);
         ArgumentException.ThrowIfNullOrWhiteSpace(profileDigest);
 
-        return facts.Select(fact => ToRecord(fact, profileDigest)).ToArray();
+        var keys = ComputeFactKeys(facts, profileDigest);
+        return facts.Select((fact, index) => ToRecord(fact, profileDigest, keys[index])).ToArray();
     }
 
-    private static DataRecord ToRecord(XbrlFact fact, string profileDigest)
+    private static DataRecord ToRecord(XbrlFact fact, string profileDigest, string key)
     {
         ArgumentNullException.ThrowIfNull(fact);
-        var key = ComputeFactKey(fact, profileDigest);
         var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
         {
             ["fact_key"] = DataValue.StringValue(key),
@@ -72,7 +72,43 @@ public static class XbrlFactRecordMapper
         };
     }
 
-    private static string ComputeFactKey(XbrlFact fact, string profileDigest)
+    private static string[] ComputeFactKeys(IReadOnlyList<XbrlFact> facts, string profileDigest)
+    {
+        var keys = facts.Select(fact =>
+        {
+            ArgumentNullException.ThrowIfNull(fact);
+            return ComputeAspectFactKey(fact, profileDigest);
+        }).ToArray();
+        foreach (var group in Enumerable.Range(0, keys.Length)
+                     .GroupBy(index => keys[index], StringComparer.Ordinal)
+                     .Where(group => group.Count() > 1))
+        {
+            var duplicateOrdinals = new Dictionary<string, int>(StringComparer.Ordinal);
+            var keepsHistoricalKey = true;
+            var occurrenceSignatures = group.ToDictionary(index => index,
+                index => ComputeOccurrenceSignature(facts[index]));
+            foreach (var index in group.OrderBy(index => occurrenceSignatures[index], StringComparer.Ordinal)
+                         .ThenBy(index => index))
+            {
+                var signature = occurrenceSignatures[index];
+                duplicateOrdinals.TryGetValue(signature, out var ordinal);
+                ordinal++;
+                duplicateOrdinals[signature] = ordinal;
+                if (keepsHistoricalKey)
+                {
+                    // Keep the established aspect key for the first occurrence. Only
+                    // additional colliding occurrences receive a deterministic suffix.
+                    keepsHistoricalKey = false;
+                    continue;
+                }
+                keys[index] = ComputeOccurrenceFactKey(keys[index], signature, ordinal);
+            }
+        }
+
+        return keys;
+    }
+
+    private static string ComputeAspectFactKey(XbrlFact fact, string profileDigest)
     {
         var builder = new StringBuilder();
         AppendPart(builder, profileDigest);
@@ -100,6 +136,37 @@ public static class XbrlFactRecordMapper
             AppendPart(builder, dimension.IsExplicit ? "1" : "0");
         }
 
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+            .ToLowerInvariant();
+        return "sha256:" + digest;
+    }
+
+    private static string ComputeOccurrenceSignature(XbrlFact fact)
+    {
+        var builder = new StringBuilder();
+        AppendPart(builder, fact.SemanticKey());
+        var sources = fact.ContributingSources
+            .OrderBy(source => source.SourceId, StringComparer.Ordinal)
+            .ThenBy(source => source.Locator, StringComparer.Ordinal)
+            .ThenBy(source => source.DisplayName, StringComparer.Ordinal)
+            .ToArray();
+        builder.Append(sources.Length).Append(':');
+        foreach (var source in sources)
+        {
+            AppendPart(builder, source.SourceId);
+            AppendPart(builder, source.Locator);
+            AppendPart(builder, source.DisplayName ?? "");
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+            .ToLowerInvariant();
+    }
+
+    private static string ComputeOccurrenceFactKey(string aspectKey, string occurrenceSignature, int ordinal)
+    {
+        var builder = new StringBuilder("xbrl-fact-occurrence-v1");
+        AppendPart(builder, aspectKey);
+        AppendPart(builder, occurrenceSignature);
+        AppendPart(builder, ordinal.ToString(CultureInfo.InvariantCulture));
         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
             .ToLowerInvariant();
         return "sha256:" + digest;
