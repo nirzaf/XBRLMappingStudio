@@ -1,7 +1,8 @@
 # Verification baseline — 2026-11-07
 
-This records local verification evidence for the XBR-04 set-collected text-fact
-slice on `main`. It does not qualify a customer taxonomy or a filing profile.
+This records verification evidence for shipped XBR-04 and XBR-05 slices on
+`main`, including the set-collected text-fact, compound-unit, and profile-aware
+XML QName work. It does not qualify a customer taxonomy or filing profile.
 
 ## Set-collected language-tagged text facts
 
@@ -81,3 +82,37 @@ handling, profile-specific concept/dimension constraints, complete BCP-47
 metadata, customer taxonomy qualification, source-drift revalidation, and native
 workflow acceptance remain incomplete or gated. This synthetic implementation
 does not establish regulator acceptance.
+
+## Profile-aware XML QName aliases
+
+`XmlSerializer.ReadFacts(xml, profile)` reads XML facts against the selected
+profile's namespace map and returns profile-canonical QNames for concepts,
+explicit dimension axes and members, and custom unit measures. Prefixes are
+treated as aliases: the reader resolves their namespace URI, then maps the
+expanded name to the profile's canonical QName. Built-in ISO4217 currency and
+XBRLI measure namespaces normalize to their supported local measure names.
+An XML namespace that is not declared by the selected profile is rejected
+rather than accepted as a fact or silently flattened. The existing
+profile-free overload remains available for generic XML import.
+
+Verification:
+
+- `XmlExportTests.ProfileAwareReader_NormalizesXmlQNameAliasesByNamespaceUri`
+  verifies alternate prefixes for concepts, explicit dimensions and members,
+  currency normalization, and rejection of an undeclared taxonomy namespace.
+- The focused profile-aware reader test passed; the XBRL Release suite passed
+  106/106.
+- The local Release build completed with 0 warnings and errors; all eight .NET
+  projects passed 748 tests with 0 failures and 5 environment-gated Arelle
+  subprocess skips.
+- Exact-head GitHub Actions run
+  [42311840089](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42311840089)
+  verified source commit `70ca4c1f8f491ab29fd1a8caccb4dea0f45217be`.
+  Repository hygiene, Windows and Ubuntu Release build/test, pinned worker
+  integration, dependency inventory, and SPDX generation passed. Both .NET OS
+  matrices passed 748 tests and skipped the same 5 gated cases; the pinned
+  worker job passed all 11 gated .NET Arelle execution tests.
+
+This improves QName normalization for supported XML imports; it does not prove
+full OIM conformance, equivalence against a real filing profile, or regulator
+acceptance. Those remain open under XBR-05 and GAT-01/GAT-02.

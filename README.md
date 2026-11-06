@@ -141,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Exact-head CI on `2887939e`: Windows and Ubuntu each passed 747 tests and skipped 5 environment-gated Arelle subprocess cases; the pinned worker job passed all worker and 11 gated .NET Arelle execution tests. |
+| Tests | xUnit 2.9.3 | Exact-head CI on `70ca4c1`: Windows and Ubuntu each passed 748 tests and skipped 5 environment-gated Arelle subprocess cases; the pinned worker job passed all worker checks and 11 gated .NET Arelle execution tests. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -283,10 +283,12 @@ The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStu
 
 The compound-unit slice run [42308787441](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42308787441) verified exact source commit `2887939e0be99c710faa6aa973337b7d81c671e5`: repository hygiene, Windows and Ubuntu Release build/test, pinned worker integration, dependency inventory, and SPDX generation all passed. Each .NET OS matrix passed **747 tests** and skipped **5** environment-gated Arelle subprocess cases. The pinned worker job passed all **11** gated .NET Arelle execution tests. Local verification passed the same eight-project suite: **747 passed, 0 failed, 5 skipped**; the skipped cases require the pinned Arelle subprocess runtime.
 
+The profile-aware XML QName round-trip run [42311840089](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42311840089) verified exact source commit `70ca4c1f8f491ab29fd1a8caccb4dea0f45217be`: repository hygiene, Windows and Ubuntu Release build/test, pinned worker integration, dependency inventory, and SPDX generation all passed. Each .NET OS matrix passed **748 tests** and skipped **5** environment-gated Arelle subprocess cases; the pinned worker job passed all **11** gated .NET Arelle execution tests. The local Release build completed with 0 warnings and errors, and all eight .NET projects passed **748 tests** with the same 5 Arelle-gated skips.
+
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 118 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
-| XBRL.Tests | 105 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, required-check completeness |
+| XBRL.Tests | 106 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import, QName alias normalization, filing rules, conversion resilience, required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 94 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
 | Ops.Tests | 76 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
