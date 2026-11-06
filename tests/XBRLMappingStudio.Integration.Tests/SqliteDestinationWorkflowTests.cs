@@ -175,6 +175,48 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task DestinationChangePreview_CancellationLeavesDatabaseUnchanged()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        var before = await File.ReadAllBytesAsync(_databasePath);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.PreviewDestinationChangesAsync(project, result, _directory, cancellation.Token));
+
+        Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
+    }
+
+    [Fact]
+    public async Task DestinationChangePreview_ReportsTargetSchemaDriftWithoutMutation()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        await using (var target = new SqliteConnection($"Data Source={_databasePath};Pooling=False"))
+        {
+            await target.OpenAsync();
+            await using var command = target.CreateCommand();
+            command.CommandText = "ALTER TABLE facts RENAME TO facts_stale";
+            await command.ExecuteNonQueryAsync();
+        }
+        var beforePreview = await File.ReadAllBytesAsync(_databasePath);
+
+        var estimate = await service.PreviewDestinationChangesAsync(project, result, _directory);
+
+        Assert.Single(estimate.SchemaDiscrepancies);
+        Assert.Contains("facts", estimate.SchemaDiscrepancies[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, estimate.InspectedRows);
+        Assert.Equal(beforePreview, await File.ReadAllBytesAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task PreviewAndPublish_RejectSourceChangedAfterRunWithoutWritingDatabase()
     {
         var project = ConfiguredProject(_workbookPath);

@@ -292,3 +292,17 @@ provenance and worker-adjudication integration tests passed 2/2; the run used
 `BuildProjectReferences=false` because a running Desktop process held shared
 Release output files. Profile-specific precision and default division scale
 remain open.
+
+## DST-07 preview cancellation and target drift
+
+The SQLite destination preview observes cancellation while checking the saved
+run's input identity. A pre-cancelled preview exits with
+`OperationCanceledException` and leaves the target database bytes unchanged.
+When the configured target table is renamed after the run, the preview returns a
+schema discrepancy with zero inspected candidates and leaves the already-drifted
+database bytes unchanged.
+
+Verification: the two focused Release integration tests passed 2/2. They were run
+with `BuildProjectReferences=false` because a running Desktop process held shared
+Release outputs. Disposable-target crash recovery and native full-preview
+acceptance remain open.
