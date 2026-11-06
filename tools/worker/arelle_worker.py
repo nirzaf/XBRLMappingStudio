@@ -37,6 +37,7 @@ MAX_TAXONOMY_GRAPH_EDGES = 16384
 TAXONOMY_XML_READ_BYTES = 64 * 1024
 
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
+XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
@@ -292,6 +293,17 @@ def _read_taxonomy_xml_edges(relative_path, path, expected_digest, remaining_bud
                 raise ValueError("Taxonomy XSD dependency has no schemaLocation: " + relative_path)
             add_edge(schema_location, "schemaLocation")
 
+        xsi_schema_locations = attributes.get(XSI_NAMESPACE + "}schemaLocation")
+        if xsi_schema_locations is not None:
+            locations = xsi_schema_locations.split()
+            if not locations or len(locations) % 2:
+                raise ValueError("Taxonomy xsi:schemaLocation must contain namespace/location pairs: " + relative_path)
+            for schema_location in locations[1::2]:
+                add_edge(schema_location, "schemaLocation")
+        no_namespace_schema_location = attributes.get(XSI_NAMESPACE + "}noNamespaceSchemaLocation")
+        if no_namespace_schema_location is not None:
+            add_edge(no_namespace_schema_location, "schemaLocation")
+
         href = attributes.get(XLINK_NAMESPACE + "}href")
         if href is not None:
             if namespace == LINK_NAMESPACE and local_name in ("linkbaseRef", "roleRef", "arcroleRef") and not href:
@@ -415,6 +427,53 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
         for target in sorted(discovered):
             pending.append((target, depth + 1))
     return tuple(scanned)
+
+
+def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root, snapshot_root, package_files):
+    """Copy verified closure bytes into a private tree so source edits cannot race Arelle."""
+    source_root = Path(taxonomy_root).resolve(strict=True)
+    target_root = Path(snapshot_root).resolve(strict=True)
+    total_bytes = 0
+    for relative_path in relative_paths:
+        expected_digest = package_files.get(relative_path)
+        if not isinstance(expected_digest, str):
+            raise ValueError("Taxonomy dependency is not hash-pinned by packageFiles: " + relative_path)
+        source_path = safe_package_path(relative_path, source_root)
+        target_path = target_root.joinpath(*relative_path.split("/"))
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        file_bytes = 0
+        try:
+            with source_path.open("rb") as source, target_path.open("xb") as target:
+                while True:
+                    chunk = source.read(TAXONOMY_XML_READ_BYTES)
+                    if not chunk:
+                        break
+                    file_bytes += len(chunk)
+                    total_bytes += len(chunk)
+                    if file_bytes > MAX_TAXONOMY_XML_FILE_BYTES:
+                        raise ValueError("Taxonomy dependency XML file exceeds the size limit: " + relative_path)
+                    if total_bytes > MAX_TAXONOMY_GRAPH_XML_BYTES:
+                        raise ValueError("Taxonomy dependency graph exceeds the XML byte limit")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if "sha256:" + digest.hexdigest() != expected_digest:
+                raise ValueError("Taxonomy package hash mismatch while snapshotting dependency: " + relative_path)
+            if os.name != "nt":
+                target_path.chmod(0o400)
+        except OSError as ex:
+            raise ValueError("Could not create private taxonomy snapshot for: " + relative_path) from ex
+
+    return safe_package_path(entry_point, target_root)
+
+
+def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root, package_files, args):
+    """Keep a verified private dependency snapshot alive for the complete Arelle load."""
+    with tempfile.TemporaryDirectory(prefix="xms-taxonomy-") as snapshot_directory:
+        os.chmod(snapshot_directory, 0o700)
+        snapshot_entry = _copy_verified_taxonomy_snapshot(
+            entry_point, relative_paths, taxonomy_root, snapshot_directory, package_files)
+        return run_arelle(snapshot_entry, args)
 
 
 def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None):
@@ -728,16 +787,20 @@ def handle(req, args):
                             if value.is_absolute() else str(value)).replace(os.sep, "/")
                 if relative not in profile["packageFiles"]:
                     raise ValueError("Taxonomy entry point is not hash-pinned by the installed profile")
-                taxonomy_path = safe_package_path(relative, args.taxonomy_root)
-                validate_taxonomy_dependency_closure(
+                dependency_paths = validate_taxonomy_dependency_closure(
                     relative,
                     args.taxonomy_root,
                     profile["packageFiles"],
                     profile.get("offlineReferences", {}),
                 )
+                ok, logs, concept_count = run_arelle_with_verified_taxonomy(
+                    relative, dependency_paths, args.taxonomy_root, profile["packageFiles"], args)
+                relative_entry_point = relative
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
-            ok, logs, concept_count = run_arelle(taxonomy_path, args)
+                ok, logs, concept_count = run_arelle(taxonomy_path, args)
+                relative_entry_point = os.path.relpath(
+                    taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
             plugin_failures = required_plugin_load_failures(
                 logs, profile.get("requiredPlugins", []) if profile else [])
             if plugin_failures:
@@ -751,7 +814,6 @@ def handle(req, args):
             if not ok or any(d["isBlocking"] for d in diags):
                 return response(op_id, "domainFailure", {"conceptCount": concept_count}, diags,
                                 "Arelle could not load the filing taxonomy")
-            relative_entry_point = os.path.relpath(taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
             return response(op_id, "success", {
                 "engine": "Arelle",
                 "engineVersion": ENGINE_VERSION,

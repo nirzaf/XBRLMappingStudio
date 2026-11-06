@@ -366,6 +366,34 @@ class ArelleWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "xml:base resolution is unsupported"):
                 arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
 
+    def test_taxonomy_dependency_checks_xsi_schema_location_edges(self):
+        external_locations = [
+            'xsi:schemaLocation="urn:link https://example.invalid/linkbase.xsd"',
+            'xsi:noNamespaceSchemaLocation="https://example.invalid/schema.xsd"',
+        ]
+        for location in external_locations:
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                package_files = write_taxonomy_files(root, {
+                    "entry.xsd": (
+                        '<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' + location + '/>'
+                    ),
+                })
+                with self.assertRaisesRegex(ValueError, "External taxonomy dependency is unsupported"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+                    'xsi:schemaLocation="urn:link schemas/linkbase.xsd"/>'
+                ),
+                "schemas/linkbase.xsd": '<schema/>',
+            })
+            closure = arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+        self.assertEqual(("entry.xsd", "schemas/linkbase.xsd"), closure)
+
     def test_external_taxonomy_dependency_fails_before_arelle_even_with_offline_mapping(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -399,6 +427,93 @@ class ArelleWorkerTests(unittest.TestCase):
 
         self.assertEqual("domainFailure", result["status"])
         self.assertIn("offlineReferences do not configure Arelle's package resolver", result["error"])
+        run_arelle.assert_not_called()
+
+    def test_load_taxonomy_uses_hash_verified_snapshot_after_installed_files_change(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original_dependency = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" id="pinned"/>'
+            files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="dependency.xsd"/></xs:schema>'
+                ),
+                "dependency.xsd": original_dependency,
+            })
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = {
+                "schemaVersion": 3,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": [],
+                "packageFiles": files,
+            }
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+            observed = {}
+
+            def mutate_installed_file_then_load(snapshot_entry, _args):
+                observed["snapshot_entry"] = Path(snapshot_entry)
+                (root / "dependency.xsd").write_text(
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" id="changed"/>',
+                    encoding="utf-8")
+                observed["loaded_dependency"] = (
+                    Path(snapshot_entry).parent / "dependency.xsd").read_text(encoding="utf-8")
+                return True, [], 1
+
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "run_arelle", side_effect=mutate_installed_file_then_load):
+                result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual("pinned", observed["loaded_dependency"].split('id="', 1)[1].split('"', 1)[0])
+        self.assertFalse(observed["snapshot_entry"].is_relative_to(root))
+        self.assertEqual("entry.xsd", result["result"]["taxonomyEntryPoint"])
+
+    def test_load_taxonomy_rejects_file_changed_between_closure_scan_and_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="dependency.xsd"/></xs:schema>'
+                ),
+                "dependency.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" id="pinned"/>',
+            })
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = {
+                "schemaVersion": 3,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": [],
+                "packageFiles": files,
+            }
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+            validate = arelle_worker.validate_taxonomy_dependency_closure
+
+            def scan_then_mutate(*args):
+                closure = validate(*args)
+                (root / "dependency.xsd").write_text(
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" id="changed"/>',
+                    encoding="utf-8")
+                return closure
+
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "validate_taxonomy_dependency_closure", side_effect=scan_then_mutate), \
+                    mock.patch.object(arelle_worker, "run_arelle") as run_arelle:
+                result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", result["status"])
+        self.assertIn("hash mismatch while snapshotting dependency: dependency.xsd", result["error"])
         run_arelle.assert_not_called()
 
     def test_taxonomy_dependency_rejects_zip_catalogs_before_arelle(self):
