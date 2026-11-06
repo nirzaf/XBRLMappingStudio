@@ -29,7 +29,8 @@ public sealed record ExecutionBudget(
     int MaxCollectionItems = 100_000,
     int MaxGroupCount = 100_000,
     int MaxJoinExpansionRows = 200_000,
-    long MaxGroupWorkingBytes = 64L * 1024 * 1024)
+    long MaxGroupWorkingBytes = 64L * 1024 * 1024,
+    int MaxSignificantDigits = 29)
 {
     public static ExecutionBudget Default { get; } = new();
 
@@ -52,6 +53,8 @@ public sealed record ExecutionBudget(
         if (MaxGroupCount < 1) throw new ArgumentOutOfRangeException(nameof(MaxGroupCount));
         if (MaxJoinExpansionRows < 1) throw new ArgumentOutOfRangeException(nameof(MaxJoinExpansionRows));
         if (MaxGroupWorkingBytes < 1) throw new ArgumentOutOfRangeException(nameof(MaxGroupWorkingBytes));
+        if (MaxSignificantDigits is < 1 or > 29)
+            throw new ArgumentOutOfRangeException(nameof(MaxSignificantDigits));
     }
 }
 

@@ -28,6 +28,84 @@ public class FunctionTests
     private static ExecutionContext OneRow(decimal amount)
         => GraphHarness.Ctx(new[] { (Binding, new[] { GraphHarness.Row(("amount", D(amount))) } as IReadOnlyList<DataRecord>) });
 
+    private static (MappingProject Project, ExecutionContext Context) ParseDecimalGraph(
+        DataValue inputValue, string culture)
+    {
+        var source = GraphHarness.Node(NodeTypeConstants.ExcelField, "Numeric text",
+            new() { ["bindingId"] = Binding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.String) });
+        var parse = GraphHarness.Node(NodeTypeConstants.ParseDecimal, "Parse amount",
+            new() { ["culture"] = culture },
+            inputs: new[] { GraphHarness.P("input", PortShape.String) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge> { GraphHarness.Link(source, "value", parse, "input") };
+        var sink = GraphHarness.FactSink(out var factEdges, parse, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new[] { source, parse }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var row = GraphHarness.Row(("amount", inputValue));
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, new[] { row } as IReadOnlyList<DataRecord>) });
+        return (project, context);
+    }
+
+    [Fact]
+    public void DataValueFormatting_IsInvariantAcrossCurrentCultures()
+    {
+        var priorCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture =
+                System.Globalization.CultureInfo.GetCultureInfo("fr-FR");
+            var value = DataValue.DecimalValue(1234.5m);
+            Assert.Equal("1234.5", value.AsString());
+            Assert.Equal("1234.5", value.ToString());
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = priorCulture;
+        }
+    }
+
+    [Fact]
+    public void ParseDecimal_UsesExplicitCultureForSignAndGrouping()
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue("-1.234,50"), "de-DE");
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Equal(-1234.50m, Assert.Single(result!.Facts).Value);
+    }
+
+    [Theory]
+    [InlineData("123456789012345678901234567890", "significant digits")]
+    [InlineData("0.00000000000000000000000000001", "scale 29")]
+    [InlineData("(123.45)", "parentheses")]
+    public void ParseDecimal_RejectsOutOfDomainOrUnsupportedLexicalForms(string text, string expectedMessage)
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue(text), "invariant");
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Empty(result!.Facts);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidConstant
+            && diagnostic.Message.Contains(expectedMessage, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ParseDecimal_PreservesExplicitNil()
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.ExplicitNil(PortShape.String), "invariant");
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        var fact = Assert.Single(result!.Facts);
+        Assert.True(fact.IsNil);
+        Assert.Null(fact.Value);
+    }
+
     // ---- MAP04: rounding modes ------------------------------------------------------
 
     [Theory]

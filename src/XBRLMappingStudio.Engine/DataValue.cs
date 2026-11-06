@@ -118,7 +118,7 @@ public sealed class DataValue : IEquatable<DataValue>
             decimal d => d,
             long l => l,
             int i => i,
-            string s => decimal.Parse(s, CultureInfo.InvariantCulture),
+            string s => DecimalDomain.ParseInvariant(s),
             _ => throw new InvalidCastException($"Cannot convert {Raw.GetType()} to decimal.")
         };
     }
@@ -127,7 +127,12 @@ public sealed class DataValue : IEquatable<DataValue>
     {
         if (Presence is ValuePresence.Missing or ValuePresence.ExplicitNil)
             return "";
-        return Raw?.ToString() ?? "";
+        return Raw switch
+        {
+            string text => text,
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "",
+            _ => Raw?.ToString() ?? ""
+        };
     }
 
     public bool AsBoolean()
@@ -153,7 +158,7 @@ public sealed class DataValue : IEquatable<DataValue>
             ValuePresence.Missing => "<missing>",
             ValuePresence.ExplicitNil => "<nil>",
             ValuePresence.Blank => "<blank>",
-            _ => Raw?.ToString() ?? "<null>"
+            _ => AsString() is { Length: > 0 } value ? value : "<null>"
         };
 }
 

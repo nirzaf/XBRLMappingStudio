@@ -201,7 +201,7 @@ public sealed class ExecutionContext
     /// significant-digit / fractional-scale range. Defaults are permissive; profiles
     /// may tighten.
     /// </summary>
-    public int MaxSignificantDigits { get; init; } = 28;
+    public int MaxSignificantDigits { get; init; } = 29;
 
     /// <summary>MAP05 resource budget: maximum items in a Collection port.</summary>
     public int MaxCollectionItems { get; init; } = 100_000;

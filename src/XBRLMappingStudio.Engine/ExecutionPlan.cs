@@ -140,7 +140,10 @@ public sealed class ExecutionPlan
                     context.CancellationToken.ThrowIfCancellationRequested();
                     var outputs = step.Evaluator(snapshot, setSlots, context, context.Diagnostics);
                     foreach (var (port, value) in outputs)
+                    {
+                        DecimalDomain.ValidateValue(value, context.MaxSignificantDigits, step.NodeId);
                         setSlots[ProvenanceTracker.SlotKey(step.NodeId, port)] = value;
+                    }
                 }
 
                 foreach (var sinkId in SinkNodeIds)

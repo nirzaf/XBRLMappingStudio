@@ -783,6 +783,7 @@ public sealed class PlanCompiler
                 periodInputConnected, factConstructSourcePaths);
             foreach (var (name, value) in outputs)
             {
+                DecimalDomain.ValidateValue(value, ctx.MaxSignificantDigits, nodeId);
                 frame.Set(nodeId, name, value);
 
                 // Propagate all upstream contributors across transforms and joins,
@@ -937,7 +938,7 @@ public sealed class PlanCompiler
                 }
                 outputs["value"] = shape switch
                 {
-                    PortShape.Decimal => decimal.TryParse(raw, NumberStyles.Number, CultureInfo.InvariantCulture, out var d)
+                    PortShape.Decimal => TryParseDecimalInvariant(raw, ctx, diag, node, out var d)
                         ? DataValue.DecimalValue(d) : DataValue.Missing(shape),
                     PortShape.Integer => long.TryParse(raw, out var l) ? DataValue.IntegerValue(l) : DataValue.Missing(shape),
                     _ => DataValue.StringValue(raw)
@@ -950,7 +951,9 @@ public sealed class PlanCompiler
                 var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.String));
                 if (input.IsMissing || input.IsNil)
                 {
-                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    outputs["value"] = input.IsNil
+                        ? DataValue.ExplicitNil(PortShape.Decimal)
+                        : DataValue.Missing(PortShape.Decimal);
                     break;
                 }
                 var text = input.AsString();
@@ -1569,7 +1572,20 @@ public sealed class PlanCompiler
     private static bool TryParseDecimalInvariant(string text, ExecutionContext ctx, DiagnosticBag diag,
         MappingNode node, out decimal value)
     {
-        if (decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out value))
+        if (!DecimalDomain.TryValidateLexical(text, CultureInfo.InvariantCulture.NumberFormat,
+                ctx.MaxSignificantDigits, out var domainFailure))
+        {
+            value = 0m;
+            diag.Error(
+                DiagnosticCodes.MapInvalidConstant,
+                DiagnosticSubsystem.Mapping,
+                DiagnosticStage.Execution,
+                $"Constant '{text}' is outside the supported decimal domain: {domainFailure}",
+                nodeId: node.NodeId);
+            return false;
+        }
+        if (decimal.TryParse(text, DecimalDomain.InvariantNumberStyles,
+                CultureInfo.InvariantCulture, out value))
             return true;
         diag.Error(
             DiagnosticCodes.MapInvalidConstant,
@@ -1604,7 +1620,21 @@ public sealed class PlanCompiler
             return false;
         }
 
-        // Preserve the original lexical form; reject ambiguity.
+        // Preserve the original lexical form; reject excess precision before CLR
+        // decimal parsing can round a too-long financial lexeme.
+        if (!DecimalDomain.TryValidateLexical(text, culture.NumberFormat,
+                ctx.MaxSignificantDigits, out var domainFailure))
+        {
+            diag.Error(
+                DiagnosticCodes.MapInvalidConstant,
+                DiagnosticSubsystem.Mapping,
+                DiagnosticStage.Execution,
+                $"'{text}' is outside the supported decimal domain: {domainFailure}",
+                nodeId: node.NodeId,
+                source: src);
+            value = 0m;
+            return false;
+        }
         if (!decimal.TryParse(text, NumberStyles.Number, culture, out value))
         {
             diag.Error(
