@@ -151,4 +151,32 @@ public sealed class FilingRuleValidatorTests
             Assert.Contains(required, emitted);
         Assert.DoesNotContain(result.Outcomes, o => o.Status == RuleStatus.Incomplete);
     }
+
+    [Theory]
+    [InlineData("expected-pass.xbrl.json")]
+    [InlineData("duplicate-fact.xbrl.json")]
+    [InlineData("failing-rule.xbrl.json")]
+    [InlineData("invalid-dimension.xbrl.json")]
+    public void StreamingValidation_MatchesInMemoryOutcomes(string fixture)
+    {
+        var facts = Load(fixture);
+        var duplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Skip(1).Any())?.Key;
+        var validator = new FilingRuleValidator(Profile);
+
+        var expected = validator.Validate(facts);
+        var actual = validator.ValidateStreaming(facts.Select(fact => fact), duplicateKey);
+
+        Assert.Equal(expected.Outcomes, actual.Outcomes);
+    }
+
+    [Fact]
+    public void StreamingValidation_ObservesCancellationBetweenFacts()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => new FilingRuleValidator(Profile)
+            .ValidateStreaming(Load("expected-pass.xbrl.json"), null, cancellation.Token));
+    }
 }

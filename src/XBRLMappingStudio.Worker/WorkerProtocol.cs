@@ -159,7 +159,8 @@ public static class ValidationCompletionReportValidator
     public static ValidationCompletionAssessment Evaluate(
         JsonElement? workerResult,
         FilingProfile profile,
-        IReadOnlyList<XbrlFact>? localSyntheticFacts = null)
+        IReadOnlyList<XbrlFact>? localSyntheticFacts = null,
+        FilingValidationResult? localSyntheticValidation = null)
     {
         ArgumentNullException.ThrowIfNull(profile);
         if (workerResult is not { ValueKind: JsonValueKind.Object } result
@@ -189,7 +190,7 @@ public static class ValidationCompletionReportValidator
             return EvaluateItems(profile.RequiredChecks, report.RequiredRules, "required rule", isPlugin: false);
 
         ValidationCompletionAssessment rules;
-        var canUseSyntheticRules = localSyntheticFacts is not null
+        var canUseSyntheticRules = (localSyntheticFacts is not null || localSyntheticValidation is not null)
             && StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)
             && report.RequiredRules.Count > 0
             && report.RequiredRules.All(item => item.Status == ValidationCheckStatus.Unavailable);
@@ -197,7 +198,8 @@ public static class ValidationCompletionReportValidator
         {
             var knownDimensionMembers = profile.DimensionDomains.Values
                 .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
-            var localOutcomes = new FilingRuleValidator(profile, knownDimensionMembers).Validate(localSyntheticFacts!);
+            var localOutcomes = localSyntheticValidation
+                ?? new FilingRuleValidator(profile, knownDimensionMembers).Validate(localSyntheticFacts!);
             var byRule = localOutcomes.Outcomes.GroupBy(outcome => outcome.RuleId, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.OrderBy(outcome => outcome.Status switch
                 {

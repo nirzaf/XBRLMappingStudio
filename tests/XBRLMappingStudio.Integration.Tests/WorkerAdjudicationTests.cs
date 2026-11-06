@@ -457,6 +457,35 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public void CompletionReport_UsesStreamedLocalRulesWhenSyntheticWorkerRulesAreUnavailable()
+    {
+        var profile = SyntheticProfile.Build();
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "streamed-completion-fixture",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("USD"),
+            Value = 123m,
+            Decimals = 0
+        };
+        var requirements = new ValidationRequirements(profile.ProfileId, profile.Digest,
+            profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+            profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray());
+        var report = UnavailableRulesCompletionResult(requirements);
+        var localValidation = new FilingRuleValidator(profile,
+            profile.DimensionDomains.Values.SelectMany(members => members).ToHashSet(StringComparer.Ordinal))
+            .ValidateStreaming(new[] { fact }, firstDuplicateSemanticKey: null);
+
+        var assessment = ValidationCompletionReportValidator.Evaluate(
+            report, profile, localSyntheticValidation: localValidation);
+
+        Assert.Equal(ValidationCompletionState.Complete, assessment.State);
+        Assert.True(assessment.UsedLocalSyntheticRuleEvidence);
+    }
+
+    [Fact]
     public async Task WorkerCancelled_IsNotSuccess_AndNotPublishable()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);

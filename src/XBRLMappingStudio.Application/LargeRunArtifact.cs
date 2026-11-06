@@ -86,6 +86,28 @@ public sealed class LargeRunArtifact : IDisposable
             64 * 1024, FileOptions.SequentialScan);
     }
 
+    /// <summary>Streams the original fact order from the private disk-backed spool.</summary>
+    public IEnumerable<XbrlFact> InInputOrder(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _facts.InInputOrder(cancellationToken);
+    }
+
+    /// <summary>Streams facts with the same deterministic occurrence IDs written to xBRL-JSON.</summary>
+    public IEnumerable<(XbrlFact Fact, int Occurrence)> InSemanticOrderWithOccurrences(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _facts.InSemanticOrderWithOccurrences(cancellationToken);
+    }
+
+    /// <summary>Gets the first repeated semantic key from the disk-backed fact index.</summary>
+    public bool TryGetFirstDuplicate(out string semanticKey, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _facts.TryGetFirstDuplicate(out semanticKey, cancellationToken);
+    }
+
     public void CopyReportTo(Stream destination, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -326,12 +348,16 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
     }
 
-    public bool TryGetFirstDuplicate(out string semanticKey)
+    public bool TryGetFirstDuplicate(out string semanticKey, CancellationToken cancellationToken = default)
     {
-        Finish();
+        Finish(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         using var command = _connection.CreateCommand();
-        command.CommandText = "SELECT semantic_key FROM facts GROUP BY semantic_key HAVING COUNT(*) > 1 ORDER BY MIN(semantic_sort_key), MIN(seq) LIMIT 1;";
+        // Match the in-memory validator's first repeated key: the duplicate group
+        // whose first occurrence appears earliest in input order.
+        command.CommandText = "SELECT semantic_key FROM facts GROUP BY semantic_key HAVING COUNT(*) > 1 ORDER BY MIN(seq) LIMIT 1;";
         semanticKey = command.ExecuteScalar() as string ?? "";
+        cancellationToken.ThrowIfCancellationRequested();
         return semanticKey.Length > 0;
     }
 

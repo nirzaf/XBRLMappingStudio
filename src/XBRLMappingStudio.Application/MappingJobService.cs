@@ -967,11 +967,21 @@ public sealed class MappingJobService
             {
                 ValidationRequirements = CreateValidationRequirements()
             };
+            FilingValidationResult? localSyntheticValidation = null;
+            if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+                localSyntheticValidation = ValidateLargeSyntheticArtifact(artifact, cancellationToken);
+
             progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
-            var workerResponse = await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+            var workerResponse = _worker is LocalSyntheticWorker localWorker
+                && localSyntheticValidation is not null
+                ? await localWorker.ValidateLargeReport(request,
+                    LocatedFacts(artifact, cancellationToken), localSyntheticValidation,
+                    artifact.FactCount, cancellationToken).ConfigureAwait(false)
+                : await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
             var workerDiagnostics = (workerResponse.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
             EnrichWorkerDiagnosticsWithFactPaths(workerDiagnostics, artifact, cancellationToken);
-            var completion = ValidationCompletionReportValidator.Evaluate(workerResponse.Result, _profile);
+            var completion = ValidationCompletionReportValidator.Evaluate(
+                workerResponse.Result, _profile, localSyntheticValidation: localSyntheticValidation);
             var workerBlocking = workerDiagnostics.Any(diagnostic => diagnostic.IsBlocking);
             manifest.Outcome = workerResponse.Status switch
             {
@@ -1197,6 +1207,25 @@ public sealed class MappingJobService
         }
     }
 
+    private FilingValidationResult ValidateLargeSyntheticArtifact(
+        LargeRunArtifact artifact,
+        CancellationToken cancellationToken)
+    {
+        var hasDuplicates = artifact.TryGetFirstDuplicate(out var duplicateKey, cancellationToken);
+        var knownDimensionMembers = _profile.DimensionDomains.Values
+            .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
+        return new FilingRuleValidator(_profile, knownDimensionMembers)
+            .ValidateStreaming(artifact.InInputOrder(cancellationToken),
+                hasDuplicates ? duplicateKey : null, cancellationToken);
+    }
+
+    private static IEnumerable<OimFactEntry> LocatedFacts(
+        LargeRunArtifact artifact,
+        CancellationToken cancellationToken)
+        => artifact.InSemanticOrderWithOccurrences(cancellationToken)
+            .Select(item => new OimFactEntry(
+                OimSerializer.GetFactLocator(item.Fact, item.Occurrence), item.Fact));
+
     private static Diagnostic CompletionDiagnostic(
         ValidationCompletionAssessment assessment,
         string operationId)
@@ -1244,6 +1273,7 @@ public sealed class MappingJobService
         JsonElement workerPayload;
         string? workerScratch = null;
         IReadOnlyList<XbrlFact>? localSyntheticStagedFacts = null;
+        FilingValidationResult? localSyntheticStagedValidation = null;
         if (result.LargeArtifact is not null)
         {
             try
@@ -1279,7 +1309,37 @@ public sealed class MappingJobService
                     throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                         "Staged report changed while it was copied for profile validation.", manifest.RunId, destinationPath);
                 await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                await using (var copiedArtifact = new FileStream(workerPath, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    var copiedDigest = RunManifest.ComputeSha256(copiedArtifact);
+                    if (!StringComparer.Ordinal.Equals(digest, copiedDigest))
+                        throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                            "Staged report bytes changed while they were copied for profile validation.",
+                            manifest.RunId, destinationPath);
+                }
                 workerPayload = JsonSerializer.SerializeToElement(new { xbrlJsonPath = workerPath, sha256 = digest });
+                if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+                {
+                    try
+                    {
+                        // The staged digest was matched to the artifact identity above;
+                        // its retained disk-backed fact spool is the exact serializer input.
+                        localSyntheticStagedValidation = ValidateLargeSyntheticArtifact(
+                            result.LargeArtifact, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex) when (ex is IOException or InvalidDataException
+                        or System.Data.Common.DbException)
+                    {
+                        throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
+                            $"The disk-backed facts for the staged synthetic artifact could not be evaluated: {ex.Message}",
+                            manifest.RunId, destinationPath);
+                    }
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -1356,20 +1416,27 @@ public sealed class MappingJobService
                 "Staged report bytes do not match the artifact recorded by the completed run.", manifest.RunId, destinationPath);
 
         var operationId = manifest.OperationId + "-staged-" + Guid.NewGuid().ToString("N");
+        var request = new WorkerRequest(
+            WorkerOperations.ValidateReport,
+            OperationId: operationId,
+            JobId: manifest.RunId,
+            ProfileDigest: _profile.Digest,
+            DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
+            Payload: workerPayload)
+        {
+            ValidationRequirements = CreateValidationRequirements()
+        };
         WorkerResponse response;
         try
         {
-            response = await _worker.RequestAsync(new WorkerRequest(
-                WorkerOperations.ValidateReport,
-                OperationId: operationId,
-                JobId: manifest.RunId,
-                ProfileDigest: _profile.Digest,
-                DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-                Payload: workerPayload)
-            {
-                ValidationRequirements = CreateValidationRequirements()
-            }, cancellationToken)
-                .ConfigureAwait(false);
+            response = result.LargeArtifact is not null
+                && _worker is LocalSyntheticWorker localWorker
+                && localSyntheticStagedValidation is not null
+                ? await localWorker.ValidateLargeReport(request,
+                    LocatedFacts(result.LargeArtifact, cancellationToken),
+                    localSyntheticStagedValidation, result.LargeArtifact.FactCount, cancellationToken)
+                    .ConfigureAwait(false)
+                : await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1399,7 +1466,7 @@ public sealed class MappingJobService
         var diagnostics = response.Diagnostics ?? Array.Empty<Diagnostic>();
         var blocking = diagnostics.FirstOrDefault(diagnostic => diagnostic.IsBlocking);
         var completion = ValidationCompletionReportValidator.Evaluate(
-            response.Result, _profile, localSyntheticStagedFacts);
+            response.Result, _profile, localSyntheticStagedFacts, localSyntheticStagedValidation);
         if (completion.State == ValidationCompletionState.Failed)
         {
             var completionDiagnostic = CompletionDiagnostic(completion, operationId);

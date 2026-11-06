@@ -224,3 +224,24 @@ Local verification passed all 50 Python worker tests (one symlink-privilege
 skip) and all 4 focused profile-catalog .NET tests. Arelle 2.47.4 emitted one
 non-failing `ResourceWarning` while closing the temporary ZIP package stream;
 the taxonomy load and temporary-directory cleanup completed successfully.
+
+## TAX-08 streamed synthetic rule completion
+
+`FilingRuleValidator.ValidateStreaming` reduces an arbitrary fact sequence to the
+same collapsed rule outcomes as the in-memory validator. Large-run duplicate evidence
+comes from a query over the SQLite fact spool, ordered by the first input occurrence to preserve
+the in-memory result. The application passes these local outcomes to the completion
+gate only for the synthetic profile and only as a replacement for unavailable worker
+rule rows. `LocalSyntheticWorker` can produce its normal profile-bound completion
+response from streamed fact locators without parsing a whole large report into memory.
+Staged validation checks the staged byte count and digest against the completed
+artifact before using the retained spool for its local synthetic rule pass.
+
+Focused Release verification passed `FilingRuleValidatorTests` 85/85 and the combined
+`LargeRunExecutionTests`, `WorkerAdjudicationTests`, and `PublicationGateTests` filter
+54/54. New coverage compares streaming/in-memory outcomes for pass, duplicate, failing,
+and incomplete fixtures; checks cancellation; verifies the Arelle-unavailable local
+fallback; and runs a large synthetic artifact through both run validation and staged
+revalidation. `git diff --check` passed. These tests do not supply real-profile Arelle
+rule/plugin execution evidence; real-profile completion remains owner-gated, and
+worker diagnostic storage can still grow with the count of per-fact findings.

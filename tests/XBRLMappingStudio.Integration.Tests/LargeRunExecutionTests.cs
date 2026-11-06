@@ -50,6 +50,40 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task LargeSyntheticRun_StreamsLocalRuleCompletionForRunAndStagedArtifact()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2, variedValues: true);
+            var project = BuildProject(database);
+            var profile = SyntheticProfile.Build();
+            var budget = new ExecutionBudget(InMemorySourceRecordLimit: 1, RowBatchSize: 1);
+            await using var worker = new LocalSyntheticWorker(profile);
+            var service = new MappingJobService(profile, worker, executionBudget: budget);
+
+            using var result = await service.RunAsync(project, Connections(project, database),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+            var artifact = Assert.IsType<LargeRunArtifact>(result.LargeArtifact);
+            Assert.Equal(2, artifact.FactCount);
+            Assert.Equal(artifact.Sha256, result.Manifest.ValidatedArtifactDigest);
+
+            var stagedPath = Path.Combine(root, "staged-large-report.json");
+            using (var report = artifact.OpenReportRead())
+            using (var staged = File.Create(stagedPath))
+                await report.CopyToAsync(staged);
+            var validatedDigest = await service.ValidateStagedArtifactAsync(
+                stagedPath, Path.Combine(root, "published-report.json"), result);
+
+            Assert.Equal(artifact.Sha256, validatedDigest);
+            Assert.Equal(validatedDigest, result.Manifest.ValidatedArtifactDigest);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task TwoInputRatio_SourceTransformationPathsSurviveLargeFactSpool()
     {
         var root = NewDirectory();

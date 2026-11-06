@@ -83,12 +83,48 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                 "Missing report payload."));
         }
 
-        var diags = new List<Diagnostic>();
         var factEntries = OimSerializer.ReadFactEntries(payload);
         var facts = factEntries.Select(entry => entry.Fact).ToArray();
+        var firstDuplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Skip(1).Any())?.Key;
         var knownDimensionMembers = _profile.DimensionDomains.Values
             .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
-        var filingValidation = new FilingRuleValidator(_profile, knownDimensionMembers).Validate(facts);
+        var filingValidation = new FilingRuleValidator(_profile, knownDimensionMembers)
+            .ValidateStreaming(facts, firstDuplicateKey, cancellationToken);
+        return Task.FromResult(CreateValidationResponse(
+            request, factEntries, filingValidation, facts.Length, cancellationToken));
+    }
+
+    /// <summary>
+    /// Completes synthetic-profile validation for a large report whose facts and
+    /// deterministic locators are streamed from the application's disk-backed spool.
+    /// </summary>
+    public Task<WorkerResponse> ValidateLargeReport(
+        WorkerRequest request,
+        IEnumerable<OimFactEntry> locatedFacts,
+        FilingValidationResult filingValidation,
+        int factCount,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(locatedFacts);
+        ArgumentNullException.ThrowIfNull(filingValidation);
+        if (request.Operation != WorkerOperations.ValidateReport)
+            throw new ArgumentException("Large synthetic validation requires a validate-report request.", nameof(request));
+        if (factCount < 0) throw new ArgumentOutOfRangeException(nameof(factCount));
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(CreateValidationResponse(
+            request, locatedFacts, filingValidation, factCount, cancellationToken));
+    }
+
+    private WorkerResponse CreateValidationResponse(
+        WorkerRequest request,
+        IEnumerable<OimFactEntry> factEntries,
+        FilingValidationResult filingValidation,
+        int factCount,
+        CancellationToken cancellationToken)
+    {
+        var diags = new List<Diagnostic>();
         var requiredRules = CompletionItems(_profile.RequiredChecks,
             filingValidation.Outcomes.Select(outcome => new ValidationCheckCompletion(
                 outcome.RuleId,
@@ -111,6 +147,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         int i = 0;
         foreach (var entry in factEntries)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             i++;
             var fact = entry.Fact;
             var concept = _profile.FindConcept(fact.ConceptName);
@@ -222,6 +259,9 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                 });
             }
         }
+        if (i != factCount)
+            throw new InvalidDataException(
+                $"Streamed validation supplied {i} fact entries, but the artifact records {factCount} facts.");
 
         var completionFailed = requiredRules.Any(item => item.Status == ValidationCheckStatus.Fail);
         var completionIncomplete = requiredRules.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable)
@@ -229,17 +269,17 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         var status = diags.Any(d => d.IsBlocking) || completionFailed
             ? WorkerStatus.DomainFailure
             : completionIncomplete ? WorkerStatus.IncompleteValidation : WorkerStatus.Success;
-        return Task.FromResult(new WorkerResponse(
+        return new WorkerResponse(
             request.OperationId,
             status,
             JsonSerializer.SerializeToElement(new
             {
-                factCount = facts.Length,
+                factCount,
                 errorCount = diags.Count(d => d.IsBlocking),
                 validationCompletion = completion
             }, WorkerJson.Options),
             diags,
-            Error: null));
+            Error: null);
 
         static ValidationCheckCompletion[] CompletionItems(
             IReadOnlySet<string> required,

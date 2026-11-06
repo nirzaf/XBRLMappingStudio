@@ -62,79 +62,106 @@ public sealed class FilingRuleValidator
 
     public FilingValidationResult Validate(IReadOnlyList<XbrlFact> facts)
     {
-        var outcomes = new List<RuleOutcome>();
+        ArgumentNullException.ThrowIfNull(facts);
+        var firstDuplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Skip(1).Any())?.Key;
+        return ValidateCore(facts, firstDuplicateKey, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Validates a streamed fact sequence while keeping only the collapsed rule outcomes
+    /// in memory. The caller supplies the first duplicate semantic key from its bounded
+    /// external index, or null when no duplicate exists.
+    /// </summary>
+    public FilingValidationResult ValidateStreaming(
+        IEnumerable<XbrlFact> facts,
+        string? firstDuplicateSemanticKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        return ValidateCore(facts, firstDuplicateSemanticKey, cancellationToken);
+    }
+
+    private FilingValidationResult ValidateCore(
+        IEnumerable<XbrlFact> facts,
+        string? firstDuplicateSemanticKey,
+        CancellationToken cancellationToken)
+    {
+        var outcomes = new Dictionary<(string RuleId, RuleStatus Status), RuleOutcome>();
+        void Record(RuleOutcome outcome) => outcomes.TryAdd((outcome.RuleId, outcome.Status), outcome);
         string op = "filing-validation";
 
         foreach (var f in facts)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var concept = _profile.FindConcept(f.ConceptName);
 
             // Rule: concept-exists + abstract-not-used.
             if (concept is null)
             {
-                outcomes.Add(Fail("synthetic:concept-exists", DiagnosticCodes.XbrConceptUnknown,
+                Record(Fail("synthetic:concept-exists", DiagnosticCodes.XbrConceptUnknown,
                     $"Concept '{f.ConceptName}' is not defined in profile '{_profile.ProfileId}'.", op));
                 continue;
             }
-            outcomes.Add(Pass("synthetic:concept-exists"));
+            Record(Pass("synthetic:concept-exists"));
             if (concept.IsAbstract)
-                outcomes.Add(Fail("synthetic:abstract-concept-not-used", DiagnosticCodes.XbrConceptUnknown,
+                Record(Fail("synthetic:abstract-concept-not-used", DiagnosticCodes.XbrConceptUnknown,
                     $"Concept '{f.ConceptName}' is abstract and cannot carry a fact value.", op));
             else
-                outcomes.Add(Pass("synthetic:abstract-concept-not-used"));
+                Record(Pass("synthetic:abstract-concept-not-used"));
 
             // Rule: monetary-unit-required + unit-allowed.
             if (concept.DataType == "monetary" && f.Unit is null && f.CompoundUnit is null)
-                outcomes.Add(Fail("synthetic:monetary-unit-required", DiagnosticCodes.XbrUnitMissing,
+                Record(Fail("synthetic:monetary-unit-required", DiagnosticCodes.XbrUnitMissing,
                     $"Fact on monetary concept '{f.ConceptName}' has no unit.", op));
             else
-                outcomes.Add(Pass("synthetic:monetary-unit-required"));
+                Record(Pass("synthetic:monetary-unit-required"));
 
             if (f.Unit is not null && !_profile.SupportedUnits.Contains(f.Unit.Measure))
-                outcomes.Add(Fail("synthetic:unit-allowed", DiagnosticCodes.XbrUnitMissing,
+                Record(Fail("synthetic:unit-allowed", DiagnosticCodes.XbrUnitMissing,
                     $"Unit '{f.Unit.Measure}' is not supported by profile '{_profile.ProfileId}'.", op));
             else if (f.CompoundUnit is not null)
-                outcomes.Add(CompoundUnitRule(f));
+                Record(CompoundUnitRule(f));
             else
-                outcomes.Add(Pass("synthetic:unit-allowed"));
+                Record(Pass("synthetic:unit-allowed"));
 
             if (!f.ValidateValueAgainst(concept, out var valueReason)
                 && !valueReason.EndsWith("is monetary and requires a unit.", StringComparison.Ordinal))
-                outcomes.Add(Fail("synthetic:fact-value-contract", DiagnosticCodes.XbrUnsupportedConstruct,
+                Record(Fail("synthetic:fact-value-contract", DiagnosticCodes.XbrUnsupportedConstruct,
                     valueReason, op));
             else
-                outcomes.Add(Pass("synthetic:fact-value-contract"));
+                Record(Pass("synthetic:fact-value-contract"));
 
             // Rule: period-type-match.
             var periodOk =
                 (concept.PeriodType == "instant" && f.Period.Kind == PeriodKind.Instant) ||
                 (concept.PeriodType == "duration" && f.Period.Kind == PeriodKind.Duration);
-            outcomes.Add(periodOk
+            Record(periodOk
                 ? Pass("synthetic:period-type-match")
                 : Fail("synthetic:period-type-match", DiagnosticCodes.XbrPeriodTypeMismatch,
                     $"Fact on '{f.ConceptName}' period kind '{f.Period.Kind}' does not match '{concept.PeriodType}'.", op));
 
             // Rule: dimension-member-valid (incomplete when the member domain is undeclared).
             foreach (var d in f.Dimensions)
-                outcomes.Add(DimensionRule(f, d, op));
+                Record(DimensionRule(f, d, op));
         }
 
-        // Rule: no-duplicate-facts across the whole set.
-        var dupes = facts.GroupBy(f => f.SemanticKey())
-            .Where(g => g.Count() > 1)
-            .ToList();
-        if (dupes.Count > 0)
+        // Rule: no-duplicate-facts across the whole set. Large runs obtain this key
+        // from the disk-backed semantic index instead of materializing every group.
+        if (firstDuplicateSemanticKey is not null)
         {
-            var first = dupes[0];
-            outcomes.Add(Fail("synthetic:no-duplicate-facts", DiagnosticCodes.XbrDuplicateFact,
-                $"Duplicate fact (same aspects) for concept '{first.Key}'.", op));
+            Record(Fail("synthetic:no-duplicate-facts", DiagnosticCodes.XbrDuplicateFact,
+                $"Duplicate fact (same aspects) for concept '{firstDuplicateSemanticKey}'.", op));
         }
         else
         {
-            outcomes.Add(Pass("synthetic:no-duplicate-facts"));
+            Record(Pass("synthetic:no-duplicate-facts"));
         }
 
-        var collapsed = Collapse(outcomes);
+        var collapsed = outcomes.Values
+            .OrderBy(outcome => outcome.RuleId, StringComparer.Ordinal)
+            .ThenBy(outcome => outcome.Status)
+            .ToList();
         // XBR07 check-completeness: any profile-declared required rule that never
         // produced an outcome (empty fact set, or the fact set did not exercise the
         // rule) must appear as an Incomplete outcome so the run cannot resolve to a
@@ -143,6 +170,7 @@ public sealed class FilingRuleValidator
         var emitted = new HashSet<string>(collapsed.Select(o => o.RuleId), StringComparer.Ordinal);
         foreach (var required in _profile.RequiredChecks.OrderBy(r => r, StringComparer.Ordinal))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (emitted.Contains(required)) continue;
             collapsed = collapsed.Append(new RuleOutcome(
                 required,
@@ -217,12 +245,4 @@ public sealed class FilingRuleValidator
             RuleIdentifier = rule
         });
 
-    /// <summary>Keep one instance of each failing/incomplete rule; pass outcomes dedupe too.</summary>
-    private static List<RuleOutcome> Collapse(List<RuleOutcome> outcomes)
-        => outcomes
-            .GroupBy(o => (o.RuleId, o.Status))
-            .Select(g => g.First())
-            .OrderBy(g => g.RuleId, StringComparer.Ordinal)
-            .ThenBy(g => g.Status)
-            .ToList();
 }
