@@ -185,6 +185,62 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task RejectsOversizedWithoutRowIdTextBeforeMaterializingTheCell()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("oversized-without-rowid.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (id TEXT PRIMARY KEY, payload TEXT) WITHOUT ROWID; INSERT INTO ledger VALUES ('row-1', $payload);";
+            command.Parameters.AddWithValue("$payload", new string('x', 8_192));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var connection = new SourceConnection("ledger-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "ledger" });
+        var adapter = new SqliteSourceAdapter(maximumRowBytes: 1_024);
+        var schema = await adapter.InspectSchemaAsync(connection, default);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, default)) { }
+        });
+
+        Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, error.Code);
+        Assert.Contains("before its cells were materialized", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RejectsUnsupportedBlobFromSqliteTypeMetadataBeforeCellConversion()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("blob-source.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE ledger (id TEXT PRIMARY KEY, payload BLOB) WITHOUT ROWID; INSERT INTO ledger VALUES ('row-1', $payload);";
+            command.Parameters.AddWithValue("$payload", new byte[8_192]);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var connection = new SourceConnection("ledger-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "ledger" });
+        var adapter = new SqliteSourceAdapter(maximumRowBytes: 1_024);
+        var schema = await adapter.InspectSchemaAsync(connection, default);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, default)) { }
+        });
+
+        Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+        Assert.Contains("BLOB source values are unsupported", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReadFullKeepsOneWalSnapshotWhileConcurrentWriterCommits()
     {
         using var ws = new TempWorkspace();

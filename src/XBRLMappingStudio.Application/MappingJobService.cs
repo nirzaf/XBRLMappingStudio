@@ -427,7 +427,9 @@ public sealed class MappingJobService
             catch (AdapterException ex)
             {
                 context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, opId));
-                manifest.Outcome = RunOutcome.DataError;
+                manifest.Outcome = ex.Code == DiagnosticCodes.IoNumberOutOfBudget
+                    ? RunOutcome.IncompleteConfiguration
+                    : RunOutcome.DataError;
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
                 manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
@@ -512,7 +514,9 @@ public sealed class MappingJobService
         catch (AdapterException ex)
         {
             context.Diagnostics.Add(ex.ToDiagnostic(activeBindingId, opId));
-            manifest.Outcome = RunOutcome.DataError;
+            manifest.Outcome = ex.Code == DiagnosticCodes.IoNumberOutOfBudget
+                ? RunOutcome.IncompleteConfiguration
+                : RunOutcome.DataError;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.Diagnostics = context.Diagnostics.Items;
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
@@ -1979,7 +1983,9 @@ public sealed class MappingJobService
     private static void AppendIntentPart(StringBuilder builder, string value)
         => builder.Append(value.Length).Append(':').Append(value);
 
-    private static ISourceAdapter BuildAdapter(SourceConnection conn) => conn.Kind switch
+    private static ISourceAdapter BuildAdapter(
+        SourceConnection conn,
+        int sqliteMaximumRowBytes = SqliteSourceAdapter.DefaultMaximumRowBytes) => conn.Kind switch
     {
         "excel" => ExcelAdapter.FromConnection(conn),
         "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
@@ -1987,14 +1993,14 @@ public sealed class MappingJobService
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
         "pdf-digital" => new PdfSourceAdapter(),
-        "sqlite" => new SqliteSourceAdapter(),
+        "sqlite" => new SqliteSourceAdapter(sqliteMaximumRowBytes),
         _ => throw new NotSupportedException($"Adapter kind '{conn.Kind}' is not supported in this build.")
     };
 
     private ISourceAdapter BuildExecutionAdapter(SourceConnection conn)
         => StringComparer.Ordinal.Equals(conn.Kind, "pdf-digital")
             ? new PdfSourceAdapter(new PdfEvidenceStore(_applicationDatabaseFactory()))
-            : BuildAdapter(conn);
+            : BuildAdapter(conn, _executionBudget.MaxRowBytes);
 
     /// <summary>
     /// Resolve the write-path adapter for a destination connection and enforce the IO01
@@ -2258,7 +2264,7 @@ public sealed class MappingJobService
             try
             {
                 CreatePrivateArtifactDirectory(scratchDirectory);
-                var adapter = new SqliteSourceAdapter();
+                var adapter = new SqliteSourceAdapter(_executionBudget.MaxRowBytes);
                 var schema = await adapter.InspectSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
                     && !StringComparer.Ordinal.Equals(binding.SchemaFingerprint, schema.Fingerprint))

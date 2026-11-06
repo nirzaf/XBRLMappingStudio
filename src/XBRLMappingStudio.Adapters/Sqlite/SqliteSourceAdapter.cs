@@ -1,4 +1,3 @@
-using System.Data;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -15,8 +14,17 @@ namespace XBRLMappingStudio.Adapters.Sqlite;
 /// TEXT and parse them explicitly in the mapping.</summary>
 public sealed class SqliteSourceAdapter : ISourceAdapter
 {
+    public const int DefaultMaximumRowBytes = 4 * 1024 * 1024;
     public const string StablePrimaryKeyIdentityStrategy = "sqlite-primary-key-sha256";
     public const string PositionalIdentityStrategy = "positional-row-number";
+
+    private readonly int _maximumRowBytes;
+
+    public SqliteSourceAdapter(int maximumRowBytes = DefaultMaximumRowBytes)
+    {
+        if (maximumRowBytes < 1) throw new ArgumentOutOfRangeException(nameof(maximumRowBytes));
+        _maximumRowBytes = maximumRowBytes;
+    }
 
     public string Kind => "sqlite";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
@@ -97,10 +105,18 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
 
         await using var command = db.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"SELECT * FROM {Quote(table)}";
-        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cancellationToken);
-        if (reader.FieldCount != columns.Length
-            || Enumerable.Range(0, reader.FieldCount).Any(i => reader.GetName(i) != columns[i].Name))
+        var columnBytes = CombineSqlExpressions(columns.Select(column =>
+            $"COALESCE(length(CAST({Quote(column.Name)} AS BLOB)), 0)"), "+");
+        var containsBlob = CombineSqlExpressions(columns.Select(column =>
+            $"typeof({Quote(column.Name)}) = 'blob'"), "OR");
+        command.CommandText = $"SELECT *, CASE WHEN {containsBlob} THEN -1 ELSE {columnBytes} END "
+            + $"FROM {Quote(table)}";
+        // The final expression reports all source cell byte lengths without asking
+        // Microsoft.Data.Sqlite to materialize any cell. Read it before GetValue;
+        // GetStream/GetBytes can allocate the whole value for tables without rowid.
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (reader.FieldCount != columns.Length + 1
+            || Enumerable.Range(0, columns.Length).Any(i => reader.GetName(i) != columns[i].Name))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 $"SQLite table '{table}' changed after schema inspection; inspect and remap before reading.");
 
@@ -112,6 +128,20 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
         while (await reader.ReadAsync(cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var totalCellBytes = reader.GetInt64(columns.Length);
+            if (totalCellBytes < 0)
+                throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                    $"SQLite table '{table}' contains a BLOB value; BLOB source values are unsupported.");
+
+            var rowId = stableKeyColumns.Length > 0
+                ? "pk:sha256:" + new string('0', 64)
+                : $"pos:{rowNumber.ToString(CultureInfo.InvariantCulture)}";
+            var estimatedRowBytes = EstimateRowBytesUpperBound(
+                columns, connection.SourceId, table, rowId, totalCellBytes);
+            if (estimatedRowBytes > _maximumRowBytes)
+                throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                    $"A SQLite source row exceeded the {_maximumRowBytes} byte row budget before its cells were materialized.");
+
             var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
             var keyValues = new List<(ColumnSchema Column, object Value)>(stableKeyColumns.Length);
             foreach (var column in columns)
@@ -123,7 +153,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
             }
 
             var hasStableIdentity = stableKeyColumns.Length > 0;
-            var rowId = hasStableIdentity ? StablePrimaryKeyRowId(keyValues) : $"pos:{rowNumber.ToString(CultureInfo.InvariantCulture)}";
+            rowId = hasStableIdentity ? StablePrimaryKeyRowId(keyValues) : rowId;
             var sources = columns.ToDictionary(
                 column => column.Name,
                 column => new SourceReference(connection.SourceId, $"{table}.{column.Name}", rowId),
@@ -137,6 +167,47 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
             };
             rowNumber++;
         }
+    }
+
+    private long EstimateRowBytesUpperBound(
+        IReadOnlyList<ColumnSchema> columns,
+        string sourceId,
+        string table,
+        string rowId,
+        long totalCellBytes)
+    {
+        // Match BufferedSourceReader's accounting conservatively before any source
+        // value is converted to a managed string/array. UTF-8 decoding can expand
+        // malformed input, so reserve up to three UTF-8 bytes per SQLite cell byte.
+        long estimate = Encoding.UTF8.GetByteCount(rowId) + 64L;
+        var sourceIdBytes = Encoding.UTF8.GetByteCount(sourceId);
+        var rowIdBytes = Encoding.UTF8.GetByteCount(rowId);
+        var decimalTextColumns = 0;
+        foreach (var column in columns)
+        {
+            var nameBytes = Encoding.UTF8.GetByteCount(column.Name);
+            var locatorBytes = Encoding.UTF8.GetByteCount($"{table}.{column.Name}");
+            estimate = checked(estimate + nameBytes + 48L
+                + nameBytes + sourceIdBytes + locatorBytes + rowIdBytes + 48L);
+            if (column.InferredShape == PortShape.Decimal) decimalTextColumns++;
+        }
+
+        return checked(estimate + (totalCellBytes * 3L) + (decimalTextColumns * 32L));
+    }
+
+    private static string CombineSqlExpressions(IEnumerable<string> expressions, string operation)
+    {
+        var level = expressions.ToList();
+        while (level.Count > 1)
+        {
+            var next = new List<string>((level.Count + 1) / 2);
+            for (var index = 0; index < level.Count; index += 2)
+                next.Add(index + 1 < level.Count
+                    ? $"({level[index]} {operation} {level[index + 1]})"
+                    : level[index]);
+            level = next;
+        }
+        return level[0];
     }
 
     private static async Task<IReadOnlyList<ColumnSchema>> ReadColumnsAsync(

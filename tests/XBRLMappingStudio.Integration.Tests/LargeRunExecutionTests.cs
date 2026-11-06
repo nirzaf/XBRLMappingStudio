@@ -438,6 +438,40 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task OversizedSqliteCell_FailsBeforeAdapterMaterializationUsingExecutionBudget()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2, variedValues: false);
+            await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+            {
+                await db.OpenAsync();
+                await using var command = db.CreateCommand();
+                command.CommandText = "UPDATE financials SET Current=$value WHERE Id=1";
+                command.Parameters.AddWithValue("$value", new string('9', 8_192));
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var project = BuildProject(database);
+            var profile = SyntheticProfile.Build();
+            var worker = new DigestOnlyArtifactWorker(profile);
+            var service = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(MaxRowBytes: 1_024));
+
+            using var result = await service.RunAsync(project, Connections(project, database),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+            Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.IoNumberOutOfBudget && diagnostic.IsBlocking);
+            Assert.Equal(0, worker.ValidationRequests);
+            Assert.Empty(result.Manifest.Outputs);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task WorkerRejection_CleansLargeArtifactAndReturnsNoOutputIdentity()
     {
         var root = NewDirectory();
