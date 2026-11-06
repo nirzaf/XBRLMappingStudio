@@ -231,13 +231,28 @@ public sealed class ExecutionPlan
                 var key = ProvenanceTracker.SlotKey(srcNode, srcPort);
                 if (!setSlots.TryGetValue(key, out var v)) continue;
                 DataValue emitValue = v;
+                string? setProvenanceKey = null;
                 if (v.Raw is IReadOnlyList<DataValue> list)
+                {
                     emitValue = idx < list.Count ? list[idx] : DataValue.Missing();
+                    if (idx < list.Count)
+                        setProvenanceKey = ProvenanceTracker.SetSlotKey(srcNode, srcPort, idx);
+                }
+                else
+                {
+                    setProvenanceKey = ProvenanceTracker.SetSlotKey(srcNode, srcPort);
+                }
                 frame.Set(srcNode, srcPort, emitValue);
-                // Also record provenance from the source collection contributor at idx.
-                context.Provenance.MergeSources(
-                    ProvenanceTracker.SlotKey(sinkId, portName, 10_000 + idx),
-                    new[] { key });
+                if (setProvenanceKey is not null)
+                {
+                    // Copy only this selected collection item's evidence onto the
+                    // synthetic sink row. The row-phase sink then consumes it through
+                    // the ordinary upstream-slot provenance path.
+                    var rowSourceKey = ProvenanceTracker.SlotKey(srcNode, srcPort, 10_000 + idx);
+                    context.Provenance.MergeSources(rowSourceKey, new[] { setProvenanceKey });
+                    context.Provenance.MergeTransformations(rowSourceKey, new[] { setProvenanceKey });
+                    context.Provenance.MergeSourceTransformationPaths(rowSourceKey, new[] { setProvenanceKey });
+                }
             }
             sinkStep.Evaluator(10_000 + idx, frame, context, context.Diagnostics);
 
@@ -245,6 +260,8 @@ public sealed class ExecutionPlan
             {
                 var slotKey = ProvenanceTracker.SlotKey(sinkId, "fact", 10_000 + idx);
                 pf.Sources.AddRange(context.Provenance.GetContributors(slotKey));
+                pf.TransformationIds.AddRange(context.Provenance.GetTransformationIds(slotKey));
+                pf.SourceTransformationPaths.AddRange(context.Provenance.GetSourceTransformationPaths(slotKey));
                 facts.Add(pf);
             }
         }

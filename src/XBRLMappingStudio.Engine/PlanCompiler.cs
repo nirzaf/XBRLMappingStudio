@@ -337,12 +337,75 @@ public sealed class PlanCompiler
                 return ResolveCollection(snapshot, e);
             }
 
+            IReadOnlyList<IReadOnlyList<SourceTransformationPath>> ReadSetInputPaths(string port)
+            {
+                var e = graph.IncomingEdge(nodeId, port);
+                if (e is null) return Array.Empty<IReadOnlyList<SourceTransformationPath>>();
+                var key = ProvenanceTracker.SlotKey(e.SourceNodeId, e.SourcePortName);
+                if (setSlots.TryGetValue(key, out var value))
+                {
+                    if (value.Raw is IReadOnlyList<DataValue> list)
+                        return Enumerable.Range(0, list.Count)
+                            .Select(index => (IReadOnlyList<SourceTransformationPath>)ctx.Provenance
+                                .GetSourceTransformationPaths(ProvenanceTracker.SetSlotKey(
+                                    e.SourceNodeId, e.SourcePortName, index)))
+                            .ToArray();
+                    return new[] { ctx.Provenance.GetSourceTransformationPaths(
+                        ProvenanceTracker.SetSlotKey(e.SourceNodeId, e.SourcePortName)) };
+                }
+
+                return Enumerable.Range(0, snapshot.Count)
+                    .Select(index => (IReadOnlyList<SourceTransformationPath>)ctx.Provenance
+                        .GetSourceTransformationPaths(ProvenanceTracker.SlotKey(
+                            e.SourceNodeId, e.SourcePortName, index)))
+                    .ToArray();
+            }
+
+            void StoreSetPaths(string port, int? itemIndex, IEnumerable<SourceTransformationPath> paths,
+                string? fieldName = null)
+            {
+                var key = ProvenanceTracker.SetSlotKey(nodeId, port, itemIndex, fieldName);
+                foreach (var path in paths)
+                {
+                    ctx.Provenance.RecordSourceTransformationPath(key, path);
+                    ctx.Provenance.RecordSource(key, path.Source);
+                    foreach (var transformationId in path.TransformationIds)
+                        ctx.Provenance.RecordTransformation(key, transformationId);
+                }
+            }
+
+            IReadOnlyList<SourceTransformationPath> ExtendPaths(
+                IEnumerable<SourceTransformationPath> paths, string transformationId)
+            {
+                var extended = new List<SourceTransformationPath>();
+                foreach (var path in paths)
+                {
+                    var ids = path.TransformationIds.Contains(transformationId, StringComparer.Ordinal)
+                        ? path.TransformationIds
+                        : path.TransformationIds.Append(transformationId).ToArray();
+                    if (!extended.Any(existing => existing.Source == path.Source
+                        && existing.TransformationIds.SequenceEqual(ids, StringComparer.Ordinal)))
+                        extended.Add(new SourceTransformationPath(path.Source, ids));
+                }
+                return extended;
+            }
+
+            void AddDistinctPaths(List<SourceTransformationPath> target,
+                IEnumerable<SourceTransformationPath> candidates)
+            {
+                foreach (var candidate in candidates)
+                    if (!target.Any(existing => existing.Source == candidate.Source
+                        && existing.TransformationIds.SequenceEqual(candidate.TransformationIds, StringComparer.Ordinal)))
+                        target.Add(candidate);
+            }
+
             switch (node.NodeType)
             {
                 case NodeTypeConstants.Collect:
                 {
                     var edge = graph.IncomingEdge(nodeId, "input");
                     var list = new List<DataValue>();
+                    var inputPaths = ReadSetInputPaths("input");
                     if (edge is not null)
                     {
                         for (int r = 0; r < snapshot.Count; r++)
@@ -350,6 +413,10 @@ public sealed class PlanCompiler
                             var v = snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName);
                             if (v.IsMissing) continue;
                             list.Add(v);
+                            var paths = r < inputPaths.Count
+                                ? inputPaths[r]
+                                : Array.Empty<SourceTransformationPath>();
+                            StoreSetPaths("items", list.Count - 1, ExtendPaths(paths, nodeId));
                             if (list.Count > ctx.MaxCollectionItems)
                             {
                                 diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
@@ -367,15 +434,20 @@ public sealed class PlanCompiler
                 case NodeTypeConstants.Sum:
                 {
                     var items = ReadSetInput("items");
+                    var itemPaths = ReadSetInputPaths("items");
                     decimal total = 0m;
-                    foreach (var it in items)
+                    var contributingPaths = new List<SourceTransformationPath>();
+                    for (var index = 0; index < items.Count; index++)
                     {
+                        var it = items[index];
                         if (it.IsMissing || it.IsNil) continue;
                         try { total += it.AsDecimal(); }
                         catch (OverflowException)
                         { throw new NumericOverflowException($"Sum overflow on node '{node.DisplayName}'."); }
+                        if (index < itemPaths.Count) AddDistinctPaths(contributingPaths, itemPaths[index]);
                     }
                     outputs["value"] = DataValue.DecimalValue(total);
+                    StoreSetPaths("value", null, ExtendPaths(contributingPaths, nodeId));
                     if (ctx.IsPreview)
                         ctx.SampledTotals.Add(new SampledTotal(nodeId, "sum", total, IsPartial: true));
                     break;
@@ -384,17 +456,38 @@ public sealed class PlanCompiler
                 case NodeTypeConstants.Count:
                 {
                     var items = ReadSetInput("items");
+                    var itemPaths = ReadSetInputPaths("items");
                     long c = 0;
-                    foreach (var it in items) if (!it.IsMissing && !it.IsNil) c++;
+                    var contributingPaths = new List<SourceTransformationPath>();
+                    for (var index = 0; index < items.Count; index++)
+                    {
+                        var it = items[index];
+                        if (it.IsMissing || it.IsNil) continue;
+                        c++;
+                        if (index < itemPaths.Count) AddDistinctPaths(contributingPaths, itemPaths[index]);
+                    }
                     outputs["value"] = DataValue.IntegerValue(c);
+                    StoreSetPaths("value", null, ExtendPaths(contributingPaths, nodeId));
                     break;
                 }
 
                 case NodeTypeConstants.First:
                 {
                     var items = ReadSetInput("items");
-                    outputs["value"] = items.FirstOrDefault(v => !v.IsMissing && !v.IsNil)
-                        ?? DataValue.Missing(PortShape.Decimal);
+                    var itemPaths = ReadSetInputPaths("items");
+                    var firstIndex = -1;
+                    for (var index = 0; index < items.Count; index++)
+                    {
+                        if (items[index].IsMissing || items[index].IsNil) continue;
+                        firstIndex = index;
+                        break;
+                    }
+                    outputs["value"] = firstIndex >= 0
+                        ? items[firstIndex]
+                        : DataValue.Missing(PortShape.Decimal);
+                    StoreSetPaths("value", null, firstIndex >= 0 && firstIndex < itemPaths.Count
+                        ? ExtendPaths(itemPaths[firstIndex], nodeId)
+                        : Array.Empty<SourceTransformationPath>());
                     break;
                 }
 
@@ -420,8 +513,23 @@ public sealed class PlanCompiler
                         {
                             var dict = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                             foreach (var f in records[r].Fields)
+                            {
                                 if (retain is null || retain.Contains(f.Key, StringComparer.Ordinal))
+                                {
                                     dict[f.Key] = f.Value;
+                                    var source = f.Value.Source;
+                                    var cellSources = records[r].CellSources;
+                                    if (source is null && cellSources is not null)
+                                        cellSources.TryGetValue(f.Key, out source);
+                                    if (source is not null)
+                                    {
+                                        var path = new SourceTransformationPath(source, new[] { nodeId });
+                                        StoreSetPaths("items", rows.Count,
+                                            new[] { path });
+                                        StoreSetPaths("items", rows.Count, new[] { path }, f.Key);
+                                    }
+                                }
+                            }
                             rows.Add(DataValue.Record(dict));
                             if (rows.Count > ctx.MaxCollectionItems)
                             {
@@ -441,28 +549,64 @@ public sealed class PlanCompiler
                 case NodeTypeConstants.GroupBy:
                 {
                     var items = ReadSetInput("items");
+                    var inputEdge = graph.IncomingEdge(nodeId, "items");
+                    // GroupBy can currently attribute source rows safely when its
+                    // records came directly from CollectRows, which records
+                    // field-specific adapter sources. Joined record lineage is not
+                    // reconstructed here because the current join record shape does
+                    // not preserve field-to-source paths.
+                    var collectRowsInput = inputEdge is not null
+                        && graph.Nodes[inputEdge.SourceNodeId].NodeType == NodeTypeConstants.CollectRows;
                     var keyFields = (GetString(node, "keys") ?? "")
                         .Split(',', StringSplitOptions.TrimEntries);
                     var sumField = GetString(node, "sumField") ?? "";
                     var order = new List<string>();
                     var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
-                    foreach (var rec in items)
+                    var groupKeyPaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
+                    var groupValuePaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
+                    foreach (var (rec, itemIndex) in items.Select((item, index) => (item, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
                         var bk = string.Join("|", keyFields.Select(kf => GetField(fields, kf).AsString()));
-                        if (!totals.ContainsKey(bk)) { order.Add(bk); totals[bk] = 0m; }
+                        if (!totals.ContainsKey(bk))
+                        {
+                            order.Add(bk);
+                            totals[bk] = 0m;
+                            groupKeyPaths[bk] = new List<SourceTransformationPath>();
+                            groupValuePaths[bk] = new List<SourceTransformationPath>();
+                        }
+                        if (collectRowsInput && inputEdge is not null)
+                        {
+                            foreach (var keyField in keyFields)
+                            {
+                                var paths = ctx.Provenance.GetSourceTransformationPaths(
+                                    ProvenanceTracker.SetSlotKey(inputEdge.SourceNodeId,
+                                        inputEdge.SourcePortName, itemIndex, keyField));
+                                AddDistinctPaths(groupKeyPaths[bk], paths);
+                                AddDistinctPaths(groupValuePaths[bk], paths);
+                            }
+                        }
                         var v = GetField(fields, sumField);
                         if (v.IsMissing || v.IsNil) continue;
                         try { totals[bk] += v.AsDecimal(); }
                         catch (OverflowException)
                         { throw new NumericOverflowException($"GroupBy sum overflow on node '{node.DisplayName}'."); }
+                        if (collectRowsInput && inputEdge is not null)
+                        {
+                            AddDistinctPaths(groupValuePaths[bk], ctx.Provenance.GetSourceTransformationPaths(
+                                ProvenanceTracker.SetSlotKey(inputEdge.SourceNodeId,
+                                    inputEdge.SourcePortName, itemIndex, sumField)));
+                        }
                     }
                     var valueList = new List<DataValue>();
                     var keyList = new List<DataValue>();
                     foreach (var bk in order)
                     {
+                        var outputIndex = valueList.Count;
                         valueList.Add(DataValue.DecimalValue(totals[bk]));
                         keyList.Add(DataValue.StringValue(bk));
+                        StoreSetPaths("values", outputIndex, ExtendPaths(groupValuePaths[bk], nodeId));
+                        StoreSetPaths("keys", outputIndex, ExtendPaths(groupKeyPaths[bk], nodeId));
                         if (ctx.IsPreview)
                             ctx.SampledTotals.Add(new SampledTotal(nodeId, $"group:{bk}", totals[bk], IsPartial: true));
                     }

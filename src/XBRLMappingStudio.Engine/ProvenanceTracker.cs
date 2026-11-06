@@ -19,6 +19,17 @@ public sealed class ProvenanceTracker
     public static string SlotKey(string nodeId, string portName, int? rowIndex = null)
         => rowIndex.HasValue ? $"{nodeId}.{portName}[{rowIndex}]" : $"{nodeId}.{portName}";
 
+    /// <summary>
+    /// Internal key for a set-phase output or collection item. It is deliberately
+    /// disjoint from row slot keys so set-item metadata cannot be mistaken for a row.
+    /// </summary>
+    public static string SetSlotKey(string nodeId, string portName, int? itemIndex = null, string? fieldName = null)
+    {
+        var field = fieldName is null ? "-1:" : $"{fieldName.Length}:{fieldName}";
+        var index = itemIndex?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "scalar";
+        return $"@set:{nodeId.Length}:{nodeId}:{portName.Length}:{portName}:{index}:{field}";
+    }
+
     public void RecordSource(string slotKey, SourceReference source)
     {
         var list = _sources.GetOrAdd(slotKey, _ => new List<SourceReference>());
@@ -101,6 +112,13 @@ public sealed class ProvenanceTracker
             if (paths.Any(path => path.Source == source)) return;
             AddPathIfMissing(paths, new SourceTransformationPath(source, new[] { nodeId }));
         }
+    }
+
+    public void RecordSourceTransformationPath(string slotKey, SourceTransformationPath path)
+    {
+        var paths = _sourceTransformationPaths.GetOrAdd(slotKey, _ => new List<SourceTransformationPath>());
+        lock (paths)
+            AddPathIfMissing(paths, path);
     }
 
     public void RecordTransformationOnSourcePaths(string slotKey, string nodeId)
