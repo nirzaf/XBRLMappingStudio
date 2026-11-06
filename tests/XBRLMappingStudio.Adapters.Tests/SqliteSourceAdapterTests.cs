@@ -135,6 +135,56 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task ReadsWithoutRowIdSourceWithHostileIdentifiersAndReportsStableIdentityPolicy()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("hostile-source.db");
+        const string table = "ledger\"; DROP TABLE canary;--";
+        const string keyColumn = "tenant\"; DROP TABLE canary;--";
+        static string QuoteIdentifier(string identifier)
+            => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = $"CREATE TABLE {QuoteIdentifier(table)} "
+                + $"({QuoteIdentifier(keyColumn)} TEXT NOT NULL, amount TEXT NOT NULL, "
+                + $"PRIMARY KEY({QuoteIdentifier(keyColumn)})) WITHOUT ROWID; CREATE TABLE canary (value TEXT);";
+            await command.ExecuteNonQueryAsync();
+            command.CommandText = $"INSERT INTO {QuoteIdentifier(table)} ({QuoteIdentifier(keyColumn)}, amount) VALUES ($key, $amount);";
+            command.Parameters.AddWithValue("$key", "tenant-1");
+            command.Parameters.AddWithValue("$amount", "123.4500");
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var beforeRead = await File.ReadAllBytesAsync(path);
+        var connection = new SourceConnection("hostile-source", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = table, ["decimalColumns"] = "amount" });
+        var adapter = new SqliteSourceAdapter();
+        var tables = await adapter.DiscoverTablesAsync(connection, default);
+        var schema = await adapter.InspectSchemaAsync(connection, default);
+        var descriptor = SqliteSourceAdapter.Describe(connection, schema);
+        var rows = new List<DataRecord>();
+        await foreach (var row in adapter.ReadFullAsync(connection, schema, default)) rows.Add(row);
+        var tablesAfterRead = await adapter.DiscoverTablesAsync(connection, default);
+
+        Assert.Contains(table, tables);
+        Assert.Contains("canary", tables);
+        Assert.Contains("canary", tablesAfterRead);
+        Assert.Equal(beforeRead, await File.ReadAllBytesAsync(path));
+        Assert.Equal(new[] { keyColumn, "amount" }, schema.Columns.Select(column => column.Name));
+        Assert.Equal(new[] { keyColumn }, descriptor.PrimaryKeyColumns);
+        Assert.Equal(SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy, descriptor.RowIdentityStrategy);
+        Assert.Equal("InvariantCulture", descriptor.DecimalCulture);
+        Assert.False(descriptor.Capabilities.AllowsWriteTarget);
+        var record = Assert.Single(rows);
+        Assert.True(record.HasStableRowIdentity);
+        Assert.StartsWith("pk:sha256:", record.RowId, StringComparison.Ordinal);
+        Assert.Equal(123.45m, record["amount"].AsDecimal());
+    }
+
+    [Fact]
     public async Task ReadFullKeepsOneWalSnapshotWhileConcurrentWriterCommits()
     {
         using var ws = new TempWorkspace();
