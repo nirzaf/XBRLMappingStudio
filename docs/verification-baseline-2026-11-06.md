@@ -306,3 +306,21 @@ Verification: the two focused Release integration tests passed 2/2. They were ru
 with `BuildProjectReferences=false` because a running Desktop process held shared
 Release outputs. Disposable-target crash recovery and native full-preview
 acceptance remain open.
+
+## UX-06 selected node parameter editor
+
+The desktop Properties pane now exposes edits for selected String constants,
+Scale factors, and Round digits/mode. Constant editors summarize connected
+consumers; entity identifiers and period date strings receive contextual checks.
+Scale factors are checked as exact invariant decimals (maximum 29 significant
+digits and 28 fractional places). Invalid values produce inline diagnostics and
+leave the mapping unchanged; valid parameter edits are one undoable change.
+
+Verification: the Desktop.Tests suite passed 71/71 in Debug after closing the
+isolated native test window. `git diff --check` passed. The native window was
+checked at 1280×800: selecting the sample period-start constant showed its
+consumer and editor; an invalid date displayed XBR004 inline and a valid date
+applied. The final on-edit error clearing behavior is covered by the view-model
+tests. This was a synthetic sample only; no installed-profile validation or
+publication was performed. Dynamic source rebinding through the inspector and
+source-drift revalidation remain open.

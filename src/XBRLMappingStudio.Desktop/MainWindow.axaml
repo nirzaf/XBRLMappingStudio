@@ -441,6 +441,37 @@
           <StackPanel DockPanel.Dock="Top" Spacing="6">
             <TextBlock Text="Properties" FontWeight="Bold" />
             <TextBlock Text="{Binding SelectedNodeDisplayName}" />
+            <Expander Header="Selected node parameters" IsVisible="{Binding CanEditSelectedNodeParameters}"
+                      IsExpanded="True" Margin="0,2,0,2">
+              <StackPanel Spacing="4" Margin="2,4,2,2">
+                <TextBlock Text="{Binding SelectedNodeParameterSummary}" TextWrapping="Wrap"
+                           AutomationProperties.Name="Selected node parameter context" />
+                <StackPanel IsVisible="{Binding CanEditSelectedStringConstant}" Spacing="3">
+                  <TextBlock Text="String value" FontWeight="SemiBold" />
+                  <TextBox Text="{Binding SelectedStringConstantValue, Mode=TwoWay}"
+                           AutomationProperties.Name="Selected String constant value" />
+                </StackPanel>
+                <StackPanel IsVisible="{Binding CanEditSelectedScaleFactor}" Spacing="3">
+                  <TextBlock Text="Scale factor" FontWeight="SemiBold" />
+                  <TextBox Text="{Binding SelectedScaleFactor, Mode=TwoWay}"
+                           AutomationProperties.Name="Selected scale factor" />
+                </StackPanel>
+                <StackPanel IsVisible="{Binding CanEditSelectedRound}" Spacing="3">
+                  <TextBlock Text="Decimal places" FontWeight="SemiBold" />
+                  <TextBox Text="{Binding SelectedRoundDigits, Mode=TwoWay}"
+                           AutomationProperties.Name="Selected rounding decimal places" />
+                  <TextBlock Text="Rounding mode" FontWeight="SemiBold" />
+                  <ComboBox ItemsSource="{Binding RoundingModes}"
+                            SelectedItem="{Binding SelectedRoundMode, Mode=TwoWay}"
+                            AutomationProperties.Name="Selected rounding mode" />
+                </StackPanel>
+                <TextBlock Text="{Binding SelectedNodeParameterError}" TextWrapping="Wrap"
+                           Foreground="#B42318" IsVisible="{Binding HasSelectedNodeParameterError}"
+                           AutomationProperties.Name="Selected node parameter error" />
+                <Button Content="Apply node parameters" Command="{Binding ApplySelectedNodeParametersCommand}"
+                        AutomationProperties.Name="Apply selected node parameters as one undoable change" />
+              </StackPanel>
+            </Expander>
             <StackPanel IsVisible="{Binding CanEditSelectedFact}" Spacing="4">
               <TextBlock Text="Fact target properties" FontWeight="SemiBold" />
               <TextBlock Text="Taxonomy concept" FontWeight="SemiBold" />

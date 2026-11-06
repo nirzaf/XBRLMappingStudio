@@ -810,6 +810,128 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void StringPeriodConstantCanBeEditedValidatedAndUndone()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-start");
+        Assert.True(viewModel.CanEditSelectedStringConstant);
+
+        viewModel.SelectedStringConstantValue = "2024-01-01";
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        var start = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-start");
+        Assert.Equal("2024-01-01", start.Parameters["literal"]?.ToString());
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+
+        viewModel.Session.Undo();
+        start = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-start");
+        Assert.Equal("2025-01-01", start.Parameters["literal"]?.ToString());
+
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-start");
+        viewModel.SelectedStringConstantValue = "2024-1-1";
+        Assert.Contains("XBR004", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        var beforeInvalidEdit = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        Assert.Equal(beforeInvalidEdit, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR004", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        viewModel.SelectedStringConstantValue = "2024-01-01";
+        Assert.Empty(viewModel.SelectedNodeParameterError);
+    }
+
+    [Fact]
+    public void StringEntityConstantRejectsBlankAndSupportsUndo()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-entity");
+        Assert.Contains("XBRL Revenue.entity", viewModel.SelectedNodeParameterSummary, StringComparison.Ordinal);
+
+        viewModel.SelectedStringConstantValue = " ";
+        Assert.Contains("XBR005", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        var beforeInvalidEdit = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        Assert.Equal(beforeInvalidEdit, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal("ABC-Corp", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity")
+            .Parameters["literal"]?.ToString());
+
+        viewModel.SelectedStringConstantValue = "ABC-Labs";
+        Assert.Empty(viewModel.SelectedNodeParameterError);
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        Assert.Equal("ABC-Labs", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity")
+            .Parameters["literal"]?.ToString());
+        viewModel.Session.Undo();
+        Assert.Equal("ABC-Corp", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-entity")
+            .Parameters["literal"]?.ToString());
+    }
+
+    [Fact]
+    public void ScaleFactorEditIsExactAndInvalidInputPreservesMapping()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-scale");
+        Assert.True(viewModel.CanEditSelectedScaleFactor);
+
+        viewModel.SelectedScaleFactor = "0.001";
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        var scale = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-scale");
+        Assert.Equal("0.001", scale.Parameters["factor"]?.ToString());
+        viewModel.Session.Undo();
+        Assert.Equal("1000", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-scale")
+            .Parameters["factor"]?.ToString());
+
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-scale");
+        viewModel.SelectedScaleFactor = "123456789012345678901234567890";
+        Assert.Contains("MAP008", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        var beforeInvalidEdit = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        Assert.Equal(beforeInvalidEdit, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("MAP008", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RoundNodeParametersApplyTogetherAndRejectUnsupportedScale()
+    {
+        var project = new MainWindowViewModel().Session.Project;
+        project.Nodes.Add(new MappingNode
+        {
+            NodeId = "test-round",
+            NodeType = NodeTypeConstants.Round,
+            DisplayName = "Round amount",
+            Parameters = new() { ["digits"] = "0", ["mode"] = "HalfEven" },
+            InputPorts = new() { new PortDefinition("input", PortShape.Decimal, PortCardinality.Single) },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        });
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "test-round");
+        Assert.True(viewModel.CanEditSelectedRound);
+
+        viewModel.SelectedRoundDigits = "2";
+        viewModel.SelectedRoundMode = "HalfUp";
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        var round = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "test-round");
+        Assert.Equal("2", round.Parameters["digits"]?.ToString());
+        Assert.Equal("HalfUp", round.Parameters["mode"]?.ToString());
+        viewModel.Session.Undo();
+        round = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "test-round");
+        Assert.Equal("0", round.Parameters["digits"]?.ToString());
+        Assert.Equal("HalfEven", round.Parameters["mode"]?.ToString());
+
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "test-round");
+        viewModel.SelectedRoundDigits = "29";
+        Assert.Contains("MAP018", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        var beforeInvalidEdit = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        Assert.Equal(beforeInvalidEdit, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("MAP018", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ConceptSelectionRejectsIncompatibleConnectedPeriodBeforeMutation()
     {
         var viewModel = new MainWindowViewModel();

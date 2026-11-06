@@ -384,6 +384,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactDimensions = "";
     private string _selectedFactEntityIdentifier = "";
     private bool _canEditSelectedFactEntity;
+    private string _selectedStringConstantValue = "";
+    private string _selectedScaleFactor = "1";
+    private string _selectedRoundDigits = "0";
+    private string _selectedRoundMode = "HalfEven";
+    private bool _canEditSelectedStringConstant;
+    private bool _canEditSelectedScaleFactor;
+    private bool _canEditSelectedRound;
+    private string _selectedNodeParameterSummary = "";
+    private string _selectedNodeParameterError = "";
     private string _selectedFactConceptIdentity = "Select a fact to inspect its taxonomy identity.";
     private string _selectedFactSourceSummary = "Select a fact to inspect its source mapping.";
     private string _selectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
@@ -740,6 +749,67 @@ public sealed class MainWindowViewModel : ViewModelBase
     public string SelectedFactDecimals { get => _selectedFactDecimals; set => Set(ref _selectedFactDecimals, value); }
     public string SelectedFactDimensions { get => _selectedFactDimensions; set => Set(ref _selectedFactDimensions, value); }
     public string SelectedFactEntityIdentifier { get => _selectedFactEntityIdentifier; set => Set(ref _selectedFactEntityIdentifier, value); }
+    public string SelectedStringConstantValue
+    {
+        get => _selectedStringConstantValue;
+        set { if (Set(ref _selectedStringConstantValue, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedScaleFactor
+    {
+        get => _selectedScaleFactor;
+        set { if (Set(ref _selectedScaleFactor, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedRoundDigits
+    {
+        get => _selectedRoundDigits;
+        set { if (Set(ref _selectedRoundDigits, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedRoundMode
+    {
+        get => _selectedRoundMode;
+        set { if (Set(ref _selectedRoundMode, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public IReadOnlyList<string> RoundingModes { get; } = new[] { "HalfUp", "HalfEven", "Truncate" };
+    public bool CanEditSelectedStringConstant
+    {
+        get => _canEditSelectedStringConstant;
+        private set
+        {
+            if (Set(ref _canEditSelectedStringConstant, value)) Raise(nameof(CanEditSelectedNodeParameters));
+        }
+    }
+    public bool CanEditSelectedScaleFactor
+    {
+        get => _canEditSelectedScaleFactor;
+        private set
+        {
+            if (Set(ref _canEditSelectedScaleFactor, value)) Raise(nameof(CanEditSelectedNodeParameters));
+        }
+    }
+    public bool CanEditSelectedRound
+    {
+        get => _canEditSelectedRound;
+        private set
+        {
+            if (Set(ref _canEditSelectedRound, value)) Raise(nameof(CanEditSelectedNodeParameters));
+        }
+    }
+    public bool CanEditSelectedNodeParameters => CanEditSelectedStringConstant
+        || CanEditSelectedScaleFactor || CanEditSelectedRound;
+    public string SelectedNodeParameterSummary
+    {
+        get => _selectedNodeParameterSummary;
+        private set => Set(ref _selectedNodeParameterSummary, value);
+    }
+    public string SelectedNodeParameterError
+    {
+        get => _selectedNodeParameterError;
+        private set
+        {
+            if (Set(ref _selectedNodeParameterError, value)) Raise(nameof(HasSelectedNodeParameterError));
+        }
+    }
+    public bool HasSelectedNodeParameterError => !string.IsNullOrWhiteSpace(SelectedNodeParameterError);
     public bool CanEditSelectedFactEntity
     {
         get => _canEditSelectedFactEntity;
@@ -1158,6 +1228,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand BindSourceColumnCommand { get; }
     public RelayCommand SetConceptCommand { get; }
     public RelayCommand ApplyFactPropertiesCommand { get; }
+    public RelayCommand ApplySelectedNodeParametersCommand { get; }
     public RelayCommand SuggestMappingsCommand { get; }
     public RelayCommand SuggestConnectedMappingsCommand { get; }
     public RelayCommand ApplySuggestedMappingCommand { get; }
@@ -1278,6 +1349,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         BindSourceColumnCommand = new RelayCommand(_ => BindSelectedSourceColumn());
         SetConceptCommand = new RelayCommand(_ => SetSelectedConcept());
         ApplyFactPropertiesCommand = new RelayCommand(_ => ApplySelectedFactProperties());
+        ApplySelectedNodeParametersCommand = new RelayCommand(_ => ApplySelectedNodeParameters());
         SuggestMappingsCommand = new RelayCommand(async _ => await SuggestMappingsAsync());
         SuggestConnectedMappingsCommand = new RelayCommand(async _ => await SuggestConnectedMappingsAsync(),
             _ => !IsBusy && !IsSourceLoading);
@@ -1341,9 +1413,9 @@ public sealed class MainWindowViewModel : ViewModelBase
             : _session.Nodes.FirstOrDefault(node => node.NodeId == selectedNodeId);
         var selectionChanged = !StringComparer.Ordinal.Equals(previousSelection, _selectedNode?.NodeId);
 
+        LoadSelectedFactProperties();
         if (_selectedNode is not null)
         {
-            LoadSelectedFactProperties();
             if (selectionChanged && SelectedSuggestion is not null)
             {
                 CaptureSelectedSuggestionDraft();
@@ -1370,6 +1442,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private void LoadSelectedFactProperties()
     {
         var node = _selectedNode is null ? null : Session.Project.Nodes.FirstOrDefault(n => n.NodeId == _selectedNode.NodeId);
+        LoadSelectedNodeParameters(node);
         if (node?.NodeType != NodeTypeConstants.FactConstruct)
         {
             CanEditSelectedFactEntity = false;
@@ -1481,6 +1554,172 @@ public sealed class MainWindowViewModel : ViewModelBase
             : CanEditSelectedFactEntity
                 ? $"Entity identifier comes from the String constant '{source.DisplayName}' and can be edited here."
                 : $"Entity identifier is supplied by '{source.DisplayName}' ({source.NodeType}); select that source node to edit it.";
+    }
+
+    private void LoadSelectedNodeParameters(MappingNode? node)
+    {
+        CanEditSelectedStringConstant = node?.NodeType == NodeTypeConstants.Constant
+            && string.Equals(node.Parameters.GetValueOrDefault("shape")?.ToString(), "String", StringComparison.OrdinalIgnoreCase);
+        CanEditSelectedScaleFactor = node?.NodeType == NodeTypeConstants.Scale;
+        CanEditSelectedRound = node?.NodeType == NodeTypeConstants.Round;
+        SelectedNodeParameterError = "";
+        SelectedNodeParameterSummary = "";
+
+        if (CanEditSelectedStringConstant && node is not null)
+        {
+            SelectedStringConstantValue = node.Parameters.GetValueOrDefault("literal")?.ToString() ?? "";
+            var consumers = Session.Project.Edges
+                .Where(edge => edge.SourceNodeId == node.NodeId)
+                .Select(edge => Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == edge.TargetNodeId) is { } target
+                    ? $"{target.DisplayName}.{edge.TargetPortName}"
+                    : $"missing node.{edge.TargetPortName}")
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            SelectedNodeParameterSummary = consumers.Length == 0
+                ? "This String constant is not connected to another node."
+                : $"String value used by: {string.Join(", ", consumers)}.";
+        }
+        else if (CanEditSelectedScaleFactor && node is not null)
+        {
+            SelectedScaleFactor = node.Parameters.GetValueOrDefault("factor")?.ToString() ?? "1";
+            SelectedNodeParameterSummary = "The factor multiplies the connected decimal value. Use an exact invariant decimal.";
+        }
+        else if (CanEditSelectedRound && node is not null)
+        {
+            SelectedRoundDigits = node.Parameters.GetValueOrDefault("digits")?.ToString() ?? "0";
+            SelectedRoundMode = node.Parameters.GetValueOrDefault("mode")?.ToString() ?? "HalfEven";
+            SelectedNodeParameterSummary = "Rounding applies to the connected value. Choose 0–28 decimal places and a declared mode.";
+        }
+
+        if (CanEditSelectedNodeParameters) ValidateSelectedNodeParameterDraft();
+    }
+
+    private void ApplySelectedNodeParameters()
+    {
+        if (_selectedNode is null || !CanEditSelectedNodeParameters) return;
+        var node = Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == _selectedNode.NodeId);
+        if (node is null)
+        {
+            SelectedNodeParameterError = "The selected node no longer exists. Select it again before editing.";
+            return;
+        }
+
+        ValidateSelectedNodeParameterDraft();
+        if (HasSelectedNodeParameterError) return;
+
+        var parameters = new Dictionary<string, object?>(StringComparer.Ordinal);
+        if (CanEditSelectedStringConstant)
+        {
+            parameters["literal"] = SelectedStringConstantValue;
+        }
+        else if (CanEditSelectedScaleFactor)
+        {
+            parameters["factor"] = SelectedScaleFactor.Trim();
+        }
+        else if (CanEditSelectedRound)
+        {
+            int.TryParse(SelectedRoundDigits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits);
+            parameters["digits"] = digits.ToString(CultureInfo.InvariantCulture);
+            parameters["mode"] = SelectedRoundMode;
+        }
+
+        var changed = Session.SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
+        {
+            [node.NodeId] = parameters
+        });
+        SelectedNodeParameterError = "";
+        StatusText = changed ? "Node parameters updated as one undoable change." : "No node parameters changed.";
+    }
+
+    private void ValidateSelectedNodeParameterDraft()
+    {
+        if (_selectedNode is null || !CanEditSelectedNodeParameters)
+        {
+            SelectedNodeParameterError = "";
+            return;
+        }
+
+        var node = Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == _selectedNode.NodeId);
+        if (node is null)
+        {
+            SelectedNodeParameterError = "The selected node no longer exists. Select it again before editing.";
+            return;
+        }
+
+        if (CanEditSelectedStringConstant)
+        {
+            foreach (var edge in Session.Project.Edges.Where(edge => edge.SourceNodeId == node.NodeId))
+            {
+                var target = Session.Project.Nodes.FirstOrDefault(candidate => candidate.NodeId == edge.TargetNodeId);
+                if (target?.NodeType == NodeTypeConstants.FactConstruct && edge.TargetPortName == "entity"
+                    && (string.IsNullOrWhiteSpace(SelectedStringConstantValue)
+                        || SelectedStringConstantValue.Any(char.IsControl)))
+                {
+                    SelectedNodeParameterError = "XBR005: an entity identifier must contain at least one non-control character.";
+                    return;
+                }
+
+                var isPeriodDateInput = target?.NodeType == NodeTypeConstants.BuildInstantDate
+                    && edge.TargetPortName == "dateText"
+                    || target?.NodeType == NodeTypeConstants.BuildDurationDate
+                    && edge.TargetPortName is "startText" or "endText";
+                if (isPeriodDateInput
+                    && !DateOnly.TryParseExact(SelectedStringConstantValue, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out _))
+                {
+                    SelectedNodeParameterError = "XBR004: a connected period date must use the valid YYYY-MM-DD format.";
+                    return;
+                }
+            }
+        }
+        else if (CanEditSelectedScaleFactor
+                 && !TryParseExactInvariantDecimal(SelectedScaleFactor, out _))
+        {
+            SelectedNodeParameterError = "MAP008: enter an exact invariant decimal with at most 29 significant digits and 28 decimal places.";
+            return;
+        }
+        else if (CanEditSelectedRound
+                 && (!int.TryParse(SelectedRoundDigits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits)
+                     || digits is < 0 or > 28))
+        {
+            SelectedNodeParameterError = "MAP018: decimal places must be an integer from 0 through 28.";
+            return;
+        }
+        else if (CanEditSelectedRound && !RoundingModes.Contains(SelectedRoundMode, StringComparer.Ordinal))
+        {
+            SelectedNodeParameterError = "MAP018: choose HalfUp, HalfEven, or Truncate as the rounding mode.";
+            return;
+        }
+
+        SelectedNodeParameterError = "";
+    }
+
+    private static bool TryParseExactInvariantDecimal(string text, out decimal value)
+    {
+        value = default;
+        var token = text.Trim();
+        if (token.Length == 0) return false;
+
+        if (token[0] is '+' or '-') token = token[1..];
+        if (token.Length == 0) return false;
+        var decimalIndex = token.IndexOf('.');
+        if (decimalIndex >= 0 && token.IndexOf('.', decimalIndex + 1) >= 0) return false;
+
+        var integerPart = decimalIndex < 0 ? token : token[..decimalIndex];
+        var fractionalPart = decimalIndex < 0 ? string.Empty : token[(decimalIndex + 1)..];
+        if (integerPart.Any(character => !char.IsAsciiDigit(character))
+            || fractionalPart.Any(character => !char.IsAsciiDigit(character))
+            || (integerPart.Length == 0 && fractionalPart.Length == 0)
+            || fractionalPart.Length > 28)
+            return false;
+
+        var digits = integerPart.Concat(fractionalPart).ToArray();
+        var firstNonZero = Array.FindIndex(digits, character => character != '0');
+        var significantDigits = firstNonZero < 0 ? 1 : digits.Length - firstNonZero;
+        return significantDigits <= 29
+            && decimal.TryParse(text, NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite
+                | NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture, out value);
     }
 
     public async Task NewProjectAsync()
