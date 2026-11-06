@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xbrlmappingstudio.invalid/schemas/taxonomy-benchmark.schema.json",
+  "title": "XBRLMappingStudio synthetic taxonomy benchmark record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "scenarioId",
+    "measurementStatus",
+    "thresholdPassClaimed",
+    "capturedUtc",
+    "runtime",
+    "fixture",
+    "measurements",
+    "integrity",
+    "interpretation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "scenarioId": { "enum": ["taxonomy-search-20k", "taxonomy-search-custom"] },
+    "measurementStatus": { "const": "measured_synthetic_only" },
+    "thresholdPassClaimed": { "const": false },
+    "capturedUtc": { "type": "string", "format": "date-time" },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["framework", "operatingSystem", "operatingSystemArchitecture", "processArchitecture", "processorDescription", "processorCount", "configuration", "stopwatchHighResolution", "stopwatchFrequency"],
+      "properties": {
+        "framework": { "type": "string", "minLength": 1 },
+        "operatingSystem": { "type": "string", "minLength": 1 },
+        "operatingSystemArchitecture": { "type": "string", "minLength": 1 },
+        "processArchitecture": { "type": "string", "minLength": 1 },
+        "processorDescription": { "type": "string", "minLength": 1 },
+        "processorCount": { "type": "integer", "minimum": 1 },
+        "configuration": { "type": "string", "minLength": 1 },
+        "stopwatchHighResolution": { "type": "boolean" },
+        "stopwatchFrequency": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "profileId", "profileDigest", "conceptCount", "relationshipCount", "roleUri", "groupCount", "digestBinding"],
+      "properties": {
+        "generator": { "type": "string", "const": "synthetic-taxonomy-v1" },
+        "profileId": { "type": "string", "minLength": 1 },
+        "profileDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "conceptCount": { "type": "integer", "minimum": 3 },
+        "relationshipCount": { "type": "integer", "minimum": 1 },
+        "roleUri": { "type": "string", "format": "uri" },
+        "groupCount": { "type": "integer", "minimum": 1 },
+        "digestBinding": { "type": "string", "minLength": 1 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtureGenerationMs", "indexConstructionMs", "roleNetworkConstructionMs", "indexRecreationMs", "warmSearch", "lazyRoleExpansion"],
+      "properties": {
+        "fixtureGenerationMs": { "type": "number", "minimum": 0 },
+        "indexConstructionMs": { "type": "number", "minimum": 0 },
+        "roleNetworkConstructionMs": { "type": "number", "minimum": 0 },
+        "indexRecreationMs": { "type": "number", "minimum": 0 },
+        "warmSearch": { "$ref": "#/$defs/search" },
+        "lazyRoleExpansion": { "$ref": "#/$defs/expansion" }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtureAndIndexIdentityVerified", "recreatedIndexMatches", "preCancelledSearchObserved", "rapidSupersedingQueryCoverage"],
+      "properties": {
+        "fixtureAndIndexIdentityVerified": { "const": true },
+        "recreatedIndexMatches": { "const": true },
+        "preCancelledSearchObserved": { "const": true },
+        "rapidSupersedingQueryCoverage": { "type": "string", "minLength": 1 }
+      }
+    },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notes"],
+      "properties": { "notes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 } }
+    }
+  },
+  "$defs": {
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warmupCount", "sampleCount", "p50Ms", "p95Ms", "maximumMs", "rawSamples"],
+      "properties": {
+        "warmupCount": { "type": "integer", "minimum": 1 },
+        "sampleCount": { "type": "integer", "minimum": 1 },
+        "p50Ms": { "type": "number", "minimum": 0 },
+        "p95Ms": { "type": "number", "minimum": 0 },
+        "maximumMs": { "type": "number", "minimum": 0 },
+        "rawSamples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "queryKind", "query", "elapsedMs", "resultCount"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "queryKind": { "enum": ["broad", "exact_label"] },
+              "query": { "type": "string", "minLength": 1 },
+              "elapsedMs": { "type": "number", "minimum": 0 },
+              "resultCount": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "expansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampleCount", "pageSize", "p50Ms", "p95Ms", "maximumMs", "rawSamples"],
+      "properties": {
+        "sampleCount": { "type": "integer", "minimum": 1 },
+        "pageSize": { "type": "integer", "minimum": 1 },
+        "p50Ms": { "type": "number", "minimum": 0 },
+        "p95Ms": { "type": "number", "minimum": 0 },
+        "maximumMs": { "type": "number", "minimum": 0 },
+        "rawSamples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "parentQName", "page", "elapsedMs", "returnedCount", "totalChildren"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "parentQName": { "type": "string", "minLength": 1 },
+              "page": { "type": "integer", "minimum": 0 },
+              "elapsedMs": { "type": "number", "minimum": 0 },
+              "returnedCount": { "type": "integer", "minimum": 0 },
+              "totalChildren": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

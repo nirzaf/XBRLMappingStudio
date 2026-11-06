@@ -69,7 +69,7 @@ where explicitly narrowed below.
 | PERF01 | Missing | No cold/warm startup measurements. BEN-01 now provides a command-level process-tree harness, but native workspace-ready timing remains unmeasured. |
 | PERF02 | Missing | No idle/peak resource measurements. BEN-01 now records process-tree working set, private memory, cumulative CPU and hardware, but no product workload has been benchmarked. |
 | PERF03 | Missing | No graph scale benchmark at 100–2,000 nodes; BEN-01's proposed gesture scenario still needs native fixture loading, replay and frame instrumentation. |
-| PERF04 | Missing | No real taxonomy benchmark at 20,000 concepts; BEN-01's proposed synthetic search scenario has not been run. |
+| PERF04 | Missing | The synthetic 20,000-concept `TaxonomyIndex` runner emits index construction/recreation, 100 warm searches, and 100 bounded role-page expansions with raw samples. A local output was schema-validated but retained only as a temporary check, not as performance evidence. No licensed real-taxonomy run, customer hardware baseline, or accepted threshold is available; synthetic component measurements do not qualify PERF04. |
 | PERF05 | Missing | No interaction latency measurements; process duration is not UI input-to-frame latency. |
 | PERF06 | Missing | No background validation responsiveness benchmark; native concurrent gesture and Arelle evidence is still required. |
 | PERF07 | Missing | No Windows recovery and clean-install qualification. |
@@ -82,7 +82,8 @@ where explicitly narrowed below.
 
 | Ticket | Status | Evidence and limitation |
 |---|---|---|
-| BEN-01 | Partially implemented | `tools/performance/benchmark_harness.py` captures Windows/Linux process-tree samples, hardware, clock calibration, optional artifact/fixture digests and raw records validated against `benchmark_result.schema.json`; a deterministic SQLite fixture and proposed scenario catalog are included. The self-test and unit tests verify clock calibration, fixture stability, process-tree capture, no-overwrite behavior and schema enforcement. Native UI gesture replay, graph/taxonomy fixture integration, workspace-ready instrumentation and product benchmark runs remain unmeasured; this does not complete PERF01–PERF07. |
+| BEN-01 | Partially implemented | `tools/performance/benchmark_harness.py` captures Windows/Linux process-tree samples, hardware, clock calibration, optional artifact/fixture digests and raw records validated against `benchmark_result.schema.json`; a deterministic SQLite fixture and proposed scenario catalog are included. The self-test and unit tests verify clock calibration, fixture stability, process-tree capture, no-overwrite behavior and schema enforcement. Graph fixture integration, native UI gesture replay, workspace-ready instrumentation and product benchmark runs remain unmeasured; this does not complete PERF01–PERF07. |
+| BEN-05 | Partially implemented | `tools/performance/taxonomy-benchmark` generates a deterministic SHA-256-bound 20,000-concept profile and records index build/recreation, 100 warm searches and 100 bounded role-page expansions with every duration and p50/p95/max. It checks paging, result totals, cancellation and recreated-index identity; the existing desktop test covers rapid superseding queries. The runner is compiled and self-tested locally, and CI is configured to repeat that self-test in both OS matrices. No real taxonomy, native UI latency or target-hardware threshold is claimed; those remain gated. |
 
 ## Baseline verification before pending-feature implementation
 

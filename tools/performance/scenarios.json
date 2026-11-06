@@ -36,11 +36,11 @@
     },
     {
       "id": "taxonomy-search-20k",
-      "status": "proposed",
+      "status": "synthetic-runner-available",
       "depends_on": "BEN-05",
       "fixture": "synthetic digest-bound profile with 20000 concepts",
-      "interaction": "100 warm searches, lazy role expansion, cancellation, and rapid superseding queries",
-      "automation_status": "process-tree capture available; the 20k fixture generator and repeated-query runner are pending"
+      "interaction": "100 warm searches and 100 bounded lazy role-page expansions, with index recreation and cancellation integrity checks",
+      "automation_status": "digest-bound synthetic fixture and p50/p95 raw-sample runner available; real taxonomy, native UI, and target-hardware qualification remain gated"
     },
     {
       "id": "arelle-foreground-validation",
