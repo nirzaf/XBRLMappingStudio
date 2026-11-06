@@ -714,6 +714,49 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void JoinMissingBlankAndNilKeysRemainUnmatchedByCardinality()
+    {
+        var leftRows = new[]
+        {
+            GraphHarness.Row(("a", D(10m))),
+            GraphHarness.Row(("k", DataValue.Blank()), ("a", D(11m))),
+            GraphHarness.Row(("k", DataValue.ExplicitNil(PortShape.String)), ("a", D(12m)))
+        };
+        var rightRows = new[]
+        {
+            GraphHarness.Row(("a", D(20m))),
+            GraphHarness.Row(("k", DataValue.Blank()), ("a", D(21m))),
+            GraphHarness.Row(("k", DataValue.ExplicitNil(PortShape.String)), ("a", D(22m)))
+        };
+
+        var inner = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All");
+        Assert.Empty(inner.Facts);
+
+        var left = RunJoinToGroupedFacts(leftRows, rightRows, "Left", "All");
+        Assert.Equal(new[] { 33m }, left.Facts.Select(fact => fact.Value!.Value));
+
+        var right = RunJoinToGroupedFacts(leftRows, rightRows, "Right", "All");
+        Assert.Equal(new[] { 63m }, right.Facts.Select(fact => fact.Value!.Value));
+
+        var full = RunJoinToGroupedFacts(leftRows, rightRows, "Full", "All");
+        Assert.Equal(new[] { 96m }, full.Facts.Select(fact => fact.Value!.Value));
+    }
+
+    [Fact]
+    public void JoinUnknownDuplicateKeyPolicy_FailsClosed()
+    {
+        var result = RunJoinToGroupedFacts(
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(10m))) },
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(20m))) },
+            "Inner", "Merge");
+
+        Assert.Contains(result.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.MapInvalidJoinDuplicateKeyPolicy
+                && diagnostic.IsBlocking);
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
     public void JoinExpansionBudget_BlocksBeforePublication()
     {
         const string Left = "L";

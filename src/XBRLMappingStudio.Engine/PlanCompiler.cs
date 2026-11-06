@@ -584,6 +584,15 @@ public sealed class PlanCompiler
                             $"Unknown join cardinality '{cardinality}'.", nodeId: nodeId);
                         cardinality = "Inner";
                     }
+                    if (dupPolicy is not ("Fail" or "First" or "All"))
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidJoinDuplicateKeyPolicy,
+                            DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                            $"Unknown join duplicateKey '{dupPolicy}'. Expected Fail, First or All.",
+                            nodeId: nodeId);
+                        outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                        return outputs;
+                    }
                     if (fieldConflict is not ("Left" or "Right" or "Fail"))
                     {
                         diag.Error(DiagnosticCodes.MapInvalidJoinFieldConflictPolicy,
@@ -597,10 +606,15 @@ public sealed class PlanCompiler
                     // Build right-hand index keyed by rightKey, honouring the duplicate policy.
                     var index = new Dictionary<string, List<(Dictionary<string, DataValue> Fields, int ItemIndex)>>(StringComparer.Ordinal);
                     var rightOrder = new List<string>();
+                    var unmatchedRightRows = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
                     foreach (var (rec, itemIndex) in right.Select((record, index) => (record, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
-                        var rk = GetField(fields, rightKey).AsString();
+                        if (!TryGetJoinKey(fields, rightKey, out var rk))
+                        {
+                            unmatchedRightRows.Add((fields, itemIndex));
+                            continue;
+                        }
                         if (!index.TryGetValue(rk, out var bucket))
                         {
                             bucket = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
@@ -713,11 +727,13 @@ public sealed class PlanCompiler
                     foreach (var (rec, itemIndex) in left.Select((record, index) => (record, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
-                        var lk = GetField(fields, leftKey).AsString();
-                        var hasMatch = index.TryGetValue(lk, out var bucket) && bucket.Count > 0;
-                        if (hasMatch)
+                        var hasJoinKey = TryGetJoinKey(fields, leftKey, out var lk);
+                        List<(Dictionary<string, DataValue> Fields, int ItemIndex)>? bucket = null;
+                        if (hasJoinKey && index.TryGetValue(lk, out var matchingRows) && matchingRows.Count > 0)
+                            bucket = matchingRows;
+                        if (bucket is not null)
                         {
-                            foreach (var rrow in bucket!)
+                            foreach (var rrow in bucket)
                             {
                                 if (!AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex))
                                 {
@@ -754,6 +770,18 @@ public sealed class PlanCompiler
                         }
                     }
 
+                    if (cardinality is "Right" or "Full")
+                    {
+                        foreach (var (fields, itemIndex) in unmatchedRightRows)
+                        {
+                            if (!AddRow(null, null, fields, itemIndex))
+                            {
+                                outputs["rows"] = DataValue.Collection(joined);
+                                return outputs;
+                            }
+                        }
+                    }
+
                     outputs["rows"] = DataValue.Collection(joined);
                     break;
                 }
@@ -783,6 +811,19 @@ public sealed class PlanCompiler
 
     private static DataValue GetField(IReadOnlyDictionary<string, DataValue> fields, string name)
         => fields.TryGetValue(name, out var v) ? v : DataValue.Missing(PortShape.String);
+
+    private static bool TryGetJoinKey(IReadOnlyDictionary<string, DataValue> fields, string name, out string key)
+    {
+        var value = GetField(fields, name);
+        if (value.Presence != ValuePresence.Present)
+        {
+            key = string.Empty;
+            return false;
+        }
+
+        key = value.AsString();
+        return !string.IsNullOrWhiteSpace(key);
+    }
 
     private static IReadOnlyList<DataValue> ResolveCollection(
         RowSnapshot snapshot, MappingEdge? edge)

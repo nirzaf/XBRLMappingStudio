@@ -20,6 +20,10 @@ integration project-reference build was blocked because the running Desktop proc
 held shared Release output files; the test project was rebuilt against the existing
 dependency binaries with `-p:BuildProjectReferences=false`. `git diff --check` passed.
 
+The follow-up join-key suite also passed 20/20: missing, blank and nil key values stay
+unmatched and honor Inner/Left/Right/Full cardinality; invalid `duplicateKey` values
+block with MAP028 instead of falling through to `All`.
+
 ## ENG-01 qualified row-scoped execution
 
 The implementation preserves the existing in-memory path for runs that stay within
