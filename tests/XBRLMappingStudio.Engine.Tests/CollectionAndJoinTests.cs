@@ -117,6 +117,9 @@ public class CollectionAndJoinTests
         Assert.Equal(new[] { "row:1", "row:3" }, mixedFact.SourceTransformationPaths
             .Select(path => path.Source.Locator).OrderBy(locator => locator, StringComparer.Ordinal));
 
+        var empty = RunScalarSum(Array.Empty<DataValue>(), preview: true);
+        Assert.Equal(0m, Assert.Single(empty.Context.SampledTotals).Value);
+
         var incomplete = RunScalarSum(new[]
         {
             D(12m),
