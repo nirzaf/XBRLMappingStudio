@@ -965,6 +965,7 @@ public sealed class MappingJobService
             progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
             var workerResponse = await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
             var workerDiagnostics = (workerResponse.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+            EnrichWorkerDiagnosticsWithFactPaths(workerDiagnostics, artifact, cancellationToken);
             var completion = ValidationCompletionReportValidator.Evaluate(workerResponse.Result, _profile);
             var workerBlocking = workerDiagnostics.Any(diagnostic => diagnostic.IsBlocking);
             manifest.Outcome = workerResponse.Status switch
@@ -1152,7 +1153,29 @@ public sealed class MappingJobService
         IReadOnlyList<XbrlFact> facts)
     {
         if (diagnostics.Count == 0 || facts.Count == 0) return;
-        var factsByLocator = OimSerializer.GetFactLocatorMap(facts);
+        EnrichWorkerDiagnosticsWithFactPaths(diagnostics, OimSerializer.GetFactLocatorMap(facts));
+    }
+
+    private static void EnrichWorkerDiagnosticsWithFactPaths(
+        IList<Diagnostic> diagnostics,
+        LargeRunArtifact artifact,
+        CancellationToken cancellationToken)
+    {
+        if (diagnostics.Count == 0) return;
+        var locators = diagnostics.Select(diagnostic => diagnostic.FactLocator)
+            .Where(locator => !string.IsNullOrWhiteSpace(locator))
+            .Select(locator => locator!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (locators.Length == 0) return;
+        EnrichWorkerDiagnosticsWithFactPaths(
+            diagnostics, artifact.FindFactsByLocators(locators, cancellationToken));
+    }
+
+    private static void EnrichWorkerDiagnosticsWithFactPaths(
+        IList<Diagnostic> diagnostics,
+        IReadOnlyDictionary<string, XbrlFact> factsByLocator)
+    {
         for (var index = 0; index < diagnostics.Count; index++)
         {
             var diagnostic = diagnostics[index];

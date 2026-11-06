@@ -103,6 +103,11 @@ public sealed class LargeRunArtifact : IDisposable
         }
     }
 
+    internal IReadOnlyDictionary<string, XbrlFact> FindFactsByLocators(
+        IEnumerable<string> locators,
+        CancellationToken cancellationToken = default)
+        => _facts.FindFactsByLocators(locators, cancellationToken);
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -260,6 +265,28 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
             yield return (JsonSerializer.Deserialize<XbrlFact>(json, JsonOptions)
                 ?? throw new InvalidDataException("The disk-backed fact spool contains an invalid fact row."), reader.GetInt32(1));
         }
+    }
+
+    public IReadOnlyDictionary<string, XbrlFact> FindFactsByLocators(
+        IEnumerable<string> locators,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(locators);
+        var remaining = locators.Where(locator => !string.IsNullOrWhiteSpace(locator))
+            .ToHashSet(StringComparer.Ordinal);
+        var matches = new Dictionary<string, XbrlFact>(StringComparer.Ordinal);
+        if (remaining.Count == 0) return matches;
+
+        foreach (var (fact, occurrence) in InSemanticOrderWithOccurrences(cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var locator = OimSerializer.GetFactLocator(fact, occurrence);
+            if (!remaining.Remove(locator)) continue;
+            matches.Add(locator, fact);
+            if (remaining.Count == 0) break;
+        }
+        return matches;
     }
 
     public void Finish(CancellationToken cancellationToken = default)

@@ -91,6 +91,57 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task LargeRunWorkerFindings_LinkExactDuplicateFactLocatorsToSpooledSources()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 9, variedValues: false);
+            var project = BuildProject(database);
+            var profile = SyntheticProfile.Build();
+            using var small = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 20, RowBatchSize: 3));
+            var expectedByLocator = OimSerializer.GetFactLocatorMap(small.Facts);
+            var expectedLocators = OimSerializer.GetFactLocators(small.Facts);
+            var worker = new DigestOnlyArtifactWorker(profile, emitFactLocatorFindings: true);
+
+            using var large = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 2, RowBatchSize: 3), worker);
+
+            Assert.Equal(RunOutcome.InvalidMapping, large.Manifest.Outcome);
+            var linked = large.Manifest.Diagnostics
+                .Where(diagnostic => diagnostic.Message.StartsWith("large fact finding", StringComparison.Ordinal))
+                .OrderBy(diagnostic => diagnostic.Message, StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(2, linked.Length);
+            Assert.Equal(new[] { expectedLocators[0], expectedLocators[^1] },
+                linked.Select(diagnostic => diagnostic.FactLocator));
+            foreach (var diagnostic in linked)
+            {
+                var locator = Assert.IsType<string>(diagnostic.FactLocator);
+                var expectedFact = expectedByLocator[locator];
+                var expectedPaths = expectedFact.SourceTransformationPaths;
+                var actualPaths = Assert.IsAssignableFrom<IReadOnlyList<SourceTransformationPath>>(
+                    diagnostic.SourceTransformationPaths);
+                Assert.Equal(expectedPaths.Count, actualPaths.Count);
+                for (var pathIndex = 0; pathIndex < expectedPaths.Count; pathIndex++)
+                {
+                    Assert.Equal(expectedPaths[pathIndex].Source, actualPaths[pathIndex].Source);
+                    Assert.Equal(expectedPaths[pathIndex].TransformationIds,
+                        actualPaths[pathIndex].TransformationIds);
+                }
+                Assert.Equal(expectedFact.SourceTransformationPaths[0].Source, diagnostic.Source);
+            }
+            Assert.NotEqual(linked[0].Source, linked[1].Source);
+            Assert.Contains(large.Manifest.Diagnostics, diagnostic => diagnostic.Message == "unknown large fact locator"
+                && diagnostic.FactLocator == "f-not-in-this-report"
+                && diagnostic.Source is null
+                && diagnostic.SourceTransformationPaths is null);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task LargeSpoolBudgetExceeded_FailsClosedBeforeWorkerValidation()
     {
         var root = NewDirectory();
@@ -689,11 +740,16 @@ public sealed class LargeRunExecutionTests
     private sealed class DigestOnlyArtifactWorker : IWorkerClient
     {
         private readonly LocalSyntheticWorker _inner;
+        private readonly bool _emitFactLocatorFindings;
         public int ValidationRequests { get; private set; }
         public string? LastValidationPath { get; private set; }
         public WorkerStatus ValidationStatus { get; set; } = WorkerStatus.Success;
 
-        public DigestOnlyArtifactWorker(FilingProfile profile) => _inner = new LocalSyntheticWorker(profile);
+        public DigestOnlyArtifactWorker(FilingProfile profile, bool emitFactLocatorFindings = false)
+        {
+            _inner = new LocalSyntheticWorker(profile);
+            _emitFactLocatorFindings = emitFactLocatorFindings;
+        }
         public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
             => _inner.HandshakeAsync(cancellationToken);
 
@@ -719,12 +775,42 @@ public sealed class LargeRunExecutionTests
             using var sha = SHA256.Create();
             var actual = "sha256:" + Convert.ToHexString(await sha.ComputeHashAsync(stream, cancellationToken))
                 .ToLowerInvariant();
-            return actual == expected
-                ? new WorkerResponse(request.OperationId, ValidationStatus,
-                    CompletionResult(request, ValidationStatus == WorkerStatus.Success),
-                    Array.Empty<Diagnostic>(), ValidationStatus == WorkerStatus.Success ? null : "Synthetic worker rejection.")
-                : Failure(request, "Report digest mismatch.");
+            if (actual != expected) return Failure(request, "Report digest mismatch.");
+
+            var diagnostics = _emitFactLocatorFindings
+                ? await ReadFactLocatorFindingsAsync(path, request.OperationId, cancellationToken)
+                : Array.Empty<Diagnostic>();
+            return new WorkerResponse(request.OperationId, ValidationStatus,
+                CompletionResult(request, ValidationStatus == WorkerStatus.Success), diagnostics,
+                ValidationStatus == WorkerStatus.Success ? null : "Synthetic worker rejection.");
         }
+
+        private static async Task<Diagnostic[]> ReadFactLocatorFindingsAsync(
+            string reportPath, string operationId, CancellationToken cancellationToken)
+        {
+            var report = await File.ReadAllTextAsync(reportPath, cancellationToken);
+            var entries = OimSerializer.ReadFactEntries(report);
+            var first = Assert.IsType<string>(entries.FirstOrDefault()?.Locator);
+            var last = Assert.IsType<string>(entries.LastOrDefault()?.Locator);
+            return new[]
+            {
+                FactFinding("large fact finding 1", first, operationId),
+                FactFinding("large fact finding 2", last, operationId),
+                FactFinding("unknown large fact locator", "f-not-in-this-report", operationId)
+            };
+        }
+
+        private static Diagnostic FactFinding(string message, string locator, string operationId) => new()
+        {
+            Code = DiagnosticCodes.XbrValidationFailed,
+            Subsystem = DiagnosticSubsystem.XBRL,
+            Severity = DiagnosticSeverity.Error,
+            Stage = DiagnosticStage.Validation,
+            IsBlocking = true,
+            Message = message,
+            OperationId = operationId,
+            FactLocator = locator
+        };
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

@@ -119,8 +119,7 @@ public static class OimSerializer
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (occurrence < 1) throw new InvalidDataException("A fact occurrence index must be positive.");
-                var key = fact.SemanticKey();
-                var id = CreateFactLocator(key, occurrence);
+                var id = GetFactLocator(fact, occurrence);
                 writer.WritePropertyName(id);
                 FactToJson(fact, ns).WriteTo(writer);
                 writer.Flush();
@@ -163,6 +162,14 @@ public static class OimSerializer
         for (var index = 0; index < facts.Count; index++)
             map.Add(locators[index], facts[index]);
         return map;
+    }
+
+    /// <summary>Returns the deterministic facts-object key for one fact occurrence.</summary>
+    public static string GetFactLocator(XbrlFact fact, int occurrence)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        if (occurrence < 1) throw new ArgumentOutOfRangeException(nameof(occurrence));
+        return CreateFactLocator(fact.SemanticKey(), occurrence);
     }
 
     private static string CreateFactLocator(string semanticKey, int occurrence)

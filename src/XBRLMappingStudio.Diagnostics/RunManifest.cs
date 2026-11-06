@@ -76,10 +76,11 @@ public sealed class RunManifest
     /// <summary>
     /// Conservative evidence-completeness marker. Current runs record row-phase paths on
     /// blocking FactConstruct diagnostics and supported row- and set-phase paths on
-    /// facts, including joined-record GroupBy paths. In-memory synthetic-worker findings
-    /// link by exact xBRL-JSON fact key. Other unmodeled derived record shapes, complete
-    /// input identity coverage, Arelle or large-report finding-to-fact links, and paths
-    /// embedded in the report artifact remain uncovered, so this stays Incomplete.
+    /// facts, including joined-record GroupBy paths. In-memory and disk-spooled worker
+    /// findings link by exact xBRL-JSON fact key when the worker supplies one. Other
+    /// unmodeled derived record shapes, complete input identity coverage, Arelle findings
+    /// without exact fact identity, and paths embedded in the report artifact remain
+    /// uncovered, so this stays Incomplete.
     /// </summary>
     [JsonConverter(typeof(JsonStringEnumConverter<RunProvenanceStatus>))]
     public RunProvenanceStatus ProvenanceStatus { get; set; } = RunProvenanceStatus.Incomplete;
