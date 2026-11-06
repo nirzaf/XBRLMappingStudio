@@ -219,6 +219,36 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
     }
 
     [Fact]
+    public void RunManifest_ProvenanceStatusDefaultsIncompleteAndSerializesAsAStableString()
+    {
+        var manifest = new RunManifest
+        {
+            RunId = "run",
+            OperationId = "operation",
+            ProjectId = "project",
+            ProfileDigest = "sha256:profile",
+            EngineVersion = "test"
+        };
+
+        Assert.Equal(RunProvenanceStatus.Incomplete, manifest.ProvenanceStatus);
+        var json = JsonSerializer.Serialize(manifest);
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal("Incomplete", document.RootElement
+            .GetProperty(nameof(RunManifest.ProvenanceStatus)).GetString());
+
+        var restored = JsonSerializer.Deserialize<RunManifest>(json);
+        Assert.NotNull(restored);
+        Assert.Equal(RunProvenanceStatus.Incomplete, restored.ProvenanceStatus);
+
+        const string legacyManifestJson = """
+            {"RunId":"legacy-run","OperationId":"legacy-operation","ProjectId":"legacy-project","ProfileDigest":"sha256:legacy","EngineVersion":"test"}
+            """;
+        var legacy = JsonSerializer.Deserialize<RunManifest>(legacyManifestJson);
+        Assert.NotNull(legacy);
+        Assert.Equal(RunProvenanceStatus.Incomplete, legacy.ProvenanceStatus);
+    }
+
+    [Fact]
     public async Task SharedExecutionServiceReadsConfiguredSqliteSource()
     {
         var database = Path.Combine(_dir, "financials.db");

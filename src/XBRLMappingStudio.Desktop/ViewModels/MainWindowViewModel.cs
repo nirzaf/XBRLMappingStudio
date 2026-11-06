@@ -4714,14 +4714,22 @@ public sealed class MainWindowViewModel : ViewModelBase
         var truncationNote = resultFactCount > PreviewFacts.Count
             ? $" Showing the first {PreviewFacts.Count} of {resultFactCount} fact(s)."
             : "";
+        var provenanceStatus = FormatProvenanceStatus(result.Manifest.ProvenanceStatus);
         PreviewResultSummary = result.Manifest.IsPreview
             ? $"Preview only · {PreviewFacts.Count} sampled fact(s). "
-                + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published."
-            : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s).{truncationNote} See Diagnostics for details.";
+                + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published. {provenanceStatus}"
+            : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s).{truncationNote} See Diagnostics for details. {provenanceStatus}";
         SelectedPreviewFact = PreviewFacts.FirstOrDefault();
         Raise(nameof(Diagnostics));
         Raise(nameof(PreviewFacts));
     }
+
+    private static string FormatProvenanceStatus(RunProvenanceStatus status)
+        => status switch
+        {
+            RunProvenanceStatus.Complete => "Provenance complete.",
+            _ => "Provenance incomplete: per-source paths, full input identity coverage, and worker finding-to-fact links are not fully recorded."
+        };
 
     private void OpenSelectedPreviewEvidence()
     {

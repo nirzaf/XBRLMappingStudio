@@ -40,6 +40,8 @@ public sealed class MappingOperationViewModelTests
 
             Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             Assert.Contains("partial", viewModel.PreviewResultSummary, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Provenance incomplete", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.Contains("worker finding-to-fact links", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             var fact = Assert.Single(viewModel.PreviewFacts);
             Assert.Contains($"{mappingOracle.Concept} = {mappingOracle.ValueLexical}", fact.Display, StringComparison.Ordinal);
             Assert.Contains(mappingOracle.Unit, fact.Display, StringComparison.Ordinal);

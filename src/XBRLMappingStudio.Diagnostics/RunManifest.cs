@@ -3,6 +3,13 @@ using System.Text.Json.Serialization;
 
 namespace XBRLMappingStudio.Diagnostics;
 
+/// <summary>Whether source and transformation evidence is complete for a run.</summary>
+public enum RunProvenanceStatus
+{
+    Incomplete,
+    Complete
+}
+
 /// <summary>
 /// Terminal outcome of a job. Distinguishes confirmed states from ambiguous ones per
 /// section 9 (Job lifecycle and publication).
@@ -65,6 +72,14 @@ public sealed class RunManifest
     public string? PublishedArtifactDigest { get; set; }
 
     public RunOutcome Outcome { get; set; } = RunOutcome.Unknown;
+
+    /// <summary>
+    /// Conservative evidence-completeness marker. Current mappings do not yet persist
+    /// per-source transformation paths, complete input identity coverage, or worker
+    /// finding-to-fact links, so this remains Incomplete for current runs.
+    /// </summary>
+    [JsonConverter(typeof(JsonStringEnumConverter<RunProvenanceStatus>))]
+    public RunProvenanceStatus ProvenanceStatus { get; set; } = RunProvenanceStatus.Incomplete;
 
     /// <summary>
     /// True when this run was a bounded preview/draft evaluation rather than a full,
@@ -251,6 +266,7 @@ public sealed class DiagnosticBag
 [JsonSerializable(typeof(Diagnostic))]
 [JsonSerializable(typeof(DiagnosticSeverity))]
 [JsonSerializable(typeof(RunOutcome))]
+[JsonSerializable(typeof(RunProvenanceStatus))]
 public partial class DiagnosticsJsonContext : JsonSerializerContext
 {
 }
