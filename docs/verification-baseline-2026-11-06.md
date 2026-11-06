@@ -411,3 +411,7 @@ suite (717 passed, 5 environment-gated Arelle skips). The Python worker suite pa
 process-tree sampling failure under concurrent load passed on isolated rerun. The
 taxonomy benchmark self-test passed for 20,000 concepts and graph sizes 100, 500, 1,000
 and 2,000. `git diff --check` passed.
+
+Exact-head GitHub Actions run [42286350022](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42286350022)
+for source SHA `41a32c8c0ead27e4b27b60be7924b050cb71bc43` passed repository hygiene,
+Windows and Ubuntu Release build/tests, and the pinned Arelle worker integration.
