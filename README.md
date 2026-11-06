@@ -141,7 +141,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Exact-head CI: 723 passed and 5 gated Arelle cases skipped per OS; the pinned worker job passed 68 Python tests and all 11 gated .NET Arelle execution tests. |
+| Tests | xUnit 2.9.3 | Exact-head CI on `2887939e`: Windows and Ubuntu each passed 747 tests and skipped 5 environment-gated Arelle subprocess cases; the pinned worker job passed all worker and 11 gated .NET Arelle execution tests. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -279,19 +279,19 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. The archived TRX artifacts and per-suite totals for that baseline are recorded in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
+The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 
-The XBR-04 set-collected text implementation run [42298685658](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42298685658) verified source commit `0cac3fee5dfad0a0c8879b12c8366ddb3f291041`: repository hygiene, Ubuntu and Windows Release build/tests, and the pinned Arelle worker integration all passed. Each .NET OS matrix passed **723 tests** and skipped **5** environment-gated cases; the worker job passed **53 protocol/offline-validation Python tests**, **15 locked-inventory Python tests**, and **11 .NET Arelle execution tests**. Local focused Release verification passed **117 Engine tests** and **78 Desktop tests**.
+The compound-unit slice run [42308787441](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42308787441) verified exact source commit `2887939e0be99c710faa6aa973337b7d81c671e5`: repository hygiene, Windows and Ubuntu Release build/test, pinned worker integration, dependency inventory, and SPDX generation all passed. Each .NET OS matrix passed **747 tests** and skipped **5** environment-gated Arelle subprocess cases. The pinned worker job passed all **11** gated .NET Arelle execution tests. Local verification passed the same eight-project suite: **747 passed, 0 failed, 5 skipped**; the skipped cases require the pinned Arelle subprocess runtime.
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 117 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text facts |
-| XBRL.Tests | 85 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
+| Engine.Tests | 118 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
+| XBRL.Tests | 105 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 94 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
 | Ops.Tests | 76 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 186 passed; 5 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 78 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
+| Integration.Tests | 187 passed; 5 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 80 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
 | Project.Tests | 15 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash
@@ -329,8 +329,8 @@ git tag v1.0.0 && git push origin v1.0.0
 
 Capabilities are tracked by stable guide IDs and delivery gates in
 [`docs/implementation-status.md`](./docs/implementation-status.md). This summary
-reports evidence-backed subsets; an interface or passing unit test alone does not
-complete a guide ID:
+reports evidence-backed subsets; the tracker retains all 67 original guide IDs.
+An interface or passing unit test alone does not complete a guide ID:
 
 | Area | Verified subset | Still open |
 |---|---|---|

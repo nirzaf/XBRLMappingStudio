@@ -64,7 +64,17 @@ Verification:
 - XBRL: 105/105; Engine: 118/118; Desktop: 80/80; Integration: 187 passed,
   5 skipped. The integration suite includes the small and SQLite-spooled
   compound-unit fold, plus worker rejection of a deliberately corrupted unit.
-- `git diff --check` will be rerun on the final staged change set.
+- The full local Release build completed with 0 warnings and 0 errors; the
+  full eight-project test run passed 747, failed 0, and skipped 5 Arelle-gated
+  subprocess cases. `git diff --check` passed before commit.
+
+Exact-head GitHub Actions run
+[42308787441](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42308787441)
+verified source commit `2887939e0be99c710faa6aa973337b7d81c671e5`. Repository
+hygiene, Windows and Ubuntu Release build/test, pinned Arelle worker integration,
+locked dependency inventory, and SPDX generation all passed. Each OS matrix
+passed 747 tests and skipped the same 5 Arelle-gated cases; the pinned worker
+job passed all 11 gated .NET Arelle execution tests.
 
 The full XBR-04 acceptance remains open: typed dimensions and default-member
 handling, profile-specific concept/dimension constraints, complete BCP-47
