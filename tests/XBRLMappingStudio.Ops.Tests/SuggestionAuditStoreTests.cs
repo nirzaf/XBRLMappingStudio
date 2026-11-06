@@ -216,6 +216,14 @@ public sealed class SuggestionAuditStoreTests : IDisposable
         Assert.Equal("legacy-1", legacy[0].EventId);
         Assert.Equal("", legacy[0].Actor);
         Assert.Equal("retrieval", legacy[0].Method);
+        using (var verify = upgraded.OpenConnection())
+        using (var check = verify.CreateCommand())
+        {
+            check.CommandText = "PRAGMA user_version";
+            Assert.Equal(6L, check.ExecuteScalar());
+            check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='taxonomy_profile_index'";
+            Assert.Equal(1L, check.ExecuteScalar());
+        }
 
         // 3. A new row on top of the migrated schema still lands cleanly.
         store.Append(

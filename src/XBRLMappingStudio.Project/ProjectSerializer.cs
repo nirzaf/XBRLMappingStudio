@@ -38,7 +38,7 @@ public static class ProjectSerializer
         {
             throw new ProjectSchemaException(
                 DiagnosticCodes.PrjCorruptFile,
-                "Project file is not valid JSON.", ex);
+                DeserializationErrorMessage(json), ex);
         }
 
         if (project is null)
@@ -67,6 +67,32 @@ public static class ProjectSerializer
         }
 
         return project;
+    }
+
+    private static string DeserializationErrorMessage(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                var missingIdentity = new[] { "profileId", "profileDigest" }
+                    .Where(property => !document.RootElement.TryGetProperty(property, out var value)
+                        || value.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(value.GetString()))
+                    .ToArray();
+                if (missingIdentity.Length > 0)
+                    return "Project is missing required profile identity field(s): "
+                        + string.Join(", ", missingIdentity)
+                        + "; profile identity cannot be inferred.";
+            }
+        }
+        catch (JsonException)
+        {
+            // Preserve the generic malformed/schema fallback when the source cannot be parsed.
+        }
+
+        return "Project file is malformed or does not satisfy the current schema.";
     }
 
     /// <summary>

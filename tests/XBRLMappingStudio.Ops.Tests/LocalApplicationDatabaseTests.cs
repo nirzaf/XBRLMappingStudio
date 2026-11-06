@@ -66,15 +66,52 @@ public sealed class LocalApplicationDatabaseTests
             legacy.Open();
             using var create = legacy.CreateCommand();
             create.CommandText = """
+                PRAGMA foreign_keys=ON;
+                CREATE TABLE app_settings (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL
+                );
+                CREATE TABLE project_registry (
+                    project_path TEXT PRIMARY KEY NOT NULL,
+                    project_id TEXT NOT NULL,
+                    content_sha256 TEXT,
+                    last_opened_utc TEXT NOT NULL
+                );
                 CREATE TABLE run_journal (
                     run_id TEXT PRIMARY KEY NOT NULL, destination_path TEXT NOT NULL,
                     state INTEGER NOT NULL, staged_digest TEXT, final_digest TEXT,
                     lock_token TEXT, updated_utc TEXT NOT NULL
                 );
                 CREATE TABLE publication_receipts (
-                    run_id TEXT PRIMARY KEY NOT NULL, final_digest TEXT NOT NULL,
-                    completed_utc TEXT NOT NULL
+                    run_id TEXT PRIMARY KEY NOT NULL REFERENCES run_journal(run_id) ON DELETE CASCADE,
+                    final_digest TEXT NOT NULL, completed_utc TEXT NOT NULL
                 );
+                CREATE TABLE suggestion_audit (
+                    event_id TEXT PRIMARY KEY NOT NULL,
+                    project_id TEXT NOT NULL,
+                    semantic_revision INTEGER NOT NULL,
+                    source_field_ref TEXT NOT NULL,
+                    candidate_ids_json TEXT NOT NULL,
+                    provider_config_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    accepted_revision INTEGER,
+                    occurred_utc TEXT NOT NULL,
+                    method TEXT NOT NULL DEFAULT 'retrieval',
+                    actor TEXT NOT NULL DEFAULT '',
+                    prompt_template_revision TEXT NOT NULL DEFAULT '',
+                    original_proposal_json TEXT NOT NULL DEFAULT '',
+                    approved_edit_json TEXT NOT NULL DEFAULT '',
+                    provider_snapshot_limitation TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO app_settings VALUES('density','compact','2026-01-01T00:00:00Z');
+                INSERT INTO project_registry VALUES('/workspace/legacy.xmap','legacy-project','sha256:project','2026-01-01T00:00:00Z');
+                INSERT INTO run_journal VALUES('legacy-v2','/workspace/report.json',3,'sha256:staged','sha256:final','lock','2026-01-01T00:00:00Z');
+                INSERT INTO publication_receipts VALUES('legacy-v2','sha256:final','2026-01-01T00:00:00Z');
+                INSERT INTO suggestion_audit (
+                    event_id,project_id,semantic_revision,source_field_ref,candidate_ids_json,
+                    provider_config_id,decision,accepted_revision,occurred_utc,actor)
+                VALUES ('legacy-audit-v2','legacy-project',2,'Revenue','[]','cfg','accept',2,'2026-01-01T00:00:00Z','analyst');
                 PRAGMA user_version=2;
                 """;
             create.ExecuteNonQuery();
@@ -88,11 +125,29 @@ public sealed class LocalApplicationDatabaseTests
         journal.Save(receiptEntry);
 
         Assert.Equal(6, LocalApplicationDatabase.CurrentSchemaVersion);
+        var legacyEntry = journal.Load("legacy-v2");
+        Assert.Equal("/workspace/report.json", legacyEntry?.DestinationPath);
+        Assert.Equal(JournalState.Finalized, legacyEntry?.State);
+        Assert.Equal("sha256:staged", legacyEntry?.StagedDigest);
+        Assert.Equal("sha256:final", legacyEntry?.FinalDigest);
+        Assert.Null(legacyEntry?.ValidatedDigest);
         Assert.Equal(receiptEntry, journal.Load("run-v2"));
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(6L, check.ExecuteScalar());
+        check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
+        Assert.Equal("compact", check.ExecuteScalar());
+        check.CommandText = "SELECT project_id FROM project_registry WHERE project_path='/workspace/legacy.xmap'";
+        Assert.Equal("legacy-project", check.ExecuteScalar());
+        check.CommandText = "SELECT final_digest FROM publication_receipts WHERE run_id='legacy-v2'";
+        Assert.Equal("sha256:final", check.ExecuteScalar());
+        check.CommandText = "SELECT actor FROM suggestion_audit WHERE event_id='legacy-audit-v2'";
+        Assert.Equal("analyst", check.ExecuteScalar());
         check.CommandText = "SELECT validated_digest FROM publication_receipts WHERE run_id='run-v2'";
         Assert.Equal("sha256:validated", check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='taxonomy_profile_index'";
+        Assert.Equal(1L, check.ExecuteScalar());
     }
 
     [Fact]
@@ -148,6 +203,72 @@ public sealed class LocalApplicationDatabaseTests
         Assert.Equal(99L, check.ExecuteScalar());
         check.CommandText = "PRAGMA journal_mode";
         Assert.Equal("delete", check.ExecuteScalar());
+    }
+
+    [Fact]
+    public void FailedV1ToV6MigrationRollsBackSchemaVersionAndHistoricalState()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "rollback-v1.db");
+        using (var legacy = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                PRAGMA foreign_keys=ON;
+                CREATE TABLE app_settings (
+                    key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updated_utc TEXT NOT NULL
+                );
+                CREATE TABLE project_registry (
+                    project_path TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL,
+                    content_sha256 TEXT, last_opened_utc TEXT NOT NULL
+                );
+                CREATE TABLE run_journal (
+                    run_id TEXT PRIMARY KEY NOT NULL, destination_path TEXT NOT NULL,
+                    state INTEGER NOT NULL, staged_digest TEXT, final_digest TEXT,
+                    lock_token TEXT, updated_utc TEXT NOT NULL
+                );
+                CREATE TABLE publication_receipts (
+                    run_id TEXT PRIMARY KEY NOT NULL REFERENCES run_journal(run_id) ON DELETE CASCADE,
+                    final_digest TEXT NOT NULL, completed_utc TEXT NOT NULL
+                );
+                CREATE TABLE suggestion_audit (
+                    event_id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL,
+                    semantic_revision INTEGER NOT NULL, source_field_ref TEXT NOT NULL,
+                    candidate_ids_json TEXT NOT NULL, provider_config_id TEXT NOT NULL,
+                    decision TEXT NOT NULL, accepted_revision INTEGER, occurred_utc TEXT NOT NULL
+                );
+                CREATE TABLE taxonomy_profile_index (marker TEXT NOT NULL);
+                INSERT INTO app_settings VALUES('theme','dark','2026-01-01T00:00:00Z');
+                INSERT INTO run_journal VALUES('keep-run','/report.json',3,'sha256:a','sha256:b','lock','2026-01-01T00:00:00Z');
+                INSERT INTO suggestion_audit VALUES('keep-audit','p',1,'Revenue','[]','cfg','accept',1,'2026-01-01T00:00:00Z');
+                INSERT INTO taxonomy_profile_index VALUES('collision-sentinel');
+                PRAGMA user_version=1;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        Assert.Throws<SqliteException>(() => _ = new LocalApplicationDatabase(path));
+
+        using var verify = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        verify.Open();
+        using var check = verify.CreateCommand();
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(1L, check.ExecuteScalar());
+        check.CommandText = "SELECT value FROM app_settings WHERE key='theme'";
+        Assert.Equal("dark", check.ExecuteScalar());
+        check.CommandText = "SELECT run_id FROM run_journal WHERE run_id='keep-run'";
+        Assert.Equal("keep-run", check.ExecuteScalar());
+        check.CommandText = "SELECT event_id FROM suggestion_audit WHERE event_id='keep-audit'";
+        Assert.Equal("keep-audit", check.ExecuteScalar());
+        check.CommandText = "SELECT marker FROM taxonomy_profile_index";
+        Assert.Equal("collision-sentinel", check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('run_journal') WHERE name='validated_digest'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('suggestion_audit') WHERE name='actor'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence','pdf_review_audit')";
+        Assert.Equal(0L, check.ExecuteScalar());
     }
 
     [Fact]

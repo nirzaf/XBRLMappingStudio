@@ -1,5 +1,6 @@
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
+using System.Text.Json.Nodes;
 
 namespace XBRLMappingStudio.Project.Tests;
 
@@ -139,6 +140,26 @@ public sealed class ProjectManagerTests : IDisposable
 
         Assert.Null(reloaded.Destination);
         Assert.Equal(project.ComputeSemanticDigest(), reloaded.ComputeSemanticDigest());
+    }
+
+    [Theory]
+    [InlineData("profileId")]
+    [InlineData("profileDigest")]
+    public void LegacyProjectMissingProfileIdentityIsBlockedWithoutRewritingTheFile(string missingField)
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(
+            idSeed: Guid.Parse("33333333-1111-2222-3333-444444444452"));
+        var document = JsonNode.Parse(ProjectSerializer.Serialize(project))!.AsObject();
+        Assert.True(document.Remove(missingField));
+        var path = ProjectPath("legacy-unpinned.xmap");
+        File.WriteAllText(path, document.ToJsonString(ProjectSerializer.Options));
+        var originalBytes = File.ReadAllBytes(path);
+
+        var blocked = Assert.Throws<ProjectSchemaException>(() => new ProjectManager(path).Load());
+
+        Assert.Contains(missingField, blocked.Message, StringComparison.Ordinal);
+        Assert.Contains("profile identity cannot be inferred", blocked.Message, StringComparison.Ordinal);
+        Assert.Equal(originalBytes, File.ReadAllBytes(path));
     }
 
     [Fact]

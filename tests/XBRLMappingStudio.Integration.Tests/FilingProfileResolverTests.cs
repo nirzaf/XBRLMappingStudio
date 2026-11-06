@@ -198,6 +198,58 @@ public sealed class FilingProfileResolverTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarmTaxonomyCacheCannotResolveMissingOrTamperedInstalledPackage(bool removePackage)
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-cached-profile", "1.0.0", "Revenue");
+            var database = new LocalApplicationDatabase(Path.Combine(root, "state.db"));
+            var cache = new TaxonomyConceptIndexStore(database);
+            var warm = cache.LoadOrBuild(installed.Profile);
+            Assert.False(warm.ReusedCachedMetadata);
+
+            if (removePackage)
+                File.Delete(installed.EntryPointPath);
+            else
+                File.AppendAllText(installed.EntryPointPath, "<!-- changed after cache warmup -->");
+
+            var resolver = FilingProfileResolver.FromInstalledDirectory(root);
+            var result = resolver.Resolve(Project(installed.Profile), allowSyntheticProfile: false);
+
+            Assert.False(result.Success);
+            Assert.Null(result.Profile);
+            Assert.Contains(result.Diagnostics.Items, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.XbrProfileMismatch
+                && (diagnostic.Message.Contains("Package hash mismatch", StringComparison.Ordinal)
+                    || diagnostic.Message.Contains("is missing", StringComparison.Ordinal)));
+
+            var missingIdentity = resolver.Resolve(
+                WithProfile(Project(installed.Profile), "", ""), allowSyntheticProfile: false);
+            Assert.False(missingIdentity.Success);
+            Assert.Null(missingIdentity.Profile);
+            Assert.Contains(missingIdentity.Diagnostics.Items,
+                diagnostic => diagnostic.Code == DiagnosticCodes.XbrProfileMismatch);
+
+            using var connection = database.OpenConnection();
+            using var check = connection.CreateCommand();
+            check.CommandText = """
+                SELECT COUNT(*) FROM taxonomy_profile_index
+                WHERE profile_id=$profile_id AND profile_digest=$profile_digest;
+                """;
+            check.Parameters.AddWithValue("$profile_id", installed.Profile.ProfileId);
+            check.Parameters.AddWithValue("$profile_digest", installed.Profile.Digest);
+            Assert.Equal(1L, check.ExecuteScalar());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public void CatalogRejectsMissingPackageDependency()
     {
