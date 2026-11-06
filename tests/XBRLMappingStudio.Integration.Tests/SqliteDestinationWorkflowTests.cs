@@ -98,6 +98,31 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PreviewAndPublish_RejectSourceChangedAfterRunWithoutWritingDatabase()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+        var before = await File.ReadAllBytesAsync(_databasePath);
+
+        var changedWorkbook = (await File.ReadAllBytesAsync(_workbookPath)).Concat(new byte[] { 0x58 }).ToArray();
+        await File.WriteAllBytesAsync(_workbookPath, changedWorkbook);
+
+        var estimate = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        Assert.NotEmpty(estimate.SchemaDiscrepancies);
+        Assert.Contains(project.Bindings.Single().BindingId, Assert.Single(estimate.SchemaDiscrepancies),
+            StringComparison.Ordinal);
+
+        var error = await Assert.ThrowsAsync<PublicationException>(() => service.PublishDestinationAsync(
+            project, result, _directory, allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task XbrlReportToSqlite_PreservesFactValuePeriodAndReportProvenance()
     {
         var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");

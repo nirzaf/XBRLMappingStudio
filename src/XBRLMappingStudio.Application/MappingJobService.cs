@@ -561,18 +561,6 @@ public sealed class MappingJobService
             foreach (var binding in project.Bindings)
             {
                 var connection = sourceConnections[binding.BindingId];
-                if (StringComparer.Ordinal.Equals(connection.Kind, "pdf-digital")
-                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, connection, manifest.Inputs, cancellationToken))
-                {
-                    context.Diagnostics.Error(DiagnosticCodes.IoPdfReviewManifestInvalid,
-                        DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
-                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
-                        source: new SourceReference(binding.BindingId, "pdf-input-identity"), operationId: opId);
-                    manifest.Outcome = RunOutcome.DataError;
-                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
-                    manifest.Diagnostics = context.Diagnostics.Items;
-                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-                }
                 if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
                 {
                     AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
@@ -586,18 +574,6 @@ public sealed class MappingJobService
             foreach (var binding in project.Bindings)
             {
                 var connection = sourceConnections[binding.BindingId];
-                if (StringComparer.Ordinal.Equals(connection.Kind, "pdf-digital")
-                    && !await PdfInputsMatchRecordedIdentityAsync(binding.BindingId, connection, manifest.Inputs, cancellationToken))
-                {
-                    context.Diagnostics.Error(DiagnosticCodes.IoPdfReviewManifestInvalid,
-                        DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
-                        "The PDF source or review manifest changed during this run. Retry so the approved input identity can be recorded.",
-                        source: new SourceReference(binding.BindingId, "pdf-input-identity"), operationId: opId);
-                    manifest.Outcome = RunOutcome.DataError;
-                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
-                    manifest.Diagnostics = context.Diagnostics.Items;
-                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
-                }
                 if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
                 {
                     AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
@@ -605,6 +581,26 @@ public sealed class MappingJobService
                         DigestRecords(connection, context.LoadedSources[binding.BindingId]), schema: sourceSchemas[binding.BindingId], preview: false);
                 }
             }
+        }
+
+        var changedInput = await FindChangedFileInputAsync(
+            manifest.Inputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        if (changedInput is not null)
+        {
+            var isPdfInput = changedInput.Kind == "pdf-review-manifest"
+                || manifest.Inputs.Any(input => input.Kind == "pdf-review-manifest"
+                    && StringComparer.Ordinal.Equals(input.SourceId, changedInput.SourceId + ":review-manifest"));
+            var code = isPdfInput
+                ? DiagnosticCodes.IoPdfReviewManifestInvalid
+                : DiagnosticCodes.IoInputIdentityChanged;
+            var source = new SourceReference(changedInput.SourceId, changedInput.OriginalPath ?? "source-input");
+            context.Diagnostics.Error(code, DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
+                $"Source input '{changedInput.SourceId}' changed or could not be verified after its identity was recorded. Retry with a stable input.",
+                source: source, operationId: opId);
+            manifest.Outcome = RunOutcome.DataError;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
         }
 
         if (context.Diagnostics.HasBlockingErrors)
@@ -1403,6 +1399,11 @@ public sealed class MappingJobService
         string workspaceRoot,
         CancellationToken cancellationToken = default)
     {
+        var changedInput = await FindChangedFileInputAsync(
+            result.Manifest.Inputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        if (changedInput is not null)
+            return BlockedDestinationPreview(0, SourceIdentityMismatchMessage(changedInput));
+
         var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
         SqliteTargetTableSchema schema;
         try
@@ -1463,6 +1464,7 @@ public sealed class MappingJobService
             prepared.Path,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
 
+        await EnsureFileInputIdentityAsync(manifest, plan.Locator, cancellationToken);
         var receipt = await new SqliteTargetPublisher().PublishAsync(
             destination,
             prepared.Records,
@@ -1713,6 +1715,7 @@ public sealed class MappingJobService
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                     "The destination changed while the staged artifact was being verified.", manifest.RunId, destinationPath);
 
+            await EnsureFileInputIdentityAsync(manifest, destinationPath, cancellationToken);
             var output = await adapter.PublishAsync(stagedPath, connection, cancellationToken);
             var finalDigest = CurrentFileDigest(destinationPath);
             if (finalDigest is null || !StringComparer.Ordinal.Equals(output.Digest, finalDigest))
@@ -2050,29 +2053,52 @@ public sealed class MappingJobService
         }
     }
 
-    private static async Task<bool> PdfInputsMatchRecordedIdentityAsync(
-        string bindingId,
-        SourceConnection connection,
-        IReadOnlyList<InputIdentity> recordedInputs,
+    private async Task EnsureFileInputIdentityAsync(
+        RunManifest manifest,
+        string destination,
         CancellationToken cancellationToken)
     {
-        if (connection.Path is null) return false;
-        var sourceInput = recordedInputs.FirstOrDefault(input =>
-            StringComparer.Ordinal.Equals(input.SourceId, bindingId));
-        var reviewInput = recordedInputs.FirstOrDefault(input =>
-            StringComparer.Ordinal.Equals(input.SourceId, bindingId + ":review-manifest"));
-        if (sourceInput is null || reviewInput is null
-            || !sourceInput.IsReplayable || string.IsNullOrWhiteSpace(sourceInput.Digest)
-            || !reviewInput.IsReplayable || string.IsNullOrWhiteSpace(reviewInput.Digest))
-            return false;
+        var changedInput = await FindChangedFileInputAsync(
+            manifest.Inputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        if (changedInput is not null)
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                SourceIdentityMismatchMessage(changedInput), manifest.RunId, destination);
+    }
 
-        var sourceDigest = await ComputeBoundedFileDigestAsync(connection.Path,
-            PdfDigitalExtractionOptions.AbsoluteMaxFileBytes, cancellationToken);
-        var reviewDigest = await ComputeBoundedFileDigestAsync(
-            PdfSourceAdapter.ResolveReviewManifestPath(connection),
-            PdfSourceAdapter.MaxReviewManifestBytes, cancellationToken);
-        return StringComparer.Ordinal.Equals(sourceDigest, sourceInput.Digest)
-            && StringComparer.Ordinal.Equals(reviewDigest, reviewInput.Digest);
+    private static string SourceIdentityMismatchMessage(InputIdentity input)
+        => $"Input source '{input.SourceId}' changed or could not be verified since this run. Rerun from the current source before preview or publication.";
+
+    private static async Task<InputIdentity?> FindChangedFileInputAsync(
+        IReadOnlyList<InputIdentity> recordedInputs,
+        long maximumSourceBytes,
+        CancellationToken cancellationToken)
+    {
+        foreach (var input in recordedInputs)
+        {
+            if (input.Kind is not ("file" or "pdf-review-manifest" or "xbrl-report"))
+                continue;
+            if (!input.IsReplayable || string.IsNullOrWhiteSpace(input.Digest)
+                || string.IsNullOrWhiteSpace(input.OriginalPath))
+                return input;
+
+            var isPdfSource = input.Kind == "file" && recordedInputs.Any(review =>
+                review.Kind == "pdf-review-manifest"
+                && StringComparer.Ordinal.Equals(review.SourceId, input.SourceId + ":review-manifest"));
+            var maximumBytes = input.Kind switch
+            {
+                "pdf-review-manifest" => PdfSourceAdapter.MaxReviewManifestBytes,
+                _ when isPdfSource => PdfDigitalExtractionOptions.AbsoluteMaxFileBytes,
+                _ => maximumSourceBytes
+            };
+            var currentDigest = input.Kind == "pdf-review-manifest" || isPdfSource
+                ? await ComputeBoundedFileDigestAsync(input.OriginalPath, maximumBytes, cancellationToken)
+                    .ConfigureAwait(false)
+                : await ComputeFileDigestWithinLimitAsync(input.OriginalPath, maximumBytes, cancellationToken)
+                    .ConfigureAwait(false);
+            if (!StringComparer.Ordinal.Equals(currentDigest, input.Digest))
+                return input;
+        }
+        return null;
     }
 
     private static async Task<string?> ComputeBoundedFileDigestAsync(

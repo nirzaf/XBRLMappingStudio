@@ -67,6 +67,7 @@ public static class DiagnosticCodes
     public const string IoPdfEvidenceReferenceInvalid = "IO027";
     public const string IoPdfReviewRequired = "IO028";
     public const string IoPdfReviewManifestInvalid = "IO029";
+    public const string IoInputIdentityChanged = "IO030";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";
