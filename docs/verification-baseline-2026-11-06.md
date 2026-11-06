@@ -369,3 +369,15 @@ the separate numeric-zero fact. The fixture is synthetic and the test is headles
 Verification: the focused Release Desktop test passed 1/1, and the full Release
 solution suite passed 711 tests with five Arelle-gated skips. Native visual/browser
 acceptance and broader null/duplicate/one-to-many user journeys remain open.
+
+## MAP08 duplicate fact occurrences in Desktop preview
+
+`MappingOperationViewModelTests.DuplicateFactPreviewKeepsEachOccurrenceAndItsSourceRowSeparate`
+uses two identical Revenue source rows and confirms the view model preserves both
+fact occurrences with their shared aspects/value and separate `Financials!B4` and
+`Financials!B5` source evidence. This checks headless Desktop presentation; it does
+not qualify a complete native workflow.
+
+Verification: the focused Release Desktop test passed 1/1, and the full Release
+solution suite passed 712 tests with five Arelle-gated skips. Native visual/browser
+acceptance and broader duplicate/null/one-to-many user journeys remain open.

@@ -228,6 +228,54 @@ public sealed class MappingOperationViewModelTests
     }
 
     [Fact]
+    public async Task DuplicateFactPreviewKeepsEachOccurrenceAndItsSourceRowSeparate()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-duplicate-preview-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbookPath = TestFixtures.MaterializeGroupedRevenueWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbookPath);
+            var viewModel = new MainWindowViewModel(project, null,
+                (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(Path.Combine(directory, "duplicate-mapping.xmap"));
+
+            var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedBusy = false;
+            PropertyChangedEventHandler handler = (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                if (viewModel.IsBusy) observedBusy = true;
+                else if (observedBusy) operationStopped.TrySetResult();
+            };
+            viewModel.PropertyChanged += handler;
+            try
+            {
+                viewModel.PreviewCommand.Execute(null);
+                await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            finally { viewModel.PropertyChanged -= handler; }
+
+            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.Equal(2, viewModel.PreviewFacts.Count);
+            var facts = viewModel.PreviewFacts
+                .OrderBy(fact => fact.Evidence.Single().Source.Locator, StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(10_000m, facts[0].SemanticFact!.Value);
+            Assert.Equal(10_000m, facts[1].SemanticFact!.Value);
+            Assert.Equal(facts[0].SemanticFact!.ConceptName, facts[1].SemanticFact!.ConceptName);
+            Assert.Equal(facts[0].SemanticFact!.EntityIdentifier, facts[1].SemanticFact!.EntityIdentifier);
+            Assert.Equal("Financials!B4", facts[0].Evidence.Single().Source.Locator);
+            Assert.Equal("Financials!B5", facts[1].Evidence.Single().Source.Locator);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void PreviewEvidenceRowDisplaysStableBoundedTransformationPathsAndMissingState()
     {
         var source = new XBRLMappingStudio.Diagnostics.SourceReference("excel", "Income!B3", "Revenue workbook");
