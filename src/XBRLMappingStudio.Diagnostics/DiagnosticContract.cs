@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace XBRLMappingStudio.Diagnostics;
 
 /// <summary>
@@ -52,12 +54,19 @@ public sealed record SourceReference(
     public override string ToString() => DisplayName ?? $"{SourceId}:{Locator}";
 }
 
+/// <summary>A connected row-phase transformation path associated with one source occurrence.</summary>
+public sealed record SourceTransformationPath(
+    SourceReference Source,
+    IReadOnlyList<string> TransformationIds);
+
 /// <summary>
 /// Structured diagnostic per BASE04 contract. Stable product code + evidence locators.
 /// The same invalid mapping must produce the same code and binding ID in CLI and desktop.
 /// </summary>
 public sealed record Diagnostic
 {
+    private IReadOnlyList<SourceTransformationPath>? _sourceTransformationPaths;
+
     /// <summary>Stable product code, e.g. "MAP001", "IO012", "XBR003". Never reassigned.</summary>
     public required string Code { get; init; }
 
@@ -77,6 +86,14 @@ public sealed record Diagnostic
 
     /// <summary>Optional source cell/row reference for evidence navigation.</summary>
     public SourceReference? Source { get; init; }
+
+    /// <summary>Optional connected source paths that contributed to this diagnostic.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<SourceTransformationPath>? SourceTransformationPaths
+    {
+        get => _sourceTransformationPaths is { Count: > 0 } ? _sourceTransformationPaths : null;
+        init => _sourceTransformationPaths = value is { Count: > 0 } ? value : null;
+    }
 
     /// <summary>Optional mapping node ID for graph navigation.</summary>
     public string? NodeId { get; init; }

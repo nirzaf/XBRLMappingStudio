@@ -1,3 +1,4 @@
+using System.Text.Json;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -145,6 +146,112 @@ public class FunctionTests
         var denominatorPath = Assert.Single(fact.SourceTransformationPaths,
             path => path.Source == denominatorSource);
         Assert.Equal(new[] { denominator.NodeId, ratio.NodeId, factConstruct.NodeId }, denominatorPath.TransformationIds);
+    }
+
+    [Fact]
+    public void RatioFactConstructRejection_ReportsBothSourcePathsAndKeepsPrimarySource()
+    {
+        const string numeratorBinding = "ratio-reject-numerator";
+        const string denominatorBinding = "ratio-reject-denominator";
+        var numerator = GraphHarness.Node(NodeTypeConstants.ExcelField, "Numerator",
+            new() { ["bindingId"] = numeratorBinding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var denominator = GraphHarness.Node(NodeTypeConstants.ExcelField, "Denominator",
+            new() { ["bindingId"] = denominatorBinding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var ratio = GraphHarness.Node(NodeTypeConstants.Ratio, "Ratio",
+            new() { ["divideByZero"] = "Diagnostic" },
+            inputs: new[]
+            {
+                GraphHarness.P("numerator", PortShape.Decimal),
+                GraphHarness.P("denominator", PortShape.Decimal)
+            },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(numerator, "value", ratio, "numerator"),
+            GraphHarness.Link(denominator, "value", ratio, "denominator")
+        };
+        var sink = GraphHarness.FactSink(out var sinkEdges, ratio, "value", PortCardinality.Single);
+        edges.AddRange(sinkEdges);
+        var factConstruct = sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        factConstruct.Parameters["unit"] = "unsupported-unit";
+        var project = GraphHarness.Project(
+            new[] { numerator, denominator, ratio }.Concat(sink), edges,
+            bindings: new[]
+            {
+                GraphHarness.Binding(numeratorBinding),
+                GraphHarness.Binding(denominatorBinding)
+            });
+        var numeratorSource = new SourceReference(numeratorBinding, "financials.Current", "pk:revenue");
+        var denominatorSource = new SourceReference(denominatorBinding, "comparatives.Prior", "pk:revenue");
+        var context = GraphHarness.Ctx(new[]
+        {
+            (numeratorBinding, new[]
+            {
+                GraphHarness.Row(("amount", DataValue.DecimalValue(10m, numeratorSource)))
+            } as IReadOnlyList<DataRecord>),
+            (denominatorBinding, new[]
+            {
+                GraphHarness.Row(("amount", DataValue.DecimalValue(2m, denominatorSource)))
+            } as IReadOnlyList<DataRecord>)
+        });
+
+        var execution = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Empty(execution!.Facts);
+        var diagnostic = Assert.Single(execution.Diagnostics, item => item.Code == DiagnosticCodes.XbrUnitMissing);
+        Assert.Equal(numeratorSource, diagnostic.Source);
+        Assert.Equal(2, diagnostic.SourceTransformationPaths?.Count);
+        AssertPath(numeratorSource, numerator.NodeId);
+        AssertPath(denominatorSource, denominator.NodeId);
+
+        var diagnosticJson = JsonSerializer.Serialize(diagnostic);
+        Assert.Equal(diagnosticJson,
+            JsonSerializer.Serialize(diagnostic, DiagnosticsJsonContext.Default.Diagnostic));
+        using var document = JsonDocument.Parse(diagnosticJson);
+        var serializedPaths = document.RootElement.GetProperty(nameof(Diagnostic.SourceTransformationPaths))
+            .EnumerateArray()
+            .ToDictionary(
+                path => path.GetProperty("Source").GetProperty("Locator").GetString()!,
+                path => path.GetProperty("TransformationIds").EnumerateArray()
+                    .Select(node => node.GetString()!).ToArray(),
+                StringComparer.Ordinal);
+        Assert.Equal(new[] { numerator.NodeId, ratio.NodeId, factConstruct.NodeId },
+            serializedPaths[numeratorSource.Locator]);
+        Assert.Equal(new[] { denominator.NodeId, ratio.NodeId, factConstruct.NodeId },
+            serializedPaths[denominatorSource.Locator]);
+
+        void AssertPath(SourceReference source, string fieldNodeId)
+        {
+            var path = Assert.Single(diagnostic.SourceTransformationPaths!, item => item.Source == source);
+            Assert.Equal(new[] { fieldNodeId, ratio.NodeId, factConstruct.NodeId }, path.TransformationIds);
+        }
+    }
+
+    [Fact]
+    public void DiagnosticWithoutTransformationPaths_PreservesLegacyJsonBytes()
+    {
+        var diagnostic = new Diagnostic
+        {
+            Code = "XBR099",
+            Subsystem = DiagnosticSubsystem.XBRL,
+            Severity = DiagnosticSeverity.Error,
+            Stage = DiagnosticStage.Execution,
+            IsBlocking = true,
+            Message = "invalid"
+        };
+
+        var json = JsonSerializer.Serialize(diagnostic);
+        Assert.Equal(json, JsonSerializer.Serialize(diagnostic, DiagnosticsJsonContext.Default.Diagnostic));
+        var emptyPathsJson = JsonSerializer.Serialize(diagnostic with
+        {
+            SourceTransformationPaths = Array.Empty<SourceTransformationPath>()
+        });
+
+        Assert.Equal("{\"Code\":\"XBR099\",\"Subsystem\":\"XBRL\",\"Severity\":2,\"Stage\":\"Execution\",\"IsBlocking\":true,\"Message\":\"invalid\",\"Source\":null,\"NodeId\":null,\"PortName\":null,\"EdgeId\":null,\"OperationId\":null,\"RuleIdentifier\":null,\"Details\":null}", json);
+        Assert.Equal(json, emptyPathsJson);
     }
 
     private static (MappingProject, ExecutionContext) RatioGraph(string policy, decimal num, decimal den)

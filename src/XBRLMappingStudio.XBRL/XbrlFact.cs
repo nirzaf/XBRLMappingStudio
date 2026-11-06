@@ -74,10 +74,6 @@ public sealed record XbrlUnit(
 /// Immutable fact value per XBR04. The G1 synthetic profile supports:
 /// monetary instant/duration facts with decimals accuracy and ISO language tags.
 /// </summary>
-public sealed record SourceTransformationPath(
-    SourceReference Source,
-    IReadOnlyList<string> TransformationIds);
-
 public sealed class XbrlFact
 {
     public required string ConceptName { get; init; }         // qualified name: "synthetic:Revenue"

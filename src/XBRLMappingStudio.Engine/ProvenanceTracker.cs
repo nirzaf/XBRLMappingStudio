@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using XBRLMappingStudio.Diagnostics;
-using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Engine;
 

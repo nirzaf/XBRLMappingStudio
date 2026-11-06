@@ -632,7 +632,11 @@ public sealed class PlanCompiler
                 ctx.Provenance.MergeSourceTransformationPaths(thisKey, new[] { upstreamKey });
             }
 
-            var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile, periodInputConnected);
+            var factConstructSourcePaths = node.NodeType == NodeTypeConstants.FactConstruct
+                ? CollectFactConstructSourcePaths(node, row, ctx)
+                : null;
+            var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile,
+                periodInputConnected, factConstructSourcePaths);
             foreach (var (name, value) in outputs)
             {
                 frame.Set(nodeId, name, value);
@@ -661,6 +665,27 @@ public sealed class PlanCompiler
         };
     }
 
+    private static IReadOnlyList<SourceTransformationPath> CollectFactConstructSourcePaths(
+        MappingNode node, int row, ExecutionContext context)
+    {
+        var paths = new List<SourceTransformationPath>();
+        foreach (var port in node.InputPorts)
+        {
+            var slotKey = ProvenanceTracker.SlotKey(node.NodeId, port.Name, row);
+            foreach (var path in context.Provenance.GetSourceTransformationPaths(slotKey))
+            {
+                var transformationIds = path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)
+                    ? path.TransformationIds
+                    : path.TransformationIds.Append(node.NodeId).ToArray();
+                if (paths.Any(existing => existing.Source == path.Source
+                    && existing.TransformationIds.SequenceEqual(transformationIds, StringComparer.Ordinal)))
+                    continue;
+                paths.Add(new SourceTransformationPath(path.Source, transformationIds));
+            }
+        }
+        return paths;
+    }
+
     private static Dictionary<string, DataValue> Dispatch(
         MappingNode node,
         FunctionSignature sig,
@@ -669,7 +694,8 @@ public sealed class PlanCompiler
         ExecutionContext ctx,
         DiagnosticBag diag,
         FilingProfile profile,
-        bool periodInputConnected)
+        bool periodInputConnected,
+        IReadOnlyList<SourceTransformationPath>? factConstructSourcePaths)
     {
         var outputs = new Dictionary<string, DataValue>(StringComparer.Ordinal);
 
@@ -1118,7 +1144,8 @@ public sealed class PlanCompiler
                         "FactConstruct cannot receive both numeric and text values.",
                         nodeId: node.NodeId,
                         portName: "textValue",
-                        source: textIn.Source ?? valueIn.Source);
+                        source: textIn.Source ?? valueIn.Source,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1137,7 +1164,8 @@ public sealed class PlanCompiler
                         $"Concept '{concept}' is not defined in profile '{profile.ProfileId}'.",
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource);
+                        source: factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1150,7 +1178,8 @@ public sealed class PlanCompiler
                         $"Concept '{concept}' is abstract and cannot carry fact values.",
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource);
+                        source: factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1168,7 +1197,8 @@ public sealed class PlanCompiler
                             $"Unit '{unitStr}' is not supported by profile '{profile.ProfileId}'.",
                             nodeId: node.NodeId,
                             portName: factValuePortName,
-                            source: factValueSource);
+                            source: factValueSource,
+                            sourceTransformationPaths: factConstructSourcePaths);
                         outputs["fact"] = DataValue.Missing(PortShape.Fact);
                         break;
                     }
@@ -1188,7 +1218,8 @@ public sealed class PlanCompiler
                         dimensionError,
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource);
+                        source: factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1216,7 +1247,8 @@ public sealed class PlanCompiler
                         "Fact requires a valid instant or duration period.",
                         nodeId: node.NodeId,
                         portName: periodInputConnected ? "period" : "instantDate",
-                        source: periodIn.Source ?? instantIn.Source ?? factValueSource);
+                        source: periodIn.Source ?? instantIn.Source ?? factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1238,7 +1270,8 @@ public sealed class PlanCompiler
                             "Decimals must be an integer in the supported range [-30, 30] or INF.",
                             nodeId: node.NodeId,
                             portName: factValuePortName,
-                            source: factValueSource);
+                            source: factValueSource,
+                            sourceTransformationPaths: factConstructSourcePaths);
                         outputs["fact"] = DataValue.Missing(PortShape.Fact);
                         break;
                     }
@@ -1254,7 +1287,8 @@ public sealed class PlanCompiler
                                 $"Decimals value {parsed} is outside the supported range [-30, 30].",
                                 nodeId: node.NodeId,
                                 portName: factValuePortName,
-                                source: factValueSource);
+                                source: factValueSource,
+                                sourceTransformationPaths: factConstructSourcePaths);
                             outputs["fact"] = DataValue.Missing(PortShape.Fact);
                             break;
                         }
@@ -1323,7 +1357,8 @@ public sealed class PlanCompiler
                         reason,
                         nodeId: node.NodeId,
                         portName: portName,
-                        source: source);
+                        source: source,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
