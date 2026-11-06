@@ -415,3 +415,7 @@ window was increased to two seconds. The taxonomy benchmark self-test passed for
 Exact-head GitHub Actions run [42286350022](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42286350022)
 for source SHA `41a32c8c0ead27e4b27b60be7924b050cb71bc43` passed repository hygiene,
 Windows and Ubuntu Release build/tests, and the pinned Arelle worker integration.
+
+Follow-up exact-head run [42287847754](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42287847754)
+for source SHA `0466ade29943a9452a92c13f6a102126f0eaa61e` passed the same four jobs
+after stabilizing the process-tree timeout test's child startup window.
