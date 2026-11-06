@@ -425,7 +425,7 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
-    public async Task TargetPreviewReportsBoundedInsertUpdateUnchangedAndConflictCountsWithoutWriting()
+    public async Task TargetPreviewReportsBoundedCountsWithoutWritingAndMatchesTransactionalWriteCounts()
     {
         using var ws = new TempWorkspace();
         var path = ws.PathFor("preview.db");
@@ -468,6 +468,31 @@ public sealed class SqliteSourceAdapterTests
         Assert.Equal(2, bounded.UncertainRows);
         Assert.Single(bounded.Samples);
         Assert.Equal(before, await File.ReadAllBytesAsync(path));
+
+        var publishableRecords = records.Take(3).ToArray();
+        var publishablePreview = await publisher.PreviewAsync(destination, publishableRecords, new[] { "account" });
+        await using (var writer = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await writer.OpenAsync();
+            await using var command = writer.CreateCommand();
+            command.CommandText = "INSERT INTO report(account,amount) VALUES('new','5')";
+            await command.ExecuteNonQueryAsync();
+        }
+        var beforeRefreshedPreview = await File.ReadAllBytesAsync(path);
+        var refreshedPreview = await publisher.PreviewAsync(destination, publishableRecords, new[] { "account" });
+        Assert.Equal(beforeRefreshedPreview, await File.ReadAllBytesAsync(path));
+        var receipt = await publisher.PublishAsync(destination, publishableRecords, new[] { "account" },
+            "preview-write-counts", "sha256:preview-write-counts");
+
+        Assert.True(publishablePreview.CountsAreComplete);
+        Assert.Equal(1, publishablePreview.Inserts);
+        Assert.Equal(2, publishablePreview.Updates);
+        Assert.Equal(1, publishablePreview.UnchangedValueUpdates);
+        Assert.True(refreshedPreview.CountsAreComplete);
+        Assert.Equal(0, refreshedPreview.Inserts);
+        Assert.Equal(3, refreshedPreview.Updates);
+        Assert.Equal(1, refreshedPreview.UnchangedValueUpdates);
+        Assert.Equal(refreshedPreview.Inserts + refreshedPreview.Updates, receipt.WrittenRows);
     }
 
     [Fact]
