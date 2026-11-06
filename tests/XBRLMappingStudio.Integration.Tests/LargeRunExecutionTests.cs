@@ -127,6 +127,40 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task CancellationDuringSpoolFinalization_ReturnsCancelledAndCleansPrivateSpool()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2_000, variedValues: false);
+            var project = BuildProject(database);
+            var profile = SyntheticProfile.Build();
+            var worker = new DigestOnlyArtifactWorker(profile);
+            using var cancellation = new CancellationTokenSource();
+            var priorDirectories = LargeRunDirectories();
+            var progressStages = new List<string>();
+            var progress = new InlineProgress<MappingJobProgress>(stage =>
+            {
+                progressStages.Add(stage.Stage);
+                if (stage.Stage == "Computing bounded source digest") cancellation.Cancel();
+            });
+
+            using var result = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 16, RowBatchSize: 32),
+                worker, progress, cancellation.Token);
+
+            Assert.Equal(RunOutcome.Cancelled, result.Manifest.Outcome);
+            Assert.Null(result.LargeArtifact);
+            Assert.Empty(result.Facts);
+            Assert.Contains("Finalizing bounded source spool indexes", progressStages);
+            Assert.Contains("Computing bounded source digest", progressStages);
+            Assert.Equal(0, worker.ValidationRequests);
+            Assert.Equal(priorDirectories, LargeRunDirectories());
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task AdapterFailureDuringBoundedProbe_ReturnsDataErrorInsteadOfEscaping()
     {
         var root = NewDirectory();
@@ -202,6 +236,42 @@ public sealed class LargeRunExecutionTests
             Assert.Equal(0, worker.ValidationRequests);
             Assert.Equal(priorDirectories, LargeRunDirectories());
             Assert.Contains(result.Manifest.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.IoUnsupportedOperation);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task OversizedInMemorySource_FailsBeforeSourceIdentityReadOrSchemaInspection()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2, variedValues: false);
+            var project = BuildProject(database);
+            var oversizedPath = Path.Combine(root, "oversized.csv");
+            await File.WriteAllBytesAsync(oversizedPath, Encoding.UTF8.GetBytes(new string('x', 1_024)));
+            var binding = project.Bindings.Single();
+            var connection = new SourceConnection(binding.BindingId, "csv", oversizedPath,
+                new Dictionary<string, string> { ["delimiter"] = "," });
+            var profile = SyntheticProfile.Build();
+            var worker = new DigestOnlyArtifactWorker(profile);
+            var progressStages = new List<string>();
+            var progress = new InlineProgress<MappingJobProgress>(stage => progressStages.Add(stage.Stage));
+            var service = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(MaxInMemorySourceBytes: 128,
+                    MaxExpandedInMemorySourceBytes: 128));
+
+            using var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection> { [binding.BindingId] = connection },
+                new Dictionary<string, string>(), preview: false, CancellationToken.None, progress);
+
+            Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+            Assert.Contains(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoNumberOutOfBudget && diagnostic.IsBlocking);
+            Assert.DoesNotContain("Recording source identities", progressStages);
+            Assert.DoesNotContain(progressStages, stage => stage.StartsWith("Inspecting source ", StringComparison.Ordinal));
+            Assert.Empty(result.Manifest.Inputs);
+            Assert.Equal(0, worker.ValidationRequests);
         }
         finally { TryDeleteDirectory(root); }
     }

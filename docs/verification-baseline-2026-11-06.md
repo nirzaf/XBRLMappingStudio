@@ -51,3 +51,16 @@ column. A single unusually large TEXT/BLOB cell can therefore allocate before th
 4 MiB row budget rejects it. The row and batch budgets bound retained working sets for
 ordinary records, but they are not a strict peak-allocation cap against a pathological
 single cell; that input-memory edge remains open.
+
+Large-run finalization checks cancellation while scanning source-digest rows and fact
+rows, and immediately before and after each synchronous SQLite `CREATE INDEX` call.
+The provider call itself cannot observe the cancellation token while SQLite is building
+an index; cancellation during that call is handled when SQLite returns, after which the
+run discards its private spool. Cancellation responsiveness during an unusually long
+index build is therefore not bounded.
+
+The current checkout also preflights project-bound non-SQLite file sizes before reading
+source identities, limits identity hashing to those bindings, and caps/cancels the digest
+read. Local Windows Release verification on the checkout based on `e5e303c` passed 510
+.NET tests and skipped five Arelle-gated integration tests; exact-head CI for this
+follow-up remains pending.

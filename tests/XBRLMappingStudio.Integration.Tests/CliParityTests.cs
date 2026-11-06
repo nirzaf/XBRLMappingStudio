@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
@@ -685,6 +686,51 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Equal(4, exit); // IncompleteProfile
         Assert.False(File.Exists(outputPath));
         Assert.Contains("XBR017", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteDisabledInstalledProfile_IsBlockedBeforeSourceReadAndPreservesOutput()
+    {
+        var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();
+        try
+        {
+            var installed = FilingProfileResolverTests.WriteInstalledProfile(
+                catalogRoot, "fixture-disabled-cli-profile", "1.0.0", "Revenue");
+            File.WriteAllText(Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName), "disabled by local administrator");
+
+            var baseProject = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+            var identifiedProject = ProfileIdentityTests.ProjectWithProfile(
+                baseProject, installed.Profile.ProfileId, installed.Profile.Digest);
+            var projectJson = JsonNode.Parse(ProjectSerializer.Serialize(identifiedProject))!;
+            projectJson["bindings"]![0]!["locator"] = Path.Combine(_dir, "source-must-not-be-read.xlsx");
+            var project = ProjectSerializer.Deserialize(projectJson.ToJsonString());
+            var projectPath = Path.Combine(_dir, "disabled-profile.xmap");
+            new ProjectManager(projectPath).Save(project);
+
+            var outputPath = Path.Combine(_dir, "disabled-profile-output.json");
+            const string priorContent = "PRIOR-ACCEPTED";
+            File.WriteAllText(outputPath, priorContent);
+            var start = BuildStartInfo(LocateCli(), "execute", projectPath,
+                "--output", outputPath, "--allow-synthetic-profile");
+            start.Environment[InstalledFilingProfileCatalog.CatalogEnvironmentVariable] = catalogRoot;
+
+            using var process = Process.Start(start)
+                ?? throw new InvalidOperationException("CLI process failed to start.");
+            var stdout = await process.StandardOutput.ReadToEndAsync();
+            var stderr = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            Assert.Equal(4, process.ExitCode);
+            Assert.Contains("disabled", stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("source-must-not-be-read.xlsx", stderr, StringComparison.Ordinal);
+            Assert.Equal(priorContent, await File.ReadAllTextAsync(outputPath));
+            Assert.Empty(stdout);
+        }
+        finally
+        {
+            Directory.Delete(catalogRoot, recursive: true);
+        }
     }
 
     [Fact]

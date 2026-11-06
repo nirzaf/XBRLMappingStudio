@@ -309,11 +309,39 @@ public sealed class MappingJobService
                     "Loaded taxonomy metadata does not match the selected profile handshake.");
         }
 
+        var identityConnections = new Dictionary<string, SourceConnection>(StringComparer.Ordinal);
+        foreach (var binding in project.Bindings)
+        {
+            if (!connections.TryGetValue(binding.BindingId, out var connection)) continue;
+            identityConnections.TryAdd(binding.BindingId, connection);
+            if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite")) continue;
+            if (IsBoundedInMemorySource(connection, out var sourceLimitReason)) continue;
+
+            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = new[]
+            {
+                new Diagnostic
+                {
+                    Code = DiagnosticCodes.IoNumberOutOfBudget,
+                    Subsystem = DiagnosticSubsystem.Adapter,
+                    Severity = DiagnosticSeverity.Error,
+                    Stage = DiagnosticStage.Introspection,
+                    IsBlocking = true,
+                    Message = sourceLimitReason,
+                    OperationId = opId
+                }
+            };
+            progress?.Report(new MappingJobProgress("Run ended: IncompleteConfiguration"));
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             progress?.Report(new MappingJobProgress("Recording source identities"));
-            manifest.Inputs = await RecordInputIdentities(connections, cancellationToken);
+            manifest.Inputs = await RecordInputIdentities(identityConnections, cancellationToken,
+                _executionBudget.MaxInMemorySourceBytes);
         }
         catch (OperationCanceledException)
         {
@@ -852,7 +880,10 @@ public sealed class MappingJobService
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
 
-            var digest = store.ComputeSourceDigest(table);
+            progress?.Report(new MappingJobProgress("Finalizing bounded source spool indexes"));
+            store.Finish(cancellationToken);
+            progress?.Report(new MappingJobProgress("Computing bounded source digest"));
+            var digest = store.ComputeSourceDigest(table, cancellationToken);
             UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
             var reportPath = Path.Combine(directory, "report.json");
             long reportBytes;
@@ -860,7 +891,8 @@ public sealed class MappingJobService
             {
                 using var report = new FileStream(reportPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
                     64 * 1024, FileOptions.SequentialScan);
-                reportBytes = OimSerializer.WriteLargeReport(_profile, store, store.InSemanticOrderWithOccurrences(),
+                reportBytes = OimSerializer.WriteLargeReport(_profile, store.InInputOrder(cancellationToken),
+                    store.InSemanticOrderWithOccurrences(cancellationToken),
                     report, _executionBudget.MaxReportBytes, _executionBudget.MaxNamespaces, cancellationToken);
                 report.Flush(flushToDisk: true);
             }
@@ -1837,7 +1869,8 @@ public sealed class MappingJobService
 
     private static async Task<IReadOnlyList<InputIdentity>> RecordInputIdentities(
         IReadOnlyDictionary<string, SourceConnection> connections,
-        CancellationToken ct)
+        CancellationToken ct,
+        long maxInMemorySourceBytes)
     {
         var list = new List<InputIdentity>();
         foreach (var kv in connections)
@@ -1858,9 +1891,9 @@ public sealed class MappingJobService
             }
             else if (kv.Value.Path is not null && File.Exists(kv.Value.Path))
             {
-                await using var fs = File.OpenRead(kv.Value.Path);
-                var digest = RunManifest.ComputeSha256(fs);
-                list.Add(new InputIdentity(kv.Key, "file", digest, IsReplayable: true, kv.Value.Path));
+                var digest = await ComputeFileDigestWithinLimitAsync(
+                    kv.Value.Path, maxInMemorySourceBytes, ct);
+                list.Add(new InputIdentity(kv.Key, "file", digest, IsReplayable: digest is not null, kv.Value.Path));
             }
             else
             {
@@ -1877,6 +1910,41 @@ public sealed class MappingJobService
             }
         }
         return list;
+    }
+
+    private static async Task<string?> ComputeFileDigestWithinLimitAsync(
+        string path,
+        long maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length > maximumBytes) return null;
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[64 * 1024];
+            long total = 0;
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                if (read > maximumBytes - total) return null;
+                total += read;
+                hash.AppendData(buffer, 0, read);
+            }
+            if (total != stream.Length || total != info.Length) return null;
+            return "sha256:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private static async Task<bool> PdfInputsMatchRecordedIdentityAsync(

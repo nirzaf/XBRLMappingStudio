@@ -278,7 +278,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-On 2026-11-06, the local Windows Release solution run on the working tree based on `b539b9f2d4e40270f23552eb5883bd1d5c330f28` passed **505 tests** and skipped **5** Arelle-gated .NET subprocess tests (510 total). The pinned Arelle runtime was not configured locally, so those five subprocess cases and the Python worker suite were not run in this session. The table shows totals from that solution run; exact-head CI for the pending FND-02 update will be recorded after push.
+Exact-head GitHub Actions run [42132498946](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42132498946) passed repository hygiene and the Windows/Ubuntu Release build/test matrix on `e5e303c6d9aab38a0f7b32b20733cdc9192d32d2`. Each .NET matrix passed **505 tests** and skipped **5** Arelle-gated subprocess cases. The pinned worker job passed **23 Python tests** and **5 gated .NET Arelle integration tests**. The current Windows Release run on this checkout (based on that SHA, with TAX-01 and ENG-01 follow-up changes) passed **510 tests** and skipped the same **5** gated cases. The table shows the current local suite totals; exact-head CI for these follow-up changes is pending:
 
 | Suite | Count | Covers |
 |---|---:|---|
@@ -287,8 +287,8 @@ On 2026-11-06, the local Windows Release solution run on the working tree based 
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 89 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
 | Ops.Tests | 68 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 119 | 114 passed; 5 Arelle-gated subprocess cases skipped locally. Covers CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, profile gates, receipts and worker failures |
-| Desktop.Tests | 61 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, suggestion review and audit persistence |
+| Integration.Tests | 123 | 118 passed; 5 Arelle-gated subprocess cases skipped locally. Covers CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 62 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
 | Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash

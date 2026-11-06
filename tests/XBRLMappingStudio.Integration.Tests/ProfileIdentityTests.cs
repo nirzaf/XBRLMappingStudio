@@ -53,9 +53,17 @@ public sealed class ProfileIdentityTests
         Assert.Equal(0, worker.RequestCalls);
     }
 
-    private static MappingProject ProjectWithProfile(string profileId, string profileDigest)
+    internal static MappingProject ProjectWithProfile(string profileId, string profileDigest)
     {
         var source = TestFixtures.BuildRevenueMappingProject("unused.xlsx", approved: false);
+        return ProjectWithProfile(source, profileId, profileDigest);
+    }
+
+    internal static MappingProject ProjectWithProfile(
+        MappingProject source,
+        string profileId,
+        string profileDigest)
+    {
         return new MappingProject
         {
             SchemaVersion = source.SchemaVersion,

@@ -243,6 +243,39 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public void DisabledInstalledProfileFailsClosedWithoutChangingItsIdentity()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-disabled-profile", "1.0.0", "Revenue");
+            File.WriteAllText(Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName), "disabled by local administrator");
+
+            var loaded = InstalledFilingProfileCatalog.Load(root);
+            var installation = Assert.Single(loaded.Profiles);
+            Assert.False(installation.IsEnabled);
+            Assert.Equal(installed.Profile.ProfileId, installation.Profile.ProfileId);
+            Assert.Equal(installed.Profile.Digest, installation.Profile.Digest);
+
+            var resolver = FilingProfileResolver.FromInstalledDirectory(root);
+            var result = resolver.Resolve(Project(installed.Profile), allowSyntheticProfile: false);
+
+            Assert.False(result.Success);
+            Assert.Null(result.Profile);
+            Assert.Contains(result.Diagnostics.Items, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.XbrProfileNotAuthorized
+                && diagnostic.Message.Contains("disabled", StringComparison.Ordinal)
+                && diagnostic.Message.Contains("no source data was read", StringComparison.Ordinal));
+
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CatalogRejectsTraversalAndOfflineReferencesToUnpinnedFiles()
     {
         var root = NewCatalogDirectory();

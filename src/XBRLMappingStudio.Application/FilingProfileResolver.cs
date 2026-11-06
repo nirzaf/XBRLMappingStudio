@@ -119,15 +119,27 @@ public sealed class FilingProfileResolver
             diagnostics.Add(diagnostic);
         }
 
-        if (_installations.ContainsKey((profile.ProfileId, profile.Digest)))
+        if (_installations.TryGetValue((profile.ProfileId, profile.Digest), out var installation))
         {
-            diagnostics.Error(
-                DiagnosticCodes.XbrProfileNotAuthorized,
-                DiagnosticSubsystem.XBRL,
-                stage,
-                $"Profile '{profile.ProfileId}' is installed and hash-verified, but has not passed the owner, filing-authority, and redistribution-rights gates. "
-                + "Close GAT-01 and GAT-02 before using it; no source data was read.",
-                operationId: operationId);
+            if (!installation.IsEnabled)
+            {
+                diagnostics.Error(
+                    DiagnosticCodes.XbrProfileNotAuthorized,
+                    DiagnosticSubsystem.XBRL,
+                    stage,
+                    $"Profile '{profile.ProfileId}' version '{installation.Version}' is disabled in the installed catalog; no source data was read.",
+                    operationId: operationId);
+            }
+            else
+            {
+                diagnostics.Error(
+                    DiagnosticCodes.XbrProfileNotAuthorized,
+                    DiagnosticSubsystem.XBRL,
+                    stage,
+                    $"Profile '{profile.ProfileId}' is installed and hash-verified, but has not passed the owner, filing-authority, and redistribution-rights gates. "
+                    + "Close GAT-01 and GAT-02 before using it; no source data was read.",
+                    operationId: operationId);
+            }
         }
 
         var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);

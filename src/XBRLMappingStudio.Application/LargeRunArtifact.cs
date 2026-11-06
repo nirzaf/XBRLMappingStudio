@@ -223,47 +223,68 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
         if ((_count + _sourceRows) % 512 == 0) CommitAndBeginInsertTransaction();
     }
 
-    public string ComputeSourceDigest(string table)
+    public string ComputeSourceDigest(string table, CancellationToken cancellationToken = default)
     {
-        Finish();
+        Finish(cancellationToken);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         AppendPart(hash, table);
         AppendText(hash, _sourceRows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":");
         using var command = _connection.CreateCommand();
         command.CommandText = "SELECT canonical FROM source_rows ORDER BY sort_key, seq;";
+        cancellationToken.ThrowIfCancellationRequested();
         using var reader = command.ExecuteReader();
-        while (reader.Read()) AppendPart(hash, reader.GetString(0));
+        cancellationToken.ThrowIfCancellationRequested();
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AppendPart(hash, reader.GetString(0));
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         return "sha256:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
-    public IEnumerable<(XbrlFact Fact, int Occurrence)> InSemanticOrderWithOccurrences()
+    public IEnumerable<(XbrlFact Fact, int Occurrence)> InSemanticOrderWithOccurrences(
+        CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        Finish();
+        Finish(cancellationToken);
         using var command = _connection.CreateCommand();
         command.CommandText = "SELECT fact_json, occurrence FROM (SELECT fact_json, semantic_sort_key, seq, ROW_NUMBER() OVER (PARTITION BY semantic_key ORDER BY seq) AS occurrence FROM facts) ORDER BY semantic_sort_key, seq;";
+        cancellationToken.ThrowIfCancellationRequested();
         using var reader = command.ExecuteReader();
+        cancellationToken.ThrowIfCancellationRequested();
         while (reader.Read())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var json = reader.GetString(0);
             yield return (JsonSerializer.Deserialize<XbrlFact>(json, JsonOptions)
                 ?? throw new InvalidDataException("The disk-backed fact spool contains an invalid fact row."), reader.GetInt32(1));
         }
     }
 
-    public void Finish()
+    public void Finish(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (_finished) return;
+        cancellationToken.ThrowIfCancellationRequested();
         CommitInsertTransaction();
+        cancellationToken.ThrowIfCancellationRequested();
         using (var index = _connection.CreateCommand())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             index.CommandText = "CREATE INDEX facts_semantic_order ON facts(semantic_sort_key, seq);";
             index.ExecuteNonQuery();
+            // Microsoft.Data.Sqlite executes this index build synchronously. Observe
+            // cancellation as soon as the native SQLite call returns, then skip the
+            // remaining index and let the owner discard the private spool.
+            cancellationToken.ThrowIfCancellationRequested();
             index.CommandText = "CREATE INDEX source_rows_order ON source_rows(sort_key, seq);";
             index.ExecuteNonQuery();
+            cancellationToken.ThrowIfCancellationRequested();
         }
         _finished = true;
         EnsureDatabaseDiskBudget();
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     public bool TryGetFirstDuplicate(out string semanticKey)
@@ -277,6 +298,12 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
 
     public IEnumerable<XbrlFact> InInputOrder() => ReadFacts("seq");
     public IEnumerable<XbrlFact> InSemanticOrder() => ReadFacts("semantic_sort_key, seq");
+
+    public IEnumerable<XbrlFact> InInputOrder(CancellationToken cancellationToken)
+        => ReadFacts("seq", cancellationToken);
+
+    public IEnumerable<XbrlFact> InSemanticOrder(CancellationToken cancellationToken)
+        => ReadFacts("semantic_sort_key, seq", cancellationToken);
 
     public IEnumerator<XbrlFact> GetEnumerator() => InInputOrder().GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
@@ -296,15 +323,18 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
         finally { _connection.Dispose(); }
     }
 
-    private IEnumerable<XbrlFact> ReadFacts(string orderBy)
+    private IEnumerable<XbrlFact> ReadFacts(string orderBy, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        Finish();
+        Finish(cancellationToken);
         using var command = _connection.CreateCommand();
         command.CommandText = $"SELECT fact_json FROM facts ORDER BY {orderBy};";
+        cancellationToken.ThrowIfCancellationRequested();
         using var reader = command.ExecuteReader();
+        cancellationToken.ThrowIfCancellationRequested();
         while (reader.Read())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var json = reader.GetString(0);
             yield return JsonSerializer.Deserialize<XbrlFact>(json, JsonOptions)
                 ?? throw new InvalidDataException("The disk-backed fact spool contains an invalid fact row.");

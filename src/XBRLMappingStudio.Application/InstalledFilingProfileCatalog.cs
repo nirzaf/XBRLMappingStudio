@@ -65,7 +65,8 @@ public sealed record InstalledFilingProfile(
     IReadOnlyList<string> PackageNames,
     IReadOnlyDictionary<string, string> OfflineReferences,
     IReadOnlyList<string> RequiredPlugins,
-    string ManifestFileDigest);
+    string ManifestFileDigest,
+    bool IsEnabled = true);
 
 public sealed record FilingProfileCatalogIssue(string? ProfileId, string? Version, string Message);
 
@@ -82,6 +83,8 @@ public static class InstalledFilingProfileCatalog
 {
     public const string CatalogEnvironmentVariable = "XMS_PROFILE_CATALOG";
     public const string ManifestFileName = "profile.json";
+    /// <summary>Presence of this regular file disables one installed profile version without changing its pinned taxonomy digest.</summary>
+    public const string DisabledMarkerFileName = ".disabled";
     private const int MaxManifestBytes = 16 * 1024 * 1024;
     private const int MaxConcepts = 250_000;
     private const int MaxPackageFiles = 16_384;
@@ -221,6 +224,7 @@ public static class InstalledFilingProfileCatalog
 
         var entryPointPath = ResolvePackageFile(versionDirectory, manifest.EntryPoint);
         var profile = manifest.ToProfile();
+        var isEnabled = !HasDisabledMarker(versionDirectory);
         return new InstalledFilingProfile(
             profile,
             manifest.Version,
@@ -230,7 +234,30 @@ public static class InstalledFilingProfileCatalog
             manifest.PackageNames.ToArray(),
             new Dictionary<string, string>(manifest.OfflineReferences, StringComparer.Ordinal),
             manifest.RequiredPlugins.ToArray(),
-            "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+            "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            isEnabled);
+    }
+
+    private static bool HasDisabledMarker(string versionDirectory)
+    {
+        var markerPath = Path.Combine(versionDirectory, DisabledMarkerFileName);
+        try
+        {
+            var attributes = File.GetAttributes(markerPath);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidDataException("A disabled-profile marker cannot be a symbolic link or reparse point.");
+            if (attributes.HasFlag(FileAttributes.Directory))
+                throw new InvalidDataException("A disabled-profile marker must be a regular file.");
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
     }
 
     private static void ValidateManifestShape(FilingProfileManifest manifest,

@@ -7,6 +7,7 @@ using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.AI;
 using XBRLMappingStudio.Engine;
+using System.Security.Cryptography;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -558,6 +559,96 @@ public sealed class DesignerSessionTests
         Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR015", StringComparison.Ordinal));
         Assert.DoesNotContain(viewModel.Diagnostics, row => row.Display.Contains("Source inspection must not run.", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void DesktopBlocksDisabledInstalledProfileBeforePreviewReadsSource()
+    {
+        var catalogRoot = Path.Combine(Path.GetTempPath(), "xms-desktop-disabled-profile-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(catalogRoot);
+        try
+        {
+            var installed = WriteInstalledProfile(catalogRoot, "desktop-disabled-profile", "1.0.0");
+            File.WriteAllText(Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName), "disabled by local administrator");
+
+            var workbookPath = TestFixtures.MaterializeWorkbook(catalogRoot);
+            var project = WithProfileIdentity(TestFixtures.BuildRevenueMappingProject(workbookPath), installed.Profile);
+            var viewModel = new MainWindowViewModel(
+                project,
+                null,
+                (_, _) => throw new InvalidOperationException("SQLite source inspection must not run."),
+                FilingProfileResolver.FromInstalledDirectory(catalogRoot));
+            viewModel.SaveProjectTo(Path.Combine(catalogRoot, "mapping.xmap"));
+            File.Delete(workbookPath);
+
+            viewModel.PreviewCommand.Execute(null);
+
+            Assert.Equal("Operation blocked by filing-profile resolution.", viewModel.StatusText);
+            Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR018", StringComparison.Ordinal)
+                && row.Display.Contains("disabled", StringComparison.Ordinal));
+            Assert.DoesNotContain(viewModel.Diagnostics, row => row.Display.Contains(workbookPath, StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    private static InstalledFilingProfile WriteInstalledProfile(string root, string profileId, string version)
+    {
+        var directory = Path.Combine(root, profileId, version);
+        Directory.CreateDirectory(directory);
+        var entryPath = Path.Combine(directory, "entry.xsd");
+        File.WriteAllText(entryPath, $"<schema version='{version}'/>");
+        var manifest = new FilingProfileManifest
+        {
+            SchemaVersion = FilingProfileManifest.CurrentSchemaVersion,
+            ProfileId = profileId,
+            Version = version,
+            EntryPoint = "entry.xsd",
+            ProfileDigest = "",
+            Concepts = new List<ConceptMetadata>
+            {
+                new("ex:Revenue", "urn:example", "Revenue", "Revenue", "monetary", "duration", false)
+            },
+            SupportedUnits = new List<string> { "USD" },
+            NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ex"] = "urn:example"
+            },
+            PackageNames = new List<string> { "example-taxonomy" },
+            PackageFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["entry.xsd"] = FileDigest(entryPath)
+            }
+        };
+        manifest = manifest with { ProfileDigest = manifest.ComputeDigest() };
+        File.WriteAllText(Path.Combine(directory, InstalledFilingProfileCatalog.ManifestFileName), manifest.ToJson());
+        return InstalledFilingProfileCatalog.Load(root).Profiles.Single(profile =>
+            profile.Profile.ProfileId == profileId && profile.Version == version);
+    }
+
+    private static string FileDigest(string path)
+        => "sha256:" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+
+    private static MappingProject WithProfileIdentity(MappingProject source, FilingProfile profile) => new()
+    {
+        SchemaVersion = source.SchemaVersion,
+        ProjectId = source.ProjectId,
+        Name = source.Name,
+        ProfileId = profile.ProfileId,
+        ProfileDigest = profile.Digest,
+        FunctionCatalogVersion = source.FunctionCatalogVersion,
+        SemanticRevision = source.SemanticRevision,
+        LayoutGeneration = source.LayoutGeneration,
+        Metadata = source.Metadata,
+        Nodes = source.Nodes,
+        Edges = source.Edges,
+        Bindings = source.Bindings,
+        Functions = source.Functions,
+        Destination = source.Destination,
+        Approvals = source.Approvals
+    };
 
     [Fact]
     public void FactPropertyEdit_IsOneUndoableChange()

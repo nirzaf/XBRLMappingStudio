@@ -49,6 +49,9 @@ integration tests were run again after adding direct source JSON/XML lexical che
 `-p:BaseOutputPath=bin-codex\` to keep the build away from a running Desktop process
 that held the normal Release output files open.
 
-The pinned CI worker job remains the required execution evidence for the Arelle-gated
-cases on the pushed implementation head. `git diff --check` is recorded separately
-with the implementation commit.
+Exact-head GitHub Actions run [42132498946](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42132498946)
+passed repository hygiene and both Windows and Ubuntu Release matrices on
+`e5e303c6d9aab38a0f7b32b20733cdc9192d32d2`; each matrix passed 505 tests and skipped
+the same five gated subprocess cases. The dedicated pinned worker job passed 23 Python
+tests and all five gated .NET Arelle integration cases. `git diff --check` passed
+before the implementation commit.
