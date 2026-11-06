@@ -206,6 +206,9 @@ public sealed class ExecutionContext
     /// <summary>MAP05 resource budget: maximum items in a Collection port.</summary>
     public int MaxCollectionItems { get; init; } = 100_000;
 
+    /// <summary>MAP05 resource budget: maximum number of GroupBy buckets.</summary>
+    public int MaxGroupCount { get; init; } = 100_000;
+
     /// <summary>MAP06 resource budget: maximum many-to-many expansion rows before block.</summary>
     public int MaxJoinExpansionRows { get; init; } = 200_000;
 

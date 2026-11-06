@@ -436,6 +436,22 @@ public sealed class PlanCompiler
                         var bk = string.Join("|", keyFields.Select(kf => GetField(fields, kf).AsString()));
                         if (!totals.ContainsKey(bk))
                         {
+                            if (order.Count >= ctx.MaxGroupCount)
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy exceeded MaxGroupCount={ctx.MaxGroupCount}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                break;
+                            }
+                            if (order.Count >= ctx.MaxCollectionItems)
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy output exceeded MaxCollectionItems={ctx.MaxCollectionItems}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                break;
+                            }
                             order.Add(bk);
                             totals[bk] = 0m;
                             groupKeyPaths[bk] = new List<SourceTransformationPath>();

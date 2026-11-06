@@ -199,6 +199,120 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void GroupBy_StopsBeforeCreatingGroupBeyondConfiguredLimit()
+    {
+        var rows = new[]
+        {
+            GraphHarness.Row(("entity", S("X")), ("amount", D(10m))),
+            GraphHarness.Row(("entity", S("Y")), ("amount", D(5m))),
+            GraphHarness.Row(("entity", S("Z")), ("amount", D(20m))),
+        };
+
+        var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
+            new() { ["binding"] = Binding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By entity",
+            new() { ["keys"] = "entity", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection),
+            });
+
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(collectRows, "items", group, "items"),
+        };
+        var sink = GraphHarness.FactSink(out var factEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new List<MappingNode> { collectRows, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var ctx = GraphHarness.Ctx(
+            new[] { (Binding, rows as IReadOnlyList<DataRecord>) },
+            maxGroupCount: 2);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.NotNull(result);
+        var budgetDiagnostic = Assert.Single(result!.Diagnostics,
+            d => d.Code == DiagnosticCodes.MapCollectionBudgetExceeded);
+        Assert.True(budgetDiagnostic.IsBlocking);
+        Assert.Contains("MaxGroupCount=2", budgetDiagnostic.Message, StringComparison.Ordinal);
+        Assert.Equal(2, result.Facts.Count);
+    }
+
+    [Fact]
+    public void GroupBy_StopsBeforeExceedingCollectionOutputLimit()
+    {
+        const string Left = "L";
+        const string Right = "R";
+        var leftRows = new[]
+        {
+            GraphHarness.Row(("joinKey", S("1")), ("leftCode", S("A")), ("amount", D(10m))),
+            GraphHarness.Row(("joinKey", S("1")), ("leftCode", S("B")), ("amount", D(5m))),
+        };
+        var rightRows = new[]
+        {
+            GraphHarness.Row(("joinKey", S("1")), ("rightCode", S("X"))),
+            GraphHarness.Row(("joinKey", S("1")), ("rightCode", S("Y"))),
+        };
+
+        var left = GraphHarness.Node(NodeTypeConstants.CollectRows, "Left rows",
+            new() { ["binding"] = Left },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var right = GraphHarness.Node(NodeTypeConstants.CollectRows, "Right rows",
+            new() { ["binding"] = Right },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var join = GraphHarness.Node(NodeTypeConstants.Join, "Join",
+            new() { ["leftKey"] = "joinKey", ["rightKey"] = "joinKey", ["cardinality"] = "Inner", ["duplicateKey"] = "All" },
+            inputs: new[]
+            {
+                GraphHarness.P("left", PortShape.Record, PortCardinality.Collection),
+                GraphHarness.P("right", PortShape.Record, PortCardinality.Collection),
+            },
+            outputs: new[] { GraphHarness.P("rows", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By pair",
+            new() { ["keys"] = "leftCode,rightCode", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection),
+            });
+
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(left, "items", join, "left"),
+            GraphHarness.Link(right, "items", join, "right"),
+            GraphHarness.Link(join, "rows", group, "items"),
+        };
+        var sink = GraphHarness.FactSink(out var factEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new List<MappingNode> { left, right, join, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Left), GraphHarness.Binding(Right) });
+        var ctx = GraphHarness.Ctx(new[]
+        {
+            (Left, leftRows as IReadOnlyList<DataRecord>),
+            (Right, rightRows as IReadOnlyList<DataRecord>),
+        }, maxCollectionItems: 2, maxGroupCount: 10);
+
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.NotNull(result);
+        var budgetDiagnostic = Assert.Single(result!.Diagnostics,
+            d => d.Code == DiagnosticCodes.MapCollectionBudgetExceeded);
+        Assert.True(budgetDiagnostic.IsBlocking);
+        Assert.Contains("GroupBy output exceeded MaxCollectionItems=2", budgetDiagnostic.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(2, result.Facts.Count);
+    }
+
+    [Fact]
     public void GroupBySetEmission_PreservesOnlyMemberRowsAndFieldSources()
     {
         var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
