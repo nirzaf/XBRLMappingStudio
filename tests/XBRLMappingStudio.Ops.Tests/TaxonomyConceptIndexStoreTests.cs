@@ -36,6 +36,7 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
         Assert.Equal("USD", Assert.Single(first.Index.SupportedUnits));
         Assert.Contains("ext:Domestic", first.Index.DimensionDomains["ext:RegionAxis"]);
         Assert.Contains("Revenue", first.Index.Get("synthetic:Revenue")!.Label);
+        Assert.Equal(2, first.Index.PresentationOccurrencesFor("synthetic:Revenue").Count);
 
         var reused = new TaxonomyConceptIndexStore(new LocalApplicationDatabase(_databasePath))
             .LoadOrBuild(firstProfile);
@@ -43,6 +44,8 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
         Assert.Equal("إيرادات", TaxonomyIndex.ResolveLabel(
             reused.Index.GetByExpandedName(SyntheticProfile.Namespace, "Revenue")!, "ar"));
         Assert.True(reused.Index.Get("synthetic:FinancialStatements")!.IsAbstract);
+        Assert.Equal(2, reused.Index.PresentationOccurrencesFor("synthetic:Revenue").Count);
+        Assert.Contains("https://example.invalid/roles/statement", reused.Index.Roles);
 
         using (var connection = database.OpenConnection())
         using (var corrupt = connection.CreateCommand())
@@ -117,6 +120,13 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
             DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
             {
                 ["ext:RegionAxis"] = new[] { "ext:Domestic", "ext:International" }
+            },
+            PresentationLinks = new[]
+            {
+                new PresentationLink("https://example.invalid/roles/statement",
+                    "synthetic:FinancialStatements", "synthetic:Revenue", 2.5m),
+                new PresentationLink("https://example.invalid/roles/income",
+                    "synthetic:NetIncome", "synthetic:Revenue", 1m)
             },
             NamespaceUris = namespaceUris,
             TaxonomyUrls = new[] { "extension.xsd" },

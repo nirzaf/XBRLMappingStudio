@@ -51,4 +51,4 @@ public sealed record PresentationLink(
     string RoleUri,
     string ParentQName,
     string ChildQName,
-    int Order = 0);
+    decimal Order = 0);

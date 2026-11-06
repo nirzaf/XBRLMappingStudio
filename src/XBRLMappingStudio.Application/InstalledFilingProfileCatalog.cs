@@ -12,7 +12,8 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
+    public const int MaximumPresentationRelationships = TaxonomyIndex.MaximumRelationships;
 
     public required int SchemaVersion { get; init; }
     public required string ProfileId { get; init; }
@@ -25,6 +26,8 @@ public sealed record FilingProfileManifest
     public Dictionary<string, string> NamespaceUris { get; init; } = new(StringComparer.Ordinal);
     /// <summary>Dimension QName to allowed member QNames for the exact taxonomy version.</summary>
     public Dictionary<string, List<string>> DimensionDomains { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>Ordered presentation arcs; concept identity remains separate from its role-specific occurrences.</summary>
+    public List<PresentationLink> PresentationLinks { get; init; } = new();
     public required List<string> PackageNames { get; init; }
     /// <summary>Relative package path to sha256 digest. Every file is verified before install.</summary>
     public required Dictionary<string, string> PackageFiles { get; init; }
@@ -49,6 +52,7 @@ public sealed record FilingProfileManifest
             pair => pair.Key,
             pair => (IReadOnlyList<string>)pair.Value.ToArray(),
             StringComparer.Ordinal),
+        PresentationLinks = PresentationLinks.ToArray(),
         OutputFormat = OutputFormat,
         NamespaceUris = new Dictionary<string, string>(NamespaceUris, StringComparer.Ordinal),
         TaxonomyUrls = OfflineReferences.Keys.Order(StringComparer.Ordinal).ToArray(),
@@ -280,11 +284,16 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException($"Concept count exceeds the {MaxConcepts}-concept limit or is missing.");
         if (manifest.SupportedUnits is null || manifest.PackageNames is null
             || manifest.PackageFiles is null || manifest.NamespaceUris is null
-            || manifest.DimensionDomains is null || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
+            || manifest.DimensionDomains is null || manifest.PresentationLinks is null
+            || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
             || manifest.RequiredChecks is null)
             throw new InvalidDataException("Profile collections cannot be null.");
         if (manifest.SchemaVersion < 3 && manifest.DimensionDomains.Count > 0)
             throw new InvalidDataException("Dimension domains require profile manifest schema version 3.");
+        if (manifest.SchemaVersion < 4 && manifest.PresentationLinks.Count > 0)
+            throw new InvalidDataException("Presentation relationships require profile manifest schema version 4.");
+        if (manifest.PresentationLinks.Count > FilingProfileManifest.MaximumPresentationRelationships)
+            throw new InvalidDataException($"Presentation relationships exceed the {FilingProfileManifest.MaximumPresentationRelationships}-relationship limit.");
         if (manifest.PackageNames.Count is 0 or > MaxPackageNames)
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageNames} taxonomy package names.");
         if (manifest.PackageFiles.Count is 0 or > MaxPackageFiles)
@@ -315,13 +324,15 @@ public static class InstalledFilingProfileCatalog
         }
 
         var concepts = new HashSet<(string Namespace, string LocalName)>();
+        var qualifiedNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var concept in manifest.Concepts)
         {
             if (concept is null || string.IsNullOrWhiteSpace(concept.QualifiedName)
                 || string.IsNullOrWhiteSpace(concept.Namespace) || string.IsNullOrWhiteSpace(concept.LocalName)
                 || string.IsNullOrWhiteSpace(concept.Label) || string.IsNullOrWhiteSpace(concept.DataType)
                 || string.IsNullOrWhiteSpace(concept.PeriodType) || concept.SupportedLanguages is null
-                || concept.LabelsByLanguage is null || !concepts.Add((concept.Namespace, concept.LocalName)))
+                || concept.LabelsByLanguage is null || !concepts.Add((concept.Namespace, concept.LocalName))
+                || !qualifiedNames.Add(concept.QualifiedName))
                 throw new InvalidDataException("Profile concepts must have unique expanded names and complete metadata.");
             var colon = concept.QualifiedName.IndexOf(':');
             if (colon <= 0 || colon != concept.QualifiedName.LastIndexOf(':')
@@ -334,6 +345,22 @@ public static class InstalledFilingProfileCatalog
                 || string.IsNullOrWhiteSpace(pair.Value)
                 || !concept.SupportedLanguages.Contains(pair.Key, StringComparer.Ordinal)))
                 throw new InvalidDataException($"Localized labels for concept '{concept.QualifiedName}' must use a supported language and non-empty text.");
+        }
+        var relationshipKeys = new HashSet<(string RoleUri, string ParentQName, string ChildQName, decimal Order)>();
+        foreach (var relationship in manifest.PresentationLinks)
+        {
+            if (relationship is null || string.IsNullOrWhiteSpace(relationship.RoleUri)
+                || relationship.RoleUri.Length > 2048 || relationship.RoleUri.Any(char.IsWhiteSpace)
+                || relationship.RoleUri.Any(char.IsControl)
+                || !Uri.TryCreate(relationship.RoleUri, UriKind.Absolute, out var roleUri)
+                || (roleUri.Scheme is "http" or "https"
+                    && (string.IsNullOrEmpty(roleUri.Host) || roleUri.UserInfo.Length > 0))
+                || !qualifiedNames.Contains(relationship.ParentQName)
+                || !qualifiedNames.Contains(relationship.ChildQName))
+                throw new InvalidDataException("Presentation relationships must have an absolute role URI and reference indexed concepts.");
+            if (!relationshipKeys.Add((relationship.RoleUri, relationship.ParentQName,
+                    relationship.ChildQName, relationship.Order)))
+                throw new InvalidDataException("Profile presentation relationships cannot contain duplicate arcs.");
         }
         foreach (var (dimensionQName, memberQNames) in manifest.DimensionDomains)
         {
@@ -525,6 +552,23 @@ internal static class FilingProfileManifestDigest
         IReadOnlyList<string> RequiredPlugins,
         IReadOnlyList<string> RequiredChecks);
 
+    private sealed record DigestPayloadV4(
+        int SchemaVersion,
+        string ProfileId,
+        string Version,
+        string EntryPoint,
+        string OutputFormat,
+        IReadOnlyList<CanonicalConcept> Concepts,
+        IReadOnlyList<string> SupportedUnits,
+        IReadOnlyDictionary<string, string> NamespaceUris,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains,
+        IReadOnlyList<PresentationLink> PresentationLinks,
+        IReadOnlyList<string> PackageNames,
+        IReadOnlyDictionary<string, string> PackageFiles,
+        IReadOnlyDictionary<string, string> OfflineReferences,
+        IReadOnlyList<string> RequiredPlugins,
+        IReadOnlyList<string> RequiredChecks);
+
     private sealed record CanonicalConcept(
         string QualifiedName,
         string Namespace,
@@ -550,8 +594,9 @@ internal static class FilingProfileManifestDigest
                 concept.SupportedLanguages.Order(StringComparer.Ordinal).ToArray(),
                 Sorted(concept.LabelsByLanguage)))
             .ToArray();
-        object canonical = manifest.SchemaVersion < 3
-            ? new DigestPayload(
+        object canonical = manifest.SchemaVersion switch
+        {
+            < 3 => new DigestPayload(
                 manifest.SchemaVersion,
                 manifest.ProfileId,
                 manifest.Version,
@@ -564,8 +609,8 @@ internal static class FilingProfileManifestDigest
                 Sorted(manifest.PackageFiles),
                 Sorted(manifest.OfflineReferences),
                 manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
-                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray())
-            : new DigestPayloadV3(
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
+            3 => new DigestPayloadV3(
                 manifest.SchemaVersion,
                 manifest.ProfileId,
                 manifest.Version,
@@ -579,7 +624,24 @@ internal static class FilingProfileManifestDigest
                 Sorted(manifest.PackageFiles),
                 Sorted(manifest.OfflineReferences),
                 manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
-                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray());
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
+            _ => new DigestPayloadV4(
+                manifest.SchemaVersion,
+                manifest.ProfileId,
+                manifest.Version,
+                manifest.EntryPoint,
+                manifest.OutputFormat,
+                concepts,
+                manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.NamespaceUris),
+                SortedDomains(manifest.DimensionDomains),
+                SortedPresentationLinks(manifest.PresentationLinks),
+                manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.PackageFiles),
+                Sorted(manifest.OfflineReferences),
+                manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray())
+        };
         var bytes = JsonSerializer.SerializeToUtf8Bytes(canonical,
             InstalledFilingProfileCatalog.SerializerOptionsForManifest);
         return "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -601,4 +663,11 @@ internal static class FilingProfileManifestDigest
             result.Add(key, members.Order(StringComparer.Ordinal).ToArray());
         return result;
     }
+
+    internal static IReadOnlyList<PresentationLink> SortedPresentationLinks(IEnumerable<PresentationLink> links)
+        => links.OrderBy(link => link.RoleUri, StringComparer.Ordinal)
+            .ThenBy(link => link.ParentQName, StringComparer.Ordinal)
+            .ThenBy(link => link.Order)
+            .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+            .ToArray();
 }

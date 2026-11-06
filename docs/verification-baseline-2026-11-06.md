@@ -193,3 +193,18 @@ Release packaging now hashes every uploaded archive and the SPDX document into
 `SHA256SUMS.txt`. This provides package/artifact provenance evidence, not per-file
 license review, redistribution approval, native/OCR qualification, signatures, or
 clean-machine installation evidence.
+
+## TAX-07 profile-bound presentation relationships
+
+Filing-profile manifest schema v4 carries ordered presentation links in the
+profile digest; schema-v2/v3 digest contracts remain unchanged. The catalog and
+worker bound link count, validate role URIs and indexed endpoints, and reject
+duplicate arcs. `TaxonomyIndex` keeps relationships separate from concept
+identity, exposes per-parent child paging, and retains bounded cycle-safe path
+enumeration; taxonomy cache schema v2 preserves the links. No licensed real
+taxonomy network was loaded, so calculation/definition relationship ingestion
+and real-profile qualification remain open.
+
+Focused Release verification passed: 23 profile-catalog integration tests, 80
+XBRL tests, 72 operations/cache tests, and 2 desktop explorer tests. The 48 Python
+worker tests passed with 6 environment-dependent skips.

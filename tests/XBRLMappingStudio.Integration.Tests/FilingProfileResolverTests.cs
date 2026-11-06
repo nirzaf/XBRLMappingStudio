@@ -127,11 +127,20 @@ public sealed class FilingProfileResolverTests
                     new ConceptMetadata("ex:RegionAxis", "urn:example", "RegionAxis",
                         "Region", "dimension", "duration", IsAbstract: true),
                     new ConceptMetadata("ex:NorthAmerica", "urn:example", "NorthAmerica",
-                        "North America", "domain-item", "duration", IsAbstract: false)
+                        "North America", "domain-item", "duration", IsAbstract: false),
+                    new ConceptMetadata("ex:Statements", "urn:example", "Statements",
+                        "Statements", "string", "duration", IsAbstract: true),
+                    new ConceptMetadata("ex:Income", "urn:example", "Income",
+                        "Income", "string", "duration", IsAbstract: true)
                 }).ToList(),
                 DimensionDomains = new Dictionary<string, List<string>>(StringComparer.Ordinal)
                 {
                     ["ex:RegionAxis"] = new() { "ex:NorthAmerica" }
+                },
+                PresentationLinks = new List<PresentationLink>
+                {
+                    new("https://example.invalid/roles/statement", "ex:Statements", "ex:Revenue", 2.5m),
+                    new("https://example.invalid/roles/income", "ex:Income", "ex:Revenue", 1m)
                 },
                 ProfileDigest = ""
             };
@@ -144,6 +153,8 @@ public sealed class FilingProfileResolverTests
             var loaded = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles);
             Assert.Equal("3.0.0", loaded.Profile.TaxonomyVersion);
             Assert.Equal(new[] { "ex:NorthAmerica" }, loaded.Profile.DimensionDomains["ex:RegionAxis"]);
+            Assert.Equal(2, new TaxonomyIndex(loaded.Profile)
+                .PresentationOccurrencesFor("ex:Revenue").Count);
             Assert.NotEqual(dimensionManifest.ProfileDigest,
                 (dimensionManifest with
                 {
@@ -153,6 +164,35 @@ public sealed class FilingProfileResolverTests
                     },
                     ProfileDigest = ""
                 }).ComputeDigest());
+            Assert.Equal(dimensionManifest.ProfileDigest,
+                (dimensionManifest with
+                {
+                    PresentationLinks = dimensionManifest.PresentationLinks.AsEnumerable().Reverse().ToList(),
+                    ProfileDigest = ""
+                }).ComputeDigest());
+            Assert.NotEqual(dimensionManifest.ProfileDigest,
+                (dimensionManifest with
+                {
+                    PresentationLinks = new List<PresentationLink>
+                    {
+                        dimensionManifest.PresentationLinks[0] with { Order = 3m },
+                        dimensionManifest.PresentationLinks[1]
+                    },
+                    ProfileDigest = ""
+                }).ComputeDigest());
+
+            var legacyV3 = dimensionManifest with
+            {
+                SchemaVersion = 3,
+                PresentationLinks = new List<PresentationLink>(),
+                ProfileDigest = ""
+            };
+            legacyV3 = legacyV3 with { ProfileDigest = legacyV3.ComputeDigest() };
+            File.WriteAllText(manifestPath, legacyV3.ToJson());
+            var reloadedV3 = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles);
+            Assert.Equal(3, reloadedV3.SchemaVersion);
+            Assert.Empty(reloadedV3.Profile.PresentationLinks);
+            Assert.Equal(new[] { "ex:NorthAmerica" }, reloadedV3.Profile.DimensionDomains["ex:RegionAxis"]);
 
             var legacy = manifest with
             {
@@ -165,6 +205,59 @@ public sealed class FilingProfileResolverTests
             Assert.Equal(2, reloadedLegacy.SchemaVersion);
             Assert.Equal("fixture-dimension-profile", reloadedLegacy.Profile.ProfileId);
             Assert.Empty(reloadedLegacy.Profile.DimensionDomains);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CatalogRejectsPresentationRelationshipsThatReferenceUnknownConcepts()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            WriteInvalidManifest(root, "fixture-invalid-relationship", "1.0.0", manifest => manifest with
+            {
+                PresentationLinks = new List<PresentationLink>
+                {
+                    new("https://example.invalid/roles/invalid", "ex:Missing", "ex:Revenue", 1m)
+                }
+            });
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue =>
+                issue.ProfileId == "fixture-invalid-relationship"
+                && issue.Message.Contains("reference indexed concepts", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CatalogRejectsDuplicatePresentationRelationships()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var relationship = new PresentationLink(
+                "https://example.invalid/roles/duplicate", "ex:Revenue", "ex:Revenue", 1m);
+            WriteInvalidManifest(root, "fixture-duplicate-relationship", "1.0.0", manifest => manifest with
+            {
+                PresentationLinks = new List<PresentationLink> { relationship, relationship }
+            });
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue =>
+                issue.ProfileId == "fixture-duplicate-relationship"
+                && issue.Message.Contains("duplicate arcs", StringComparison.Ordinal));
         }
         finally
         {

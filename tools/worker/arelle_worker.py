@@ -3,8 +3,10 @@
 
 import argparse
 from collections import deque
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -19,7 +21,7 @@ from urllib.request import url2pathname
 from xml.parsers import expat
 
 PROTOCOL_VERSION = 2
-SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3)
+SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
@@ -27,6 +29,7 @@ MAX_PROFILE_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_PROFILE_FILE_BYTES = 512 * 1024 * 1024
 MAX_PROFILE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PROFILE_FILES = 16384
+MAX_PROFILE_PRESENTATION_RELATIONSHIPS = 1_000_000
 MAX_DOCUMENT_INFO_BYTES = 4 * 1024 * 1024
 MAX_LARGE_REPORT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TAXONOMY_GRAPH_FILES = 4096
@@ -188,6 +191,54 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
                 raise ValueError("Profile dimension domains must contain unique, non-empty member arrays")
             if any(member not in qualified_names for member in member_qnames):
                 raise ValueError("Profile dimension domains cannot refer to unindexed taxonomy members")
+    presentation_links = manifest.get("presentationLinks", [])
+    if not isinstance(presentation_links, list):
+        raise ValueError("Profile presentationLinks must be an array")
+    if schema_version < 4 and presentation_links:
+        raise ValueError("Presentation relationships require manifest schema version 4")
+    if len(presentation_links) > MAX_PROFILE_PRESENTATION_RELATIONSHIPS:
+        raise ValueError("Profile presentation relationships exceed the relationship limit")
+    if presentation_links:
+        concepts = manifest.get("concepts")
+        if not isinstance(concepts, list) or len(concepts) > 250_000:
+            raise ValueError("Profile concepts must be an array within the 250000-concept limit")
+        qualified_names = {
+            concept.get("qualifiedName")
+            for concept in concepts
+            if isinstance(concept, dict) and isinstance(concept.get("qualifiedName"), str)
+        }
+        relationship_keys = set()
+        for relationship in presentation_links:
+            if not isinstance(relationship, dict):
+                raise ValueError("Profile presentation relationships must be objects")
+            role_uri = relationship.get("roleUri")
+            parent_qname = relationship.get("parentQName")
+            child_qname = relationship.get("childQName")
+            order = relationship.get("order", 0)
+            try:
+                parsed_role_uri = urlsplit(role_uri) if isinstance(role_uri, str) else None
+                numeric_order = Decimal(str(order)) if not isinstance(order, bool) else None
+            except (InvalidOperation, ValueError):
+                parsed_role_uri = None
+                numeric_order = None
+            if (parsed_role_uri is None or not parsed_role_uri.scheme
+                    or not isinstance(role_uri, str) or not role_uri or len(role_uri) > 2048
+                    or role_uri != role_uri.strip()
+                    or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in role_uri)
+                    or (parsed_role_uri.scheme.lower() in ("http", "https")
+                        and (not parsed_role_uri.hostname or parsed_role_uri.username is not None
+                             or parsed_role_uri.password is not None))
+                    or not isinstance(parent_qname, str) or parent_qname not in qualified_names
+                    or not isinstance(child_qname, str) or child_qname not in qualified_names
+                    or not isinstance(order, (int, float)) or isinstance(order, bool)
+                    or (isinstance(order, float) and not math.isfinite(order))
+                    or numeric_order is None
+                    or abs(numeric_order) > Decimal("79228162514264337593543950335")):
+                raise ValueError("Profile presentation relationships must have an absolute role URI, numeric order, and indexed endpoints")
+            relationship_key = (role_uri, parent_qname, child_qname, numeric_order)
+            if relationship_key in relationship_keys:
+                raise ValueError("Profile presentation relationships cannot contain duplicate arcs")
+            relationship_keys.add(relationship_key)
     for field in ("profileId", "version", "profileDigest", "entryPoint"):
         if not isinstance(manifest.get(field), str) or not manifest[field] or len(manifest[field]) > 1024:
             raise ValueError("Profile manifest has invalid " + field)

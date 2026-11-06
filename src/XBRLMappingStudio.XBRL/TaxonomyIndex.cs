@@ -19,19 +19,51 @@ public sealed class PresentationNetwork
 {
     public string RoleUri { get; }
     private readonly IReadOnlyList<PresentationLink> _links;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<PresentationLink>> _childrenByParent;
 
     public PresentationNetwork(string roleUri, IReadOnlyList<PresentationLink> links)
     {
         RoleUri = roleUri;
-        _links = links;
+        _links = Array.AsReadOnly(links.ToArray());
+        _childrenByParent = _links
+            .GroupBy(link => link.ParentQName, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<PresentationLink>)Array.AsReadOnly(group
+                    .OrderBy(link => link.Order)
+                    .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+                    .ToArray()),
+                StringComparer.Ordinal);
     }
 
     public IReadOnlyList<PresentationLink> Links => _links;
 
-    public IEnumerable<PresentationLink> ChildrenOf(string parentQName) => _links
-        .Where(l => string.Equals(l.ParentQName, parentQName, StringComparison.Ordinal))
-        .OrderBy(l => l.Order)
-        .ThenBy(l => l.ChildQName, StringComparer.Ordinal);
+    public IEnumerable<PresentationLink> ChildrenOf(string parentQName) =>
+        _childrenByParent.TryGetValue(parentQName, out var children)
+            ? children
+            : Array.Empty<PresentationLink>();
+
+    /// <summary>Loads one bounded page of a parent's ordered child relationships.</summary>
+    public PagedResult<PresentationLink> ChildrenPage(
+        string parentQName,
+        int page = 0,
+        int pageSize = TaxonomyIndex.DefaultPageSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (page < 0) throw new ArgumentOutOfRangeException(nameof(page));
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_childrenByParent.TryGetValue(parentQName, out var children))
+            return new PagedResult<PresentationLink>(Array.Empty<PresentationLink>(), page, pageSize, 0, false);
+
+        var start = (long)page * pageSize;
+        var end = start + pageSize;
+        var items = start >= children.Count
+            ? Array.Empty<PresentationLink>()
+            : children.Skip((int)start).Take(pageSize).ToArray();
+        return new PagedResult<PresentationLink>(
+            Array.AsReadOnly(items), page, pageSize, children.Count, children.Count > end);
+    }
 
     /// <summary>Concepts that are never a child within this role (the top of the tree).</summary>
     public IEnumerable<string> Roots()
@@ -53,6 +85,7 @@ public sealed class PresentationNetwork
 public sealed class TaxonomyIndex
 {
     public const int DefaultPageSize = 50;
+    public const int MaximumRelationships = 1_000_000;
 
     private readonly FilingProfile _profile;
     private readonly IReadOnlyList<PresentationLink> _links;
@@ -81,9 +114,34 @@ public sealed class TaxonomyIndex
                 "A taxonomy profile must have unique expanded names and qualified names.", nameof(profile), ex);
         }
         _orderedConcepts = Array.AsReadOnly(concepts);
-        _links = (links ?? (StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)
-            ? SyntheticProfile.PresentationLinks
-            : Array.Empty<PresentationLink>())).ToList();
+        var profileLinks = profile.PresentationLinks ?? Array.Empty<PresentationLink>();
+        var selectedLinks = links ?? (profileLinks.Count > 0
+            ? profileLinks
+            : StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)
+                ? SyntheticProfile.PresentationLinks
+                : Array.Empty<PresentationLink>());
+        var linkArray = selectedLinks.ToArray();
+        if (linkArray.Length > MaximumRelationships)
+            throw new ArgumentException($"A taxonomy profile cannot index more than {MaximumRelationships} presentation relationships.", nameof(profile));
+        var knownQualifiedNames = new HashSet<string>(_byQualifiedName.Keys, StringComparer.Ordinal);
+        var uniqueLinks = new HashSet<(string RoleUri, string ParentQName, string ChildQName, decimal Order)>();
+        foreach (var link in linkArray)
+        {
+            if (link is null
+                || string.IsNullOrWhiteSpace(link.RoleUri)
+                || link.RoleUri.Length > 2048
+                || link.RoleUri.Any(char.IsWhiteSpace)
+                || link.RoleUri.Any(char.IsControl)
+                || !Uri.TryCreate(link.RoleUri, UriKind.Absolute, out var roleUri)
+                || (roleUri.Scheme is "http" or "https"
+                    && (string.IsNullOrEmpty(roleUri.Host) || roleUri.UserInfo.Length > 0))
+                || !knownQualifiedNames.Contains(link.ParentQName)
+                || !knownQualifiedNames.Contains(link.ChildQName))
+                throw new ArgumentException("Presentation relationships must have an absolute role URI and reference indexed concepts.", nameof(profile));
+            if (!uniqueLinks.Add((link.RoleUri, link.ParentQName, link.ChildQName, link.Order)))
+                throw new ArgumentException("A taxonomy profile cannot contain duplicate presentation relationships.", nameof(profile));
+        }
+        _links = Array.AsReadOnly(linkArray);
         var rolesByConcept = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var link in _links)
         {

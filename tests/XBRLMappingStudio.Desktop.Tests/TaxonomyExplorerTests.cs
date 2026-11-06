@@ -61,6 +61,52 @@ public sealed class TaxonomyExplorerTests
         Assert.False(viewModel.IsTaxonomySearchBusy);
     }
 
+    [Fact]
+    public async Task SelectedConceptShowsRoleSpecificPathsFromResolvedProfileRelationships()
+    {
+        var source = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = "desktop-profile-relationships",
+            Digest = "sha256:desktop-profile-relationships-v1",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            NamespaceUris = source.NamespaceUris,
+            PresentationLinks = new[]
+            {
+                new PresentationLink("https://example.invalid/roles/statement",
+                    "synthetic:FinancialStatements", "synthetic:Revenue", 2.5m),
+                new PresentationLink("https://example.invalid/roles/income",
+                    "synthetic:NetIncome", "synthetic:Revenue", 1m)
+            }
+        };
+        var project = new MappingProject
+        {
+            ProjectId = Id.New(),
+            Name = "Profile relationship explorer test",
+            ProfileId = profile.ProfileId,
+            ProfileDigest = profile.Digest
+        };
+        var viewModel = new MainWindowViewModel(
+            project,
+            null,
+            (_, _) => throw new NotSupportedException("No source adapter is needed."),
+            new FilingProfileResolver(new[] { profile }));
+
+        viewModel.SearchTerm = "Revenue";
+        viewModel.SearchTaxonomyCommand.Execute(null);
+        await WaitForTaxonomySearchAsync(viewModel);
+        viewModel.SelectedConcept = Assert.Single(viewModel.ConceptResults);
+
+        Assert.Equal(2, viewModel.SelectedConceptOccurrences.Count);
+        Assert.Contains(viewModel.SelectedConceptOccurrences, row =>
+            row.RoleUri == "https://example.invalid/roles/statement");
+        Assert.Contains(viewModel.SelectedConceptOccurrences, row =>
+            row.RoleUri == "https://example.invalid/roles/income");
+        Assert.Contains("2 presentation path(s)", viewModel.SelectedConceptOccurrencesStatus,
+            StringComparison.Ordinal);
+    }
+
     private static async Task WaitForTaxonomySearchAsync(MainWindowViewModel viewModel)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));

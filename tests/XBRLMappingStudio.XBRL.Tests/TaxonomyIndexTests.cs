@@ -145,6 +145,111 @@ public sealed class TaxonomyIndexTests
     }
 
     [Fact]
+    public void ProfileRelationshipsRetainRoleOccurrencesAndPageOrderedChildren()
+    {
+        var source = Profile;
+        var roleOne = "https://example.invalid/roles/statement";
+        var roleTwo = "https://example.invalid/roles/income";
+        var links = new[]
+        {
+            new PresentationLink(roleOne, SyntheticProfile.Qualified("FinancialStatements"),
+                SyntheticProfile.Qualified("Revenue"), 2.5m),
+            new PresentationLink(roleOne, SyntheticProfile.Qualified("FinancialStatements"),
+                SyntheticProfile.Qualified("Expenses"), 1.25m),
+            new PresentationLink(roleTwo, SyntheticProfile.Qualified("NetIncome"),
+                SyntheticProfile.Qualified("Revenue"), 1m)
+        };
+        var profile = new FilingProfile
+        {
+            ProfileId = "manifest-relationships",
+            Digest = "sha256:manifest-relationships-v1",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            NamespaceUris = source.NamespaceUris,
+            PresentationLinks = links
+        };
+        var index = new TaxonomyIndex(profile);
+
+        var firstPage = index.Network(roleOne).ChildrenPage(
+            SyntheticProfile.Qualified("FinancialStatements"), page: 0, pageSize: 1);
+        var secondPage = index.Network(roleOne).ChildrenPage(
+            SyntheticProfile.Qualified("FinancialStatements"), page: 1, pageSize: 1);
+        var revenueOccurrences = index.PresentationOccurrencesFor(SyntheticProfile.Qualified("Revenue"));
+
+        Assert.Equal(2, firstPage.TotalCount);
+        Assert.True(firstPage.HasNext);
+        Assert.Equal(1.25m, Assert.Single(firstPage.Items).Order);
+        Assert.False(secondPage.HasNext);
+        Assert.Equal(2.5m, Assert.Single(secondPage.Items).Order);
+        Assert.Equal(2, revenueOccurrences.Count);
+        Assert.Contains(revenueOccurrences, occurrence => occurrence.RoleUri == roleOne);
+        Assert.Contains(revenueOccurrences, occurrence => occurrence.RoleUri == roleTwo);
+        Assert.Equal(source.Concepts.Count, index.AllConcepts.Count);
+        Assert.Same(source.FindConcept(SyntheticProfile.Qualified("Revenue")),
+            index.Get(SyntheticProfile.Qualified("Revenue")));
+    }
+
+    [Fact]
+    public void PresentationOccurrences_IgnoreCyclesAndKeepOtherValidPaths()
+    {
+        var source = Profile;
+        var role = "https://example.invalid/roles/cycle";
+        var links = new[]
+        {
+            new PresentationLink(role, SyntheticProfile.Qualified("FinancialStatements"),
+                SyntheticProfile.Qualified("Revenue"), 1),
+            new PresentationLink(role, SyntheticProfile.Qualified("Revenue"),
+                SyntheticProfile.Qualified("FinancialStatements"), 2),
+            new PresentationLink(role, SyntheticProfile.Qualified("NetIncome"),
+                SyntheticProfile.Qualified("FinancialStatements"), 3)
+        };
+        var profile = new FilingProfile
+        {
+            ProfileId = "cycle-relationships",
+            Digest = "sha256:cycle-relationships-v1",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            PresentationLinks = links
+        };
+
+        var occurrences = new TaxonomyIndex(profile).PresentationOccurrencesFor(
+            SyntheticProfile.Qualified("Revenue"));
+
+        var occurrence = Assert.Single(occurrences);
+        Assert.Equal(role, occurrence.RoleUri);
+        Assert.Equal(new[]
+        {
+            SyntheticProfile.Qualified("NetIncome"),
+            SyntheticProfile.Qualified("FinancialStatements"),
+            SyntheticProfile.Qualified("Revenue")
+        }, occurrence.ConceptPath);
+    }
+
+    [Fact]
+    public void PresentationNetwork_ChildPagingObservesCancellationAndRejectsUnknownEndpoints()
+    {
+        var index = new TaxonomyIndex(Profile);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => index.Network(SyntheticProfile.PresentationRole)
+            .ChildrenPage(SyntheticProfile.Qualified("FinancialStatements"), cancellationToken: cancellation.Token));
+        var invalidProfile = new FilingProfile
+        {
+            ProfileId = "invalid-relationships",
+            Digest = "sha256:invalid-relationships",
+            Concepts = Profile.Concepts,
+            SupportedUnits = Profile.SupportedUnits,
+            PresentationLinks = new[]
+            {
+                new PresentationLink("https://example.invalid/roles/bad", "missing:Parent",
+                    SyntheticProfile.Qualified("Revenue"), 1)
+            }
+        };
+        Assert.Throws<ArgumentException>(() => new TaxonomyIndex(invalidProfile));
+    }
+
+    [Fact]
     public async Task Search_ObservesPreCancelledTokens_SynchronouslyAndAsynchronously()
     {
         var index = new TaxonomyIndex(Profile);

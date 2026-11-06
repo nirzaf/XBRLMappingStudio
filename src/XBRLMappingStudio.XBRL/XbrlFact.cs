@@ -354,6 +354,8 @@ public sealed class FilingProfile
     /// <summary>Dimension QName to its allowed member QNames, when declared by the package.</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains { get; init; }
         = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+    /// <summary>Ordered, role-specific presentation arcs for this exact taxonomy version.</summary>
+    public IReadOnlyList<PresentationLink> PresentationLinks { get; init; } = Array.Empty<PresentationLink>();
     public string OutputFormat { get; init; } = "xbrl-json";
     public IReadOnlyDictionary<string, string> NamespaceUris { get; init; }
         = new Dictionary<string, string>();
