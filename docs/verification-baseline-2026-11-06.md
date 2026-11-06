@@ -4,6 +4,19 @@ This records local verification evidence for the ENG-01 implementation in the
 shared `main` worktree. Release and deployment verification are outside this
 baseline.
 
+## MAP06 application-level join expansion guard
+
+`LargeRunExecutionTests.JoinExpansionBudget_BlocksPublicationAndPreservesPriorFile`
+creates a many-to-many SQLite row join with `MaxJoinExpansionRows=2`. The application
+returns the expected blocking MAP015 diagnostic after producing only the bounded
+partial result; it skips worker report validation, refuses file publication, and
+preserves the existing destination bytes.
+
+The focused Release integration test passed 1/1. The normal project-reference build
+was blocked because the running Desktop process held shared Release output files; the
+test project was rebuilt against the existing dependency binaries with
+`-p:BuildProjectReferences=false`. `git diff --check` passed.
+
 ## ENG-01 qualified row-scoped execution
 
 The implementation preserves the existing in-memory path for runs that stay within
