@@ -86,7 +86,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                 "Missing report payload."));
         }
 
-        var factEntries = OimSerializer.ReadFactEntries(payload);
+        var factEntries = OimSerializer.ReadFactEntries(payload, _profile);
         var facts = factEntries.Select(entry => entry.Fact).ToArray();
         var firstDuplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
             .FirstOrDefault(group => group.Skip(1).Any())?.Key;
@@ -227,7 +227,10 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     FactLocator = entry.Locator
                 });
             }
-            if (concept.DataType == "monetary" && fact.Unit is null)
+            var isMonetary = StringComparer.OrdinalIgnoreCase.Equals(concept.DataTypeLocalName, "monetary");
+            var hasValidUnit = FactUnitParser.TryValidateForConcept(
+                concept, _profile, fact.Unit, fact.CompoundUnit, out var unitError);
+            if (isMonetary && !hasValidUnit)
             {
                 Capture(new Diagnostic
                 {
@@ -236,13 +239,13 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     Severity = DiagnosticSeverity.Error,
                     Stage = DiagnosticStage.Validation,
                     IsBlocking = true,
-                    Message = $"Fact {i} on monetary concept '{fact.ConceptName}' has no unit.",
+                    Message = unitError,
                     OperationId = request.OperationId,
                     RuleIdentifier = "synthetic:monetary-unit-required",
                     FactLocator = entry.Locator
                 });
             }
-            if (fact.Unit is not null && !_profile.SupportedUnits.Contains(fact.Unit.Measure))
+            if (!hasValidUnit)
             {
                 Capture(new Diagnostic
                 {
@@ -251,7 +254,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                     Severity = DiagnosticSeverity.Error,
                     Stage = DiagnosticStage.Validation,
                     IsBlocking = true,
-                    Message = $"Unit '{fact.Unit.Measure}' is not supported by profile '{_profile.ProfileId}'.",
+                    Message = unitError,
                     OperationId = request.OperationId,
                     RuleIdentifier = "synthetic:unit-allowed",
                     FactLocator = entry.Locator

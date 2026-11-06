@@ -3779,7 +3779,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (profile.FindConcept(SelectedConcept.QualifiedName) is null)
         { StatusText = "The selected concept is not part of this project's filing profile."; return; }
         var concept = profile.FindConcept(SelectedConcept.QualifiedName)!;
-        if (!StringComparer.Ordinal.Equals(concept.DataType, "monetary"))
+        if (!concept.IsNumeric)
         {
             StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
             return;
@@ -3822,7 +3822,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             StatusText = $"XBR001: concept '{conceptName ?? "(unset)"}' is unavailable or cannot carry facts in profile '{profile.ProfileId}'.";
             return;
         }
-        if (!StringComparer.Ordinal.Equals(concept.DataType, "monetary"))
+        if (!concept.IsNumeric)
         {
             StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
             return;
@@ -3831,14 +3831,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         var unit = SelectedFactUnit.Trim();
         var periodType = SelectedFactPeriodType.Trim().ToLowerInvariant();
         var decimals = SelectedFactDecimals.Trim();
-        if (unit.Length > 0 && !profile.SupportedUnits.Contains(unit))
+        if (!FactUnitParser.TryParse(unit, profile, out var parsedUnit, out var compoundUnit, out var unitError))
         {
-            StatusText = $"XBR002: unit '{unit}' is not supported by filing profile '{profile.ProfileId}'.";
+            StatusText = $"XBR002: {unitError}";
             return;
         }
-        if (concept.DataType == "monetary" && unit.Length == 0)
+        if (!FactUnitParser.TryValidateForConcept(concept, profile, parsedUnit, compoundUnit, out var unitContractError))
         {
-            StatusText = $"XBR002: monetary concept '{concept.QualifiedName}' requires a unit.";
+            StatusText = $"XBR002: {unitContractError}";
             return;
         }
         if (periodType is not ("instant" or "duration")

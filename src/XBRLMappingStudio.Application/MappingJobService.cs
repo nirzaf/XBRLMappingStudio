@@ -666,6 +666,7 @@ public sealed class MappingJobService
                 EntityIdentifier = pf.EntityIdentifier,
                 Period = pf.Period,
                 Unit = pf.Unit,
+                CompoundUnit = pf.CompoundUnit,
                 Value = pf.Value,
                 TextValue = pf.TextValue,
                 IsNil = pf.IsNil,
@@ -886,6 +887,7 @@ public sealed class MappingJobService
                         EntityIdentifier = pending.EntityIdentifier,
                         Period = pending.Period,
                         Unit = pending.Unit,
+                        CompoundUnit = pending.CompoundUnit,
                         Value = pending.Value,
                         TextValue = pending.TextValue,
                         IsNil = pending.IsNil,
@@ -1418,7 +1420,7 @@ public sealed class MappingJobService
                     // Adjudicate exactly what the worker and publisher are validating. The
                     // in-memory JobResult facts are useful for the run but are not the staged
                     // artifact's trust boundary.
-                    localSyntheticStagedFacts = OimSerializer.ReadFacts(reportJson);
+                    localSyntheticStagedFacts = OimSerializer.ReadFacts(reportJson, _profile);
                 }
                 catch (Exception ex) when (ex is JsonException or XbrlExportException)
                 {

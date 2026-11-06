@@ -31,6 +31,9 @@ public static class XmlSerializer
             var concept = profile.FindConcept(f.ConceptName)
                 ?? throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                     $"Concept '{f.ConceptName}' is not defined in the filing profile.");
+            if (!FactUnitParser.TryValidateForConcept(concept, profile, f.Unit, f.CompoundUnit, out var unitError))
+                throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                    unitError);
             if (!f.ValidateAgainst(concept, out var reason))
                 throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct, reason);
         }
@@ -158,19 +161,39 @@ public static class XmlSerializer
     {
         if (f.CompoundUnit is not null)
         {
+            if (f.CompoundUnit.Numerators.Count == 0
+                || f.CompoundUnit.Numerators.Count + f.CompoundUnit.DenominatorList.Count > FactUnitParser.MaximumMeasures)
+                throw Unsupported("Compound unit must contain a numerator and stay within the supported measure limit.");
+            if (f.CompoundUnit.DenominatorList.Count == 0)
+            {
+                var product = new XElement(Xbrli + "unit", new XAttribute("id", id));
+                foreach (var item in f.CompoundUnit.Numerators.OrderBy(measure => measure, StringComparer.Ordinal))
+                    product.Add(new XElement(Xbrli + "measure", qname(MeasureQName(item, profile))));
+                return product;
+            }
             var num = new XElement(Xbrli + "unitNumerator");
-            foreach (var m in f.CompoundUnit.Numerators)
+            foreach (var m in f.CompoundUnit.Numerators.OrderBy(measure => measure, StringComparer.Ordinal))
                 num.Add(new XElement(Xbrli + "measure", qname(MeasureQName(m, profile))));
             var den = new XElement(Xbrli + "unitDenominator");
-            foreach (var m in f.CompoundUnit.DenominatorList)
+            foreach (var m in f.CompoundUnit.DenominatorList.OrderBy(measure => measure, StringComparer.Ordinal))
                 den.Add(new XElement(Xbrli + "measure", qname(MeasureQName(m, profile))));
             return new XElement(Xbrli + "unit", new XAttribute("id", id),
                 new XElement(Xbrli + "divide", num, den));
         }
-        var unit = new XElement(Xbrli + "unit", new XAttribute("id", id),
-            new XElement(Xbrli + "measure", qname(MeasureQName(f.Unit!.Measure, profile))));
-        if (f.Unit.Power != 1)
-            unit.Element(Xbrli + "measure")!.Add(new XAttribute("power", f.Unit.Power));
+        var measureName = qname(MeasureQName(f.Unit!.Measure, profile));
+        var unit = new XElement(Xbrli + "unit", new XAttribute("id", id));
+        if (f.Unit.Power > 0)
+        {
+            foreach (var _ in Enumerable.Range(0, f.Unit.Power))
+                unit.Add(new XElement(Xbrli + "measure", measureName));
+            return unit;
+        }
+
+        var numerator = new XElement(Xbrli + "unitNumerator",
+            new XElement(Xbrli + "measure", qname("xbrli:pure")));
+        var denominator = new XElement(Xbrli + "unitDenominator",
+            Enumerable.Range(0, -f.Unit.Power).Select(_ => new XElement(Xbrli + "measure", measureName)));
+        unit.Add(new XElement(Xbrli + "divide", numerator, denominator));
         return unit;
     }
 
@@ -371,6 +394,7 @@ public static class XmlSerializer
                 EnsureNoSignificantText(divideChildren[0], "Unit numerator");
                 EnsureNoSignificantText(divideChildren[1], "Unit denominator");
                 if (numeratorChildren.Length == 0 || denominatorChildren.Length == 0
+                    || numeratorChildren.Length + denominatorChildren.Length > FactUnitParser.MaximumMeasures
                     || numeratorChildren.Any(child => child.Name != Xbrli + "measure" || child.Elements().Any())
                     || denominatorChildren.Any(child => child.Name != Xbrli + "measure" || child.Elements().Any()))
                     throw Unsupported("A divided unit contains unsupported or missing measures.");
@@ -378,17 +402,34 @@ public static class XmlSerializer
                     EnsureOnlyAttributes(measure);
                 var nums = numeratorChildren.Select(InternalMeasure).ToList();
                 var dens = denominatorChildren.Select(InternalMeasure).ToList();
-                compound = new CompoundUnit(nums, dens);
+                if (nums.Intersect(dens, StringComparer.Ordinal).Any())
+                    throw Unsupported("A divided unit must be expressed in its simplest form.");
+                if (nums.Count == 1 && StringComparer.Ordinal.Equals(nums[0], "pure")
+                    && dens.All(measure => StringComparer.Ordinal.Equals(measure, dens[0])))
+                    unit = new XbrlUnit(dens[0], -dens.Count);
+                else
+                    compound = new CompoundUnit(nums, dens);
             }
             else
             {
-                if (unitChildren.Length != 1 || unitChildren[0].Name != Xbrli + "measure"
-                    || unitChildren[0].Elements().Any())
-                    throw Unsupported("A simple unit must contain exactly one measure.");
-                var measure = unitChildren[0];
-                EnsureOnlyAttributes(measure, "power");
-                var power = (int?)measure.Attribute("power") ?? 1;
-                unit = new XbrlUnit(InternalMeasure(measure), power);
+                if (unitChildren.Length == 0 || unitChildren.Length > FactUnitParser.MaximumMeasures
+                    || unitChildren.Any(child => child.Name != Xbrli + "measure" || child.Elements().Any()))
+                    throw Unsupported("A product unit must contain one or more supported measures.");
+                if (unitChildren.Length == 1)
+                {
+                    var measure = unitChildren[0];
+                    EnsureOnlyAttributes(measure);
+                    unit = new XbrlUnit(InternalMeasure(measure));
+                }
+                else
+                {
+                    foreach (var measure in unitChildren) EnsureOnlyAttributes(measure);
+                    var measures = unitChildren.Select(InternalMeasure).ToList();
+                    if (measures.All(item => StringComparer.Ordinal.Equals(item, measures[0])))
+                        unit = new XbrlUnit(measures[0], measures.Count);
+                    else
+                        compound = new CompoundUnit(measures);
+                }
             }
         }
 
@@ -466,9 +507,23 @@ public static class XmlSerializer
 
     private static bool UnitPresent(XbrlFact f) => f.Unit is not null || f.CompoundUnit is not null;
 
-    private static string UnitKey(XbrlFact f) => f.CompoundUnit is not null
-        ? "cu:" + f.CompoundUnit.CanonicalKey
-        : $"u:{f.Unit!.Measure}^{f.Unit.Power}";
+    private static string UnitKey(XbrlFact f)
+    {
+        if (f.CompoundUnit is not null)
+        {
+            var denominators = f.CompoundUnit.DenominatorList;
+            if (denominators.Count == 0 && f.CompoundUnit.Numerators.Count > 0
+                && f.CompoundUnit.Numerators.All(measure => StringComparer.Ordinal.Equals(measure, f.CompoundUnit.Numerators[0])))
+                return $"u:{f.CompoundUnit.Numerators[0]}^{f.CompoundUnit.Numerators.Count}";
+            if (f.CompoundUnit.Numerators.Count == 1
+                && StringComparer.Ordinal.Equals(f.CompoundUnit.Numerators[0], "pure")
+                && denominators.Count > 0
+                && denominators.All(measure => StringComparer.Ordinal.Equals(measure, denominators[0])))
+                return $"u:{denominators[0]}^{-denominators.Count}";
+            return "cu:" + f.CompoundUnit.CanonicalKey;
+        }
+        return $"u:{f.Unit!.Measure}^{f.Unit.Power}";
+    }
 
     private static void AssertSupported(XbrlFact f)
     {
@@ -511,7 +566,7 @@ public static class XmlSerializer
     {
         if (measure.Contains(':')) return measure;
         if (profile.SupportedUnits.Contains(measure)) return "iso4217:" + measure;
-        if (measure is "shares" or "pure" or "monetary" or "integer" or "percent") return "xbrli:" + measure;
+        if (measure is "shares" or "pure") return "xbrli:" + measure;
         throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
             $"Unit measure '{measure}' is not qualified by the filing profile.");
     }

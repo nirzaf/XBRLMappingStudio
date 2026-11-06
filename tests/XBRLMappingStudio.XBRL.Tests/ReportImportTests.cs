@@ -15,7 +15,7 @@ namespace XBRLMappingStudio.XBRL.Tests;
 /// </summary>
 public sealed class ReportImportTests : IDisposable
 {
-    private static FilingProfile Profile => SyntheticProfile.Build();
+    private static FilingProfile Profile => TestFilingProfiles.WithNumericCompoundUnitConcept();
     private readonly string _dir;
 
     public ReportImportTests()
@@ -243,7 +243,7 @@ public sealed class ReportImportTests : IDisposable
         var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
         var powered = new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ABC-Corp",
             Period = period,
@@ -253,7 +253,7 @@ public sealed class ReportImportTests : IDisposable
         };
         var compound = new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ABC-Corp",
             Period = period,

@@ -39,3 +39,35 @@ dimensions and default-member handling, complete concept-specific dimension and
 BCP-47 metadata, other non-monetary value types, automatic source-drift
 revalidation, and installed real-profile/native workflow acceptance. Real taxonomy
 qualification remains gated by GAT-01/GAT-02.
+
+## FactConstruct compound units and standard unit encoding
+
+`FactConstruct` now accepts supported unit products and ratios, such as
+`USD*QAR/shares`, and the engine carries these through both its in-memory and
+SQLite-spooled fact folds. A shared unit validator applies profile and concept
+constraints from mapping execution through desktop editing, serialization, and
+local filing validation. Monetary concepts require one supported currency;
+shares and pure concepts require their standard XBRL measures. XML emits product
+measure sequences and divide structures; negative simple powers serialize as a
+pure numerator over repeated denominator measures. OIM omits a pure unit core
+dimension and the profile-aware reader restores it when concept metadata marks
+the fact numeric.
+
+Verification:
+
+- `dotnet build XBRLMappingStudio.slnx -c Release --no-restore` succeeded with
+  0 warnings and 0 errors.
+- `dotnet test XBRLMappingStudio.slnx -c Release --no-build -m:1` passed all
+  eight .NET test projects: 747 passed, 0 failed, 5 skipped. The skipped cases require
+  the pinned Arelle subprocess runtime, which was not configured in this local
+  environment.
+- XBRL: 105/105; Engine: 118/118; Desktop: 80/80; Integration: 187 passed,
+  5 skipped. The integration suite includes the small and SQLite-spooled
+  compound-unit fold, plus worker rejection of a deliberately corrupted unit.
+- `git diff --check` will be rerun on the final staged change set.
+
+The full XBR-04 acceptance remains open: typed dimensions and default-member
+handling, profile-specific concept/dimension constraints, complete BCP-47
+metadata, customer taxonomy qualification, source-drift revalidation, and native
+workflow acceptance remain incomplete or gated. This synthetic implementation
+does not establish regulator acceptance.

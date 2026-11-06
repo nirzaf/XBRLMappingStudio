@@ -30,8 +30,10 @@ public sealed class LargeRunExecutionTests
             using var large = await Run(project, database, profile,
                 new ExecutionBudget(InMemorySourceRecordLimit: 2, RowBatchSize: 3));
 
-            Assert.Equal(RunOutcome.Success, small.Manifest.Outcome);
-            Assert.Equal(RunOutcome.Success, large.Manifest.Outcome);
+            Assert.True(small.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", small.Manifest.Diagnostics.Select(diagnostic => diagnostic.Message)));
+            Assert.True(large.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", large.Manifest.Diagnostics.Select(diagnostic => diagnostic.Message)));
             Assert.Null(small.LargeArtifact);
             var artifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
             Assert.Equal(string.Empty, large.XbrlJson);
@@ -45,6 +47,47 @@ public sealed class LargeRunExecutionTests
             Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
                 small.Facts[0].TransformationIds);
             Assert.Equal(small.Facts[0].TransformationIds, artifact.Facts[0].TransformationIds);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task CompoundUnitsSurviveSmallAndLargeFactFolds()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2, variedValues: true);
+            var project = BuildProject(database);
+            var factConstruct = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factConstruct.Parameters["concept"] = "synthetic:UnitsPerShare";
+            factConstruct.Parameters["unit"] = "USD/shares";
+            var profile = AddNumericCompoundUnitConcept(SyntheticProfile.Build());
+
+            await using var smallWorker = new LocalSyntheticWorker(profile);
+            using var small = await new MappingJobService(profile, smallWorker,
+                    executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 20, RowBatchSize: 3))
+                .RunAsync(project, Connections(project, database), new Dictionary<string, string>(),
+                    preview: false, CancellationToken.None);
+            await using var largeWorker = new LocalSyntheticWorker(profile);
+            using var large = await new MappingJobService(profile, largeWorker,
+                    executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 1, RowBatchSize: 1))
+                .RunAsync(project, Connections(project, database), new Dictionary<string, string>(),
+                    preview: false, CancellationToken.None);
+
+            Assert.True(small.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", small.Manifest.Diagnostics.Select(diagnostic => diagnostic.Message)));
+            Assert.True(large.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", large.Manifest.Diagnostics.Select(diagnostic => diagnostic.Message)));
+            Assert.Equal(2, small.Facts.Count);
+            Assert.All(small.Facts, fact => Assert.Equal("USD/shares", fact.CompoundUnit?.CanonicalKey));
+            var largeArtifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
+            Assert.Equal(2, largeArtifact.Facts.Count);
+            Assert.All(largeArtifact.Facts, fact => Assert.Equal("USD/shares", fact.CompoundUnit?.CanonicalKey));
+            Assert.All(OimSerializer.ReadFacts(small.XbrlJson),
+                fact => Assert.Equal("USD/shares", fact.CompoundUnit?.CanonicalKey));
+            Assert.All(OimSerializer.ReadFacts(await File.ReadAllTextAsync(largeArtifact.XbrlJsonPath)),
+                fact => Assert.Equal("USD/shares", fact.CompoundUnit?.CanonicalKey));
         }
         finally { TryDeleteDirectory(root); }
     }
@@ -939,6 +982,26 @@ public sealed class LargeRunExecutionTests
         }
         return project;
     }
+
+    private static FilingProfile AddNumericCompoundUnitConcept(FilingProfile source)
+        => new()
+        {
+            ProfileId = source.ProfileId,
+            Digest = source.Digest,
+            Concepts = source.Concepts.Append(new ConceptMetadata(
+                "synthetic:UnitsPerShare", SyntheticProfile.Namespace, "UnitsPerShare",
+                "Units per share", "decimal", "duration", IsAbstract: false)).ToArray(),
+            SupportedUnits = source.SupportedUnits,
+            TaxonomyVersion = source.TaxonomyVersion,
+            DimensionDomains = source.DimensionDomains,
+            PresentationLinks = source.PresentationLinks,
+            OutputFormat = source.OutputFormat,
+            NamespaceUris = source.NamespaceUris,
+            TaxonomyUrls = source.TaxonomyUrls,
+            PackageHashes = source.PackageHashes,
+            RequiredPlugins = source.RequiredPlugins,
+            RequiredChecks = source.RequiredChecks
+        };
 
     private static MappingProject BuildRatioProject(string database)
     {

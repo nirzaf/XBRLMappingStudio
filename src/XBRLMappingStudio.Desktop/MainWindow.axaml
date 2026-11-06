@@ -525,7 +525,7 @@
               <TextBox Text="{Binding SelectedFactEntityIdentifier}" Watermark="Entity identifier"
                        IsEnabled="{Binding CanEditSelectedFactEntity}"
                        AutomationProperties.Name="Fact entity identifier" />
-              <TextBox Text="{Binding SelectedFactUnit}" Watermark="Unit (for example USD)"
+              <TextBox Text="{Binding SelectedFactUnit}" Watermark="Unit (USD, USD/shares, or USD*EUR/shares)"
                        AutomationProperties.Name="Fact unit" />
               <ComboBox ItemsSource="{Binding FactPeriodTypes}" SelectedItem="{Binding SelectedFactPeriodType}"
                         AutomationProperties.Name="Fact period type" />

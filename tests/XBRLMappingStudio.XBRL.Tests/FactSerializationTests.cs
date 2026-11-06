@@ -13,7 +13,7 @@ namespace XBRLMappingStudio.XBRL.Tests;
 /// </summary>
 public sealed class FactSerializationTests
 {
-    private static FilingProfile Profile => SyntheticProfile.Build();
+    private static FilingProfile Profile => TestFilingProfiles.WithNumericCompoundUnitConcept();
 
     private static IReadOnlyList<XbrlFact> GoldenFacts() => new[]
     {
@@ -85,7 +85,7 @@ public sealed class FactSerializationTests
         // Compound unit: USD per share.
         new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("NetIncome"),
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ABC-Corp",
             Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
@@ -205,7 +205,7 @@ public sealed class FactSerializationTests
             },
             new XbrlFact
             {
-                ConceptName = SyntheticProfile.Qualified("NetIncome"),
+                ConceptName = TestFilingProfiles.UnitsPerShareConcept,
                 EntityScheme = "http://xbrl.org/entity/",
                 EntityIdentifier = "ACME-01",
                 Period = period,
@@ -232,7 +232,7 @@ public sealed class FactSerializationTests
             new FactOccurrence("synthetic:Expenses", "http://xbrl.org/entity/", "ACME-01",
                 "2025-01-01/2026-01-01", "QAR", 1, null, null, true, null, null,
                 Array.Empty<string>()),
-            new FactOccurrence("synthetic:NetIncome", "http://xbrl.org/entity/", "ACME-01",
+            new FactOccurrence(TestFilingProfiles.UnitsPerShareConcept, "http://xbrl.org/entity/", "ACME-01",
                 "2025-01-01/2026-01-01", null, null, "USD/shares", "12.5000", false, 4,
                 null, Array.Empty<string>())
         };
@@ -400,7 +400,7 @@ public sealed class FactSerializationTests
     {
         var cu = new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("NetIncome"),
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ABC-Corp",
             Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
@@ -417,6 +417,143 @@ public sealed class FactSerializationTests
         Assert.NotNull(read.CompoundUnit);
         Assert.Null(read.Unit);
         Assert.Equal("USD/shares", read.CompoundUnit!.CanonicalKey);
+    }
+
+    [Fact]
+    public void ProductUnit_SerializesAsMultipleMeasures_AndReadsBack()
+    {
+        var product = new XbrlFact
+        {
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            CompoundUnit = new CompoundUnit(new[] { "USD", "shares" }),
+            Value = 12.5m,
+            Decimals = 1
+        };
+
+        var xml = XmlSerializer.Serialize(Profile, new[] { product });
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var unit = XDocument.Parse(xml).Root!.Element(xbrli + "unit")!;
+        Assert.Equal(2, unit.Elements(xbrli + "measure").Count());
+        Assert.Empty(unit.Elements(xbrli + "divide"));
+
+        var reopened = Assert.Single(XmlSerializer.ReadFacts(xml));
+        Assert.Equal("USD*shares", reopened.CompoundUnit?.CanonicalKey);
+    }
+
+    [Fact]
+    public void PoweredUnitsUseStandardMeasureProductsAndRatios()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("shares", -2),
+            Value = 12.5m,
+            Decimals = 1
+        };
+
+        var xml = XmlSerializer.Serialize(Profile, new[] { fact });
+        Assert.DoesNotContain(" power=", xml, StringComparison.OrdinalIgnoreCase);
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var divide = XDocument.Parse(xml).Root!.Element(xbrli + "unit")!.Element(xbrli + "divide")!;
+        Assert.Equal("xbrli:pure", divide.Element(xbrli + "unitNumerator")!
+            .Element(xbrli + "measure")!.Value);
+        Assert.Equal(2, divide.Element(xbrli + "unitDenominator")!.Elements(xbrli + "measure").Count());
+        var fromXml = Assert.Single(XmlSerializer.ReadFacts(xml));
+        Assert.Equal(fact.SemanticKey(), fromXml.SemanticKey());
+
+        var json = OimSerializer.Serialize(Profile, new[] { fact });
+        using var document = JsonDocument.Parse(json);
+        var unit = document.RootElement.GetProperty("facts").EnumerateObject().Single().Value
+            .GetProperty("dimensions").GetProperty("unit").GetString();
+        Assert.Equal("xbrli:pure/xbrli:shares*xbrli:shares", unit);
+        var fromJson = Assert.Single(OimSerializer.ReadFacts(json));
+        Assert.Equal(fact.SemanticKey(), fromJson.SemanticKey());
+    }
+
+    [Fact]
+    public void PureUnitUsesOimOmissionAndRoundTripsWithSelectedProfile()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("pure"),
+            Value = 0.125m,
+            Decimals = 3
+        };
+
+        var json = OimSerializer.Serialize(Profile, new[] { fact });
+        using (var document = JsonDocument.Parse(json))
+        {
+            var dimensions = document.RootElement.GetProperty("facts").EnumerateObject().Single().Value
+                .GetProperty("dimensions");
+            Assert.False(dimensions.TryGetProperty("unit", out _));
+        }
+
+        var fromJson = Assert.Single(OimSerializer.ReadFacts(json, Profile));
+        Assert.Equal("pure", fromJson.Unit?.Measure);
+        Assert.Equal(fact.SemanticKey(), fromJson.SemanticKey());
+
+        var xml = XmlSerializer.Serialize(Profile, new[] { fact });
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        Assert.Equal("xbrli:pure", XDocument.Parse(xml).Root!.Element(xbrli + "unit")!
+            .Element(xbrli + "measure")!.Value);
+        var fromXml = Assert.Single(XmlSerializer.ReadFacts(xml));
+        Assert.Equal(fact.SemanticKey(), fromXml.SemanticKey());
+    }
+
+    [Fact]
+    public void ProfileAwareOimReadNormalizesNamespaceAliasesForConceptsAndDimensions()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            CompoundUnit = new CompoundUnit(new[] { "USD" }, new[] { "shares" }),
+            Value = 12.5m,
+            Decimals = 1,
+            Dimensions = new[]
+            {
+                new Dimension(SyntheticProfile.Qualified("Region"), SyntheticProfile.Qualified("EMEA"))
+            }
+        };
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { fact }))!.AsObject();
+        var namespaceMap = root["documentInfo"]!["namespaces"]!.AsObject();
+        var originalPrefix = namespaceMap.First(pair =>
+            StringComparer.Ordinal.Equals(pair.Value!.GetValue<string>(), SyntheticProfile.Namespace)).Key;
+        var originalNamespace = namespaceMap[originalPrefix]!.GetValue<string>();
+        namespaceMap.Remove(originalPrefix);
+        namespaceMap["alias"] = originalNamespace;
+
+        foreach (var factEntry in root["facts"]!.AsObject())
+        {
+            var dimensions = factEntry.Value!["dimensions"]!.AsObject();
+            dimensions["concept"] = ReplacePrefix(dimensions["concept"]!.GetValue<string>());
+            var dimension = dimensions.First(pair => pair.Key.StartsWith(originalPrefix + ":", StringComparison.Ordinal));
+            var dimensionLocalName = dimension.Key[(originalPrefix.Length + 1)..];
+            var member = ReplacePrefix(dimension.Value!.GetValue<string>());
+            dimensions.Remove(dimension.Key);
+            dimensions["alias:" + dimensionLocalName] = member;
+        }
+
+        var reopened = Assert.Single(OimSerializer.ReadFacts(root.ToJsonString(), Profile));
+        Assert.Equal(fact.ConceptName, reopened.ConceptName);
+        Assert.Equal(fact.Dimensions, reopened.Dimensions);
+
+        string ReplacePrefix(string qname)
+            => qname.StartsWith(originalPrefix + ":", StringComparison.Ordinal)
+                ? "alias:" + qname[(originalPrefix.Length + 1)..]
+                : qname;
     }
 
     [Fact]

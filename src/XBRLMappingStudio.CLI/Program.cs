@@ -206,7 +206,7 @@ static async Task<int> ValidateArtifactAsync(string[] args)
                     Array.Empty<string>())
             };
             var response = await worker.RequestAsync(request, CancellationToken.None);
-            var localFacts = OimSerializer.ReadFacts(reportText);
+            var localFacts = OimSerializer.ReadFacts(reportText, syntheticProfile);
             var completion = ValidationCompletionReportValidator.Evaluate(
                 response.Result, syntheticProfile, localFacts);
             Console.WriteLine(JsonSerializer.Serialize(new
@@ -238,8 +238,9 @@ static async Task<int> ValidateArtifactAsync(string[] args)
     }
 
     var text = File.ReadAllText(args[0]);
-    var facts = OimSerializer.ReadFacts(text);
-    var result = new FilingRuleValidator(SyntheticProfile.Build()).Validate(facts);
+    var profile = SyntheticProfile.Build();
+    var facts = OimSerializer.ReadFacts(text, profile);
+    var result = new FilingRuleValidator(profile).Validate(facts);
 
     var json = JsonSerializer.Serialize(new
     {

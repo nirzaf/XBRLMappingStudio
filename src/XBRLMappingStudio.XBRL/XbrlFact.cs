@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Serialization;
+using System.Xml;
 using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.XBRL;
@@ -60,8 +61,7 @@ public sealed record XbrlPeriod(
 }
 
 /// <summary>
-/// Simple unit measure for the G1 synthetic profile. Compound units (divide/multiply)
-/// are deferred to post-G1 (XBR04 supports compound where profile requires).
+/// A single unit measure. Compound multiply/divide units use <see cref="CompoundUnit"/>.
 /// </summary>
 public sealed record XbrlUnit(
     string Measure,
@@ -71,8 +71,7 @@ public sealed record XbrlUnit(
 }
 
 /// <summary>
-/// Immutable fact value per XBR04. The G1 synthetic profile supports:
-/// monetary instant/duration facts with decimals accuracy and ISO language tags.
+/// Immutable fact value per XBR04, including numeric and textual facts with typed aspects.
 /// </summary>
 public sealed class XbrlFact
 {
@@ -82,7 +81,7 @@ public sealed class XbrlFact
     public required XbrlPeriod Period { get; init; }
     public XbrlUnit? Unit { get; init; }
     /// <summary>Compound (multiply/divide) unit for measures such as USD per share (XBR04).
-    /// Exactly one of <see cref="Unit"/> or <see cref="CompoundUnit"/> is set for a monetary fact.</summary>
+    /// Monetary facts use a single currency measure; other numeric concepts may use a compound unit.</summary>
     public CompoundUnit? CompoundUnit { get; init; }
     public decimal? Value { get; init; }
     public string? TextValue { get; init; }
@@ -132,6 +131,24 @@ public sealed class XbrlFact
         {
             return Fail(FactValidationIssue.InvalidUnit, "A fact cannot have both a simple and compound unit.", out reason, out issue);
         }
+        if (Unit is not null
+            && (string.IsNullOrWhiteSpace(Unit.Measure) || Unit.Measure.Any(character =>
+                    char.IsWhiteSpace(character) || char.IsControl(character) || character is '/' or '*' or '^')
+                || Unit.Power is 0 or < -FactUnitParser.MaximumMeasures or > FactUnitParser.MaximumMeasures))
+        {
+            return Fail(FactValidationIssue.InvalidUnit, "A simple unit has an invalid measure or power.", out reason, out issue);
+        }
+        if (CompoundUnit is not null
+            && (CompoundUnit.Numerators is null
+                || CompoundUnit.Numerators.Count == 0
+                || CompoundUnit.Numerators.Count + CompoundUnit.DenominatorList.Count > FactUnitParser.MaximumMeasures
+                || CompoundUnit.Numerators.Concat(CompoundUnit.DenominatorList).Any(measure =>
+                    string.IsNullOrWhiteSpace(measure) || measure.Any(char.IsWhiteSpace) || measure.Any(char.IsControl)
+                    || measure.Any(character => character is '/' or '*' or '^'))
+                || CompoundUnit.DenominatorList.Intersect(CompoundUnit.Numerators, StringComparer.Ordinal).Any()))
+        {
+            return Fail(FactValidationIssue.InvalidUnit, "A compound unit has missing or invalid measures.", out reason, out issue);
+        }
         if (Decimals is not null && (IsNil || Value is null))
         {
             return Fail(FactValidationIssue.InvalidDecimals, "Decimals are only valid for a non-nil numeric fact.", out reason, out issue);
@@ -140,37 +157,49 @@ public sealed class XbrlFact
         {
             return Fail(FactValidationIssue.InvalidDecimals, "Decimals are outside the supported range [-30, 30].", out reason, out issue);
         }
-        if (Value is not null && Language is not null)
+        var dataType = GetDataTypeLocalName(meta.DataType);
+        if (meta.IsNumeric && TextValue is not null)
+        {
+            return Fail(FactValidationIssue.InvalidValue, $"Numeric concept '{ConceptName}' requires a numeric value.", out reason, out issue);
+        }
+        if (!meta.IsNumeric && Value is not null)
+        {
+            return Fail(FactValidationIssue.InvalidValue, $"Non-numeric concept '{ConceptName}' cannot carry a numeric value.", out reason, out issue);
+        }
+        if (meta.IsNumeric && Language is not null)
         {
             return Fail(FactValidationIssue.InvalidLanguage, "A numeric fact cannot carry a language tag.", out reason, out issue);
         }
-        if (Value is not null && Unit is null && CompoundUnit is null)
-        {
-            return Fail(FactValidationIssue.InvalidUnit, "A numeric fact must carry a unit.", out reason, out issue);
-        }
-        if (TextValue is not null && (Unit is not null || CompoundUnit is not null))
-        {
-            return Fail(FactValidationIssue.InvalidUnit, "A text fact cannot carry a unit.", out reason, out issue);
-        }
-        if (TextValue is not null && Decimals is not null)
-        {
-            return Fail(FactValidationIssue.InvalidDecimals, "A text fact cannot carry decimals.", out reason, out issue);
-        }
-        if (meta.DataType == "monetary" && Unit is null && CompoundUnit is null)
+        if (StringComparer.OrdinalIgnoreCase.Equals(dataType, "monetary") && Unit is null)
         {
             return Fail(FactValidationIssue.InvalidUnit, $"Concept '{ConceptName}' is monetary and requires a unit.", out reason, out issue);
         }
-        if (meta.DataType == "monetary" && TextValue is not null)
+        if (meta.IsNumeric && Unit is null && CompoundUnit is null)
         {
-            return Fail(FactValidationIssue.InvalidValue, $"Monetary concept '{ConceptName}' requires a numeric value.", out reason, out issue);
+            return Fail(FactValidationIssue.InvalidUnit, "A numeric fact must carry a unit, including when it is nil.", out reason, out issue);
         }
-        if (meta.DataType == "string" && (Value is not null || Unit is not null || CompoundUnit is not null || Decimals is not null))
+        if (!meta.IsNumeric && (Unit is not null || CompoundUnit is not null || Decimals is not null))
         {
-            return Fail(FactValidationIssue.InvalidValue, $"String concept '{ConceptName}' cannot carry a numeric value, unit, or decimals.", out reason, out issue);
+            return Fail(FactValidationIssue.InvalidUnit, "A non-numeric fact cannot carry a unit or decimals.", out reason, out issue);
         }
-        if (meta.DataType == "string" && !IsNil && TextValue is null)
+        if (StringComparer.OrdinalIgnoreCase.Equals(dataType, "monetary")
+            && (CompoundUnit is not null || Unit is { Power: not 1 }))
         {
-            return Fail(FactValidationIssue.InvalidValue, $"String concept '{ConceptName}' requires a text value.", out reason, out issue);
+            return Fail(FactValidationIssue.InvalidUnit, $"Monetary concept '{ConceptName}' requires one currency measure, not a powered unit.", out reason, out issue);
+        }
+        if (StringComparer.OrdinalIgnoreCase.Equals(dataType, "shares")
+            && (CompoundUnit is not null || Unit is not { Measure: "shares", Power: 1 }))
+        {
+            return Fail(FactValidationIssue.InvalidUnit, $"Shares concept '{ConceptName}' requires one xbrli:shares measure.", out reason, out issue);
+        }
+        if (StringComparer.OrdinalIgnoreCase.Equals(dataType, "pure")
+            && (CompoundUnit is not null || Unit is not { Measure: "pure", Power: 1 }))
+        {
+            return Fail(FactValidationIssue.InvalidUnit, $"Pure concept '{ConceptName}' requires one xbrli:pure measure.", out reason, out issue);
+        }
+        if (!meta.IsNumeric && !IsNil && TextValue is null)
+        {
+            return Fail(FactValidationIssue.InvalidValue, $"Non-numeric concept '{ConceptName}' requires a text value.", out reason, out issue);
         }
         if (Language is not null && meta.SupportedLanguages.Count > 0
             && !meta.SupportedLanguages.Contains(Language.ToLowerInvariant(), StringComparer.Ordinal))
@@ -241,6 +270,14 @@ public sealed class XbrlFact
         return false;
     }
 
+    private static string GetDataTypeLocalName(string dataType)
+    {
+        var typeName = dataType[(dataType.LastIndexOf(':') + 1)..];
+        return typeName.EndsWith("ItemType", StringComparison.OrdinalIgnoreCase)
+            ? typeName[..^"ItemType".Length]
+            : typeName;
+    }
+
     /// <summary>
     /// Order-independent semantic identity used for multiset equivalence across
     /// xBRL-JSON and xBRL-XML round-trips (XBR05) and report-to-record import (XBR06).
@@ -248,10 +285,7 @@ public sealed class XbrlFact
     /// </summary>
     public string SemanticKey()
     {
-        var unit = CompoundUnit is not null
-            ? "cu:" + EscapeSemanticComponent(CompoundUnit.CanonicalKey, "|")
-            : Unit is not null ? "u:" + EscapeSemanticComponent(Unit.Measure, "|^")
-                + (Unit.Power != 1 ? $"^{Unit.Power}" : "") : "-";
+        var unit = GetSemanticUnitKey();
         var dims = string.Join(",", Dimensions
             .OrderBy(d => d.Name, System.StringComparer.Ordinal)
             .Select(d => $"{EscapeSemanticComponent(d.Name, "|,=")}="
@@ -271,6 +305,32 @@ public sealed class XbrlFact
             val,
             dec);
     }
+
+    private string GetSemanticUnitKey()
+    {
+        if (CompoundUnit is not null)
+        {
+            if (CompoundUnit.Numerators is null || CompoundUnit.Numerators.Count == 0
+                || CompoundUnit.Numerators.Concat(CompoundUnit.DenominatorList).Any(string.IsNullOrWhiteSpace))
+                return "cu:invalid";
+            var denominators = CompoundUnit.DenominatorList;
+            if (denominators.Count == 0
+                && CompoundUnit.Numerators.All(measure => StringComparer.Ordinal.Equals(measure, CompoundUnit.Numerators[0])))
+                return FormatUnitKey(CompoundUnit.Numerators[0], CompoundUnit.Numerators.Count);
+            if (CompoundUnit.Numerators.Count == 1
+                && StringComparer.Ordinal.Equals(CompoundUnit.Numerators[0], "pure")
+                && denominators.Count > 0
+                && denominators.All(measure => StringComparer.Ordinal.Equals(measure, denominators[0])))
+                return FormatUnitKey(denominators[0], -denominators.Count);
+            return "cu:" + EscapeSemanticComponent(CompoundUnit.CanonicalKey, "|");
+        }
+        if (Unit is null) return "-";
+        if (StringComparer.Ordinal.Equals(Unit.Measure, "pure") && Unit.Power == 1) return "-";
+        return FormatUnitKey(Unit.Measure, Unit.Power);
+    }
+
+    private static string FormatUnitKey(string measure, int power)
+        => "u:" + EscapeSemanticComponent(measure, "|^") + (power != 1 ? $"^{power}" : "");
 
     private static string EscapeSemanticComponent(string value, string delimiters)
     {
@@ -306,6 +366,7 @@ public sealed class PendingFact
     public string? EntityIdentifier { get; set; }
     public XbrlPeriod? Period { get; set; }
     public XbrlUnit? Unit { get; set; }
+    public CompoundUnit? CompoundUnit { get; set; }
     public decimal? Value { get; set; }
     public string? TextValue { get; set; }
     public bool IsNil { get; set; }
@@ -329,6 +390,32 @@ public sealed record ConceptMetadata(
     string PeriodType,     // "instant" | "duration"
     bool IsAbstract)
 {
+    [JsonIgnore]
+    public string DataTypeLocalName
+    {
+        get
+        {
+            var typeName = DataType[(DataType.LastIndexOf(':') + 1)..];
+            return typeName.EndsWith("ItemType", StringComparison.OrdinalIgnoreCase)
+                ? typeName[..^"ItemType".Length]
+                : typeName;
+        }
+    }
+
+    /// <summary>Whether the concept's taxonomy type is one of the numeric types emitted by FactConstruct.</summary>
+    [JsonIgnore]
+    public bool IsNumeric
+    {
+        get
+        {
+            return DataTypeLocalName.ToLowerInvariant() is
+                "monetary" or "decimal" or "integer" or "positiveinteger" or "negativeinteger"
+                or "nonpositiveinteger" or "nonnegativeinteger" or "long" or "int" or "short"
+                or "byte" or "unsignedlong" or "unsignedint" or "unsignedshort" or "unsignedbyte"
+                or "float" or "double" or "shares" or "pure" or "percent" or "percentage";
+        }
+    }
+
     public IReadOnlyList<string> SupportedLanguages { get; init; } = new[] { "en" };
     public IReadOnlyDictionary<string, string> LabelsByLanguage { get; init; }
         = new Dictionary<string, string>();
@@ -345,6 +432,11 @@ public readonly record struct ExpandedConceptName(string NamespaceUri, string Lo
 /// </summary>
 public sealed class FilingProfile
 {
+    private static readonly HashSet<string> BuiltInUnitMeasures = new(StringComparer.Ordinal)
+    {
+        "shares", "pure"
+    };
+
     public required string ProfileId { get; init; }
     public required string Digest { get; init; }             // "sha256:..."
     public required IReadOnlyList<ConceptMetadata> Concepts { get; init; }
@@ -379,4 +471,30 @@ public sealed class FilingProfile
 
     public ConceptMetadata? FindConcept(string qualifiedName)
         => Concepts.FirstOrDefault(c => c.QualifiedName == qualifiedName);
+
+    /// <summary>True for a profile currency, a standard XBRL unit measure, or a declared QName.</summary>
+    public bool SupportsUnitMeasure(string measure)
+    {
+        if (string.IsNullOrWhiteSpace(measure)) return false;
+        if (SupportedUnits.Contains(measure) || BuiltInUnitMeasures.Contains(measure)) return true;
+
+        var separator = measure.IndexOf(':');
+        if (separator <= 0 || separator != measure.LastIndexOf(':'))
+            return false;
+        var prefix = measure[..separator];
+        var localName = measure[(separator + 1)..];
+        if (prefix == "iso4217" && SupportedUnits.Contains(localName)) return true;
+        if (prefix == "xbrli" && BuiltInUnitMeasures.Contains(localName)) return true;
+        if (!NamespaceUris.ContainsKey(prefix)) return false;
+        try
+        {
+            XmlConvert.VerifyNCName(prefix);
+            XmlConvert.VerifyNCName(localName);
+            return true;
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
+    }
 }

@@ -189,6 +189,26 @@ public class ExecutionPlanTests
         return (project, profile);
     }
 
+    private static FilingProfile AddNumericCompoundUnitConcept(FilingProfile source)
+        => new()
+        {
+            ProfileId = source.ProfileId,
+            Digest = source.Digest,
+            Concepts = source.Concepts.Append(new ConceptMetadata(
+                "synthetic:UnitsPerShare", SyntheticProfile.Namespace, "UnitsPerShare",
+                "Units per share", "decimal", "duration", IsAbstract: false)).ToArray(),
+            SupportedUnits = source.SupportedUnits,
+            TaxonomyVersion = source.TaxonomyVersion,
+            DimensionDomains = source.DimensionDomains,
+            PresentationLinks = source.PresentationLinks,
+            OutputFormat = source.OutputFormat,
+            NamespaceUris = source.NamespaceUris,
+            TaxonomyUrls = source.TaxonomyUrls,
+            PackageHashes = source.PackageHashes,
+            RequiredPlugins = source.RequiredPlugins,
+            RequiredChecks = source.RequiredChecks
+        };
+
     private static MappingProject ConfigureTextFactProject(MappingProject project, string language)
     {
         var sourceNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
@@ -314,6 +334,35 @@ public class ExecutionPlanTests
             Assert.Equal("fr", fact.Language);
             Assert.Null(fact.Unit);
             Assert.Null(fact.Decimals);
+            Assert.NotEmpty(fact.Sources);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructCarriesProfileValidatedCompoundUnit()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-compound-unit-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, sourceProfile) = Prepare(path);
+            var profile = AddNumericCompoundUnitConcept(sourceProfile);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factNode.Parameters["concept"] = "synthetic:UnitsPerShare";
+            factNode.Parameters["unit"] = "USD/shares";
+
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            var fact = Assert.Single(result.Facts);
+            Assert.Null(fact.Unit);
+            Assert.Equal("USD/shares", fact.CompoundUnit?.CanonicalKey);
             Assert.NotEmpty(fact.Sources);
         }
         finally

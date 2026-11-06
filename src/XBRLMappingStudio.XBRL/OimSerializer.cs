@@ -27,6 +27,8 @@ public static class OimSerializer
         {
             var concept = profile.FindConcept(fact.ConceptName)
                 ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
+            if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
+                throw Unsupported(unitError);
             if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
         }
         var ns = BuildNamespaces(profile, facts);
@@ -88,6 +90,8 @@ public static class OimSerializer
             cancellationToken.ThrowIfCancellationRequested();
             var concept = profile.FindConcept(fact.ConceptName)
                 ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
+            if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
+                throw Unsupported(unitError);
             if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
         }
         var ns = BuildNamespaces(profile, facts, maxNamespaces, cancellationToken);
@@ -194,7 +198,8 @@ public static class OimSerializer
         };
         if (fact.Unit is not null && fact.CompoundUnit is not null)
             throw Unsupported("A fact cannot have both a simple and a compound unit.");
-        if (fact.Unit is not null)
+        if (fact.Unit is not null
+            && !(StringComparer.Ordinal.Equals(fact.Unit.Measure, "pure") && fact.Unit.Power == 1))
             dimensions["unit"] = UnitToJson(fact.Unit, ns);
         if (fact.CompoundUnit is not null)
             dimensions["unit"] = CompoundUnitToJson(fact.CompoundUnit, ns);
@@ -249,13 +254,15 @@ public static class OimSerializer
         var qname = ns.Measure(unit.Measure);
         return unit.Power > 0
             ? string.Join("*", Enumerable.Repeat(qname, unit.Power))
-            : "/" + string.Join("*", Enumerable.Repeat(qname, -unit.Power));
+            : ns.Measure("pure") + "/" + string.Join("*", Enumerable.Repeat(qname, -unit.Power));
     }
 
     private static string CompoundUnitToJson(CompoundUnit unit, NamespaceContext ns)
     {
         if (unit.Numerators.Count == 0 || unit.Numerators.Count + unit.DenominatorList.Count > 64)
             throw Unsupported("Compound unit must have a numerator and stay within the supported measure limit.");
+        if (unit.DenominatorList.Intersect(unit.Numerators, StringComparer.Ordinal).Any())
+            throw Unsupported("Compound units must cancel shared measures before division.");
         var numerator = string.Join("*", unit.Numerators.Select(ns.Measure).OrderBy(x => x, StringComparer.Ordinal));
         var denominator = string.Join("*", unit.DenominatorList.Select(ns.Measure).OrderBy(x => x, StringComparer.Ordinal));
         return denominator.Length == 0 ? numerator : numerator + "/" + denominator;
@@ -265,11 +272,25 @@ public static class OimSerializer
     public static IReadOnlyList<XbrlFact> ReadFacts(string json)
         => ReadFactEntries(json).Select(entry => entry.Fact).ToArray();
 
+    /// <summary>Read facts using selected taxonomy metadata to distinguish numeric pure facts from text.</summary>
+    public static IReadOnlyList<XbrlFact> ReadFacts(string json, FilingProfile profile)
+        => ReadFactEntries(json, profile).Select(entry => entry.Fact).ToArray();
+
     /// <summary>
     /// Reads facts while preserving their exact xBRL-JSON object member keys. Worker
     /// findings use these keys as fact locators; they are not derived from report order.
     /// </summary>
     public static IReadOnlyList<OimFactEntry> ReadFactEntries(string json)
+        => ReadFactEntriesCore(json, profile: null);
+
+    /// <summary>Read facts using the selected taxonomy's numeric typing and QName metadata.</summary>
+    public static IReadOnlyList<OimFactEntry> ReadFactEntries(string json, FilingProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return ReadFactEntriesCore(json, profile);
+    }
+
+    private static IReadOnlyList<OimFactEntry> ReadFactEntriesCore(string json, FilingProfile? profile)
     {
         ArgumentNullException.ThrowIfNull(json);
         using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
@@ -310,7 +331,14 @@ public static class OimSerializer
                 throw Unsupported("Fact notes and links are not supported by this mapping model.");
 
             var concept = RequiredString(dimensions, "concept");
-            _ = ExpandQName(concept, namespaces);
+            var expandedConcept = ExpandQName(concept, namespaces);
+            var conceptMetadata = profile is null
+                ? null
+                : profile.Concepts.FirstOrDefault(candidate =>
+                    StringComparer.Ordinal.Equals(candidate.Namespace, expandedConcept.Namespace)
+                    && StringComparer.Ordinal.Equals(candidate.LocalName, expandedConcept.LocalName));
+            var canonicalConcept = conceptMetadata?.QualifiedName
+                ?? CanonicalProfileQName(expandedConcept, concept, profile);
             var entity = RequiredString(dimensions, "entity");
             var colon = entity.IndexOf(':');
             if (colon <= 0 || colon == entity.Length - 1)
@@ -325,7 +353,7 @@ public static class OimSerializer
             var periodText = RequiredString(dimensions, "period");
             var period = ParsePeriod(periodText);
             var unit = dimensions.TryGetProperty("unit", out var unitValue)
-                ? ParseUnit(unitValue.GetString() ?? throw Unsupported("Unit must be a string."), namespaces)
+                ? ParseUnit(unitValue.GetString() ?? throw Unsupported("Unit must be a string."), namespaces, profile)
                 : (Unit: (XbrlUnit?)null, CompoundUnit: (CompoundUnit?)null);
             var reportedDimensions = new List<Dimension>();
             string? language = null;
@@ -340,7 +368,8 @@ public static class OimSerializer
                 }
                 if (dimension.Name == "noteId")
                     throw Unsupported("Note facts are not supported by this mapping model.");
-                _ = ExpandQName(dimension.Name, namespaces);
+                var expandedDimension = ExpandQName(dimension.Name, namespaces);
+                var dimensionName = CanonicalProfileQName(expandedDimension, dimension.Name, profile);
                 string member;
                 bool isExplicit;
                 if (dimension.Value.ValueKind == JsonValueKind.Null)
@@ -348,8 +377,9 @@ public static class OimSerializer
                 if (dimension.Value.ValueKind != JsonValueKind.String)
                     throw Unsupported("Dimension values must be strings in the supported report subset.");
                 member = dimension.Value.GetString()!;
-                isExplicit = TryExpandQName(member, namespaces, out _);
-                reportedDimensions.Add(new Dimension(dimension.Name, member, isExplicit));
+                isExplicit = TryExpandQName(member, namespaces, out var expandedMember);
+                if (isExplicit) member = CanonicalProfileQName(expandedMember, member, profile);
+                reportedDimensions.Add(new Dimension(dimensionName, member, isExplicit));
             }
 
             int? decimals = null;
@@ -359,9 +389,10 @@ public static class OimSerializer
                     throw Unsupported("Fact decimals must be an integer.");
                 decimals = parsed;
             }
-            var isNumeric = unit.Unit is not null || unit.CompoundUnit is not null || decimals is not null;
+            var isNumeric = conceptMetadata?.IsNumeric
+                ?? (unit.Unit is not null || unit.CompoundUnit is not null || decimals is not null);
             if (isNumeric && unit.Unit is null && unit.CompoundUnit is null)
-                throw Unsupported("A numeric xBRL-JSON fact must have a unit.");
+                unit = (new XbrlUnit("pure"), null);
             if (isNumeric && language is not null)
                 throw Unsupported("Numeric xBRL-JSON facts cannot carry a language dimension.");
             decimal? numericValue = null;
@@ -381,9 +412,9 @@ public static class OimSerializer
                 else textValue = lexical;
             }
 
-            facts.Add(new OimFactEntry(property.Name, new XbrlFact
+            var parsedFact = new XbrlFact
             {
-                ConceptName = concept,
+                ConceptName = canonicalConcept,
                 EntityScheme = entityScheme,
                 EntityIdentifier = entityIdentifier,
                 Period = period,
@@ -396,7 +427,8 @@ public static class OimSerializer
                 Decimals = decimals,
                 Language = language,
                 ContributingSources = Array.Empty<SourceReference>()
-            }));
+            };
+            facts.Add(new OimFactEntry(property.Name, parsedFact));
         }
         return facts;
     }
@@ -428,30 +460,45 @@ public static class OimSerializer
     }
 
     private static (XbrlUnit? Unit, CompoundUnit? CompoundUnit) ParseUnit(
-        string value, IReadOnlyDictionary<string, string> namespaces)
+        string value, IReadOnlyDictionary<string, string> namespaces, FilingProfile? profile)
     {
         var sides = value.Split('/');
         if (sides.Length is < 1 or > 2 || sides.Any(string.IsNullOrEmpty))
             throw Unsupported($"Invalid xBRL-JSON unit '{value}'.");
-        var numerators = ParseMeasures(sides[0], namespaces);
-        var denominators = sides.Length == 2 ? ParseMeasures(sides[1], namespaces) : new List<string>();
+        var numerators = ParseMeasures(sides[0], namespaces, profile);
+        var denominators = sides.Length == 2 ? ParseMeasures(sides[1], namespaces, profile) : new List<string>();
         if (numerators.Count == 0 || numerators.Count + denominators.Count > 64)
             throw Unsupported("Unit exceeds the supported measure limit.");
         if (denominators.Count == 0)
         {
+            if (numerators.Count == 1 && StringComparer.Ordinal.Equals(numerators[0], "pure"))
+                throw Unsupported("A pure numeric unit must be represented without a unit core dimension.");
             if (numerators.All(m => m == numerators[0])) return (new XbrlUnit(numerators[0], numerators.Count), null);
             return (null, new CompoundUnit(numerators));
         }
+        if (denominators.Intersect(numerators, StringComparer.Ordinal).Any())
+            throw Unsupported("Compound units must cancel shared measures before division.");
+        if (numerators.Count == 1 && StringComparer.Ordinal.Equals(numerators[0], "pure")
+            && denominators.All(measure => StringComparer.Ordinal.Equals(measure, denominators[0])))
+            return (new XbrlUnit(denominators[0], -denominators.Count), null);
         return (null, new CompoundUnit(numerators, denominators));
     }
 
-    private static List<string> ParseMeasures(string side, IReadOnlyDictionary<string, string> namespaces)
-        => side.Split('*').Select(measure => MeasureFromQName(measure, namespaces)).ToList();
+    private static List<string> ParseMeasures(
+        string side, IReadOnlyDictionary<string, string> namespaces, FilingProfile? profile)
+        => side.Split('*').Select(measure => MeasureFromQName(measure, namespaces, profile)).ToList();
 
-    private static string MeasureFromQName(string value, IReadOnlyDictionary<string, string> namespaces)
+    private static string MeasureFromQName(
+        string value, IReadOnlyDictionary<string, string> namespaces, FilingProfile? profile)
     {
         var expanded = ExpandQName(value, namespaces);
         if (expanded.Namespace == Iso4217 || expanded.Namespace == Xbrli) return expanded.LocalName;
+        if (profile is not null)
+        {
+            var profilePrefix = profile.NamespaceUris.FirstOrDefault(entry =>
+                StringComparer.Ordinal.Equals(entry.Value, expanded.Namespace)).Key;
+            if (!string.IsNullOrEmpty(profilePrefix)) return $"{profilePrefix}:{expanded.LocalName}";
+        }
         return value;
     }
 
@@ -466,6 +513,17 @@ public static class OimSerializer
         if (!TryExpandQName(value, namespaces, out var result))
             throw Unsupported($"QName '{value}' is invalid or uses an undeclared prefix.");
         return result;
+    }
+
+    private static string CanonicalProfileQName(
+        (string Namespace, string LocalName) expanded,
+        string original,
+        FilingProfile? profile)
+    {
+        if (profile is null) return original;
+        var prefix = profile.NamespaceUris.FirstOrDefault(entry =>
+            StringComparer.Ordinal.Equals(entry.Value, expanded.Namespace)).Key;
+        return string.IsNullOrEmpty(prefix) ? original : $"{prefix}:{expanded.LocalName}";
     }
 
     private static bool TryExpandQName(
@@ -595,7 +653,7 @@ public static class OimSerializer
         {
             if (measure.Contains(':')) return QName(measure);
             if (profile.SupportedUnits.Contains(measure)) return QName("iso4217:" + measure);
-            if (measure is "shares" or "pure" or "monetary" or "integer" or "percent")
+            if (measure is "shares" or "pure")
                 return QName("xbrli:" + measure);
             throw Unsupported($"Unit measure '{measure}' must be a qualified name or a supported currency.");
         }
@@ -640,7 +698,7 @@ public static class OimSerializer
         {
             if (value.Contains(':')) return QName(value);
             if (Currencies.Contains(value)) return QName("iso4217:" + value);
-            if (value is "shares" or "pure" or "monetary" or "integer" or "percent")
+            if (value is "shares" or "pure")
                 return QName("xbrli:" + value);
             throw Unsupported($"Unit measure '{value}' must be a qualified name or a supported currency.");
         }

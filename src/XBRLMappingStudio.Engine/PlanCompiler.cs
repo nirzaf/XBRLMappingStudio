@@ -1655,23 +1655,34 @@ public sealed class PlanCompiler
 
                 var unitStr = GetString(node, "unit");
                 XbrlUnit? unit = null;
-                if (!string.IsNullOrEmpty(unitStr))
+                CompoundUnit? compoundUnit = null;
+                if (!FactUnitParser.TryParse(unitStr, profile, out unit, out compoundUnit, out var unitError))
                 {
-                    if (!profile.SupportedUnits.Contains(unitStr))
-                    {
-                        diag.Error(
-                            DiagnosticCodes.XbrUnitMissing,
-                            DiagnosticSubsystem.XBRL,
-                            DiagnosticStage.Execution,
-                            $"Unit '{unitStr}' is not supported by profile '{profile.ProfileId}'.",
-                            nodeId: node.NodeId,
-                            portName: factValuePortName,
-                            source: factValueSource,
-                            sourceTransformationPaths: factConstructSourcePaths);
-                        outputs["fact"] = DataValue.Missing(PortShape.Fact);
-                        break;
-                    }
-                    unit = new XbrlUnit(unitStr);
+                    diag.Error(
+                        DiagnosticCodes.XbrUnitMissing,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        unitError,
+                        nodeId: node.NodeId,
+                        portName: factValuePortName,
+                        source: factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+                if (!FactUnitParser.TryValidateForConcept(conceptMeta, profile, unit, compoundUnit, out var unitContractError))
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrUnitMissing,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        unitContractError,
+                        nodeId: node.NodeId,
+                        portName: factValuePortName,
+                        source: factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
                 }
 
                 if (!FactDimensionParser.TryParse(
@@ -1772,6 +1783,7 @@ public sealed class PlanCompiler
                     EntityIdentifier = entity,
                     Period = period,
                     Unit = unit,
+                    CompoundUnit = compoundUnit,
                     Decimals = decimals,
                     Language = GetString(node, "language"),
                     Dimensions = dimensions,
@@ -1788,6 +1800,7 @@ public sealed class PlanCompiler
                     EntityIdentifier = pf.EntityIdentifier,
                     Period = period,
                     Unit = unit,
+                    CompoundUnit = compoundUnit,
                     Value = pf.Value,
                     TextValue = pf.TextValue,
                     Decimals = pf.Decimals,

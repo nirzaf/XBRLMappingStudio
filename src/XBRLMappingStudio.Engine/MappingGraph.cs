@@ -329,7 +329,8 @@ public sealed class FunctionCatalog
             new Dictionary<string, ParameterRequirement>
             {
                 ["concept"] = new("concept", PortShape.QualifiedName, true),
-                ["unit"] = new("unit", PortShape.String, false),
+                ["unit"] = new("unit", PortShape.String, false,
+                    Description: "A profile-supported measure or product/ratio expression, e.g. USD, USD/shares, or USD*EUR/shares."),
                 ["periodType"] = new("periodType", PortShape.String, true, Description: "'instant'|'duration'"),
                 ["decimals"] = new("decimals", PortShape.Integer, false, Description: "e.g. -3 for thousands"),
                 ["language"] = new("language", PortShape.String, false, Description: "BCP-47 tag")

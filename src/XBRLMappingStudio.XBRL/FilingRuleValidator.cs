@@ -111,19 +111,17 @@ public sealed class FilingRuleValidator
                 Record(Pass("synthetic:abstract-concept-not-used"));
 
             // Rule: monetary-unit-required + unit-allowed.
-            if (concept.DataType == "monetary" && f.Unit is null && f.CompoundUnit is null)
+            if (StringComparer.OrdinalIgnoreCase.Equals(concept.DataTypeLocalName, "monetary")
+                && !FactUnitParser.TryValidateForConcept(concept, _profile, f.Unit, f.CompoundUnit, out _))
                 Record(Fail("synthetic:monetary-unit-required", DiagnosticCodes.XbrUnitMissing,
-                    $"Fact on monetary concept '{f.ConceptName}' has no unit.", op));
+                    $"Fact on monetary concept '{f.ConceptName}' requires one currency unit.", op));
             else
                 Record(Pass("synthetic:monetary-unit-required"));
 
-            if (f.Unit is not null && !_profile.SupportedUnits.Contains(f.Unit.Measure))
-                Record(Fail("synthetic:unit-allowed", DiagnosticCodes.XbrUnitMissing,
-                    $"Unit '{f.Unit.Measure}' is not supported by profile '{_profile.ProfileId}'.", op));
-            else if (f.CompoundUnit is not null)
-                Record(CompoundUnitRule(f));
-            else
+            if (FactUnitParser.TryValidateForConcept(concept, _profile, f.Unit, f.CompoundUnit, out var unitError))
                 Record(Pass("synthetic:unit-allowed"));
+            else
+                Record(Fail("synthetic:unit-allowed", DiagnosticCodes.XbrUnitMissing, unitError, op));
 
             if (!f.ValidateValueAgainst(concept, out var valueReason)
                 && !valueReason.EndsWith("is monetary and requires a unit.", StringComparison.Ordinal))
@@ -191,19 +189,6 @@ public sealed class FilingRuleValidator
         }
 
         return new FilingValidationResult(collapsed);
-    }
-
-    private RuleOutcome CompoundUnitRule(XbrlFact f)
-    {
-        var cu = f.CompoundUnit!;
-        var unsupported = cu.Numerators.Concat(cu.DenominatorList)
-            .Where(m => !_profile.SupportedUnits.Contains(m))
-            .ToList();
-        return unsupported.Count == 0
-            ? Pass("synthetic:unit-allowed")
-            : Fail("synthetic:unit-allowed", DiagnosticCodes.XbrUnitMissing,
-                $"Compound unit '{cu.CanonicalKey}' uses unsupported measures: {string.Join(", ", unsupported)}.",
-                "filing-validation");
     }
 
     private RuleOutcome DimensionRule(XbrlFact f, Dimension d, string op)

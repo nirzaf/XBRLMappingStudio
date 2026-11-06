@@ -12,7 +12,7 @@ namespace XBRLMappingStudio.XBRL.Tests;
 /// </summary>
 public sealed class XmlExportTests
 {
-    private static FilingProfile Profile => SyntheticProfile.Build();
+    private static FilingProfile Profile => TestFilingProfiles.WithNumericCompoundUnitConcept();
 
     private static XbrlFact Revenue() => new()
     {
@@ -184,13 +184,18 @@ public sealed class XmlExportTests
         unknownUnit.Root!.Elements(synthetic + "Revenue").Single().SetAttributeValue("unitRef", "missing");
         Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unknownUnit.ToString()));
 
-        var extraSimpleMeasure = XDocument.Parse(valid);
-        extraSimpleMeasure.Root!.Element(xbrli + "unit")!.Add(new XElement(xbrli + "measure", "iso4217:USD"));
-        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(extraSimpleMeasure.ToString()));
+        var productUnit = XDocument.Parse(valid);
+        productUnit.Root!.Element(xbrli + "unit")!.Add(new XElement(xbrli + "measure", "iso4217:USD"));
+        Assert.Equal("QAR*USD", Assert.Single(XmlSerializer.ReadFacts(productUnit.ToString()))
+            .CompoundUnit?.CanonicalKey);
+
+        var unexpectedUnitChild = XDocument.Parse(valid);
+        unexpectedUnitChild.Root!.Element(xbrli + "unit")!.Add(new XElement(xbrli + "divide"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unexpectedUnitChild.ToString()));
 
         var compound = new XbrlFact
         {
-            ConceptName = SyntheticProfile.Qualified("NetIncome"),
+            ConceptName = TestFilingProfiles.UnitsPerShareConcept,
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "ACME",
             Period = Revenue().Period,

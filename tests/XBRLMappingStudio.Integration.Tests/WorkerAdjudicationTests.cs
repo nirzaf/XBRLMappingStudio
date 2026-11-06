@@ -7,6 +7,7 @@ using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
 using XBRLMappingStudio.XBRL;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
@@ -471,11 +472,14 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
             EntityScheme = "http://xbrl.org/entity/",
             EntityIdentifier = "locator-fixture",
             Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
-            Unit = new XbrlUnit("iso4217:ZZZ"),
+            Unit = new XbrlUnit("QAR"),
             Value = 123m,
             Decimals = 0
         }).ToArray();
-        var report = OimSerializer.Serialize(profile, facts);
+        var reportNode = JsonNode.Parse(OimSerializer.Serialize(profile, facts))!;
+        foreach (var factEntry in reportNode["facts"]!.AsObject())
+            factEntry.Value!["dimensions"]!["unit"] = "iso4217:ZZZ";
+        var report = reportNode.ToJsonString();
         var entries = OimSerializer.ReadFactEntries(report);
         var request = new WorkerRequest(WorkerOperations.ValidateReport, "locator-op", "locator-job",
             profile.Digest, DateTimeOffset.UtcNow.AddMinutes(1),

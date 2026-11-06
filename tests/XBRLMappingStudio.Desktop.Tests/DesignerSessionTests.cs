@@ -793,6 +793,60 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void FactPropertyEditorAcceptsCompoundUnitsForNumericNonMonetaryConcepts()
+    {
+        var synthetic = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = synthetic.ProfileId,
+            Digest = synthetic.Digest,
+            Concepts = synthetic.Concepts.Append(new ConceptMetadata(
+                "synthetic:UnitsPerShare", SyntheticProfile.Namespace, "UnitsPerShare",
+                "Units per share", "decimal", "duration", IsAbstract: false)).ToArray(),
+            SupportedUnits = synthetic.SupportedUnits,
+            DimensionDomains = synthetic.DimensionDomains,
+            TaxonomyVersion = synthetic.TaxonomyVersion,
+            OutputFormat = synthetic.OutputFormat,
+            NamespaceUris = synthetic.NamespaceUris,
+            TaxonomyUrls = synthetic.TaxonomyUrls,
+            PackageHashes = synthetic.PackageHashes,
+            RequiredPlugins = synthetic.RequiredPlugins,
+            RequiredChecks = synthetic.RequiredChecks
+        };
+        var project = new MainWindowViewModel().Session.Project;
+        var target = project.Nodes.Single(node => node.NodeId == "sample-fact");
+        target.Parameters["concept"] = "synthetic:UnitsPerShare";
+        var viewModel = new MainWindowViewModel(project, null,
+            (_, _) => Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                new InvalidOperationException("Source inspection must not run.")),
+            new FilingProfileResolver(new[] { profile }));
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactUnit = "USD/shares";
+        viewModel.SelectedFactPeriodType = "duration";
+        viewModel.SelectedFactDecimals = "0";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Equal("USD/shares", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["unit"]?.ToString());
+    }
+
+    [Fact]
+    public void FactPropertyEditorRejectsCompoundCurrencyUnitsForMonetaryConcepts()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactUnit = "USD/shares";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("requires one currency measure", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Equal("USD", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["unit"]?.ToString());
+    }
+
+    [Fact]
     public void EditingOneFactPropertyPreservesTheOtherProperties()
     {
         var viewModel = new MainWindowViewModel();
