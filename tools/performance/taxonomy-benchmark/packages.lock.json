@@ -5,6 +5,20 @@
       "xbrlmappingstudio.diagnostics": {
         "type": "Project"
       },
+      "xbrlmappingstudio.engine": {
+        "type": "Project",
+        "dependencies": {
+          "XBRLMappingStudio.Diagnostics": "[1.0.0, )",
+          "XBRLMappingStudio.Project": "[1.0.0, )",
+          "XBRLMappingStudio.XBRL": "[1.0.0, )"
+        }
+      },
+      "xbrlmappingstudio.project": {
+        "type": "Project",
+        "dependencies": {
+          "XBRLMappingStudio.Diagnostics": "[1.0.0, )"
+        }
+      },
       "xbrlmappingstudio.xbrl": {
         "type": "Project",
         "dependencies": {

@@ -40,7 +40,14 @@ internal static class Program
             if (args.Length == 1 && args[0] == "--self-test")
             {
                 await RunSelfTestAsync();
-                Console.WriteLine($"Taxonomy benchmark self-test passed ({DefaultConceptCount.ToString(CultureInfo.InvariantCulture)} concepts).");
+                Console.WriteLine($"Performance fixture self-test passed ({DefaultConceptCount.ToString(CultureInfo.InvariantCulture)} concepts; graph sizes 100, 500, 1000, and 2000).");
+                return 0;
+            }
+
+            if (args.Length == 2 && args[0] == "--generate-graph-fixtures")
+            {
+                GraphCanvasFixtureGenerator.Generate(args[1]);
+                Console.WriteLine($"Wrote four deterministic graph-canvas fixtures and their manifest to {Path.GetFullPath(args[1])}");
                 return 0;
             }
 
@@ -241,6 +248,8 @@ internal static class Program
         {
             throw new InvalidOperationException("Synthetic taxonomy benchmark self-test did not produce the required raw measurements.");
         }
+
+        GraphCanvasFixtureGenerator.RunSelfTest();
     }
 
     private static async Task VerifyPreCancelledSearchAsync(TaxonomyIndex index)
@@ -358,14 +367,15 @@ internal static class Program
 
     private static void PrintUsage()
     {
-        Console.WriteLine("Synthetic taxonomy index benchmark (measurements never claim a threshold passed).");
+        Console.WriteLine("Synthetic performance fixtures (measurements never claim a threshold passed).");
         Console.WriteLine("  dotnet run --project tools/performance/taxonomy-benchmark -c Release -- [options]");
         Console.WriteLine("  --concept-count N       Synthetic concept count (default 20000; range 3..500000)");
         Console.WriteLine("  --search-samples N       Warm search samples (default 100)");
         Console.WriteLine("  --expansion-samples N    Lazy role-page samples (default 100)");
         Console.WriteLine("  --page-size N            Role expansion page size (default 25)");
         Console.WriteLine("  --output PATH            Write a new JSON record; existing files are refused");
-        Console.WriteLine("  --self-test              Check fixture digest, paging, searches, cancellation and index recreation");
+        Console.WriteLine("  --generate-graph-fixtures DIR  Write 100/500/1000/2000-node .xmap fixtures and SHA-256 manifest to a new directory");
+        Console.WriteLine("  --self-test              Check taxonomy benchmarks and graph fixture generation/round trips");
     }
 
     private sealed record BenchmarkOptions(

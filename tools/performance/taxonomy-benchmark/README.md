@@ -40,3 +40,26 @@ dotnet run --project tools/performance/taxonomy-benchmark/XBRLMappingStudio.Taxo
 
 The desktop's rapid superseding-query behavior is exercised separately by
 `TaxonomyExplorerTests.RapidSearchCriteriaChanges_LeaveOnlyTheNewestTwentyThousandConceptQuery`.
+
+## Graph canvas scaling fixtures
+
+Generate a fresh set of four portable `.xmap` projects for native graph-canvas
+measurement:
+
+```powershell
+dotnet run --project tools/performance/taxonomy-benchmark/XBRLMappingStudio.TaxonomyBenchmark.csproj -c Release -- --generate-graph-fixtures artifacts/performance/graph-canvas
+```
+
+The command creates 100, 500, 1,000 and 2,000 node projects in the new output
+directory, plus `graph-canvas-fixtures.manifest.json`. Each graph is a typed
+Constant-to-Scale chain using the built-in synthetic profile, stable IDs and a
+serpentine grid layout. The manifest records node/edge counts, layout grid,
+semantic/profile identity and the exact `.xmap` SHA-256. Existing output
+directories are refused so fixture evidence is not silently replaced.
+
+The runner self-test regenerates every size, checks byte stability, validates
+the typed graph with the default catalog, round-trips each `.xmap`, and verifies
+the manifest digests. These fixtures make native replay inputs available; they
+do not measure pan/zoom frame intervals, allocations, rendering behavior or
+target-hardware performance. Record those separately with the Windows native
+gesture and rendering trace required by BEN-04/BEN-06.

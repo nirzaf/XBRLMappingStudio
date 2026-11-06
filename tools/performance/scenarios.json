@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status_note": "All entries are proposed scenarios until a raw benchmark record is captured. The catalog does not establish that any target threshold passed.",
+  "status_note": "Scenarios without raw benchmark records remain proposed. Fixture availability does not establish that any target threshold passed.",
   "scenarios": [
     {
       "id": "desktop-startup-cold",
@@ -28,11 +28,11 @@
     },
     {
       "id": "graph-canvas-100-2000",
-      "status": "proposed",
+      "status": "synthetic-fixtures-available",
       "depends_on": "BEN-04,BEN-06",
-      "fixture": "deterministic graph sizes 100, 500, 1000, and 2000 nodes",
+      "fixture": "generated deterministic .xmap graph sizes 100, 500, 1000, and 2000 nodes with SHA-256 manifest",
       "interaction": "pan, zoom, drag, connect, and property commit with frame timing",
-      "automation_status": "native gesture replay and frame capture required"
+      "automation_status": "synthetic fixture generation and integrity checks available; native gesture replay and frame capture required"
     },
     {
       "id": "taxonomy-search-20k",
