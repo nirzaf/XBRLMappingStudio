@@ -55,7 +55,8 @@ public sealed class CliParityTests : IAsyncLifetime
                 .OrderBy(p => p.Contains("Release") ? 0 : 1)
                 .FirstOrDefault();
 
-        var dll = PickDll();
+        var adjacentDll = Path.Combine(AppContext.BaseDirectory, "xbrl-studio.dll");
+        var dll = File.Exists(adjacentDll) ? adjacentDll : PickDll();
         if (dll is null)
             throw new FileNotFoundException("xbrl-studio.dll not built.");
 
@@ -491,7 +492,9 @@ public sealed class CliParityTests : IAsyncLifetime
         var projectPath = Path.Combine(_dir, "missing-arelle-runtime.xmap");
         new ProjectManager(projectPath).Save(project);
         var missingPython = Path.Combine(_dir, "missing-python-runtime.exe");
-        var outputPath = Path.Combine(_dir, "must-not-be-created.json");
+        var outputPath = Path.Combine(_dir, "existing-report.json");
+        var priorOutput = System.Text.Encoding.UTF8.GetBytes("prior-accepted-report");
+        await File.WriteAllBytesAsync(outputPath, priorOutput);
 
         var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
             "--output", outputPath, "--allow-synthetic-profile", "--arelle", "--python", missingPython);
@@ -502,7 +505,7 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.DoesNotContain("IO001", stderr, StringComparison.Ordinal);
         Assert.DoesNotContain(Path.GetFileName(missingSource), stderr, StringComparison.Ordinal);
         Assert.Empty(stdout);
-        Assert.False(File.Exists(outputPath));
+        Assert.Equal(priorOutput, await File.ReadAllBytesAsync(outputPath));
     }
 
     [Fact]
