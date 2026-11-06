@@ -407,10 +407,10 @@ retain its raw log list internally before the adapter converts it.
 Verification on an isolated worktree passed the focused .NET diagnostic-budget test,
 the full Release build with zero warnings and errors, and the full Release solution
 suite (717 passed, 5 environment-gated Arelle skips). The Python worker suite passed
-53 tests with 7 gated/environment skips; the tools suite passed 15/15 after an initial
-process-tree sampling failure under concurrent load passed on isolated rerun. The
-taxonomy benchmark self-test passed for 20,000 concepts and graph sizes 100, 500, 1,000
-and 2,000. `git diff --check` passed.
+53 tests with 7 gated/environment skips. The tools suite passed 15/15, and its
+process-tree timeout case passed three concurrent repetitions after its child-startup
+window was increased to two seconds. The taxonomy benchmark self-test passed for
+20,000 concepts and graph sizes 100, 500, 1,000 and 2,000. `git diff --check` passed.
 
 Exact-head GitHub Actions run [42286350022](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42286350022)
 for source SHA `41a32c8c0ead27e4b27b60be7924b050cb71bc43` passed repository hygiene,

@@ -130,6 +130,8 @@ class PerformanceHarnessTests(unittest.TestCase):
         self.assertIn('"threshold_pass_claimed": false', captured.getvalue())
 
     def test_timeout_terminates_the_launched_process_tree(self) -> None:
+        # Leave enough time for Windows to start the parent and its child under
+        # load; this test measures tree cleanup, not interpreter startup latency.
         record = harness.run_process(
             [
                 sys.executable,
@@ -143,7 +145,7 @@ class PerformanceHarnessTests(unittest.TestCase):
             artifact_path=None,
             fixture_path=None,
             sample_interval_seconds=0.05,
-            timeout_seconds=0.3,
+            timeout_seconds=2.0,
         )
 
         harness.validate_record(record)
