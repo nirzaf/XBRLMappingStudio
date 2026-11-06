@@ -624,6 +624,39 @@ public sealed class LargeRunExecutionTests
             await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
                 project, result, root, allowSyntheticProfile: true));
             Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+
+            join.Parameters["fieldConflict"] = "Fail";
+            project.Approvals.Clear();
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "ENG-04 field conflict regression fixture",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = profile.Digest,
+                Authority = "test-fixture"
+            });
+            var conflictWorker = new DigestOnlyArtifactWorker(profile);
+            var conflictService = new MappingJobService(profile, conflictWorker);
+            var conflictCompile = conflictService.Validate(project);
+            Assert.True(conflictCompile.Success,
+                string.Join(" | ", conflictCompile.Diagnostics.Items.Select(item => item.Message)));
+
+            using var conflictResult = await conflictService.RunAsync(project, Connections(project, database),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.Equal(RunOutcome.InvalidMapping, conflictResult.Manifest.Outcome);
+            Assert.False(conflictResult.IsPublishable);
+            Assert.Contains(conflictResult.Manifest.Diagnostics,
+                item => item.Code == DiagnosticCodes.MapJoinFieldConflict && item.IsBlocking);
+            Assert.Single(conflictResult.Facts);
+            Assert.Equal(1250m, conflictResult.Facts[0].Value!.Value);
+            Assert.Equal(string.Empty, conflictResult.XbrlJson);
+            Assert.Empty(conflictResult.Manifest.Outputs);
+            Assert.Equal(0, conflictWorker.ValidationRequests);
+            await Assert.ThrowsAsync<AdapterException>(() => conflictService.PublishFileDestinationAsync(
+                project, conflictResult, root, allowSyntheticProfile: true));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
         }
         finally { TryDeleteDirectory(root); }
     }

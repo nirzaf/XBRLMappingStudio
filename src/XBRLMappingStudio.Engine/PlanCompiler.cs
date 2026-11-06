@@ -576,12 +576,22 @@ public sealed class PlanCompiler
                     var rightKey = GetString(node, "rightKey") ?? "";
                     var cardinality = GetString(node, "cardinality") ?? "Inner";
                     var dupPolicy = GetString(node, "duplicateKey") ?? "All";
+                    var fieldConflict = GetString(node, "fieldConflict") ?? "Right";
                     if (cardinality is not ("Inner" or "Left" or "Right" or "Full"))
                     {
                         diag.Error(DiagnosticCodes.MapCardinalityMismatch, DiagnosticSubsystem.Mapping,
                             DiagnosticStage.Execution,
                             $"Unknown join cardinality '{cardinality}'.", nodeId: nodeId);
                         cardinality = "Inner";
+                    }
+                    if (fieldConflict is not ("Left" or "Right" or "Fail"))
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidJoinFieldConflictPolicy,
+                            DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                            $"Unknown join fieldConflict '{fieldConflict}'. Expected Left, Right or Fail.",
+                            nodeId: nodeId);
+                        outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                        return outputs;
                     }
 
                     // Build right-hand index keyed by rightKey, honouring the duplicate policy.
@@ -629,7 +639,38 @@ public sealed class PlanCompiler
 
                         var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                         if (l is not null) foreach (var kv in l) merged[kv.Key] = kv.Value;
-                        if (r is not null) foreach (var kv in r) merged[kv.Key] = kv.Value;
+                        if (r is not null)
+                        {
+                            foreach (var kv in r)
+                            {
+                                if (!merged.TryGetValue(kv.Key, out var leftValue))
+                                {
+                                    merged[kv.Key] = kv.Value;
+                                    continue;
+                                }
+
+                                if (leftValue.Equals(kv.Value))
+                                {
+                                    if (fieldConflict == "Right") merged[kv.Key] = kv.Value;
+                                    continue;
+                                }
+
+                                switch (fieldConflict)
+                                {
+                                    case "Left":
+                                        break;
+                                    case "Right":
+                                        merged[kv.Key] = kv.Value;
+                                        break;
+                                    case "Fail":
+                                        diag.Error(DiagnosticCodes.MapJoinFieldConflict,
+                                            DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                            $"Join field '{kv.Key}' has different values on the left and right inputs; "
+                                            + "fieldConflict=Fail.", nodeId: nodeId);
+                                        return false;
+                                }
+                            }
+                        }
                         var outputIndex = joined.Count;
                         joined.Add(DataValue.Record(merged));
 
@@ -642,11 +683,22 @@ public sealed class PlanCompiler
                         foreach (var fieldName in merged.Keys)
                         {
                             var fieldPaths = new List<SourceTransformationPath>();
-                            var comesFromRight = r is not null && r.ContainsKey(fieldName);
-                            if (comesFromRight && rightItemIndex is { } rightFieldIndex)
+                            var hasLeftField = l is not null && l.ContainsKey(fieldName);
+                            var hasRightField = r is not null && r.ContainsKey(fieldName);
+                            var equalBothSides = hasLeftField && hasRightField && fieldConflict == "Fail";
+                            var comesFromRight = hasRightField && (!hasLeftField || fieldConflict == "Right");
+                            if (equalBothSides && leftItemIndex is { } equalLeftFieldIndex)
+                            {
+                                AddDistinctPaths(fieldPaths,
+                                    ReadSetFieldPaths(leftEdge, equalLeftFieldIndex, fieldName));
+                                if (rightItemIndex is { } equalRightFieldIndex)
+                                    AddDistinctPaths(fieldPaths,
+                                        ReadSetFieldPaths(rightEdge, equalRightFieldIndex, fieldName));
+                            }
+                            else if (comesFromRight && rightItemIndex is { } rightFieldIndex)
                                 AddDistinctPaths(fieldPaths,
                                     ReadSetFieldPaths(rightEdge, rightFieldIndex, fieldName));
-                            else if (!comesFromRight && leftItemIndex is { } leftFieldIndex)
+                            else if (hasLeftField && leftItemIndex is { } leftFieldIndex)
                                 AddDistinctPaths(fieldPaths,
                                     ReadSetFieldPaths(leftEdge, leftFieldIndex, fieldName));
                             AddDistinctPaths(fieldPaths, leftJoinKeyPaths);

@@ -422,7 +422,9 @@ public sealed class FunctionCatalog
                 ["leftKey"] = new("leftKey", PortShape.String, true),
                 ["rightKey"] = new("rightKey", PortShape.String, true),
                 ["cardinality"] = new("cardinality", PortShape.String, false, "Inner", Description: "Inner | Left | Right | Full"),
-                ["duplicateKey"] = new("duplicateKey", PortShape.String, false, "All", Description: "Fail | First | All")
+                ["duplicateKey"] = new("duplicateKey", PortShape.String, false, "All", Description: "Fail | First | All"),
+                ["fieldConflict"] = new("fieldConflict", PortShape.String, false, "Right",
+                    Description: "Left | Right | Fail; legacy default is Right.")
             }),
 
         // MAP07 named visual function call. Inlined at compile time against a pinned revision.

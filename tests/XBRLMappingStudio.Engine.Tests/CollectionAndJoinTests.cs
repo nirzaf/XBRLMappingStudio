@@ -683,6 +683,37 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void JoinOverlappingFields_FollowsConfiguredConflictPolicy()
+    {
+        var leftRows = new[] { GraphHarness.Row(("k", S("1")), ("a", D(10m))) };
+        var rightRows = new[] { GraphHarness.Row(("k", S("1")), ("a", D(99m))) };
+
+        var leftWins = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All", fieldConflict: "Left");
+        Assert.Equal(new[] { 10m }, leftWins.Facts.Select(fact => fact.Value!.Value));
+        Assert.DoesNotContain(leftWins.Diagnostics, diagnostic => diagnostic.IsBlocking);
+
+        var rightWins = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All", fieldConflict: "Right");
+        Assert.Equal(new[] { 99m }, rightWins.Facts.Select(fact => fact.Value!.Value));
+        Assert.DoesNotContain(rightWins.Diagnostics, diagnostic => diagnostic.IsBlocking);
+
+        var failOnConflict = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All", fieldConflict: "Fail");
+        Assert.Contains(failOnConflict.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.MapJoinFieldConflict && diagnostic.IsBlocking);
+        Assert.Empty(failOnConflict.Facts);
+
+        var matching = RunJoinToGroupedFacts(leftRows,
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(10m))) },
+            "Inner", "All", fieldConflict: "Fail");
+        Assert.Equal(new[] { 10m }, matching.Facts.Select(fact => fact.Value!.Value));
+        Assert.DoesNotContain(matching.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.MapJoinFieldConflict);
+
+        var unknownPolicy = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All", fieldConflict: "Merge");
+        Assert.Contains(unknownPolicy.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.MapInvalidJoinFieldConflictPolicy && diagnostic.IsBlocking);
+        Assert.Empty(unknownPolicy.Facts);
+    }
+
+    [Fact]
     public void JoinExpansionBudget_BlocksBeforePublication()
     {
         const string Left = "L";
@@ -749,7 +780,8 @@ public class CollectionAndJoinTests
         IReadOnlyList<DataRecord> rightRows,
         string cardinality,
         string duplicateKey,
-        int maxJoinRows = 200_000)
+        int maxJoinRows = 200_000,
+        string fieldConflict = "Right")
     {
         const string leftBinding = "join-left";
         const string rightBinding = "join-right";
@@ -761,7 +793,7 @@ public class CollectionAndJoinTests
             outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
         var join = GraphHarness.Node(NodeTypeConstants.Join, "Join",
             new() { ["leftKey"] = "k", ["rightKey"] = "k", ["cardinality"] = cardinality,
-                ["duplicateKey"] = duplicateKey },
+                ["duplicateKey"] = duplicateKey, ["fieldConflict"] = fieldConflict },
             inputs: new[]
             {
                 GraphHarness.P("left", PortShape.Record, PortCardinality.Collection),
