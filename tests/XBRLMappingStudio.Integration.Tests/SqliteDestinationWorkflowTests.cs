@@ -123,6 +123,108 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SqliteSourceChange_BlocksPreviewAndSqlitePublicationAndPreservesDestination()
+    {
+        var sourcePath = await CreateSqliteSourceAsync("mutable-source.db", hasPrimaryKey: true);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: false);
+        var service = NewService();
+        var binding = Assert.Single(project.Bindings);
+        var connection = new SourceConnection(binding.BindingId, "sqlite", sourcePath,
+            binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "",
+                StringComparer.Ordinal));
+        var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection>(StringComparer.Ordinal) { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.True(result.IsPublishable);
+        var unchangedPreview = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        Assert.Empty(unchangedPreview.SchemaDiscrepancies);
+        Assert.Equal(1, unchangedPreview.CandidateRows);
+        var stableReceipt = await service.PublishDestinationAsync(project, result, _directory,
+            allowSyntheticProfile: true);
+        Assert.Equal(1, stableReceipt.WrittenRows);
+        var beforeChangedSourceAttempt = await File.ReadAllBytesAsync(_databasePath);
+
+        await ChangeSqliteSourceValueAsync(sourcePath, "1350");
+
+        var changedPreview = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        var discrepancy = Assert.Single(changedPreview.SchemaDiscrepancies);
+        Assert.Contains(binding.BindingId, discrepancy, StringComparison.Ordinal);
+        Assert.Contains(DiagnosticCodes.IoInputIdentityChanged, discrepancy, StringComparison.Ordinal);
+        Assert.Equal(0, changedPreview.CandidateRows);
+
+        var error = await Assert.ThrowsAsync<PublicationException>(() => service.PublishDestinationAsync(
+            project, result, _directory, allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+        Assert.Equal(beforeChangedSourceAttempt, await File.ReadAllBytesAsync(_databasePath));
+    }
+
+    [Fact]
+    public async Task SqliteSourceChange_BlocksFilePublicationAndPreservesPriorOutput()
+    {
+        var sourcePath = await CreateSqliteSourceAsync("mutable-file-source.db", hasPrimaryKey: true);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: true);
+        var service = NewService();
+        var binding = Assert.Single(project.Bindings);
+        var connection = new SourceConnection(binding.BindingId, "sqlite", sourcePath,
+            binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "",
+                StringComparer.Ordinal));
+        var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection>(StringComparer.Ordinal) { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+
+        var stableOutput = await service.PublishFileDestinationAsync(project, result, _directory,
+            allowSyntheticProfile: true, CancellationToken.None);
+        Assert.Equal("xlsx", stableOutput.Kind);
+        var priorOutput = await File.ReadAllBytesAsync(stableOutput.Path);
+        await ChangeSqliteSourceValueAsync(sourcePath, "1350");
+
+        var error = await Assert.ThrowsAsync<PublicationException>(() => service.PublishFileDestinationAsync(
+            project, result, _directory, allowSyntheticProfile: true, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+        Assert.Equal(priorOutput, await File.ReadAllBytesAsync(stableOutput.Path));
+    }
+
+    [Fact]
+    public async Task PositionalSqliteSource_FailsClosedForSavedResultReuse()
+    {
+        var sourcePath = await CreateSqliteSourceAsync("positional-source.db", hasPrimaryKey: false);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: false);
+        var service = NewService();
+        var binding = Assert.Single(project.Bindings);
+        var connection = new SourceConnection(binding.BindingId, "sqlite", sourcePath,
+            binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "",
+                StringComparer.Ordinal));
+        var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection>(StringComparer.Ordinal) { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+        var before = await File.ReadAllBytesAsync(_databasePath);
+
+        var preview = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        var discrepancy = Assert.Single(preview.SchemaDiscrepancies);
+        Assert.Contains(binding.BindingId, discrepancy, StringComparison.Ordinal);
+        Assert.Contains("primary key", discrepancy, StringComparison.OrdinalIgnoreCase);
+        var error = await Assert.ThrowsAsync<PublicationException>(() => service.PublishDestinationAsync(
+            project, result, _directory, allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task XbrlReportToSqlite_PreservesFactValuePeriodAndReportProvenance()
     {
         var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
@@ -382,6 +484,73 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
             ProfileDigest = _profile.Digest
         });
         return project;
+    }
+
+    private MappingProject ConfiguredSqliteSourceProject(string sourcePath, bool fileDestination)
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var binding = Assert.Single(project.Bindings);
+        project.Bindings[0] = binding with
+        {
+            Kind = "sqlite",
+            Locator = sourcePath,
+            Configuration = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["table"] = "financials",
+                ["decimalColumns"] = "Current,Prior"
+            }
+        };
+        project.Destination = fileDestination
+            ? new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.ExcelKind,
+                Locator = "sqlite-source-output.xlsx",
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "xlsx-records-v1",
+                WriteMode = "replace"
+            }
+            : new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.SupportedKind,
+                Locator = "destination.db",
+                Table = "facts",
+                BusinessKey = new List<string> { "fact_key" }
+            };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = _profile.Digest
+        });
+        return project;
+    }
+
+    private async Task<string> CreateSqliteSourceAsync(string name, bool hasPrimaryKey)
+    {
+        var path = Path.Combine(_directory, name);
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = hasPrimaryKey
+            ? "CREATE TABLE financials (Line TEXT PRIMARY KEY, Current TEXT, Prior TEXT);"
+            : "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT);";
+        await command.ExecuteNonQueryAsync();
+        command.CommandText = "INSERT INTO financials VALUES ('Revenue','1250','1100');";
+        await command.ExecuteNonQueryAsync();
+        return path;
+    }
+
+    private static async Task ChangeSqliteSourceValueAsync(string path, string value)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = "UPDATE financials SET Current=$value WHERE Line='Revenue';";
+        command.Parameters.AddWithValue("$value", value);
+        await command.ExecuteNonQueryAsync();
     }
 
     private MappingJobService NewService() => new(_profile, new LocalSyntheticWorker(_profile));

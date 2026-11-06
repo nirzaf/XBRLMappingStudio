@@ -1399,10 +1399,10 @@ public sealed class MappingJobService
         string workspaceRoot,
         CancellationToken cancellationToken = default)
     {
-        var changedInput = await FindChangedFileInputAsync(
-            result.Manifest.Inputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        var changedInput = await FindChangedInputAsync(
+            project, result.Manifest.Inputs, cancellationToken);
         if (changedInput is not null)
-            return BlockedDestinationPreview(0, SourceIdentityMismatchMessage(changedInput));
+            return BlockedDestinationPreview(0, $"{DiagnosticCodes.IoInputIdentityChanged}: {SourceIdentityMismatchMessage(changedInput)}");
 
         var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
         SqliteTargetTableSchema schema;
@@ -1464,7 +1464,7 @@ public sealed class MappingJobService
             prepared.Path,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
 
-        await EnsureFileInputIdentityAsync(manifest, plan.Locator, cancellationToken);
+        await EnsureInputIdentityAsync(project, manifest, plan.Locator, cancellationToken);
         var receipt = await new SqliteTargetPublisher().PublishAsync(
             destination,
             prepared.Records,
@@ -1715,7 +1715,7 @@ public sealed class MappingJobService
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                     "The destination changed while the staged artifact was being verified.", manifest.RunId, destinationPath);
 
-            await EnsureFileInputIdentityAsync(manifest, destinationPath, cancellationToken);
+            await EnsureInputIdentityAsync(project, manifest, destinationPath, cancellationToken);
             var output = await adapter.PublishAsync(stagedPath, connection, cancellationToken);
             var finalDigest = CurrentFileDigest(destinationPath);
             if (finalDigest is null || !StringComparer.Ordinal.Equals(output.Digest, finalDigest))
@@ -2053,20 +2053,127 @@ public sealed class MappingJobService
         }
     }
 
-    private async Task EnsureFileInputIdentityAsync(
+    private async Task EnsureInputIdentityAsync(
+        MappingProject project,
         RunManifest manifest,
         string destination,
         CancellationToken cancellationToken)
     {
-        var changedInput = await FindChangedFileInputAsync(
-            manifest.Inputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        var changedInput = await FindChangedInputAsync(project, manifest.Inputs, cancellationToken);
         if (changedInput is not null)
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                 SourceIdentityMismatchMessage(changedInput), manifest.RunId, destination);
     }
 
     private static string SourceIdentityMismatchMessage(InputIdentity input)
-        => $"Input source '{input.SourceId}' changed or could not be verified since this run. Rerun from the current source before preview or publication.";
+        => input.Kind is "sqlite-table" or "sqlite-preview"
+            ? StringComparer.Ordinal.Equals(input.RowIdentityStrategy, SqliteSourceAdapter.PositionalIdentityStrategy)
+                ? $"SQLite input source '{input.SourceId}' has no declared primary key, so its positional row locators cannot be verified for saved-result reuse. Its sqlite-read-transaction snapshot is not replayable; rerun from the current source before preview or publication."
+                : $"SQLite input source '{input.SourceId}' changed or could not be verified since this run. Its sqlite-read-transaction snapshot is not replayable; saved-result reuse requires a verifiable declared primary key. Rerun from the current source before preview or publication."
+            : $"Input source '{input.SourceId}' changed or could not be verified since this run. Rerun from the current source before preview or publication.";
+
+    private async Task<InputIdentity?> FindChangedInputAsync(
+        MappingProject project,
+        IReadOnlyList<InputIdentity> recordedInputs,
+        CancellationToken cancellationToken)
+    {
+        var changedFile = await FindChangedFileInputAsync(
+            recordedInputs, _executionBudget.MaxInMemorySourceBytes, cancellationToken).ConfigureAwait(false);
+        if (changedFile is not null) return changedFile;
+
+        return await FindChangedSqliteInputAsync(project, recordedInputs, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-read SQLite-backed inputs through the bounded source adapter and compare the
+    /// canonical full-run content digest. This validates current content only; it does
+    /// not make the prior sqlite-read-transaction snapshot replayable.
+    /// </summary>
+    private async Task<InputIdentity?> FindChangedSqliteInputAsync(
+        MappingProject project,
+        IReadOnlyList<InputIdentity> recordedInputs,
+        CancellationToken cancellationToken)
+    {
+        foreach (var input in recordedInputs.Where(input => input.Kind == "sqlite-table"))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // The set digest is order-independent. It cannot prove that a keyless
+            // table still assigns the same pos:n provenance locators, so saved-result
+            // reuse remains fail-closed unless the source declared a primary key.
+            if (input.IsReplayable
+                || !StringComparer.Ordinal.Equals(input.SnapshotStrategy, "sqlite-read-transaction")
+                || !StringComparer.Ordinal.Equals(input.RowIdentityStrategy,
+                    SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy)
+                || string.IsNullOrWhiteSpace(input.Digest)
+                || string.IsNullOrWhiteSpace(input.OriginalPath))
+                return input;
+
+            var bindings = project.Bindings.Where(binding =>
+                StringComparer.Ordinal.Equals(binding.BindingId, input.SourceId)).ToArray();
+            if (bindings.Length != 1
+                || !StringComparer.OrdinalIgnoreCase.Equals(bindings[0].Kind, "sqlite"))
+                return input;
+
+            var binding = bindings[0];
+            var configuration = binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => Convert.ToString(pair.Value, CultureInfo.InvariantCulture) ?? "",
+                StringComparer.Ordinal);
+            if (!configuration.TryGetValue("table", out var table) || string.IsNullOrWhiteSpace(table))
+                return input;
+            var connection = new SourceConnection(input.SourceId, "sqlite", input.OriginalPath, configuration);
+
+            var scratchDirectory = Path.Combine(Path.GetTempPath(), "xms-source-check-" + Guid.NewGuid().ToString("N"));
+            LargeRunFactStore? store = null;
+            try
+            {
+                CreatePrivateArtifactDirectory(scratchDirectory);
+                var adapter = new SqliteSourceAdapter();
+                var schema = await adapter.InspectSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
+                    && !StringComparer.Ordinal.Equals(binding.SchemaFingerprint, schema.Fingerprint))
+                    return input;
+
+                var descriptor = SqliteSourceAdapter.Describe(connection, schema);
+                if (!StringComparer.Ordinal.Equals(descriptor.Table, table)
+                    || !StringComparer.Ordinal.Equals(descriptor.RowIdentityStrategy, input.RowIdentityStrategy))
+                    return input;
+
+                store = new LargeRunFactStore(
+                    Path.Combine(scratchDirectory, "source-digest.sqlite"),
+                    _executionBudget.SqliteCacheKiB,
+                    _executionBudget.MaxSpoolBytes);
+                await foreach (var row in adapter.ReadFullAsync(connection, schema, cancellationToken))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
+                }
+
+                var currentDigest = store.ComputeSourceDigest(table, cancellationToken);
+                if (!StringComparer.Ordinal.Equals(currentDigest, input.Digest)) return input;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is AdapterException or LargeRunBudgetExceededException
+                or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException
+                or NotSupportedException or System.Data.Common.DbException)
+            {
+                return input;
+            }
+            finally
+            {
+                store?.Dispose();
+                try { if (Directory.Exists(scratchDirectory)) Directory.Delete(scratchDirectory, recursive: true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        return null;
+    }
 
     private static async Task<InputIdentity?> FindChangedFileInputAsync(
         IReadOnlyList<InputIdentity> recordedInputs,
