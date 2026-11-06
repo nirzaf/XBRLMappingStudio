@@ -68,14 +68,34 @@ public class FunctionTests
         }
     }
 
-    [Fact]
-    public void ParseDecimal_UsesExplicitCultureForSignAndGrouping()
+    [Theory]
+    [InlineData("-1.234,50", -1234.50)]
+    [InlineData("1.234.567,89", 1234567.89)]
+    public void ParseDecimal_UsesExplicitCultureForSignAndGrouping(string text, decimal expected)
     {
-        var (project, context) = ParseDecimalGraph(DataValue.StringValue("-1.234,50"), "de-DE");
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue(text), "de-DE");
         var result = GraphHarness.Run(project, context, out var compile);
 
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
-        Assert.Equal(-1234.50m, Assert.Single(result!.Facts).Value);
+        Assert.Equal(expected, Assert.Single(result!.Facts).Value);
+    }
+
+    [Theory]
+    [InlineData("1.2.34,50", "de-DE")]
+    [InlineData("12.34,50", "de-DE")]
+    [InlineData("1..234,50", "de-DE")]
+    [InlineData("1234.567,89", "de-DE")]
+    [InlineData("1.234,5.0", "de-DE")]
+    public void ParseDecimal_RejectsMalformedCultureGrouping(string text, string culture)
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue(text), culture);
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Empty(result!.Facts);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidConstant
+            && diagnostic.Message.Contains("group", StringComparison.OrdinalIgnoreCase));
     }
 
     [Theory]

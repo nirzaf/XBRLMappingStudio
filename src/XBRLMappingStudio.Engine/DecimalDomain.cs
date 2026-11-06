@@ -73,6 +73,9 @@ internal static class DecimalDomain
             return false;
         }
 
+        if (!HasValidGrouping(token, numberFormat, decimalIndex, out reason))
+            return false;
+
         var groupSeparator = numberFormat.NumberGroupSeparator;
         var scaleToken = decimalIndex < 0
             ? string.Empty
@@ -98,6 +101,78 @@ internal static class DecimalDomain
         {
             reason = $"The decimal coefficient has {significantDigits} significant digits; "
                 + $"the configured maximum is {maxSignificantDigits}.";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private static bool HasValidGrouping(
+        string token,
+        NumberFormatInfo numberFormat,
+        int decimalIndex,
+        out string reason)
+    {
+        var groupSeparator = numberFormat.NumberGroupSeparator;
+        if (groupSeparator.Length == 0)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        if (decimalIndex >= 0)
+        {
+            var fractionStart = decimalIndex + numberFormat.NumberDecimalSeparator.Length;
+            if (token.IndexOf(groupSeparator, fractionStart, StringComparison.Ordinal) >= 0)
+            {
+                reason = "Group separators are only valid between integer digits.";
+                return false;
+            }
+        }
+
+        var integerPart = decimalIndex < 0 ? token : token[..decimalIndex];
+        if (!integerPart.Contains(groupSeparator, StringComparison.Ordinal))
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        var groupSizes = numberFormat.NumberGroupSizes;
+        if (groupSizes.Length == 0)
+        {
+            reason = "The selected culture does not allow grouped decimal input.";
+            return false;
+        }
+
+        var groups = integerPart.Split(groupSeparator, StringSplitOptions.None);
+        if (groups.Any(group => group.Length == 0 || group.Any(character => !char.IsAsciiDigit(character))))
+        {
+            reason = "The decimal lexeme contains an empty or non-numeric digit group.";
+            return false;
+        }
+
+        var groupSizeIndex = 0;
+        for (var groupIndex = groups.Length - 1; groupIndex > 0; groupIndex--)
+        {
+            if (groupSizeIndex >= groupSizes.Length)
+                groupSizeIndex = groupSizes.Length - 1;
+
+            var expectedSize = groupSizes[groupSizeIndex];
+            if (expectedSize == 0 || groups[groupIndex].Length != expectedSize)
+            {
+                reason = "The decimal lexeme contains group separators in invalid positions for the selected culture.";
+                return false;
+            }
+
+            if (groupSizeIndex < groupSizes.Length - 1)
+                groupSizeIndex++;
+        }
+
+        var leadingGroupLimit = groupSizes[Math.Min(groupSizeIndex, groupSizes.Length - 1)];
+        if (leadingGroupLimit > 0 && groups[0].Length > leadingGroupLimit)
+        {
+            reason = "The leading digit group is too large for the selected culture.";
             return false;
         }
 
