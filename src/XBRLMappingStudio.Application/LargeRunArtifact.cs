@@ -8,9 +8,10 @@ using XBRLMappingStudio.XBRL;
 namespace XBRLMappingStudio.Application;
 
 /// <summary>
-/// Limits used by the qualified row-scoped large-run path. The probe limit includes
-/// all bindings, not a per-binding multiplier; the SQLite cache and batch size bound
-/// managed working memory after large mode is selected.
+/// Limits used by mapping execution. The probe limit includes all bindings, not a
+/// per-binding multiplier; the SQLite cache and batch size bound managed working
+/// memory after large mode is selected. Collection, group, and join limits are also
+/// passed to the engine so the configured execution budget applies to set-phase work.
 /// </summary>
 public sealed record ExecutionBudget(
     int InMemorySourceRecordLimit = 50_000,
@@ -24,7 +25,10 @@ public sealed record ExecutionBudget(
     long MaxInMemorySourceBytes = 8L * 1024 * 1024,
     long MaxExpandedInMemorySourceBytes = 32L * 1024 * 1024,
     long MaxSpoolBytes = 2L * 1024 * 1024 * 1024,
-    long MaxReportBytes = 2L * 1024 * 1024 * 1024)
+    long MaxReportBytes = 2L * 1024 * 1024 * 1024,
+    int MaxCollectionItems = 100_000,
+    int MaxGroupCount = 100_000,
+    int MaxJoinExpansionRows = 200_000)
 {
     public static ExecutionBudget Default { get; } = new();
 
@@ -43,6 +47,9 @@ public sealed record ExecutionBudget(
             throw new ArgumentOutOfRangeException(nameof(MaxExpandedInMemorySourceBytes));
         if (MaxSpoolBytes < 1) throw new ArgumentOutOfRangeException(nameof(MaxSpoolBytes));
         if (MaxReportBytes < 1) throw new ArgumentOutOfRangeException(nameof(MaxReportBytes));
+        if (MaxCollectionItems < 1) throw new ArgumentOutOfRangeException(nameof(MaxCollectionItems));
+        if (MaxGroupCount < 1) throw new ArgumentOutOfRangeException(nameof(MaxGroupCount));
+        if (MaxJoinExpansionRows < 1) throw new ArgumentOutOfRangeException(nameof(MaxJoinExpansionRows));
     }
 }
 

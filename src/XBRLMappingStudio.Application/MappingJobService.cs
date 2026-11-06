@@ -363,6 +363,9 @@ public sealed class MappingJobService
             Manifest = manifest,
             Parameters = parameters,
             IsPreview = preview,
+            MaxCollectionItems = _executionBudget.MaxCollectionItems,
+            MaxGroupCount = _executionBudget.MaxGroupCount,
+            MaxJoinExpansionRows = _executionBudget.MaxJoinExpansionRows,
             CancellationToken = cancellationToken
         };
 

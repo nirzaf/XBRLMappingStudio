@@ -493,6 +493,108 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task GroupByBudgetOverflow_BlocksPublicationAndPreservesPriorFile()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 9, variedValues: true);
+            var project = BuildProject(database);
+            var bindingId = project.Bindings[0].BindingId;
+            var excel = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var scale = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+            var fact = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            project.Nodes.Remove(excel);
+            project.Nodes.Remove(scale);
+            project.Edges.RemoveAll(edge => edge.SourceNodeId == excel.NodeId
+                || edge.TargetNodeId == excel.NodeId
+                || edge.SourceNodeId == scale.NodeId
+                || edge.TargetNodeId == scale.NodeId);
+
+            var valuePortIndex = fact.InputPorts.FindIndex(port => port.Name == "value");
+            fact.InputPorts[valuePortIndex] = fact.InputPorts[valuePortIndex] with
+            {
+                Cardinality = PortCardinality.Collection
+            };
+            var collect = new MappingNode
+            {
+                NodeId = Id.New(), NodeType = NodeTypeConstants.CollectRows,
+                DisplayName = "Collect source rows",
+                Parameters = new() { ["binding"] = bindingId },
+                OutputPorts = new() { new PortDefinition("items", PortShape.Record, PortCardinality.Collection) }
+            };
+            var group = new MappingNode
+            {
+                NodeId = Id.New(), NodeType = NodeTypeConstants.GroupBy,
+                DisplayName = "Group financial values",
+                Parameters = new() { ["keys"] = "Id", ["sumField"] = "Current" },
+                InputPorts = new() { new PortDefinition("items", PortShape.Record, PortCardinality.Collection) },
+                OutputPorts = new()
+                {
+                    new PortDefinition("values", PortShape.Decimal, PortCardinality.Collection),
+                    new PortDefinition("keys", PortShape.String, PortCardinality.Collection)
+                }
+            };
+            project.Nodes.Add(collect);
+            project.Nodes.Add(group);
+            project.Edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(), SourceNodeId = collect.NodeId, SourcePortName = "items",
+                TargetNodeId = group.NodeId, TargetPortName = "items"
+            });
+            project.Edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(), SourceNodeId = group.NodeId, SourcePortName = "values",
+                TargetNodeId = fact.NodeId, TargetPortName = "value"
+            });
+            project.Destination = new DestinationPlan
+            {
+                Kind = "json", Locator = "published.json", Table = string.Empty,
+                Format = "json-records-v1", BusinessKey = new(), WriteMode = "replace"
+            };
+            var profile = SyntheticProfile.Build();
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "ENG-02 regression fixture",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = profile.Digest,
+                Authority = "test-fixture"
+            });
+
+            var priorBytes = Encoding.UTF8.GetBytes("prior accepted output");
+            var destination = Path.Combine(root, "published.json");
+            await File.WriteAllBytesAsync(destination, priorBytes);
+            var worker = new DigestOnlyArtifactWorker(profile);
+            var service = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(MaxGroupCount: 2));
+            var compile = service.Validate(project);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+
+            using var result = await service.RunAsync(project, Connections(project, database),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.Equal(RunOutcome.InvalidMapping, result.Manifest.Outcome);
+            Assert.False(result.IsPublishable);
+            var diagnostic = Assert.Single(result.Manifest.Diagnostics,
+                item => item.Code == DiagnosticCodes.MapCollectionBudgetExceeded);
+            Assert.True(diagnostic.IsBlocking);
+            Assert.Contains("MaxGroupCount=2", diagnostic.Message, StringComparison.Ordinal);
+            Assert.Equal(2, result.Facts.Count);
+            Assert.Equal(new[] { 1250m, 1251m },
+                result.Facts.Select(item => item.Value!.Value).OrderBy(value => value));
+            Assert.Equal(string.Empty, result.XbrlJson);
+            Assert.Equal(0, worker.ValidationRequests);
+
+            await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
+                project, result, root, allowSyntheticProfile: true));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task SetPhasePlan_RemainsOnSmallInMemoryPathAndKeepsGroupExecutionAvailable()
     {
         var root = NewDirectory();
