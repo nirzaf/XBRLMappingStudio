@@ -101,6 +101,166 @@ public class CollectionAndJoinTests
         await Task.CompletedTask;
     }
 
+    [Fact]
+    public void CollectThenSum_DistinguishesMissingNilAndNumericZero()
+    {
+        var numericAndNil = RunScalarSum(new[]
+        {
+            D(12m),
+            DataValue.ExplicitNil(PortShape.Decimal),
+            D(0m)
+        });
+
+        var mixedFact = Assert.Single(numericAndNil.Result.Facts);
+        Assert.False(mixedFact.IsNil);
+        Assert.Equal(12m, mixedFact.Value);
+        Assert.Equal(new[] { "row:1", "row:3" }, mixedFact.SourceTransformationPaths
+            .Select(path => path.Source.Locator).OrderBy(locator => locator, StringComparer.Ordinal));
+
+        var incomplete = RunScalarSum(new[]
+        {
+            D(12m),
+            DataValue.Missing(PortShape.Decimal),
+            DataValue.ExplicitNil(PortShape.Decimal),
+            D(0m)
+        }, preview: true);
+
+        Assert.Empty(incomplete.Result.Facts);
+        Assert.Empty(incomplete.Context.SampledTotals);
+
+        var allNil = RunScalarSum(new[]
+        {
+            DataValue.ExplicitNil(PortShape.Decimal),
+            DataValue.ExplicitNil(PortShape.Decimal)
+        }, preview: true);
+
+        var nilFact = Assert.Single(allNil.Result.Facts);
+        Assert.True(nilFact.IsNil);
+        Assert.Null(nilFact.Value);
+        Assert.Equal(new[] { "row:1", "row:2" }, nilFact.SourceTransformationPaths
+            .Select(path => path.Source.Locator).OrderBy(locator => locator, StringComparer.Ordinal));
+        Assert.Empty(allNil.Context.SampledTotals);
+
+        var allMissing = RunScalarSum(new[]
+        {
+            DataValue.Missing(PortShape.Decimal),
+            DataValue.Missing(PortShape.Decimal)
+        }, preview: true);
+
+        Assert.Empty(allMissing.Result.Facts);
+        Assert.Empty(allMissing.Context.SampledTotals);
+    }
+
+    [Fact]
+    public void GroupBy_DistinguishesMissingNilZeroAndIncompleteGroups()
+    {
+        var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
+            new() { ["binding"] = Binding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By entity",
+            new() { ["keys"] = "entity", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection)
+            });
+        var edges = new List<MappingEdge> { GraphHarness.Link(collectRows, "items", group, "items") };
+        var sink = GraphHarness.FactSink(out var sinkEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        var factConstruct = sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+
+        DataRecord Row(string entity, DataValue amount, int rowNumber)
+        {
+            var keySource = new SourceReference(Binding, $"row:{rowNumber}:entity");
+            var amountSource = new SourceReference(Binding, $"row:{rowNumber}:amount");
+            return GraphHarness.Row(
+                ("entity", DataValue.StringValue(entity, keySource)),
+                ("amount", amount.WithSourceIfMissing(amountSource)));
+        }
+
+        var rows = new[]
+        {
+            Row("missing", DataValue.Missing(PortShape.Decimal), 1),
+            Row("nil", DataValue.ExplicitNil(PortShape.Decimal), 2),
+            Row("nil", DataValue.ExplicitNil(PortShape.Decimal), 3),
+            Row("zero", D(0m), 4),
+            Row("duplicate", D(5m), 5),
+            Row("duplicate", D(5m), 6),
+            Row("duplicate", DataValue.ExplicitNil(PortShape.Decimal), 7),
+            Row("partial", D(7m), 8),
+            Row("partial", DataValue.Missing(PortShape.Decimal), 9),
+            Row("mixed-null", DataValue.Missing(PortShape.Decimal), 10),
+            Row("mixed-null", DataValue.ExplicitNil(PortShape.Decimal), 11)
+        };
+        var project = GraphHarness.Project(new[] { collectRows, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, rows as IReadOnlyList<DataRecord>) },
+            preview: true,
+            previewLimit: rows.Length);
+
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Equal(3, result!.Facts.Count);
+        var nilFact = Assert.Single(result.Facts, fact => fact.IsNil);
+        Assert.Null(nilFact.Value);
+        Assert.Equal(new[] { "row:2:amount", "row:3:amount" }, nilFact.SourceTransformationPaths
+            .Where(path => path.Source.Locator.EndsWith(":amount", StringComparison.Ordinal))
+            .Select(path => path.Source.Locator).OrderBy(locator => locator, StringComparer.Ordinal));
+
+        var zeroFact = Assert.Single(result.Facts, fact => fact.Value == 0m);
+        Assert.Contains(zeroFact.SourceTransformationPaths, path => path.Source.Locator == "row:4:amount");
+
+        var duplicateFact = Assert.Single(result.Facts, fact => fact.Value == 10m);
+        Assert.Equal(new[] { "row:5:amount", "row:6:amount" }, duplicateFact.SourceTransformationPaths
+            .Where(path => path.Source.Locator.EndsWith(":amount", StringComparison.Ordinal))
+            .Select(path => path.Source.Locator).OrderBy(locator => locator, StringComparer.Ordinal));
+        Assert.DoesNotContain(duplicateFact.SourceTransformationPaths,
+            path => path.Source.Locator == "row:7:amount");
+        Assert.DoesNotContain(result.Facts, fact => fact.Value == 7m);
+        Assert.Equal(new[] { 0m, 10m }, context.SampledTotals.Select(sample => sample.Value)
+            .OrderBy(value => value));
+        Assert.All(context.SampledTotals, sample => Assert.True(sample.IsPartial));
+        Assert.DoesNotContain(context.SampledTotals,
+            sample => sample.Value == 0m && sample.Label.Contains("nil", StringComparison.Ordinal));
+
+        Assert.All(result.Facts.SelectMany(fact => fact.SourceTransformationPaths), path =>
+            Assert.Equal(new[] { collectRows.NodeId, group.NodeId, factConstruct.NodeId }, path.TransformationIds));
+    }
+
+    private static (ExecutionResult Result, ExecutionContext Context) RunScalarSum(
+        IReadOnlyList<DataValue> values,
+        bool preview = false)
+    {
+        var excel = GraphHarness.Node(NodeTypeConstants.ExcelField, "Amounts",
+            new() { ["bindingId"] = Binding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var collect = GraphHarness.Node(NodeTypeConstants.Collect, "Collect",
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("items", PortShape.Decimal, PortCardinality.Collection) });
+        var sum = GraphHarness.Node(NodeTypeConstants.Sum, "Sum",
+            inputs: new[] { GraphHarness.P("items", PortShape.Decimal, PortCardinality.Collection) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(excel, "value", collect, "input"),
+            GraphHarness.Link(collect, "items", sum, "items")
+        };
+        var sink = GraphHarness.FactSink(out var sinkEdges, sum, "value", PortCardinality.Single);
+        edges.AddRange(sinkEdges);
+        var rows = values.Select((value, index) => GraphHarness.Row(("amount",
+            value.WithSourceIfMissing(new SourceReference(Binding, $"row:{index + 1}"))))).ToList();
+        var project = GraphHarness.Project(new[] { excel, collect, sum }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, rows as IReadOnlyList<DataRecord>) }, preview: preview, previewLimit: rows.Count);
+        var result = GraphHarness.Run(project, context, out var compile);
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        return (Assert.IsType<ExecutionResult>(result), context);
+    }
+
     [Theory]
     [InlineData("sum", PortShape.Decimal, 60, 3)]
     [InlineData("count", PortShape.Integer, 3, 3)]
@@ -670,8 +830,8 @@ public class CollectionAndJoinTests
 
         Assert.Equal(new[] { 10m }, Values("Inner", "First"));
         Assert.Equal(new[] { 10m, 20m }, Values("Left", "First"));
-        Assert.Equal(new[] { 0m, 10m }, Values("Right", "First"));
-        Assert.Equal(new[] { 0m, 10m, 20m }, Values("Full", "First"));
+        Assert.Equal(new[] { 10m }, Values("Right", "First"));
+        Assert.Equal(new[] { 10m, 20m }, Values("Full", "First"));
         Assert.Equal(new[] { 20m }, Values("Inner", "All"));
 
         var duplicateFailure = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "Fail");

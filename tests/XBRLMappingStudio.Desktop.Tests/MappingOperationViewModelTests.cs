@@ -73,6 +73,62 @@ public sealed class MappingOperationViewModelTests
     }
 
     [Fact]
+    public async Task GroupedPreviewEvidenceShowsAllNumericContributorsAndKeepsBlankDistinctFromZero()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-group-preview-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbookPath = TestFixtures.MaterializeGroupedRevenueWorkbook(directory);
+            var project = TestFixtures.BuildGroupedRevenueMappingProject(workbookPath);
+            var viewModel = new MainWindowViewModel(project, null,
+                (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(Path.Combine(directory, "grouped-mapping.xmap"));
+
+            var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedBusy = false;
+            viewModel.PropertyChanged += (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                if (viewModel.IsBusy) observedBusy = true;
+                else if (observedBusy) operationStopped.TrySetResult();
+            };
+
+            viewModel.PreviewCommand.Execute(null);
+            await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.Contains("2 sampled aggregate(s) are partial", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            var revenueFact = Assert.Single(viewModel.PreviewFacts,
+                fact => fact.SemanticFact?.EntityIdentifier == "Revenue");
+            Assert.Equal(20m, revenueFact.SemanticFact!.Value);
+            Assert.Equal(new[]
+            {
+                "Financials!A4", "Financials!A5", "Financials!B4", "Financials!B5"
+            }, revenueFact.Evidence.Select(evidence => evidence.Source.Locator)
+                .OrderBy(locator => locator, StringComparer.Ordinal));
+            Assert.Contains(viewModel.PreviewFacts,
+                fact => fact.SemanticFact is { EntityIdentifier: "Zero", Value: 0m });
+            Assert.DoesNotContain(viewModel.PreviewFacts,
+                fact => fact.SemanticFact?.EntityIdentifier == "Missing amount");
+
+            foreach (var evidence in revenueFact.Evidence)
+            {
+                Assert.Contains("Collect financial rows", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+                Assert.Contains("Sum by statement line", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+                Assert.Contains("Grouped Revenue fact", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+            }
+            Assert.Same(revenueFact, viewModel.SelectedPreviewFact);
+            Assert.Same(revenueFact.Evidence[0], viewModel.SelectedPreviewEvidence);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void PreviewEvidenceRowDisplaysStableBoundedTransformationPathsAndMissingState()
     {
         var source = new XBRLMappingStudio.Diagnostics.SourceReference("excel", "Income!B3", "Revenue workbook");

@@ -95,6 +95,29 @@ public static class TestFixtures
     }
 
     /// <summary>
+    /// Workbook for Desktop drill-down acceptance: two identical numeric contributors,
+    /// one group with a missing amount, and an explicit numeric zero.
+    /// </summary>
+    public static string MaterializeGroupedRevenueWorkbook(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "grouped-revenue.xlsx");
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add(SheetName);
+        ws.Cell("A3").Value = "Line";
+        ws.Cell("B3").Value = "Current";
+        ws.Cell("A4").Value = "Revenue";
+        ws.Cell("B4").Value = 10m;
+        ws.Cell("A5").Value = "Revenue";
+        ws.Cell("B5").Value = 10m;
+        ws.Cell("A6").Value = "Missing amount";
+        ws.Cell("A7").Value = "Zero";
+        ws.Cell("B7").Value = 0m;
+        wb.SaveAs(path);
+        return path;
+    }
+
+    /// <summary>
     /// A minimal revenue-mapping project on top of the fixture workbook:
     /// ExcelField(Revenue column) -> Scale(1000) -> FactConstruct(Revenue, QAR, decimals=-3).
     /// <paramref name="approved"/> adds an <see cref="ApprovalRecord"/> for the initial
@@ -298,6 +321,98 @@ public static class TestFixtures
                 Notes = "Approved for use in fail-closed publication regression tests."
             });
         }
+        return project;
+    }
+
+    /// <summary>
+    /// Revenue profile graph that groups source rows by the Line column and sums Current.
+    /// It is used to verify Desktop evidence for multi-row, missing, and zero aggregates.
+    /// </summary>
+    public static MappingProject BuildGroupedRevenueMappingProject(string workbookPath)
+    {
+        var project = BuildRevenueMappingProject(workbookPath);
+        var binding = project.Bindings.Single();
+        var durationNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.BuildDurationDate);
+        var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        var collectRows = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.CollectRows,
+            DisplayName = "Collect financial rows",
+            Parameters = new Dictionary<string, object?> { ["binding"] = binding.BindingId },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("items", PortShape.Record, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(0, 0)
+        };
+        var group = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.GroupBy,
+            DisplayName = "Sum by statement line",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["keys"] = "Line",
+                ["sumField"] = "Current"
+            },
+            InputPorts = new List<PortDefinition>
+            {
+                new("items", PortShape.Record, PortCardinality.Collection)
+            },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("values", PortShape.Decimal, PortCardinality.Collection),
+                new("keys", PortShape.String, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(0, 1)
+        };
+        project.Nodes.RemoveAll(node => node.NodeType is NodeTypeConstants.ExcelField or NodeTypeConstants.Scale
+            || node.NodeType == NodeTypeConstants.Constant
+                && StringComparer.Ordinal.Equals(node.DisplayName, "Entity"));
+        var factIndex = project.Nodes.FindIndex(node => StringComparer.Ordinal.Equals(node.NodeId, factNode.NodeId));
+        project.Nodes[factIndex] = factNode with
+        {
+            DisplayName = "Grouped Revenue fact",
+            InputPorts = new List<PortDefinition>
+            {
+                new("values", PortShape.Decimal, PortCardinality.Collection, IsRequired: false),
+                new("entity", PortShape.String, PortCardinality.Collection),
+                new("period", PortShape.Instant, PortCardinality.Single, IsRequired: false)
+            }
+        };
+        project.Nodes.Add(collectRows);
+        project.Nodes.Add(group);
+
+        var retainedEdges = project.Edges.Where(edge => edge.TargetNodeId == durationNode.NodeId
+            || edge.TargetNodeId == factNode.NodeId && StringComparer.Ordinal.Equals(edge.TargetPortName, "period"))
+            .ToArray();
+        project.Edges.Clear();
+        project.Edges.AddRange(retainedEdges);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = collectRows.NodeId,
+            SourcePortName = "items",
+            TargetNodeId = group.NodeId,
+            TargetPortName = "items"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = group.NodeId,
+            SourcePortName = "values",
+            TargetNodeId = factNode.NodeId,
+            TargetPortName = "values"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = group.NodeId,
+            SourcePortName = "keys",
+            TargetNodeId = factNode.NodeId,
+            TargetPortName = "entity"
+        });
         return project;
     }
 

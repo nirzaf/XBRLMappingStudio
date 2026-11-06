@@ -108,6 +108,8 @@ Use a directed acyclic graph for the initial catalog. Express repetition with a 
 | Fact construction | Bind concept, entity, period, unit, dimensions and accuracy | The inspector exposes required aspects, resolved values and data provenance. |
 | Reusable visual functions | Save a typed subgraph with named inputs, outputs and revision | Pin versions at each call site. Disallow recursion initially. Upgrades preview changes before adoption. |
 
+Collection reducers preserve the runtime distinction between Missing, ExplicitNil and Present numeric values. `Collect` keeps one slot per source row. For a nonempty `Sum` or `GroupBy` bucket, any Missing member makes the result Missing so known values are not published as a complete partial total. ExplicitNil members are ignored when numeric contributors exist; an all-ExplicitNil collection or bucket remains ExplicitNil. Numeric zero remains a Present value, and an empty `Sum` retains the additive identity zero. Missing grouped values stay aligned with their group keys but do not emit facts. Preview totals include only Present numeric aggregates and remain explicitly partial.
+
 | ID | Depends on | Deliverable | Pass/fail evidence |
 |---|---|---|---|
 | MAP01 | BASE03 | Define node, edge and catalog semantics, independent of any graph control. | Two visually different layouts produce the same semantic model. Unknown node types are preserved for inspection and block execution. |

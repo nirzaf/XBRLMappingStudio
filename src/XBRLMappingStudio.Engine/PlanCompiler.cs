@@ -281,7 +281,9 @@ public sealed class PlanCompiler
                         for (int r = 0; r < snapshot.Count; r++)
                         {
                             var v = snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName);
-                            if (v.IsMissing) continue;
+                            // Keep one slot per source row. Reducers decide whether missing
+                            // values are ignored, and Sum must distinguish an empty input
+                            // collection from rows whose values are all missing.
                             list.Add(v);
                             var paths = r < inputPaths.Count
                                 ? inputPaths[r]
@@ -307,18 +309,55 @@ public sealed class PlanCompiler
                     var itemPaths = ReadSetInputPaths("items");
                     decimal total = 0m;
                     var contributingPaths = new List<SourceTransformationPath>();
+                    var nilPaths = new List<SourceTransformationPath>();
+                    var hasNumericValue = false;
+                    var hasNilValue = false;
+                    var hasMissingValue = false;
                     for (var index = 0; index < items.Count; index++)
                     {
                         var it = items[index];
-                        if (it.IsMissing || it.IsNil) continue;
+                        if (it.IsMissing)
+                        {
+                            hasMissingValue = true;
+                            continue;
+                        }
+                        if (it.IsNil)
+                        {
+                            hasNilValue = true;
+                            if (index < itemPaths.Count) AddDistinctPaths(nilPaths, itemPaths[index]);
+                            continue;
+                        }
                         try { total += it.AsDecimal(); }
                         catch (OverflowException)
                         { throw new NumericOverflowException($"Sum overflow on node '{node.DisplayName}'."); }
+                        hasNumericValue = true;
                         if (index < itemPaths.Count) AddDistinctPaths(contributingPaths, itemPaths[index]);
                     }
-                    outputs["value"] = DataValue.DecimalValue(total);
+                    // Missing is unknown, so never publish a partial numeric total.
+                    // Explicit nil is ignored when numeric contributors exist, and
+                    // remains nil when every nonempty item is nil.
+                    var aggregateValue = items.Count == 0
+                        ? DataValue.DecimalValue(total)
+                        : hasMissingValue
+                            ? DataValue.Missing(PortShape.Decimal)
+                            : hasNumericValue
+                                ? DataValue.DecimalValue(total)
+                                : hasNilValue
+                                    ? DataValue.ExplicitNil(PortShape.Decimal)
+                                    : DataValue.Missing(PortShape.Decimal);
+                    if (aggregateValue.IsNil)
+                        contributingPaths.AddRange(nilPaths);
+                    else if (aggregateValue.IsMissing)
+                    {
+                        AddDistinctPaths(contributingPaths, nilPaths);
+                        if (hasMissingValue)
+                            for (var index = 0; index < items.Count; index++)
+                                if (items[index].IsMissing && index < itemPaths.Count)
+                                    AddDistinctPaths(contributingPaths, itemPaths[index]);
+                    }
+                    outputs["value"] = aggregateValue;
                     StoreSetPaths("value", null, ExtendPaths(contributingPaths, nodeId));
-                    if (ctx.IsPreview)
+                    if (ctx.IsPreview && aggregateValue.Presence == ValuePresence.Present)
                         ctx.SampledTotals.Add(new SampledTotal(nodeId, "sum", total, IsPartial: true));
                     break;
                 }
@@ -428,6 +467,11 @@ public sealed class PlanCompiler
                     var sumField = GetString(node, "sumField") ?? "";
                     var order = new List<string>();
                     var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
+                    var numericValueCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var nilValueGroups = new HashSet<string>(StringComparer.Ordinal);
+                    var missingValueGroups = new HashSet<string>(StringComparer.Ordinal);
+                    var groupNilValuePaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
+                    var groupMissingValuePaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
                     var groupKeyPaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
                     var groupValuePaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
                     long groupWorkingBytes = 0;
@@ -509,6 +553,9 @@ public sealed class PlanCompiler
                             }
                             order.Add(bk);
                             totals[bk] = 0m;
+                            numericValueCounts[bk] = 0;
+                            groupNilValuePaths[bk] = new List<SourceTransformationPath>();
+                            groupMissingValuePaths[bk] = new List<SourceTransformationPath>();
                             groupKeyPaths[bk] = new List<SourceTransformationPath>();
                             groupValuePaths[bk] = new List<SourceTransformationPath>();
                         }
@@ -531,10 +578,40 @@ public sealed class PlanCompiler
                             if (exceededWorkingMemory) break;
                         }
                         var v = GetField(fields, sumField);
-                        if (v.IsMissing || v.IsNil) continue;
+                        if (v.IsMissing)
+                        {
+                            missingValueGroups.Add(bk);
+                            if (inputEdge is not null
+                                && !TryAddGroupPaths(groupMissingValuePaths[bk], ReadSetFieldPaths(inputEdge, itemIndex, sumField)))
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                exceededWorkingMemory = true;
+                                break;
+                            }
+                            continue;
+                        }
+                        if (v.IsNil)
+                        {
+                            nilValueGroups.Add(bk);
+                            if (inputEdge is not null
+                                && !TryAddGroupPaths(groupNilValuePaths[bk], ReadSetFieldPaths(inputEdge, itemIndex, sumField)))
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                exceededWorkingMemory = true;
+                                break;
+                            }
+                            continue;
+                        }
                         try { totals[bk] += v.AsDecimal(); }
                         catch (OverflowException)
                         { throw new NumericOverflowException($"GroupBy sum overflow on node '{node.DisplayName}'."); }
+                        numericValueCounts[bk]++;
                         if (inputEdge is not null)
                         {
                             if (!TryAddGroupPaths(groupValuePaths[bk],
@@ -554,11 +631,46 @@ public sealed class PlanCompiler
                     foreach (var bk in order)
                     {
                         var outputIndex = valueList.Count;
-                        valueList.Add(DataValue.DecimalValue(totals[bk]));
+                        var hasNumericValue = numericValueCounts[bk] > 0;
+                        // A missing member makes the group total unknown, even if
+                        // other members are numeric. Never emit their partial sum.
+                        var aggregateValue = missingValueGroups.Contains(bk)
+                            ? DataValue.Missing(PortShape.Decimal)
+                            : hasNumericValue
+                                ? DataValue.DecimalValue(totals[bk])
+                                : nilValueGroups.Contains(bk)
+                                    ? DataValue.ExplicitNil(PortShape.Decimal)
+                                    : DataValue.Missing(PortShape.Decimal);
+                        valueList.Add(aggregateValue);
                         keyList.Add(DataValue.StringValue(bk));
-                        StoreSetPaths("values", outputIndex, ExtendPaths(groupValuePaths[bk], nodeId));
+                        var valuePaths = groupValuePaths[bk];
+                        if (aggregateValue.IsNil && groupNilValuePaths[bk].Count > 0)
+                        {
+                            valuePaths = new List<SourceTransformationPath>(groupValuePaths[bk]);
+                            foreach (var nilPath in groupNilValuePaths[bk])
+                            {
+                                if (valuePaths.Any(existing => existing.Source == nilPath.Source
+                                    && existing.TransformationIds.SequenceEqual(nilPath.TransformationIds,
+                                        StringComparer.Ordinal)))
+                                    continue;
+                                valuePaths.Add(nilPath);
+                            }
+                        }
+                        else if (aggregateValue.IsMissing)
+                        {
+                            valuePaths = new List<SourceTransformationPath>(groupValuePaths[bk]);
+                            foreach (var unknownPath in groupNilValuePaths[bk].Concat(groupMissingValuePaths[bk]))
+                            {
+                                if (valuePaths.Any(existing => existing.Source == unknownPath.Source
+                                    && existing.TransformationIds.SequenceEqual(unknownPath.TransformationIds,
+                                        StringComparer.Ordinal)))
+                                    continue;
+                                valuePaths.Add(unknownPath);
+                            }
+                        }
+                        StoreSetPaths("values", outputIndex, ExtendPaths(valuePaths, nodeId));
                         StoreSetPaths("keys", outputIndex, ExtendPaths(groupKeyPaths[bk], nodeId));
-                        if (ctx.IsPreview)
+                        if (ctx.IsPreview && aggregateValue.Presence == ValuePresence.Present)
                             ctx.SampledTotals.Add(new SampledTotal(nodeId, $"group:{bk}", totals[bk], IsPartial: true));
                     }
                     outputs["values"] = DataValue.Collection(valueList);
