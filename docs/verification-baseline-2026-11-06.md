@@ -245,3 +245,13 @@ fallback; and runs a large synthetic artifact through both run validation and st
 revalidation. `git diff --check` passed. These tests do not supply real-profile Arelle
 rule/plugin execution evidence; real-profile completion remains owner-gated, and
 worker diagnostic storage can still grow with the count of per-fact findings.
+
+## AIM-04 durable audit lock failure
+
+The desktop acceptance path was exercised against a real SQLite writer lock rather
+than only an injected failing sink. The test holds a WAL write transaction while the
+suggestion session appends its acceptance event; the resulting database lock is shown
+as an audit-persistence failure, the graph semantic digest stays unchanged, the
+suggestion remains pending, and no durable acceptance row appears. The focused
+`DesignerSessionTests` Release filter passed 55/55. Organizational reviewer authority,
+retention policy, and multi-user governance remain owner decisions.

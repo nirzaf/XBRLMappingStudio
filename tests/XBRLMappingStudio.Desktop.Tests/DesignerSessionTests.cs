@@ -1413,6 +1413,49 @@ public sealed class DesignerSessionTests
         }
     }
 
+    [Fact]
+    public async Task DesktopSuggestionWorkflow_LockedAuditDatabaseBlocksGraphAcceptance()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-audit-lock-", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var dbPath = System.IO.Path.Combine(dir, "state.db");
+            var store = new SuggestionAuditStore(new LocalApplicationDatabase(dbPath));
+            var viewModel = await PrepareSuggestionViewModelAsync(dir, () => store);
+            var digest = viewModel.Session.Project.ComputeSemanticDigest();
+            var projectId = viewModel.Session.Project.ProjectId;
+            var revision = viewModel.Session.Project.SemanticRevision;
+
+            using var writer = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = dbPath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false,
+                DefaultTimeout = 0
+            }.ToString());
+            writer.Open();
+            using (var acquireWriteLock = writer.CreateCommand())
+            {
+                acquireWriteLock.CommandText = "BEGIN IMMEDIATE; INSERT INTO app_settings(key,value,updated_utc) VALUES('audit-lock-fixture','held','2026-11-06T00:00:00Z');";
+                acquireWriteLock.ExecuteNonQuery();
+            }
+
+            viewModel.ApplySuggestedMappingCommand.Execute(null);
+
+            Assert.Contains("audit persistence failed", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("rolled back", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(digest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(SuggestionState.Pending, viewModel.SelectedSuggestion!.ReviewState);
+            Assert.DoesNotContain(store.Read(projectId, revision), row => row.Decision == "accept");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private static async Task<MainWindowViewModel> PrepareSuggestionViewModelAsync(
         string directory, Func<IAuditSink> auditSinkFactory)
     {
