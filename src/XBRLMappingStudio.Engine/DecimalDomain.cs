@@ -195,6 +195,28 @@ internal static class DecimalDomain
     public static int FractionalScaleOf(decimal value)
         => (decimal.GetBits(value)[3] >> 16) & 0xFF;
 
+    public static bool ProductIsExact(decimal left, decimal right, decimal product)
+    {
+        var leftCoefficient = GetCoefficient(left, out var leftScale);
+        var rightCoefficient = GetCoefficient(right, out var rightScale);
+        var productCoefficient = GetCoefficient(product, out var productScale);
+        var exactCoefficient = leftCoefficient * rightCoefficient;
+        var exactScale = leftScale + rightScale;
+
+        return exactCoefficient * BigInteger.Pow(10, productScale)
+            == productCoefficient * BigInteger.Pow(10, exactScale);
+    }
+
+    private static BigInteger GetCoefficient(decimal value, out int scale)
+    {
+        var bits = decimal.GetBits(value);
+        scale = (bits[3] >> 16) & 0xFF;
+        var coefficient = new BigInteger((uint)bits[0])
+            + (new BigInteger((uint)bits[1]) << 32)
+            + (new BigInteger((uint)bits[2]) << 64);
+        return (bits[3] & int.MinValue) == 0 ? coefficient : -coefficient;
+    }
+
     public static void ValidateValue(DataValue value, int maxSignificantDigits, string nodeId)
     {
         if (value.Presence != ValuePresence.Present) return;

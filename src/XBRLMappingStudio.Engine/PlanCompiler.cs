@@ -1080,6 +1080,11 @@ public sealed class PlanCompiler
                         throw new NumericOverflowException(
                             $"Scale multiplication underflowed CLR decimal range on node '{node.DisplayName}'.");
                     }
+                    if (!DecimalDomain.ProductIsExact(inputValue, factor, v))
+                    {
+                        throw new NumericOverflowException(
+                            $"Scale multiplication would lose precision outside the exact CLR decimal domain on node '{node.DisplayName}'.");
+                    }
                     outputs["value"] = DataValue.DecimalValue(v, input.Source);
                 }
                 catch (OverflowException)

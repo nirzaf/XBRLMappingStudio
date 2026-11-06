@@ -243,6 +243,32 @@ public class FunctionTests
         Assert.Empty(result.Facts);
     }
 
+    [Fact]
+    public void Scale_InexactProductFailsInsteadOfSilentlyRounding()
+    {
+        const decimal inputValue = 1.2345678901234567890123456789m;
+        var source = Driver(out var edges, inputValue);
+        var scale = GraphHarness.Node(NodeTypeConstants.Scale, "Scale",
+            new() { ["factor"] = "1.1" },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        edges.Add(GraphHarness.Link(source, "value", scale, "input"));
+        var sink = GraphHarness.FactSink(out var factEdges, scale, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new[] { source, scale }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project, OneRow(inputValue), out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapNumericOverflow
+            && diagnostic.Message.Contains("would lose precision", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
     // ---- MAP04: rounding modes ------------------------------------------------------
 
     [Theory]
