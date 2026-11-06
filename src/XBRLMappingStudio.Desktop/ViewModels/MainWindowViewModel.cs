@@ -436,6 +436,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         public bool DestinationSchemaValid { get; } = destinationSchemaValid;
         public string ProfileDigest { get; } = profileDigest;
         public string? InvalidationReason { get; set; }
+        private int _acceptProgressUpdates = 1;
+        public bool AcceptProgressUpdates => System.Threading.Volatile.Read(ref _acceptProgressUpdates) != 0;
+        public void CompleteMappingRun() => System.Threading.Volatile.Write(ref _acceptProgressUpdates, 0);
     }
 
     public string Title => _title;
@@ -1912,6 +1915,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
+            operation.CompleteMappingRun();
             if (!IsMappingOperationCurrent(operation))
             {
                 StatusText = OperationStoppedStatus(operation, "Destination dry run");
@@ -2047,6 +2051,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var service = new MappingJobService(profile, worker);
             using var result = await service.RunAsync(project, connections, ReadParameters(),
                 preview: false, cancellationToken, CreateMappingProgress(operation));
+            operation.CompleteMappingRun();
             if (!IsMappingOperationCurrent(operation))
             {
                 StatusText = OperationStoppedStatus(operation, "Destination publication");
@@ -2239,7 +2244,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private IProgress<MappingJobProgress> CreateMappingProgress(ActiveMappingOperation operation)
         => new Progress<MappingJobProgress>(progress =>
         {
-            if (!IsMappingOperationCurrent(operation)) return;
+            if (!operation.AcceptProgressUpdates || !IsMappingOperationCurrent(operation)) return;
             if (progress.Stage.StartsWith("Run ended:", StringComparison.Ordinal)) return;
             StatusText = progress.Total is int total && progress.Current is int current
                 ? $"{progress.Stage} ({current:N0} of {total:N0})"
@@ -4447,6 +4452,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             using var result = await new MappingJobService(profile, worker).RunAsync(
                 project, connections, ReadParameters(), preview: true, cancellationToken,
                 CreateMappingProgress(operation));
+            operation.CompleteMappingRun();
             if (!IsMappingOperationCurrent(operation))
             {
                 StatusText = OperationStoppedStatus(operation, "Preview");
@@ -4519,6 +4525,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
+            operation.CompleteMappingRun();
             if (!IsMappingOperationCurrent(operation))
             {
                 StatusText = OperationStoppedStatus(operation, "Execution");
