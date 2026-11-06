@@ -217,6 +217,32 @@ public class FunctionTests
         }
     }
 
+    [Fact]
+    public void Scale_NonzeroUnderflowFailsWithNumericOverflowDiagnostic()
+    {
+        const decimal inputValue = 0.0000000000000000000000000001m;
+        var source = Driver(out var edges, inputValue);
+        var scale = GraphHarness.Node(NodeTypeConstants.Scale, "Scale",
+            new() { ["factor"] = "0.1" },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        edges.Add(GraphHarness.Link(source, "value", scale, "input"));
+        var sink = GraphHarness.FactSink(out var factEdges, scale, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new[] { source, scale }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project, OneRow(inputValue), out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapNumericOverflow
+            && diagnostic.Message.Contains("underflowed CLR decimal range", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
     // ---- MAP04: rounding modes ------------------------------------------------------
 
     [Theory]

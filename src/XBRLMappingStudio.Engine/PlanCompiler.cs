@@ -1073,7 +1073,13 @@ public sealed class PlanCompiler
                 }
                 try
                 {
-                    var v = input.AsDecimal() * factor;
+                    var inputValue = input.AsDecimal();
+                    var v = inputValue * factor;
+                    if (inputValue != 0m && factor != 0m && v == 0m)
+                    {
+                        throw new NumericOverflowException(
+                            $"Scale multiplication underflowed CLR decimal range on node '{node.DisplayName}'.");
+                    }
                     outputs["value"] = DataValue.DecimalValue(v, input.Source);
                 }
                 catch (OverflowException)
