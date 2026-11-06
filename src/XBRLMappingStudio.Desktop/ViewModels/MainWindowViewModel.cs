@@ -105,16 +105,53 @@ public sealed class FactRow : ViewModelBase
 /// <summary>A source location contributing to a generated fact.</summary>
 public sealed class PreviewEvidenceRow
 {
+    internal const int MaximumDisplayedTransformationPaths = 8;
+
     public SourceReference Source { get; }
     public string Display => Source.DisplayName is { Length: > 0 } displayName
         ? $"{displayName} · {Source.SourceId}: {Source.Locator}"
         : $"{Source.SourceId}: {Source.Locator}";
+    public string TransformationPathDisplay { get; }
     public PdfEvidenceRegion? PdfEvidence { get; }
 
     public PreviewEvidenceRow(SourceReference source)
+        : this(source, Array.Empty<SourceTransformationPath>(), 0, null)
+    {
+    }
+
+    public PreviewEvidenceRow(
+        SourceReference source,
+        IReadOnlyList<SourceTransformationPath> transformationPaths,
+        int additionalPathCount = 0,
+        IReadOnlyDictionary<string, string>? transformationNames = null)
     {
         Source = source;
         PdfEvidence = ParsePdfEvidence(source.Locator);
+        var displayedPaths = transformationPaths.Take(MaximumDisplayedTransformationPaths).ToArray();
+        var omittedPathCount = Math.Max(0, additionalPathCount)
+            + Math.Max(0, transformationPaths.Count - displayedPaths.Length);
+        if (displayedPaths.Length == 0)
+        {
+            TransformationPathDisplay = "Transformation path not recorded.";
+            return;
+        }
+
+        var multiplePaths = displayedPaths.Length + omittedPathCount > 1;
+        var pathLines = displayedPaths.Select((path, index) =>
+        {
+            var steps = path.TransformationIds is not { Count: > 0 }
+                ? "No transformation IDs recorded."
+                : string.Join(" → ", path.TransformationIds.Select(id =>
+                    transformationNames is not null
+                        && transformationNames.TryGetValue(id, out var name)
+                        && !string.IsNullOrWhiteSpace(name)
+                        ? $"{name} ({id})"
+                        : id));
+            return multiplePaths ? $"Path {index + 1}: {steps}" : steps;
+        }).ToList();
+        if (omittedPathCount > 0)
+            pathLines.Add($"{omittedPathCount} additional path(s) not shown.");
+        TransformationPathDisplay = string.Join(Environment.NewLine, pathLines);
     }
 
     private static PdfEvidenceRegion? ParsePdfEvidence(string locator)
@@ -142,6 +179,22 @@ public sealed class PreviewEvidenceRow
             return null;
 
         return new PdfEvidenceRegion(pageNumber, left, bottom, right, top);
+    }
+}
+
+internal sealed class PreviewTransformationPathSummary
+{
+    private readonly List<SourceTransformationPath> _displayedPaths = new(PreviewEvidenceRow.MaximumDisplayedTransformationPaths);
+
+    public IReadOnlyList<SourceTransformationPath> DisplayedPaths => _displayedPaths;
+    public int AdditionalPathCount { get; private set; }
+
+    public void Add(SourceTransformationPath path)
+    {
+        if (_displayedPaths.Count < PreviewEvidenceRow.MaximumDisplayedTransformationPaths)
+            _displayedPaths.Add(path);
+        else
+            AdditionalPathCount++;
     }
 }
 
@@ -5198,6 +5251,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedPreviewEvidence = null;
         _selectedPreviewPdfEvidence = null;
         Raise(nameof(SelectedPdfEvidence));
+        var transformationNames = Session.Project.Nodes
+            .GroupBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().DisplayName, StringComparer.Ordinal);
         foreach (var fact in result.Facts.Take(500))
         {
             var value = fact.IsNil ? "nil" : fact.Value?.ToString() ?? fact.TextValue ?? "(empty)";
@@ -5216,12 +5272,34 @@ public sealed class MainWindowViewModel : ViewModelBase
                     + string.Join(" | ", sourceNodes.Select(node =>
                         $"{node.DisplayName} ({node.NodeId}): {DescribeFactInputSources(node, "value")}"))
             };
+            var transformationPathsBySource = new Dictionary<SourceReference, PreviewTransformationPathSummary>();
+            foreach (var path in fact.SourceTransformationPaths)
+            {
+                if (!transformationPathsBySource.TryGetValue(path.Source, out var summary))
+                {
+                    summary = new PreviewTransformationPathSummary();
+                    transformationPathsBySource.Add(path.Source, summary);
+                }
+                summary.Add(path);
+            }
+            var evidenceSources = fact.ContributingSources
+                .Concat(transformationPathsBySource.Keys)
+                .Distinct()
+                .ToArray();
             PreviewFacts.Add(new FactRow
             {
                 SemanticFact = fact,
                 Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
                 StageSummary = stage,
-                Evidence = fact.ContributingSources.Select(source => new PreviewEvidenceRow(source)).ToArray()
+                Evidence = evidenceSources.Select(source =>
+                {
+                    transformationPathsBySource.TryGetValue(source, out var summary);
+                    return new PreviewEvidenceRow(
+                        source,
+                        summary?.DisplayedPaths ?? Array.Empty<SourceTransformationPath>(),
+                        summary?.AdditionalPathCount ?? 0,
+                        transformationNames);
+                }).ToArray()
             });
         }
         var errors = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);

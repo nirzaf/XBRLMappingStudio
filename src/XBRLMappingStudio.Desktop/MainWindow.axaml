@@ -275,6 +275,12 @@
                         </DataTemplate>
                       </ListBox.ItemTemplate>
                     </ListBox>
+                    <TextBlock Text="Transformation path for selected source" FontWeight="SemiBold" />
+                    <ScrollViewer MaxHeight="88" VerticalScrollBarVisibility="Auto"
+                                  AutomationProperties.Name="Selected source transformation path details">
+                      <TextBlock Text="{Binding SelectedPreviewEvidence.TransformationPathDisplay}"
+                                 TextWrapping="Wrap" />
+                    </ScrollViewer>
                   </StackPanel>
                   <Button Grid.Column="1" Margin="8,0,0,0" Content="Open PDF evidence"
                           Command="{Binding OpenSelectedPreviewEvidenceCommand}"

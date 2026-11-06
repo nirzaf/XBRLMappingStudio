@@ -49,9 +49,20 @@ public sealed class MappingOperationViewModelTests
                 fact.Display, StringComparison.Ordinal);
             Assert.NotNull(fact.SemanticFact);
             Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, fact.SemanticFact!));
-            Assert.Equal(mappingOracle.SourceLocator, Assert.Single(fact.Evidence).Source.Locator);
+            var evidence = Assert.Single(fact.Evidence);
+            Assert.Equal(mappingOracle.SourceLocator, evidence.Source.Locator);
+            var sourcePath = Assert.Single(fact.SemanticFact!.SourceTransformationPaths);
+            Assert.Equal(sourcePath.Source, evidence.Source);
+            foreach (var transformationId in sourcePath.TransformationIds)
+            {
+                var node = Assert.Single(project.Nodes, candidate => candidate.NodeId == transformationId);
+                Assert.Contains($"{node.DisplayName} ({node.NodeId})", evidence.TransformationPathDisplay,
+                    StringComparison.Ordinal);
+            }
+            Assert.Same(evidence, viewModel.SelectedPreviewEvidence);
             Assert.Contains("Fact construction", fact.StageSummary, StringComparison.Ordinal);
             Assert.Contains("Scale to units", fact.StageSummary, StringComparison.Ordinal);
+            Assert.Contains("Scale to units", evidence.TransformationPathDisplay, StringComparison.Ordinal);
             Assert.NotEmpty(fact.Evidence);
             Assert.Same(fact, viewModel.SelectedPreviewFact);
         }
@@ -59,6 +70,28 @@ public sealed class MappingOperationViewModelTests
         {
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public void PreviewEvidenceRowDisplaysStableBoundedTransformationPathsAndMissingState()
+    {
+        var source = new XBRLMappingStudio.Diagnostics.SourceReference("excel", "Income!B3", "Revenue workbook");
+        var paths = Enumerable.Range(1, 10)
+            .Select(index => new XBRLMappingStudio.Diagnostics.SourceTransformationPath(
+                source, new[] { $"node-{index}" }))
+            .ToArray();
+        var transformationNames = Enumerable.Range(1, 10)
+            .ToDictionary(index => $"node-{index}", index => $"Transform {index}", StringComparer.Ordinal);
+
+        var evidence = new PreviewEvidenceRow(source, paths, transformationNames: transformationNames);
+
+        Assert.Contains("Path 1: Transform 1 (node-1)", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+        Assert.Contains("Path 8: Transform 8 (node-8)", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+        Assert.DoesNotContain("Transform 9 (node-9)", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+        Assert.Contains("2 additional path(s) not shown.", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+
+        var pathlessEvidence = new PreviewEvidenceRow(source, Array.Empty<XBRLMappingStudio.Diagnostics.SourceTransformationPath>());
+        Assert.Equal("Transformation path not recorded.", pathlessEvidence.TransformationPathDisplay);
     }
 
     [Fact]

@@ -324,3 +324,21 @@ applied. The final on-edit error clearing behavior is covered by the view-model
 tests. This was a synthetic sample only; no installed-profile validation or
 publication was performed. Dynamic source rebinding through the inspector and
 source-drift revalidation remain open.
+
+## MAP08 per-source transformation evidence in Desktop
+
+Each selected-fact source row retains its source ID and locator. The selected
+source's detail pane displays each recorded transformation path with the saved
+graph display name and stable node ID, explicitly says when no path is recorded,
+and bounds the view to eight paths while reporting any additional count. A path
+represents graph connectivity; it does not prove which alternative input selected
+a value.
+
+Verification: the full Debug Desktop.Tests suite passed 72/72. The native Debug
+sample preview at 1280x760 displayed one synthetic Revenue fact, its Excel source
+locator, and the Revenue source field → Scale to thousands → XBRL Revenue path
+with the corresponding IDs. The selected path was visible in both the accessibility
+tree and screenshot. `git diff --check` passed. The sample used the development
+synthetic profile; this does not qualify installed-profile validation, a full run,
+or publication. Full input identity coverage and report-artifact path embedding
+remain open.
