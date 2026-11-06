@@ -393,3 +393,21 @@ remains unsupported by the CSV/XLSX record contracts.
 
 Verification: the focused Release integration test passed 4/4 contract cases, and
 the full Release solution suite passed 716 tests with five Arelle-gated skips.
+
+## TAX-08 / OPS-02 bounded worker diagnostic responses
+
+Both worker paths now retain at most 128 detailed per-fact findings, bound message
+and locator text, and append a blocking summary when omitted findings include errors.
+The synthetic worker continues scanning and records total, blocking and suppressed
+counts. The Python Arelle adapter applies the same detail cap, bounds request identity
+fields, and returns a small protocol failure if a serialized response exceeds 4 MiB.
+This bounds the worker response and duplicate diagnostic storage; Arelle can still
+retain its raw log list internally before the adapter converts it.
+
+Verification on an isolated worktree passed the focused .NET diagnostic-budget test,
+the full Release build with zero warnings and errors, and the full Release solution
+suite (717 passed, 5 environment-gated Arelle skips). The Python worker suite passed
+53 tests with 7 gated/environment skips; the tools suite passed 15/15 after an initial
+process-tree sampling failure under concurrent load passed on isolated rerun. The
+taxonomy benchmark self-test passed for 20,000 concepts and graph sizes 100, 500, 1,000
+and 2,000. `git diff --check` passed.

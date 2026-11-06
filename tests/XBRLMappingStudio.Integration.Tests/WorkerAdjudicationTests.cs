@@ -82,6 +82,58 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task LargeSyntheticValidation_BoundsFindingDetailsAndPreservesBlockingCounts()
+    {
+        var profile = SyntheticProfile.Build();
+        var factCount = WorkerProtocol.MaxResponseDiagnostics + 9;
+        var unknownConcept = "{urn:unknown}" + new string('C', 2_100);
+        var facts = Enumerable.Range(0, factCount).Select(index => new OimFactEntry(
+            new string('L', 2_100) + index,
+            new XbrlFact
+            {
+                ConceptName = unknownConcept,
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "bounded-diagnostics-fixture",
+                Period = XbrlPeriod.OfInstant(new DateOnly(2025, 12, 31)),
+                Value = 1m,
+                Decimals = 0
+            }));
+        var ruleOutcomes = profile.RequiredChecks
+            .Select(rule => new RuleOutcome(rule, RuleStatus.Pass)).ToArray();
+        var validation = new FilingValidationResult(ruleOutcomes);
+        var request = new WorkerRequest(
+            WorkerOperations.ValidateReport,
+            "bounded-diagnostics-op",
+            "bounded-diagnostics-job",
+            profile.Digest,
+            DateTimeOffset.UtcNow.AddMinutes(1),
+            Payload: null);
+        await using var worker = new LocalSyntheticWorker(profile);
+
+        var response = await worker.ValidateLargeReport(
+            request, facts, validation, factCount, CancellationToken.None);
+
+        var diagnostics = Assert.IsAssignableFrom<IReadOnlyList<Diagnostic>>(response.Diagnostics);
+        Assert.Equal(WorkerStatus.DomainFailure, response.Status);
+        Assert.Equal(WorkerProtocol.MaxResponseDiagnostics + 1, diagnostics.Count);
+        Assert.All(diagnostics.Take(WorkerProtocol.MaxResponseDiagnostics), diagnostic =>
+        {
+            Assert.True(diagnostic.IsBlocking);
+            Assert.True(diagnostic.Message.Length <= 2_000);
+            Assert.True(diagnostic.FactLocator!.Length <= 512);
+        });
+        Assert.Equal("synthetic:diagnostic-limit", diagnostics[^1].RuleIdentifier);
+        Assert.True(diagnostics[^1].IsBlocking);
+        Assert.Contains("9 additional validation findings were omitted", diagnostics[^1].Message,
+            StringComparison.Ordinal);
+
+        var result = response.Result!.Value;
+        Assert.Equal((long)factCount, result.GetProperty("findingCount").GetInt64());
+        Assert.Equal((long)factCount, result.GetProperty("errorCount").GetInt64());
+        Assert.Equal(9L, result.GetProperty("suppressedDiagnosticCount").GetInt64());
+    }
+
+    [Fact]
     public async Task MappingJobService_LinksRecognizedWorkerFactLocatorToExactMultiSourcePaths()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);

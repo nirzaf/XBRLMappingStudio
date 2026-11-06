@@ -25,6 +25,9 @@ public interface IWorkerClient : IAsyncDisposable
 /// </summary>
 public sealed class LocalSyntheticWorker : IWorkerClient
 {
+    private const int MaxDiagnosticMessageLength = 2_000;
+    private const int MaxDiagnosticLocatorLength = 512;
+    private const int MaxDiagnosticIdentifierLength = 256;
     private readonly FilingProfile _profile;
 
     public LocalSyntheticWorker(FilingProfile profile)
@@ -125,6 +128,32 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         CancellationToken cancellationToken)
     {
         var diags = new List<Diagnostic>();
+        long findingCount = 0;
+        long blockingFindingCount = 0;
+        long suppressedDiagnosticCount = 0;
+
+        void Capture(Diagnostic diagnostic)
+        {
+            findingCount++;
+            if (diagnostic.IsBlocking) blockingFindingCount++;
+            if (diags.Count >= WorkerProtocol.MaxResponseDiagnostics)
+            {
+                suppressedDiagnosticCount++;
+                return;
+            }
+
+            diags.Add(diagnostic with
+            {
+                Message = Limit(diagnostic.Message, MaxDiagnosticMessageLength)!,
+                OperationId = Limit(diagnostic.OperationId, MaxDiagnosticIdentifierLength),
+                RuleIdentifier = Limit(diagnostic.RuleIdentifier, MaxDiagnosticIdentifierLength),
+                FactLocator = Limit(diagnostic.FactLocator, MaxDiagnosticLocatorLength),
+                NodeId = Limit(diagnostic.NodeId, MaxDiagnosticIdentifierLength),
+                PortName = Limit(diagnostic.PortName, MaxDiagnosticIdentifierLength),
+                EdgeId = Limit(diagnostic.EdgeId, MaxDiagnosticIdentifierLength),
+            });
+        }
+
         var requiredRules = CompletionItems(_profile.RequiredChecks,
             filingValidation.Outcomes.Select(outcome => new ValidationCheckCompletion(
                 outcome.RuleId,
@@ -153,7 +182,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             var concept = _profile.FindConcept(fact.ConceptName);
             if (concept is null)
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrConceptUnknown,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -169,7 +198,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
             if (concept.IsAbstract)
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrConceptUnknown,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -185,7 +214,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             if (!fact.ValidateValueAgainst(concept, out var valueReason)
                 && !valueReason.EndsWith("is monetary and requires a unit.", StringComparison.Ordinal))
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrUnsupportedConstruct,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -200,7 +229,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
             if (concept.DataType == "monetary" && fact.Unit is null)
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrUnitMissing,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -215,7 +244,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
             if (fact.Unit is not null && !_profile.SupportedUnits.Contains(fact.Unit.Measure))
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrUnitMissing,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -230,7 +259,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
             if (concept.PeriodType == "instant" && fact.Period.Kind != PeriodKind.Instant)
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrPeriodTypeMismatch,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -245,7 +274,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
             if (concept.PeriodType == "duration" && fact.Period.Kind != PeriodKind.Duration)
             {
-                diags.Add(new Diagnostic
+                Capture(new Diagnostic
                 {
                     Code = DiagnosticCodes.XbrPeriodTypeMismatch,
                     Subsystem = DiagnosticSubsystem.XBRL,
@@ -263,10 +292,25 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             throw new InvalidDataException(
                 $"Streamed validation supplied {i} fact entries, but the artifact records {factCount} facts.");
 
+        if (suppressedDiagnosticCount > 0)
+        {
+            diags.Add(new Diagnostic
+            {
+                Code = DiagnosticCodes.XbrValidationFailed,
+                Subsystem = DiagnosticSubsystem.XBRL,
+                Severity = blockingFindingCount > 0 ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,
+                Stage = DiagnosticStage.Validation,
+                IsBlocking = blockingFindingCount > 0,
+                Message = $"{suppressedDiagnosticCount} additional validation findings were omitted after the first {WorkerProtocol.MaxResponseDiagnostics} details. Total findings: {findingCount}; blocking: {blockingFindingCount}.",
+                OperationId = Limit(request.OperationId, MaxDiagnosticIdentifierLength),
+                RuleIdentifier = "synthetic:diagnostic-limit"
+            });
+        }
+
         var completionFailed = requiredRules.Any(item => item.Status == ValidationCheckStatus.Fail);
         var completionIncomplete = requiredRules.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable)
             || requiredPlugins.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable);
-        var status = diags.Any(d => d.IsBlocking) || completionFailed
+        var status = blockingFindingCount > 0 || completionFailed
             ? WorkerStatus.DomainFailure
             : completionIncomplete ? WorkerStatus.IncompleteValidation : WorkerStatus.Success;
         return new WorkerResponse(
@@ -275,11 +319,18 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             JsonSerializer.SerializeToElement(new
             {
                 factCount,
-                errorCount = diags.Count(d => d.IsBlocking),
+                errorCount = blockingFindingCount,
+                findingCount,
+                suppressedDiagnosticCount,
                 validationCompletion = completion
             }, WorkerJson.Options),
             diags,
             Error: null);
+
+        static string? Limit(string? value, int maxLength)
+            => value is null || value.Length <= maxLength
+                ? value
+                : value[..(maxLength - 1)] + "…";
 
         static ValidationCheckCompletion[] CompletionItems(
             IReadOnlySet<string> required,

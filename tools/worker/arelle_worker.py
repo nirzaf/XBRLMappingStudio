@@ -26,6 +26,8 @@ from xml.etree import ElementTree
 PROTOCOL_VERSION = 2
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+MAX_RESPONSE_DIAGNOSTICS = 128
+MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
 MAX_PROFILE_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -62,7 +64,14 @@ except Exception:  # The host must fail closed if this optional runtime is absen
 
 
 def emit(obj):
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+    encoded = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) + 1 > MAX_MESSAGE_BYTES:
+        candidate = obj.get("operationId") if isinstance(obj, dict) else None
+        operation_id = candidate if isinstance(candidate, str) and len(candidate) <= 128 else "-"
+        encoded = json.dumps(response(
+            operation_id, "domainFailure", error="Worker response exceeds the 4 MiB limit."),
+            ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write(encoded + "\n")
     sys.stdout.flush()
 
 
@@ -95,7 +104,11 @@ def diagnostic(op_id, code, level, message, rule=None):
 
 def valid_request(req):
     required = ("operation", "operationId", "jobId", "profileDigest", "deadlineUtc")
-    return isinstance(req, dict) and all(isinstance(req.get(key), str) for key in required)
+    if not isinstance(req, dict) or not all(isinstance(req.get(key), str) for key in required):
+        return False
+    limits = {"operation": 64, "operationId": 128, "jobId": 128,
+              "profileDigest": 256, "deadlineUtc": 64}
+    return all(0 < len(req[key]) <= limits[key] for key in required)
 
 
 def is_expired(req):
@@ -899,6 +912,8 @@ def run_arelle(entrypoint, args, temporary_path=None):
 
 def log_diagnostics(logs, op_id, temporary_path=None):
     result = []
+    suppressed = 0
+    suppressed_blocking = False
     for item in logs or []:
         if not isinstance(item, dict):
             continue
@@ -910,10 +925,25 @@ def log_diagnostics(logs, op_id, temporary_path=None):
         if message is None:
             structured = item.get("message")
             message = structured.get("text") if isinstance(structured, dict) else structured
-        message = str(message or "Arelle reported an unspecified validation finding.")[:4000]
+        message = str(message or "Arelle reported an unspecified validation finding.")
+        if len(message) > MAX_DIAGNOSTIC_MESSAGE_CHARS:
+            message = message[:MAX_DIAGNOSTIC_MESSAGE_CHARS - 1] + "…"
         if temporary_path:
             message = message.replace(str(temporary_path), "<job>")
-        result.append(diagnostic(op_id, "XBR009", raw_level, message, code))
+        finding = diagnostic(op_id, "XBR009", raw_level, message, code)
+        if len(result) < MAX_RESPONSE_DIAGNOSTICS:
+            result.append(finding)
+        else:
+            suppressed += 1
+            suppressed_blocking = suppressed_blocking or finding["isBlocking"]
+    if suppressed:
+        result.append(diagnostic(
+            op_id,
+            "XBR009",
+            "error" if suppressed_blocking else "warning",
+            f"{suppressed} additional Arelle validation findings were omitted after the first {MAX_RESPONSE_DIAGNOSTICS} details.",
+            "arelle:diagnostic-limit",
+        ))
     return result
 
 
@@ -940,7 +970,8 @@ def required_plugin_load_failures(logs, required_plugins):
 
 
 def handle(req, args):
-    op_id = req.get("operationId", "-")
+    candidate = req.get("operationId") if isinstance(req, dict) else None
+    op_id = candidate if isinstance(candidate, str) and len(candidate) <= 128 else "-"
     if not valid_request(req):
         return response(op_id, "domainFailure", error="Request is missing required protocol fields")
     if is_expired(req):

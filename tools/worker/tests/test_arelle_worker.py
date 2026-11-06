@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import sys
 import tempfile
@@ -117,6 +118,49 @@ class ArelleWorkerTests(unittest.TestCase):
 
         self.assertEqual("domainFailure", result["status"])
         self.assertIn("No mutually supported protocol version", result["error"])
+
+    def test_request_rejects_oversized_operation_id_without_echoing_it(self):
+        request = self.handshake_request()
+        request["operationId"] = "x" * 129
+
+        result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", result["status"])
+        self.assertEqual("-", result["operationId"])
+
+    def test_log_diagnostics_caps_details_and_preserves_blocking_summary(self):
+        count = arelle_worker.MAX_RESPONSE_DIAGNOSTICS + 7
+        logs = [{"levelname": "error", "messageCode": "fixture:error", "msg": "finding"}
+                for _ in range(count)]
+
+        diagnostics = arelle_worker.log_diagnostics(logs, "bounded-op")
+
+        self.assertEqual(arelle_worker.MAX_RESPONSE_DIAGNOSTICS + 1, len(diagnostics))
+        self.assertTrue(all(item["isBlocking"] for item in diagnostics))
+        self.assertEqual("arelle:diagnostic-limit", diagnostics[-1]["ruleIdentifier"])
+        self.assertIn("7 additional Arelle validation findings were omitted", diagnostics[-1]["message"])
+
+        long_message = "x" * (arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS + 10)
+        single = arelle_worker.log_diagnostics(
+            [{"levelname": "warning", "messageCode": "fixture:warning", "msg": long_message}], "bounded-op")
+        self.assertLessEqual(len(single[0]["message"]), arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS)
+        self.assertTrue(single[0]["message"].endswith("…"))
+        self.assertFalse(single[0]["isBlocking"])
+
+    def test_emit_replaces_oversized_response_with_bounded_failure(self):
+        output = io.StringIO()
+        payload = arelle_worker.response("bounded-op", "success", {"value": "x" * 2_000})
+
+        with mock.patch.object(arelle_worker, "MAX_MESSAGE_BYTES", 512), \
+                mock.patch.object(arelle_worker.sys, "stdout", output):
+            arelle_worker.emit(payload)
+
+        encoded = output.getvalue()
+        self.assertLessEqual(len(encoded.encode("utf-8")), 512)
+        result = json.loads(encoded)
+        self.assertEqual("bounded-op", result["operationId"])
+        self.assertEqual("domainFailure", result["status"])
+        self.assertIn("exceeds the 4 MiB limit", result["error"])
 
     def test_handshake_reports_exact_profile_entrypoint_and_plugins(self):
         self.args.profile_manifest_data = {

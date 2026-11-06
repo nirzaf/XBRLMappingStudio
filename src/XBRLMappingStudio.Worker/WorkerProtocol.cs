@@ -297,6 +297,8 @@ public static class WorkerProtocol
     public const int CurrentVersion = 2;
     public const int MinimumVersion = 2;
     public const int MaxMessageBytes = 4 * 1024 * 1024; // 4 MiB bound per section 2
+    /// <summary>Maximum per-fact finding details returned by a worker before a summary row.</summary>
+    public const int MaxResponseDiagnostics = 128;
 
     public static void ValidateByteLimit(string message)
     {
