@@ -262,7 +262,7 @@ public static class OimSerializer
             _ = ExpandQName(concept, namespaces);
             var entity = RequiredString(dimensions, "entity");
             var colon = entity.IndexOf(':');
-            if (colon <= 0 || colon == entity.Length - 1 || entity.IndexOf(':', colon + 1) >= 0)
+            if (colon <= 0 || colon == entity.Length - 1)
                 throw Unsupported("Entity must be a prefixed SQName.");
             var entityPrefix = entity[..colon];
             if (!namespaces.TryGetValue(entityPrefix, out var entityScheme))
@@ -580,7 +580,7 @@ public static class OimSerializer
         {
             if (!EntityPrefixes.TryGetValue(scheme, out var prefix))
                 throw Unsupported($"Entity scheme '{scheme}' is not declared.");
-            if (identifier.Length == 0 || identifier.Contains(':') || identifier.Any(char.IsWhiteSpace))
+            if (identifier.Length == 0 || identifier.Any(char.IsWhiteSpace))
                 throw Unsupported("Entity identifier cannot be represented as an SQName local part.");
             return prefix + ":" + identifier;
         }

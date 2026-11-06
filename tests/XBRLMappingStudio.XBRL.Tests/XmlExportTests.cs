@@ -1,4 +1,5 @@
 using XBRLMappingStudio.Diagnostics;
+using System.Xml.Linq;
 
 namespace XBRLMappingStudio.XBRL.Tests;
 
@@ -111,6 +112,194 @@ public sealed class XmlExportTests
 <!DOCTYPE xbrl [ <!ENTITY boom ""AAAA""> ]>
 <xbrli:xbrl xmlns:xbrli=""http://www.xbrl.org/2003/instance""/>";
         Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(doc));
+    }
+
+    [Fact]
+    public void ReadFacts_RejectsMissingContextsNestedFractionsAndUnmodeledSegments()
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var valid = XmlSerializer.Serialize(Profile, new[] { Revenue() });
+
+        var missingContext = XDocument.Parse(valid);
+        missingContext.Root!.Elements(XNamespace.Get(SyntheticProfile.Namespace) + "Revenue").Single()
+            .Attribute("contextRef")!.Remove();
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(missingContext.ToString()));
+
+        var unknownContext = XDocument.Parse(valid);
+        unknownContext.Root!.Elements(XNamespace.Get(SyntheticProfile.Namespace) + "Revenue").Single()
+            .SetAttributeValue("contextRef", "not-present");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unknownContext.ToString()));
+
+        var fraction = XDocument.Parse(valid);
+        var fractionFact = fraction.Root!.Elements(XNamespace.Get(SyntheticProfile.Namespace) + "Revenue").Single();
+        fractionFact.RemoveNodes();
+        fractionFact.Add(new XElement(xbrli + "numerator", "12"), new XElement(xbrli + "denominator", "3"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(fraction.ToString()));
+
+        var malformedNumeric = XDocument.Parse(valid);
+        malformedNumeric.Root!.Elements(XNamespace.Get(SyntheticProfile.Namespace) + "Revenue").Single().Value = "12x";
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(malformedNumeric.ToString()));
+
+        var dimensionalFact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ACME",
+            Period = Revenue().Period,
+            Unit = new XbrlUnit("QAR"),
+            Value = 1m,
+            Decimals = 0,
+            Dimensions = new[] { new Dimension("synthetic:Region", "synthetic:EMEA") }
+        };
+        var unmodeledSegment = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { dimensionalFact }));
+        var segment = unmodeledSegment.Root!.Element(xbrli + "context")!
+            .Element(xbrli + "entity")!.Element(xbrli + "segment")!;
+        segment.Add(new XElement(XNamespace.Get("urn:unsupported:segment") + "Unknown", "extra"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unmodeledSegment.ToString()));
+
+        var segmentText = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { dimensionalFact }));
+        segmentText.Root!.Element(xbrli + "context")!.Element(xbrli + "entity")!
+            .Element(xbrli + "segment")!.Add("unmodeled segment text");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(segmentText.ToString()));
+
+        var nestedMember = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { dimensionalFact }));
+        nestedMember.Root!.Element(xbrli + "context")!.Element(xbrli + "entity")!
+            .Element(xbrli + "segment")!.Elements().Single()
+            .Add(new XElement(XNamespace.Get("urn:unsupported:member") + "Child", "nested"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(nestedMember.ToString()));
+
+        var scenario = XDocument.Parse(valid);
+        scenario.Root!.Element(xbrli + "context")!.Add(new XElement(xbrli + "scenario"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(scenario.ToString()));
+    }
+
+    [Fact]
+    public void ReadFacts_RejectsUnknownAndExtraUnitChildren()
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var valid = XmlSerializer.Serialize(Profile, new[] { Revenue() });
+
+        var unknownUnit = XDocument.Parse(valid);
+        unknownUnit.Root!.Elements(synthetic + "Revenue").Single().SetAttributeValue("unitRef", "missing");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unknownUnit.ToString()));
+
+        var extraSimpleMeasure = XDocument.Parse(valid);
+        extraSimpleMeasure.Root!.Element(xbrli + "unit")!.Add(new XElement(xbrli + "measure", "iso4217:USD"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(extraSimpleMeasure.ToString()));
+
+        var compound = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("NetIncome"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ACME",
+            Period = Revenue().Period,
+            CompoundUnit = new CompoundUnit(new[] { "USD" }, new[] { "shares" }),
+            Value = 1m,
+            Decimals = 0
+        };
+        var extraDivideChild = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { compound }));
+        extraDivideChild.Root!.Element(xbrli + "unit")!.Element(xbrli + "divide")!
+            .Add(new XElement(xbrli + "measure", "iso4217:QAR"));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(extraDivideChild.ToString()));
+    }
+
+    [Fact]
+    public void ReadFacts_RejectsUnmodeledContextEntityPeriodAndUnitAttributes()
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var valid = XmlSerializer.Serialize(Profile, new[] { Revenue() });
+
+        var contextAttribute = XDocument.Parse(valid);
+        contextAttribute.Root!.Element(xbrli + "context")!.SetAttributeValue("unexpected", "x");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(contextAttribute.ToString()));
+
+        var entityAttribute = XDocument.Parse(valid);
+        entityAttribute.Root!.Element(xbrli + "context")!.Element(xbrli + "entity")!
+            .SetAttributeValue("unexpected", "x");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(entityAttribute.ToString()));
+
+        var periodAttribute = XDocument.Parse(valid);
+        periodAttribute.Root!.Element(xbrli + "context")!.Element(xbrli + "period")!
+            .SetAttributeValue("unexpected", "x");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(periodAttribute.ToString()));
+
+        var unitAttribute = XDocument.Parse(valid);
+        unitAttribute.Root!.Element(xbrli + "unit")!.SetAttributeValue("unexpected", "x");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unitAttribute.ToString()));
+
+        var periodText = XDocument.Parse(valid);
+        periodText.Root!.Element(xbrli + "context")!.Element(xbrli + "period")!.Add("unsupported");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(periodText.ToString()));
+
+        var unsupportedPrecision = XDocument.Parse(valid);
+        unsupportedPrecision.Root!.Elements(XNamespace.Get(SyntheticProfile.Namespace) + "Revenue").Single()
+            .SetAttributeValue("precision", "2");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unsupportedPrecision.ToString()));
+    }
+
+    [Fact]
+    public void ReadFacts_UsesXmlSchemaBooleanLexicalValuesForNil()
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        var nilFact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Expenses"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = Revenue().Period,
+            Unit = new XbrlUnit("QAR"),
+            IsNil = true
+        };
+        var xml = XmlSerializer.Serialize(Profile, new[] { nilFact });
+        var document = XDocument.Parse(xml);
+        var element = document.Root!.Elements(synthetic + "Expenses").Single();
+        Assert.Equal("true", (string?)element.Attribute(xsi + "nil"));
+
+        element.SetAttributeValue(xsi + "nil", "1");
+        Assert.True(Assert.Single(XmlSerializer.ReadFacts(document.ToString())).IsNil);
+
+        element.SetAttributeValue(xsi + "nil", "yes");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(document.ToString()));
+
+        element.SetAttributeValue(xsi + "nil", "true");
+        element.Value = "discarded";
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(document.ToString()));
+
+        var legacyNilNamespace = XDocument.Parse(xml);
+        legacyNilNamespace.Root!.Elements(synthetic + "Expenses").Single()
+            .SetAttributeValue(xbrli + "nil", "true");
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(legacyNilNamespace.ToString()));
+    }
+
+    [Fact]
+    public void ReadFacts_RequiresAnXbrlInstanceRoot()
+    {
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { Revenue() }));
+        document.Root!.Name = "notXbrl";
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(document.ToString()));
+    }
+
+    [Fact]
+    public void XmlReader_PreservesNumericLookingUnitlessTextAsText()
+    {
+        var textFact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = Revenue().Period,
+            TextValue = "123",
+            Language = "en"
+        };
+
+        var reopened = Assert.Single(XmlSerializer.ReadFacts(XmlSerializer.Serialize(Profile, new[] { textFact })));
+
+        Assert.Null(reopened.Value);
+        Assert.Equal("123", reopened.TextValue);
+        Assert.Equal("en", reopened.Language);
     }
 
     private static int CountOccurrences(string haystack, string needle)

@@ -20,6 +20,7 @@ public static class XmlSerializer
     private static readonly XNamespace Link = "http://www.xbrl.org/2003/linkbase";
     private static readonly XNamespace Xbrldi = "http://xbrl.org/2006/xbrldi";
     private static readonly XNamespace Xlink = "http://www.w3.org/1999/xlink";
+    private static readonly XNamespace Xsi = "http://www.w3.org/2001/XMLSchema-instance";
     private static readonly XNamespace Iso4217 = "http://www.xbrl.org/2003/iso4217";
 
     public static string Serialize(FilingProfile profile, IReadOnlyList<XbrlFact> facts)
@@ -185,7 +186,7 @@ public static class XmlSerializer
         if (!string.IsNullOrEmpty(f.Language))
             el.Add(new XAttribute(XNamespace.Xml + "lang", f.Language.ToLowerInvariant()));
         if (f.IsNil)
-            el.Add(new XAttribute(Xbrli + "nil", "true"));
+            el.Add(new XAttribute(Xsi + "nil", "true"));
         else if (f.Value is not null)
             el.Value = f.Value.Value.ToString(CultureInfo.InvariantCulture);
         else if (f.TextValue is not null)
@@ -216,17 +217,34 @@ public static class XmlSerializer
         }
 
         var root = doc.Root ?? throw new InvalidOperationException("Missing xbrl root.");
-        var contexts = root.Elements(Xbrli + "context")
-            .ToDictionary(c => (string)c.Attribute("id")!, c => c);
-        var units = root.Elements(Xbrli + "unit")
-            .ToDictionary(u => (string)u.Attribute("id")!, u => u);
+        if (root.Name != Xbrli + "xbrl")
+            throw Unsupported("XML document root is not xbrli:xbrl.");
+        var contexts = new Dictionary<string, XElement>(StringComparer.Ordinal);
+        foreach (var context in root.Elements(Xbrli + "context"))
+        {
+            var id = (string?)context.Attribute("id");
+            if (string.IsNullOrEmpty(id) || !contexts.TryAdd(id, context))
+                throw Unsupported("XML instance contains a context with a missing or duplicate id.");
+        }
+        var units = new Dictionary<string, XElement>(StringComparer.Ordinal);
+        foreach (var unit in root.Elements(Xbrli + "unit"))
+        {
+            var id = (string?)unit.Attribute("id");
+            if (string.IsNullOrEmpty(id) || !units.TryAdd(id, unit))
+                throw Unsupported("XML instance contains a unit with a missing or duplicate id.");
+        }
 
         var facts = new List<XbrlFact>();
         foreach (var el in root.Elements())
         {
-            if (el.Name.Namespace == Xbrli) continue; // skip context/unit/schema elements
+            if (el.Name == Xbrli + "context" || el.Name == Xbrli + "unit"
+                || el.Name == Link + "schemaRef") continue;
+            if (el.Name.Namespace == Xbrli || el.Name.Namespace == Link
+                || el.Name.Namespace == Xbrldi || el.Name.Namespace == Xlink)
+                throw Unsupported($"Root element '{el.Name}' is unsupported by this report model.");
             var ctxRef = (string?)el.Attribute("contextRef");
-            if (ctxRef is null || !contexts.TryGetValue(ctxRef, out var ctx)) continue;
+            if (string.IsNullOrEmpty(ctxRef) || !contexts.TryGetValue(ctxRef, out var ctx))
+                throw Unsupported($"Root element '{el.Name}' is not a supported fact with a known contextRef.");
 
             var f = ParseFact(el, ctx, units);
             if (f is not null) facts.Add(f);
@@ -236,62 +254,153 @@ public static class XmlSerializer
 
     private static XbrlFact? ParseFact(XElement el, XElement ctx, Dictionary<string, XElement> units)
     {
+        EnsureOnlyAttributes(el, "contextRef", "unitRef", "decimals", "id",
+            Xsi + "nil",
+            XNamespace.Xml + "lang");
+        if (el.Elements().Any())
+            throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                $"Nested fact content on '{el.Name}' is unsupported by this report model.");
+
         var local = el.Name.LocalName;
         var pfx = el.GetPrefixOfNamespace(el.Name.Namespace) ?? "synthetic";
         var concept = $"{pfx}:{local}";
 
-        var ident = ctx.Element(Xbrli + "entity")?.Element(Xbrli + "identifier");
+        var contextChildren = ctx.Elements().ToArray();
+        EnsureOnlyAttributes(ctx, "id");
+        EnsureNoSignificantText(ctx, "Context");
+        if (contextChildren.Any(child => child.Name == Xbrli + "scenario"))
+            throw Unsupported("Context scenario content is unsupported by this report model.");
+        if (contextChildren.Length != 2
+            || contextChildren.Count(child => child.Name == Xbrli + "entity") != 1
+            || contextChildren.Count(child => child.Name == Xbrli + "period") != 1)
+            throw Unsupported("Context contains missing or unmodeled children.");
+
+        var entityElement = contextChildren.Single(child => child.Name == Xbrli + "entity");
+        EnsureOnlyAttributes(entityElement);
+        EnsureNoSignificantText(entityElement, "Entity");
+        var entityChildren = entityElement.Elements().ToArray();
+        var identifiers = entityChildren.Where(child => child.Name == Xbrli + "identifier").ToArray();
+        if (identifiers.Length != 1 || entityChildren.Any(child => child.Name != Xbrli + "identifier"
+                && child.Name != Xbrli + "segment"))
+            throw Unsupported("Context entity contains missing identifier or unmodeled children.");
+        var ident = identifiers[0];
+        EnsureOnlyAttributes(ident, "scheme");
+        if (ident.Elements().Any())
+            throw Unsupported("Entity identifier cannot contain nested elements.");
         var scheme = (string?)ident?.Attribute("scheme") ?? "";
         var identifier = (string?)ident ?? "";
 
         var dims = new List<Dimension>();
-        var entity = ctx.Element(Xbrli + "entity");
-        if (entity?.Descendants(Xbrldi + "typedMember").Any() == true)
+        if (entityElement.Descendants(Xbrldi + "typedMember").Any())
             throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                 "Typed dimensions are not supported by this report model.");
-        foreach (var ed in entity?.Elements(Xbrli + "segment").Elements(Xbrldi + "explicitMember") ?? Enumerable.Empty<XElement>())
+        foreach (var segment in entityElement.Elements(Xbrli + "segment"))
         {
-            var dimName = (string?)ed.Attribute("dimension") ?? "";
-            dims.Add(new Dimension(dimName, ed.Value));
+            EnsureOnlyAttributes(segment);
+            EnsureNoSignificantText(segment, "Entity segment");
+            foreach (var child in segment.Elements())
+            {
+                if (child.Name != Xbrldi + "explicitMember")
+                    throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
+                        $"Entity segment child '{child.Name}' is unsupported by this report model.");
+                EnsureOnlyAttributes(child, "dimension");
+                if (child.Elements().Any())
+                    throw Unsupported("Explicit dimension members cannot contain nested elements.");
+                var dimName = (string?)child.Attribute("dimension") ?? "";
+                dims.Add(new Dimension(dimName, child.Value));
+            }
         }
 
-        var periodEl = ctx.Element(Xbrli + "period");
+        var periodEl = contextChildren.Single(child => child.Name == Xbrli + "period");
+        EnsureOnlyAttributes(periodEl);
+        EnsureNoSignificantText(periodEl, "Period");
+        var periodChildren = periodEl.Elements().ToArray();
         XbrlPeriod period;
-        if (periodEl?.Element(Xbrli + "instant") is XElement inst)
-            period = XbrlPeriod.OfInstant(DateOnly.Parse(inst.Value, CultureInfo.InvariantCulture));
-        else
+        if (periodChildren.Length == 1 && periodChildren[0].Name == Xbrli + "instant")
         {
-            var startStr = periodEl?.Element(Xbrli + "startDate")?.Value ?? "";
-            var endStr = periodEl?.Element(Xbrli + "endDate")?.Value ?? "";
-            period = XbrlPeriod.OfDuration(
-                DateOnly.Parse(startStr, CultureInfo.InvariantCulture),
-                DateOnly.Parse(endStr, CultureInfo.InvariantCulture));
+            var inst = periodChildren[0];
+            EnsureOnlyAttributes(inst);
+            if (inst.Elements().Any()) throw Unsupported("Instant values cannot contain nested elements.");
+            period = XbrlPeriod.OfInstant(DateOnly.Parse(inst.Value, CultureInfo.InvariantCulture));
         }
+        else if (periodChildren.Length == 2
+            && periodChildren.Count(child => child.Name == Xbrli + "startDate") == 1
+            && periodChildren.Count(child => child.Name == Xbrli + "endDate") == 1)
+        {
+            var start = periodChildren.Single(child => child.Name == Xbrli + "startDate");
+            var end = periodChildren.Single(child => child.Name == Xbrli + "endDate");
+            EnsureOnlyAttributes(start);
+            EnsureOnlyAttributes(end);
+            if (start.Elements().Any() || end.Elements().Any())
+                throw Unsupported("Duration boundaries cannot contain nested elements.");
+            period = XbrlPeriod.OfDuration(
+                DateOnly.Parse(start.Value, CultureInfo.InvariantCulture),
+                DateOnly.Parse(end.Value, CultureInfo.InvariantCulture));
+        }
+        else throw Unsupported("Context period has an unsupported structure.");
 
         XbrlUnit? unit = null;
         CompoundUnit? compound = null;
         var unitRef = (string?)el.Attribute("unitRef");
-        if (unitRef is not null && units.TryGetValue(unitRef, out var unitEl))
+        if (unitRef is not null)
         {
-            var divide = unitEl.Element(Xbrli + "divide");
+            if (!units.TryGetValue(unitRef, out var unitEl))
+                throw Unsupported($"Fact references unknown unit '{unitRef}'.");
+            EnsureOnlyAttributes(unitEl, "id");
+            EnsureNoSignificantText(unitEl, "Unit");
+            var unitChildren = unitEl.Elements().ToArray();
+            var divideElements = unitChildren.Where(child => child.Name == Xbrli + "divide").ToArray();
+            if (divideElements.Length > 1)
+                throw Unsupported("Unit contains more than one divide structure.");
+            var divide = divideElements.SingleOrDefault();
             if (divide is not null)
             {
-                var nums = divide.Element(Xbrli + "unitNumerator")?.Elements(Xbrli + "measure")
-                    .Select(InternalMeasure).ToList() ?? new();
-                var dens = divide.Element(Xbrli + "unitDenominator")?.Elements(Xbrli + "measure")
-                    .Select(InternalMeasure).ToList() ?? new();
+                EnsureOnlyAttributes(divide);
+                EnsureNoSignificantText(divide, "Divided unit");
+                if (unitChildren.Length != 1)
+                    throw Unsupported("A divided unit cannot also contain simple measures or extra children.");
+                var divideChildren = divide.Elements().ToArray();
+                if (divideChildren.Length != 2
+                    || divideChildren[0].Name != Xbrli + "unitNumerator"
+                    || divideChildren[1].Name != Xbrli + "unitDenominator")
+                    throw Unsupported("A divided unit must contain one numerator followed by one denominator.");
+                var numeratorChildren = divideChildren[0].Elements().ToArray();
+                var denominatorChildren = divideChildren[1].Elements().ToArray();
+                EnsureOnlyAttributes(divideChildren[0]);
+                EnsureOnlyAttributes(divideChildren[1]);
+                EnsureNoSignificantText(divideChildren[0], "Unit numerator");
+                EnsureNoSignificantText(divideChildren[1], "Unit denominator");
+                if (numeratorChildren.Length == 0 || denominatorChildren.Length == 0
+                    || numeratorChildren.Any(child => child.Name != Xbrli + "measure" || child.Elements().Any())
+                    || denominatorChildren.Any(child => child.Name != Xbrli + "measure" || child.Elements().Any()))
+                    throw Unsupported("A divided unit contains unsupported or missing measures.");
+                foreach (var measure in numeratorChildren.Concat(denominatorChildren))
+                    EnsureOnlyAttributes(measure);
+                var nums = numeratorChildren.Select(InternalMeasure).ToList();
+                var dens = denominatorChildren.Select(InternalMeasure).ToList();
                 compound = new CompoundUnit(nums, dens);
             }
             else
             {
-                var m = unitEl.Element(Xbrli + "measure");
-                var power = (int?)m?.Attribute("power") ?? 1;
-                unit = new XbrlUnit(m is null ? "" : InternalMeasure(m), power);
+                if (unitChildren.Length != 1 || unitChildren[0].Name != Xbrli + "measure"
+                    || unitChildren[0].Elements().Any())
+                    throw Unsupported("A simple unit must contain exactly one measure.");
+                var measure = unitChildren[0];
+                EnsureOnlyAttributes(measure, "power");
+                var power = (int?)measure.Attribute("power") ?? 1;
+                unit = new XbrlUnit(InternalMeasure(measure), power);
             }
         }
 
-        var nilAttr = (string?)el.Attribute(Xbrli + "nil");
-        bool isNil = string.Equals(nilAttr, "true", StringComparison.OrdinalIgnoreCase);
+        var xsiNil = (string?)el.Attribute(Xsi + "nil");
+        bool isNil = xsiNil?.Trim() switch
+        {
+            null or "false" or "0" => false,
+            "true" or "1" => true,
+            _ => throw Unsupported("Fact nil attribute is not a valid XML Schema boolean.")
+        };
+        if (isNil && !string.IsNullOrWhiteSpace(el.Value))
+            throw Unsupported("A nil fact cannot also carry text content.");
         var decimalsStr = (string?)el.Attribute("decimals");
         int? decimals = decimalsStr is null || decimalsStr == "INF" ? null : int.Parse(decimalsStr, CultureInfo.InvariantCulture);
         var lang = (string?)el.Attribute(XNamespace.Xml + "lang");
@@ -299,8 +408,20 @@ public static class XmlSerializer
         string? textValue = null;
         if (!isNil)
         {
-            if (decimal.TryParse(el.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) value = parsed;
-            else textValue = el.Value;
+            // Without a taxonomy schema, unitRef/decimals are the available numeric
+            // markers. A unitless lexical such as "123" remains text instead of being
+            // silently retyped as a decimal. Numeric lexical overflow is rejected.
+            var isNumeric = unitRef is not null || decimalsStr is not null;
+            if (isNumeric)
+            {
+                if (!decimal.TryParse(el.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                    throw Unsupported("Numeric fact lexical value is outside the supported exact decimal range.");
+                value = parsed;
+            }
+            else
+            {
+                textValue = el.Value;
+            }
         }
 
         return new XbrlFact
@@ -323,11 +444,25 @@ public static class XmlSerializer
 
     // ---- helpers --------------------------------------------------------------------
 
-    private static string ContextKey(XbrlFact f) => string.Join('\u241F',
-        f.EntityScheme, f.EntityIdentifier,
-        f.Period.ToIsoString(),
-        string.Join(",", f.Dimensions.OrderBy(d => d.Name, StringComparer.Ordinal)
-            .Select(d => $"{d.Name}={d.MemberName}")));
+    // Length-prefix every aspect so legal characters within xs:token identifiers
+    // cannot become context separators or cause two distinct contexts to merge.
+    private static string ContextKey(XbrlFact f)
+    {
+        var parts = new List<string>
+        {
+            "context-v2",
+            f.EntityScheme,
+            f.EntityIdentifier,
+            f.Period.ToIsoString(),
+            f.Dimensions.Count.ToString(CultureInfo.InvariantCulture)
+        };
+        foreach (var dimension in f.Dimensions.OrderBy(dimension => dimension.Name, StringComparer.Ordinal))
+        {
+            parts.Add(dimension.Name);
+            parts.Add(dimension.MemberName);
+        }
+        return string.Concat(parts.Select(part => part.Length.ToString(CultureInfo.InvariantCulture) + ":" + part));
+    }
 
     private static bool UnitPresent(XbrlFact f) => f.Unit is not null || f.CompoundUnit is not null;
 
@@ -347,6 +482,22 @@ public static class XmlSerializer
             throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                 $"Concept '{f.ConceptName}' has no namespace prefix; tuples and unqualified constructs are not exportable.");
     }
+
+    private static void EnsureOnlyAttributes(XElement element, params XName[] allowed)
+    {
+        var allowedSet = allowed.ToHashSet();
+        if (element.Attributes().Any(attribute => !attribute.IsNamespaceDeclaration && !allowedSet.Contains(attribute.Name)))
+            throw Unsupported($"Element '{element.Name}' contains an unsupported attribute.");
+    }
+
+    private static void EnsureNoSignificantText(XElement element, string label)
+    {
+        if (element.Nodes().OfType<XText>().Any(text => !string.IsNullOrWhiteSpace(text.Value)))
+            throw Unsupported($"{label} contains unsupported text content.");
+    }
+
+    private static XbrlExportException Unsupported(string message)
+        => new(DiagnosticCodes.XbrUnsupportedConstruct, message);
 
     private static (string? prefix, string local) SplitQName(string qname)
     {

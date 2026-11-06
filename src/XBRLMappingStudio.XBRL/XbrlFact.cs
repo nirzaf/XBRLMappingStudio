@@ -235,25 +235,48 @@ public sealed class XbrlFact
     public string SemanticKey()
     {
         var unit = CompoundUnit is not null
-            ? "cu:" + CompoundUnit.CanonicalKey
-            : Unit is not null ? "u:" + Unit.Measure + (Unit.Power != 1 ? $"^{Unit.Power}" : "") : "-";
+            ? "cu:" + EscapeSemanticComponent(CompoundUnit.CanonicalKey, "|")
+            : Unit is not null ? "u:" + EscapeSemanticComponent(Unit.Measure, "|^")
+                + (Unit.Power != 1 ? $"^{Unit.Power}" : "") : "-";
         var dims = string.Join(",", Dimensions
             .OrderBy(d => d.Name, System.StringComparer.Ordinal)
-            .Select(d => $"{d.Name}={d.MemberName}:{d.IsExplicit}"));
+            .Select(d => $"{EscapeSemanticComponent(d.Name, "|,=")}="
+                + $"{EscapeSemanticComponent(d.MemberName, "|,=")}:{d.IsExplicit}"));
         var val = IsNil ? "nil"
             : Value is not null ? "n:" + Value.Value.ToString(CultureInfo.InvariantCulture)
-            : TextValue is not null ? "s:" + TextValue
+            : TextValue is not null ? "s:" + EscapeSemanticComponent(TextValue, "|")
             : "(none)";
         var dec = Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF";
         return string.Join('|',
-            ConceptName,
-            $"{EntityScheme}:{EntityIdentifier}",
+            EscapeSemanticComponent(ConceptName, "|"),
+            $"{EscapeSemanticComponent(EntityScheme, "|")}:{EscapeSemanticComponent(EntityIdentifier, "|:")}",
             Period.ToIsoString(),
             unit,
             dims,
-            Language?.ToLowerInvariant() ?? "",
+            Language is null ? "" : EscapeSemanticComponent(Language.ToLowerInvariant(), "|"),
             val,
             dec);
+    }
+
+    private static string EscapeSemanticComponent(string value, string delimiters)
+    {
+        // Percent itself is escaped so the encoding remains one-to-one. Ordinary
+        // values keep their historical key, while delimiters inside lexical values
+        // cannot alias another fact's aspect boundary.
+        var result = new System.Text.StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (character == '%' || delimiters.Contains(character))
+            {
+                result.Append('%');
+                result.Append(((int)character).ToString("X2", CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                result.Append(character);
+            }
+        }
+        return result.ToString();
     }
 }
 

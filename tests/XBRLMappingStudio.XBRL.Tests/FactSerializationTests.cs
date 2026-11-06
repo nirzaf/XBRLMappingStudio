@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Xml.Linq;
 
 namespace XBRLMappingStudio.XBRL.Tests;
 
@@ -118,6 +120,245 @@ public sealed class FactSerializationTests
         var fromJson = OimSerializer.ReadFacts(OimSerializer.Serialize(Profile, facts));
         var fromXml = XmlSerializer.ReadFacts(XmlSerializer.Serialize(Profile, facts));
         AssertMultisetEquivalent(fromJson, fromXml);
+    }
+
+    [Fact]
+    public void JsonAndXml_PreserveIndependentOccurrenceOracleAndExactNumericLexemes()
+    {
+        var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        var repeatedRevenue = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ACME-01",
+            Period = period,
+            Unit = new XbrlUnit("QAR"),
+            Value = 1.2300m,
+            Decimals = 4,
+            Dimensions = new[] { new Dimension("synthetic:Region", "synthetic:EMEA") }
+        };
+        var facts = new[]
+        {
+            repeatedRevenue,
+            repeatedRevenue,
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "ACME-01",
+                Period = period,
+                TextValue = "Revenue | statement: Q1",
+                Language = "en"
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("NetIncome"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "ACME-01",
+                Period = period,
+                Unit = new XbrlUnit("EUR"),
+                Value = 0m,
+                Decimals = 0
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Expenses"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "ACME-01",
+                Period = period,
+                Unit = new XbrlUnit("QAR"),
+                IsNil = true
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("NetIncome"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "ACME-01",
+                Period = period,
+                CompoundUnit = new CompoundUnit(new[] { "USD" }, new[] { "shares" }),
+                Value = 12.5000m,
+                Decimals = 4
+            }
+        };
+
+        var expected = new[]
+        {
+            new FactOccurrence("synthetic:Revenue", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", "QAR", 1, null, "1.2300", false, 4, null,
+                new[] { "synthetic:Region=synthetic:EMEA:True" }),
+            new FactOccurrence("synthetic:Revenue", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", "QAR", 1, null, "1.2300", false, 4, null,
+                new[] { "synthetic:Region=synthetic:EMEA:True" }),
+            new FactOccurrence("synthetic:EntityRegistrantName", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", null, null, null, "Revenue | statement: Q1", false,
+                null, "en", Array.Empty<string>()),
+            new FactOccurrence("synthetic:NetIncome", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", "EUR", 1, null, "0", false, 0, null,
+                Array.Empty<string>()),
+            new FactOccurrence("synthetic:Expenses", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", "QAR", 1, null, null, true, null, null,
+                Array.Empty<string>()),
+            new FactOccurrence("synthetic:NetIncome", "http://xbrl.org/entity/", "ACME-01",
+                "2025-01-01/2026-01-01", null, null, "USD/shares", "12.5000", false, 4,
+                null, Array.Empty<string>())
+        };
+
+        var json = OimSerializer.Serialize(Profile, facts);
+        var xml = XmlSerializer.Serialize(Profile, facts);
+        var fromJson = OimSerializer.ReadFacts(json);
+        var fromXml = XmlSerializer.ReadFacts(xml);
+
+        Assert.Equal(OccurrenceKeys(expected), OccurrenceKeys(fromJson.Select(ToOccurrence)));
+        Assert.Equal(OccurrenceKeys(expected), OccurrenceKeys(fromXml.Select(ToOccurrence)));
+
+        using var jsonDocument = JsonDocument.Parse(json);
+        var jsonRevenueOccurrences = jsonDocument.RootElement.GetProperty("facts").EnumerateObject()
+            .Where(property => property.Value.GetProperty("dimensions").GetProperty("concept").GetString()
+                == "synthetic:Revenue")
+            .ToArray();
+        Assert.Equal(2, jsonRevenueOccurrences.Length);
+        Assert.Equal(2, jsonRevenueOccurrences.Select(property => property.Name).Distinct(StringComparer.Ordinal).Count());
+        foreach (var occurrence in jsonRevenueOccurrences)
+        {
+            Assert.Equal("1.2300", occurrence.Value.GetProperty("value").GetString());
+            Assert.Equal(4, occurrence.Value.GetProperty("decimals").GetInt32());
+            Assert.Equal("iso4217:QAR", occurrence.Value.GetProperty("dimensions").GetProperty("unit").GetString());
+            Assert.Equal("synthetic:EMEA", occurrence.Value.GetProperty("dimensions").GetProperty("synthetic:Region").GetString());
+        }
+
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var xmlRoot = XDocument.Parse(xml).Root!;
+        var xmlRevenueOccurrences = xmlRoot.Elements(synthetic + "Revenue")
+            .Where(element => (string?)element.Attribute("decimals") == "4")
+            .ToArray();
+        Assert.Equal(2, xmlRevenueOccurrences.Length);
+        Assert.All(xmlRevenueOccurrences, element => Assert.Equal("1.2300", element.Value));
+        var xmlText = Assert.Single(xmlRoot.Elements(synthetic + "EntityRegistrantName"));
+        Assert.Equal("en", (string?)xmlText.Attribute(XNamespace.Xml + "lang"));
+        Assert.Equal("Revenue | statement: Q1", xmlText.Value);
+        var xmlNil = Assert.Single(xmlRoot.Elements(synthetic + "Expenses"));
+        Assert.Equal("true", (string?)xmlNil.Attribute(XNamespace.Get("http://www.w3.org/2001/XMLSchema-instance") + "nil"));
+    }
+
+    [Fact]
+    public void SemanticKey_DistinguishesEntitySchemeAndIdentifierBoundaries()
+    {
+        var valid = GoldenFacts()[0];
+        var first = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "urn:foo:bar",
+            EntityIdentifier = "baz",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        var second = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "urn:foo",
+            EntityIdentifier = "bar:baz",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+
+        Assert.NotEqual(first.SemanticKey(), second.SemanticKey());
+
+        var fromXml = XmlSerializer.ReadFacts(XmlSerializer.Serialize(Profile, new[] { first, second }));
+        Assert.Equal(2, fromXml.Count);
+        Assert.Equal(new[] { first.SemanticKey(), second.SemanticKey() }.Order(StringComparer.Ordinal),
+            fromXml.Select(fact => fact.SemanticKey()).Order(StringComparer.Ordinal));
+        var fromJson = OimSerializer.ReadFacts(OimSerializer.Serialize(Profile, new[] { first, second }));
+        Assert.Equal(new[] { first.SemanticKey(), second.SemanticKey() }.Order(StringComparer.Ordinal),
+            fromJson.Select(fact => fact.SemanticKey()).Order(StringComparer.Ordinal));
+
+        var unitWithCaret = new XbrlFact
+        {
+            ConceptName = first.ConceptName,
+            EntityScheme = first.EntityScheme,
+            EntityIdentifier = first.EntityIdentifier,
+            Period = first.Period,
+            Unit = new XbrlUnit("USD^2"),
+            Value = first.Value,
+            Decimals = first.Decimals
+        };
+        var poweredUnit = new XbrlFact
+        {
+            ConceptName = first.ConceptName,
+            EntityScheme = first.EntityScheme,
+            EntityIdentifier = first.EntityIdentifier,
+            Period = first.Period,
+            Unit = new XbrlUnit("USD", 2),
+            Value = first.Value,
+            Decimals = first.Decimals
+        };
+        Assert.NotEqual(unitWithCaret.SemanticKey(), poweredUnit.SemanticKey());
+    }
+
+    [Fact]
+    public void OimJson_RejectsMalformedOrWhitespaceEntityLocalParts()
+    {
+        var valid = GoldenFacts()[0];
+        var whitespaceIdentifier = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = valid.EntityScheme,
+            EntityIdentifier = "ACME INC",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { whitespaceIdentifier }));
+
+        var json = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { valid }))!;
+        var facts = json["facts"]!.AsObject();
+        facts.Single().Value!["dimensions"]!["entity"] = "entity:";
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(json.ToJsonString()));
+    }
+
+    [Fact]
+    public void XmlSerializer_DoesNotMergeContextsAtEmbeddedSeparatorBoundaries()
+    {
+        var valid = GoldenFacts()[0];
+        var separator = "\u241F";
+        var first = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "urn:foo" + separator + "bar",
+            EntityIdentifier = "baz",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        var second = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "urn:foo",
+            EntityIdentifier = "bar" + separator + "baz",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+
+        var xml = XmlSerializer.Serialize(Profile, new[] { first, second });
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var root = XDocument.Parse(xml).Root!;
+        Assert.Equal(2, root.Elements(xbrli + "context").Count());
+
+        var reopened = XmlSerializer.ReadFacts(xml);
+        var expectedEntities = new[] { first, second }
+            .Select(fact => JsonSerializer.Serialize(new[] { fact.EntityScheme, fact.EntityIdentifier }))
+            .Order(StringComparer.Ordinal);
+        var actualEntities = reopened
+            .Select(fact => JsonSerializer.Serialize(new[] { fact.EntityScheme, fact.EntityIdentifier }))
+            .Order(StringComparer.Ordinal);
+        Assert.Equal(expectedEntities, actualEntities);
     }
 
     [Fact]
@@ -327,6 +568,11 @@ public sealed class FactSerializationTests
         var expected = JsonNode.Parse(FixturePaths.Read("product-generated-pass.xbrl.json"));
         var actual = JsonNode.Parse(OimSerializer.Serialize(profile, facts));
         Assert.True(JsonNode.DeepEquals(expected, actual), "C# serializer output changed from the Arelle-validated fixture.");
+
+        var xmlFixtureFacts = XmlSerializer.ReadFacts(FixturePaths.Read("product-generated-pass.xbrl.xml"));
+        var generatedXmlFacts = XmlSerializer.ReadFacts(XmlSerializer.Serialize(profile, facts));
+        Assert.Equal(OccurrenceKeys(facts.Select(ToOccurrence)), OccurrenceKeys(xmlFixtureFacts.Select(ToOccurrence)));
+        Assert.Equal(OccurrenceKeys(facts.Select(ToOccurrence)), OccurrenceKeys(generatedXmlFacts.Select(ToOccurrence)));
     }
 
     [Fact]
@@ -478,4 +724,41 @@ public sealed class FactSerializationTests
         var b = actual.Select(f => f.SemanticKey()).OrderBy(x => x, StringComparer.Ordinal);
         Assert.Equal(a.ToList(), b.ToList());
     }
+
+    private static string[] OccurrenceKeys(IEnumerable<FactOccurrence> occurrences)
+        => occurrences.Select(occurrence => JsonSerializer.Serialize(occurrence))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+    private static FactOccurrence ToOccurrence(XbrlFact fact)
+        => new(
+            fact.ConceptName,
+            fact.EntityScheme,
+            fact.EntityIdentifier,
+            fact.Period.ToIsoString(),
+            fact.Unit?.Measure,
+            fact.Unit?.Power,
+            fact.CompoundUnit?.CanonicalKey,
+            fact.IsNil ? null : fact.Value?.ToString(CultureInfo.InvariantCulture) ?? fact.TextValue,
+            fact.IsNil,
+            fact.Decimals,
+            fact.Language?.ToLowerInvariant(),
+            fact.Dimensions
+                .Select(dimension => $"{dimension.Name}={dimension.MemberName}:{dimension.IsExplicit}")
+                .Order(StringComparer.Ordinal)
+                .ToArray());
+
+    private sealed record FactOccurrence(
+        string ConceptName,
+        string EntityScheme,
+        string EntityIdentifier,
+        string Period,
+        string? UnitMeasure,
+        int? UnitPower,
+        string? CompoundUnit,
+        string? Value,
+        bool IsNil,
+        int? Decimals,
+        string? Language,
+        string[] Dimensions);
 }

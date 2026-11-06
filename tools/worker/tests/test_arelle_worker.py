@@ -805,6 +805,24 @@ class ArelleWorkerTests(unittest.TestCase):
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_product_generated_xml_fixture_passes_arelle(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory(prefix="xms-arelle-xml-fixture-") as temporary:
+            workspace = Path(temporary)
+            report_path = workspace / "product-generated-pass.xbrl.xml"
+            shutil.copyfile(FIXTURES / "product-generated-pass.xbrl.xml", report_path)
+            shutil.copyfile(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd",
+                            workspace / "arelle-test-taxonomy.xsd")
+
+            ok, logs, concept_count = arelle_worker.run_arelle(report_path, self.args)
+
+        self.assertTrue(ok, logs)
+        self.assertGreater(concept_count, 0)
+        self.assertFalse(any(item.get("levelname", "").lower() == "error" for item in logs))
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
     def test_file_taxonomy_uri_passes_arelle(self):
         value = report()
         value["documentInfo"]["taxonomy"] = [(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()]
