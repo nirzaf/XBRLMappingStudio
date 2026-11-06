@@ -342,3 +342,18 @@ tree and screenshot. `git diff --check` passed. The sample used the development
 synthetic profile; this does not qualify installed-profile validation, a full run,
 or publication. Full input identity coverage and report-artifact path embedding
 remain open.
+
+## MAP08 preview-to-full reconciliation through the Desktop view model
+
+`MappingOperationViewModelTests.GroupedPreviewReconcilesWithFullRunAndKeepsBlankDistinctFromZero`
+uses the grouped-revenue workbook with the explicitly enabled synthetic profile.
+It runs the preview and approved full execution through the same Desktop view model,
+checks the preview's partial-sample label and expected Revenue total of 20, verifies
+missing and numeric-zero groups remain distinct, and records the four contributing
+Excel cells. The full run publishes only to a temporary test directory; its emitted
+facts and Revenue source transformation paths must match the preview.
+
+Verification: the focused Release Desktop test passed 1/1, and the full Release
+solution suite passed 710 tests with five Arelle-gated skips. This is headless
+view-model coverage. Native visual/browser reconciliation, installed-profile runs,
+and one-to-many/null/duplicate UI qualification remain open.

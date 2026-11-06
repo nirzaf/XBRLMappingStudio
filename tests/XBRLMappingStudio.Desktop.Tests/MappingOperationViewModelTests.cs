@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Desktop.ViewModels;
@@ -73,7 +74,7 @@ public sealed class MappingOperationViewModelTests
     }
 
     [Fact]
-    public async Task GroupedPreviewEvidenceShowsAllNumericContributorsAndKeepsBlankDistinctFromZero()
+    public async Task GroupedPreviewReconcilesWithFullRunAndKeepsBlankDistinctFromZero()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-group-preview-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -81,28 +82,55 @@ public sealed class MappingOperationViewModelTests
         {
             var workbookPath = TestFixtures.MaterializeGroupedRevenueWorkbook(directory);
             var project = TestFixtures.BuildGroupedRevenueMappingProject(workbookPath);
-            var viewModel = new MainWindowViewModel(project, null,
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = SyntheticProfile.Build().Digest
+            });
+            var outputPath = Path.Combine(directory, "grouped-result.json");
+            var viewModel = new MainWindowViewModel(project, new FixedReportFileDialog(outputPath),
                 (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
             viewModel.AllowSyntheticProfile = true;
             viewModel.SaveProjectTo(Path.Combine(directory, "grouped-mapping.xmap"));
 
-            var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var observedBusy = false;
-            viewModel.PropertyChanged += (_, eventArgs) =>
+            async Task RunAndWaitAsync(RelayCommand command)
             {
-                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
-                if (viewModel.IsBusy) observedBusy = true;
-                else if (observedBusy) operationStopped.TrySetResult();
-            };
+                var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var observedBusy = false;
+                PropertyChangedEventHandler handler = (_, eventArgs) =>
+                {
+                    if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                    if (viewModel.IsBusy) observedBusy = true;
+                    else if (observedBusy) operationStopped.TrySetResult();
+                };
+                viewModel.PropertyChanged += handler;
+                try
+                {
+                    command.Execute(null);
+                    await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                }
+                finally { viewModel.PropertyChanged -= handler; }
+            }
 
-            viewModel.PreviewCommand.Execute(null);
-            await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await RunAndWaitAsync(viewModel.PreviewCommand);
 
             Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             Assert.Contains("2 sampled aggregate(s) are partial", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             var revenueFact = Assert.Single(viewModel.PreviewFacts,
                 fact => fact.SemanticFact?.EntityIdentifier == "Revenue");
             Assert.Equal(20m, revenueFact.SemanticFact!.Value);
+            var previewFacts = viewModel.PreviewFacts
+                .Select(fact => (fact.SemanticFact!.ConceptName,
+                    fact.SemanticFact.EntityIdentifier, fact.SemanticFact.Value))
+                .OrderBy(fact => fact.EntityIdentifier, StringComparer.Ordinal)
+                .ToArray();
+            var previewRevenueEvidence = revenueFact.Evidence
+                .Select(evidence => $"{evidence.Source.Locator}|{evidence.TransformationPathDisplay}")
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .ToArray();
             Assert.Equal(new[]
             {
                 "Financials!A4", "Financials!A5", "Financials!B4", "Financials!B5"
@@ -121,6 +149,23 @@ public sealed class MappingOperationViewModelTests
             }
             Assert.Same(revenueFact, viewModel.SelectedPreviewFact);
             Assert.Same(revenueFact.Evidence[0], viewModel.SelectedPreviewEvidence);
+
+            await RunAndWaitAsync(viewModel.ExecuteCommand);
+
+            Assert.StartsWith("Full run ·", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.StartsWith("Published grouped-result.json", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.True(File.Exists(outputPath));
+            Assert.Equal(previewFacts, viewModel.PreviewFacts
+                .Select(fact => (fact.SemanticFact!.ConceptName,
+                    fact.SemanticFact.EntityIdentifier, fact.SemanticFact.Value))
+                .OrderBy(fact => fact.EntityIdentifier, StringComparer.Ordinal)
+                .ToArray());
+            var fullRevenueFact = Assert.Single(viewModel.PreviewFacts,
+                fact => fact.SemanticFact?.EntityIdentifier == "Revenue");
+            Assert.Equal(20m, fullRevenueFact.SemanticFact!.Value);
+            Assert.Equal(previewRevenueEvidence, fullRevenueFact.Evidence
+                .Select(evidence => $"{evidence.Source.Locator}|{evidence.TransformationPathDisplay}")
+                .OrderBy(value => value, StringComparer.Ordinal));
         }
         finally
         {
@@ -241,6 +286,24 @@ public sealed class MappingOperationViewModelTests
             workerFactory);
         viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
         return viewModel;
+    }
+
+    private sealed class FixedReportFileDialog(string outputPath) : IProjectFileDialog
+    {
+        public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
+        public Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
+            => Task.FromResult(UnsavedProjectChoice.Cancel);
+        public Task<string?> SaveReportAsync() => Task.FromResult<string?>(outputPath);
+        public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveDestinationFileAsync(string kind) => Task.FromResult<string?>(null);
+        public Task<bool> ConfirmDestinationPublicationAsync(string databasePath, string table,
+            IReadOnlyList<string> businessKey, int factCount, string semanticDigest)
+            => Task.FromResult(false);
+        public Task<bool> ConfirmFileDestinationPublicationAsync(string destinationPath, string format,
+            int factCount, string semanticDigest)
+            => Task.FromResult(false);
     }
 
     private static FilingProfile BuildTestProfile()
