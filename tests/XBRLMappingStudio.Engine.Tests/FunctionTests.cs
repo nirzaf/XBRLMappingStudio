@@ -253,6 +253,34 @@ public class FunctionTests
     }
 
     [Fact]
+    public void Ratio_RejectsUnknownDivideByZeroPolicyWithNonzeroDenominator()
+    {
+        var (project, ctx) = RatioGraph("IgnoreErrors", 10m, 2m);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidDivideByZeroPolicy
+            && diagnostic.Message.Contains("IgnoreErrors", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void Ratio_NonzeroUnderflowFailsWithNumericOverflowDiagnostic()
+    {
+        var (project, ctx) = RatioGraph("Diagnostic", 0.0000000000000000000000000001m,
+            10000000000000000000000000000m);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapNumericOverflow
+            && diagnostic.Message.Contains("underflowed CLR decimal range", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
     public void RatioFact_RecordsBothSourceNodesAndFactLevelTransformationIds()
     {
         const string numeratorBinding = "ratio-numerator";

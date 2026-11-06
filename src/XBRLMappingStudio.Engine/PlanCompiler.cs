@@ -1165,6 +1165,18 @@ public sealed class PlanCompiler
 
             case NodeTypeConstants.Ratio:
             {
+                var policy = GetString(node, "divideByZero") ?? "Diagnostic";
+                if (policy is not ("Diagnostic" or "Missing" or "NaN"))
+                {
+                    diag.Error(DiagnosticCodes.MapInvalidDivideByZeroPolicy,
+                        DiagnosticSubsystem.Mapping,
+                        DiagnosticStage.Execution,
+                        $"Unknown divide-by-zero policy '{policy}'; use Diagnostic, Missing or NaN.",
+                        nodeId: node.NodeId);
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+
                 var n = inputs.GetValueOrDefault("numerator", DataValue.Missing(PortShape.Decimal));
                 var d = inputs.GetValueOrDefault("denominator", DataValue.Missing(PortShape.Decimal));
                 if (n.IsMissing || d.IsMissing || n.IsNil || d.IsNil)
@@ -1175,7 +1187,6 @@ public sealed class PlanCompiler
                 var dv = d.AsDecimal();
                 if (dv == 0m)
                 {
-                    var policy = GetString(node, "divideByZero") ?? "Diagnostic";
                     switch (policy)
                     {
                         case "Missing":
@@ -1202,7 +1213,13 @@ public sealed class PlanCompiler
                 }
                 try
                 {
-                    var result = n.AsDecimal() / dv;
+                    var numerator = n.AsDecimal();
+                    var result = numerator / dv;
+                    if (numerator != 0m && result == 0m)
+                    {
+                        throw new NumericOverflowException(
+                            $"Ratio division underflowed CLR decimal range on node '{node.DisplayName}'.");
+                    }
                     outputs["value"] = DataValue.DecimalValue(result, n.Source ?? d.Source);
                 }
                 catch (OverflowException)
