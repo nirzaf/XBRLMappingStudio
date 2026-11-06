@@ -209,6 +209,7 @@ public sealed class SqliteSourceAdapterTests
         });
 
         Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, error.Code);
+        Assert.True(error.IsInputBudgetExceeded);
         Assert.Contains("before its cells were materialized", error.Message, StringComparison.Ordinal);
     }
 

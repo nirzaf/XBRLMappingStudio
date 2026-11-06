@@ -12,13 +12,16 @@ public sealed class AdapterException : Exception
 {
     public string Code { get; }
     public string Stage { get; }
+    public bool IsInputBudgetExceeded { get; }
 
     public AdapterException(string code, string message,
-        string stage = DiagnosticStage.Introspection)
+        string stage = DiagnosticStage.Introspection,
+        bool isInputBudgetExceeded = false)
         : base(message)
     {
         Code = code;
         Stage = stage;
+        IsInputBudgetExceeded = isInputBudgetExceeded;
     }
 
     public Diagnostic ToDiagnostic(string? sourceId = null, string? operationId = null)

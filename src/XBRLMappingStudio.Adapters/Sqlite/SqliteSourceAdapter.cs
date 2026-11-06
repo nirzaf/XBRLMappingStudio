@@ -140,7 +140,8 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
                 columns, connection.SourceId, table, rowId, totalCellBytes);
             if (estimatedRowBytes > _maximumRowBytes)
                 throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
-                    $"A SQLite source row exceeded the {_maximumRowBytes} byte row budget before its cells were materialized.");
+                    $"A SQLite source row exceeded the {_maximumRowBytes} byte row budget before its cells were materialized.",
+                    isInputBudgetExceeded: true);
 
             var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
             var keyValues = new List<(ColumnSchema Column, object Value)>(stableKeyColumns.Length);
@@ -183,6 +184,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
         var sourceIdBytes = Encoding.UTF8.GetByteCount(sourceId);
         var rowIdBytes = Encoding.UTF8.GetByteCount(rowId);
         var decimalTextColumns = 0;
+        var booleanColumns = 0;
         foreach (var column in columns)
         {
             var nameBytes = Encoding.UTF8.GetByteCount(column.Name);
@@ -190,9 +192,11 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
             estimate = checked(estimate + nameBytes + 48L
                 + nameBytes + sourceIdBytes + locatorBytes + rowIdBytes + 48L);
             if (column.InferredShape == PortShape.Decimal) decimalTextColumns++;
+            if (column.InferredShape == PortShape.Boolean) booleanColumns++;
         }
 
-        return checked(estimate + (totalCellBytes * 3L) + (decimalTextColumns * 32L));
+        return checked(estimate + (totalCellBytes * 3L)
+            + (decimalTextColumns * 32L) + (booleanColumns * 5L));
     }
 
     private static string CombineSqlExpressions(IEnumerable<string> expressions, string operation)

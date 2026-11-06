@@ -427,7 +427,7 @@ public sealed class MappingJobService
             catch (AdapterException ex)
             {
                 context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, opId));
-                manifest.Outcome = ex.Code == DiagnosticCodes.IoNumberOutOfBudget
+                manifest.Outcome = ex.IsInputBudgetExceeded
                     ? RunOutcome.IncompleteConfiguration
                     : RunOutcome.DataError;
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
@@ -514,7 +514,7 @@ public sealed class MappingJobService
         catch (AdapterException ex)
         {
             context.Diagnostics.Add(ex.ToDiagnostic(activeBindingId, opId));
-            manifest.Outcome = ex.Code == DiagnosticCodes.IoNumberOutOfBudget
+            manifest.Outcome = ex.IsInputBudgetExceeded
                 ? RunOutcome.IncompleteConfiguration
                 : RunOutcome.DataError;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
