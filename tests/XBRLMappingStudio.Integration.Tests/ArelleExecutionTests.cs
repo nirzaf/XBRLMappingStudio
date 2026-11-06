@@ -663,14 +663,8 @@ public sealed class ArelleExecutionTests
             expectedRequiredChecks: Array.Empty<string>());
 
     private static string PythonExecutable()
-    {
-        var configured = Environment.GetEnvironmentVariable("XMS_WORKER_PYTHON")
-            ?? Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
-        if (!string.IsNullOrWhiteSpace(configured)) return configured;
-        if (OperatingSystem.IsWindows())
-            throw new InvalidOperationException("Set XMS_WORKER_PYTHON to a direct Python executable on Windows.");
-        return "python3";
-    }
+        => PythonRuntime.Resolve()
+            ?? throw new InvalidOperationException("A direct Python executable is required for the worker protocol fixture.");
 
     private static string[] FakeWorkerArgs(string scriptPath, string mode, string profileId, string digest)
         => new[] { scriptPath, Path.Combine(Path.GetTempPath(), "xms-worker-unused-" + Guid.NewGuid().ToString("N")), mode, profileId, digest };
@@ -799,14 +793,12 @@ public sealed class RequiresPythonFactAttribute : FactAttribute
 {
     public RequiresPythonFactAttribute()
     {
-        var executable = Environment.GetEnvironmentVariable("XMS_WORKER_PYTHON")
-            ?? Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
-        if (string.IsNullOrWhiteSpace(executable) && OperatingSystem.IsWindows())
+        var executable = PythonRuntime.Resolve();
+        if (executable is null)
         {
-            Skip = "Set XMS_WORKER_PYTHON to a direct Python executable on Windows; the Store alias can escape Job Object assignment.";
+            Skip = "A direct Python executable is required for the worker protocol fixture; the Windows Store alias is not supported.";
             return;
         }
-        if (string.IsNullOrWhiteSpace(executable)) executable = "python3";
         try
         {
             using var process = Process.Start(new ProcessStartInfo
@@ -828,5 +820,35 @@ public sealed class RequiresPythonFactAttribute : FactAttribute
         {
             Skip = "A Python interpreter is required for the worker protocol fixture.";
         }
+    }
+}
+
+internal static class PythonRuntime
+{
+    public static string? Resolve()
+    {
+        var configured = Environment.GetEnvironmentVariable("XMS_WORKER_PYTHON");
+        if (string.IsNullOrWhiteSpace(configured))
+            configured = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+
+        if (!OperatingSystem.IsWindows())
+            return string.IsNullOrWhiteSpace(configured) ? "python3" : configured;
+
+        if (!string.IsNullOrWhiteSpace(configured)
+            && (Path.IsPathRooted(configured)
+                || configured.Contains(Path.DirectorySeparatorChar)
+                || configured.Contains(Path.AltDirectorySeparatorChar)))
+            return File.Exists(configured) ? Path.GetFullPath(configured) : null;
+
+        var commandName = string.IsNullOrWhiteSpace(configured) ? "python.exe" : configured;
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (directory.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase)) continue;
+            var candidate = Path.GetFullPath(Path.Combine(directory, commandName));
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        return null;
     }
 }

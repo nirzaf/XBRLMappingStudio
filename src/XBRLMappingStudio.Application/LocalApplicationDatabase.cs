@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -127,7 +129,7 @@ public sealed class LocalApplicationDatabase
             }
             if (!OperatingSystem.IsWindows())
                 File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            File.Move(temporaryPath, fullBackupPath);
+            PublishBackupWithoutOverwrite(temporaryPath, fullBackupPath);
         }
         finally
         {
@@ -374,6 +376,31 @@ public sealed class LocalApplicationDatabase
         wal.CommandText = "PRAGMA journal_mode=WAL";
         _ = wal.ExecuteScalar();
     }
+
+    private static void PublishBackupWithoutOverwrite(string temporaryPath, string destinationPath)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            File.Move(temporaryPath, destinationPath);
+            return;
+        }
+
+        // POSIX rename may replace a destination created after the earlier check.
+        // A same-filesystem hard link publishes atomically and fails with EEXIST
+        // when another backup wins the race.
+        if (Link(temporaryPath, destinationPath) == 0) return;
+
+        var error = Marshal.GetLastPInvokeError();
+        if (error == 17) // EEXIST
+            throw new IOException("Backup destination already exists; refusing to overwrite it.", new Win32Exception(error));
+        throw new IOException("Could not atomically publish the backup without overwriting its destination.",
+            new Win32Exception(error));
+    }
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int Link(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string existingPath,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath);
 
     private static string DefaultPath()
         => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

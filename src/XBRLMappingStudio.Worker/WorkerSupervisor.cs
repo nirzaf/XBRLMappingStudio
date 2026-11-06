@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 using XBRLMappingStudio.Diagnostics;
@@ -282,7 +283,7 @@ internal sealed class WorkerProcessTree : IDisposable
     private const string WindowsJobNamePrefix = "XBRLMappingStudio.Worker.";
     private readonly bool _linuxProcessGroup;
     private SafeFileHandle? _job;
-    private Process? _process;
+    private int? _processId;
     private bool _windowsJobAssigned;
 
     private WorkerProcessTree(bool linuxProcessGroup) => _linuxProcessGroup = linuxProcessGroup;
@@ -301,7 +302,7 @@ internal sealed class WorkerProcessTree : IDisposable
             if (setsid is null)
                 throw new PlatformNotSupportedException("Linux worker isolation requires the 'setsid' executable.");
 
-            var executable = startInfo.FileName;
+            var executable = ResolveLinuxExecutable(startInfo);
             var arguments = startInfo.ArgumentList.ToArray();
             startInfo.FileName = setsid;
             startInfo.ArgumentList.Clear();
@@ -319,7 +320,7 @@ internal sealed class WorkerProcessTree : IDisposable
             // that needs eager children requires a native suspended-process launch.
             process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException($"Failed to start '{startInfo.FileName}'.");
-            tree._process = process;
+            tree._processId = process.Id;
             if (OperatingSystem.IsWindows()) tree.AttachWindowsJob(process);
             return (process, tree);
         }
@@ -333,6 +334,48 @@ internal sealed class WorkerProcessTree : IDisposable
             tree.Dispose();
             throw;
         }
+    }
+
+    [SupportedOSPlatform("linux")]
+    private static string ResolveLinuxExecutable(ProcessStartInfo startInfo)
+    {
+        var requested = startInfo.FileName;
+        var workingDirectory = string.IsNullOrWhiteSpace(startInfo.WorkingDirectory)
+            ? Environment.CurrentDirectory
+            : startInfo.WorkingDirectory;
+        IEnumerable<string> candidates;
+        if (Path.IsPathRooted(requested)
+            || requested.Contains(Path.DirectorySeparatorChar)
+            || requested.Contains(Path.AltDirectorySeparatorChar))
+        {
+            candidates = new[] { Path.GetFullPath(requested, workingDirectory) };
+        }
+        else
+        {
+            var searchPath = startInfo.Environment.TryGetValue("PATH", out var configuredPath)
+                ? configuredPath
+                : Environment.GetEnvironmentVariable("PATH");
+            candidates = (searchPath ?? string.Empty)
+                .Split(Path.PathSeparator)
+                .Select(directory => Path.GetFullPath(
+                    Path.Combine(string.IsNullOrEmpty(directory) ? workingDirectory : directory, requested),
+                    workingDirectory));
+        }
+
+        var executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        foreach (var candidate in candidates)
+        {
+            if (!File.Exists(candidate)) continue;
+            try
+            {
+                if ((File.GetUnixFileMode(candidate) & executeBits) != 0)
+                    return candidate;
+            }
+            catch (IOException) { /* try the next PATH entry */ }
+            catch (UnauthorizedAccessException) { /* try the next PATH entry */ }
+        }
+
+        throw new Win32Exception(2, $"The Linux worker executable '{requested}' was not found or is not executable.");
     }
 
     private void AttachWindowsJob(Process process)
@@ -393,8 +436,8 @@ internal sealed class WorkerProcessTree : IDisposable
             _job.Dispose();
             return;
         }
-        if (_linuxProcessGroup && _process is not null)
-            _ = KillProcessGroup(_process.Id);
+        if (_linuxProcessGroup && _processId is { } processId)
+            _ = KillProcessGroup(processId);
         TryKill(process);
     }
 
@@ -403,8 +446,8 @@ internal sealed class WorkerProcessTree : IDisposable
         // KILL_ON_JOB_CLOSE also cleans descendants if the direct process exited
         // while they still held an inherited stdout/stderr handle.
         _job?.Dispose();
-        if (_linuxProcessGroup && _process is not null)
-            _ = KillProcessGroup(_process.Id);
+        if (_linuxProcessGroup && _processId is { } processId)
+            _ = KillProcessGroup(processId);
     }
 
     private static int KillProcessGroup(int processId)
