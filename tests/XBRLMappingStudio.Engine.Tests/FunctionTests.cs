@@ -79,9 +79,21 @@ public class FunctionTests
     }
 
     [Theory]
+    [InlineData("(123.45)", "invariant", -123.45)]
+    [InlineData("(1.234,50)", "de-DE", -1234.50)]
+    public void ParseDecimal_UsesAccountingParenthesesAsAnExplicitNegative(
+        string lexeme, string culture, decimal expected)
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue(lexeme), culture);
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Equal(expected, Assert.Single(result!.Facts).Value);
+    }
+
+    [Theory]
     [InlineData("123456789012345678901234567890", "significant digits")]
     [InlineData("0.00000000000000000000000000001", "scale 29")]
-    [InlineData("(123.45)", "parentheses")]
     public void ParseDecimal_RejectsOutOfDomainOrUnsupportedLexicalForms(string text, string expectedMessage)
     {
         var (project, context) = ParseDecimalGraph(DataValue.StringValue(text), "invariant");
@@ -92,6 +104,25 @@ public class FunctionTests
         Assert.Contains(result.Diagnostics, diagnostic =>
             diagnostic.Code == DiagnosticCodes.MapInvalidConstant
             && diagnostic.Message.Contains(expectedMessage, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("(123.45")]
+    [InlineData("123.45)")]
+    [InlineData("((123.45))")]
+    [InlineData("(-123.45)")]
+    [InlineData("(+123.45)")]
+    [InlineData("12(3.45)")]
+    public void ParseDecimal_RejectsMalformedOrDoubleSignedAccountingParentheses(string text)
+    {
+        var (project, context) = ParseDecimalGraph(DataValue.StringValue(text), "invariant");
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.Empty(result!.Facts);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidConstant
+            && diagnostic.Message.Contains("parentheses", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

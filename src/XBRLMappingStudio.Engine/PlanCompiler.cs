@@ -1716,7 +1716,7 @@ public sealed class PlanCompiler
         // Preserve the original lexical form; reject excess precision before CLR
         // decimal parsing can round a too-long financial lexeme.
         if (!DecimalDomain.TryValidateLexical(text, culture.NumberFormat,
-                ctx.MaxSignificantDigits, out var domainFailure))
+                ctx.MaxSignificantDigits, out var domainFailure, allowAccountingParentheses: true))
         {
             diag.Error(
                 DiagnosticCodes.MapInvalidConstant,
@@ -1728,7 +1728,11 @@ public sealed class PlanCompiler
             value = 0m;
             return false;
         }
-        if (!decimal.TryParse(text, NumberStyles.Number, culture, out value))
+        var parseStyles = NumberStyles.Number;
+        var trimmedText = text.Trim();
+        if (trimmedText.StartsWith('(') && trimmedText.EndsWith(')'))
+            parseStyles |= NumberStyles.AllowParentheses;
+        if (!decimal.TryParse(text, parseStyles, culture, out value))
         {
             diag.Error(
                 DiagnosticCodes.MapInvalidConstant,

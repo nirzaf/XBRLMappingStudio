@@ -33,13 +33,33 @@ internal static class DecimalDomain
     }
 
     public static bool TryValidateLexical(string text, NumberFormatInfo numberFormat,
-        int maxSignificantDigits, out string reason)
+        int maxSignificantDigits, out string reason, bool allowAccountingParentheses = false)
     {
         var token = text.Trim();
         if (token.Contains('(') || token.Contains(')'))
         {
-            reason = "Accounting parentheses are not supported; use an explicit negative sign or ChangeSign node.";
-            return false;
+            if (!allowAccountingParentheses)
+            {
+                reason = "Accounting parentheses are not supported by this decimal parser.";
+                return false;
+            }
+
+            if (token.Length < 3
+                || token[0] != '('
+                || token[^1] != ')'
+                || token[1..^1].Contains('(')
+                || token[1..^1].Contains(')'))
+            {
+                reason = "Accounting parentheses must wrap the complete numeric lexeme exactly once.";
+                return false;
+            }
+
+            token = token[1..^1].Trim();
+            if (!StringComparer.Ordinal.Equals(token, StripOneSign(token, numberFormat)))
+            {
+                reason = "Accounting parentheses cannot be combined with an explicit positive or negative sign.";
+                return false;
+            }
         }
 
         token = StripOneSign(token, numberFormat);
