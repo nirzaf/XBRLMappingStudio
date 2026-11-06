@@ -37,6 +37,23 @@ public class SupervisionTests
     }
 
     [Fact]
+    public async Task SingleOversizedNewlineFreeRecord_IsDrainedWithBoundedCapture()
+    {
+        var supervisor = new WorkerSupervisor(maxLogBytes: 4096);
+        var (exe, args) = Shell(
+            "head -c 1048576 /dev/zero | tr '\\000' x",
+            "[Console]::Out.Write(('x' * 1048576)); [Console]::Out.Flush()");
+
+        var result = await supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30));
+
+        var capturedBytes = result.CapturedLog.Sum(line => System.Text.Encoding.UTF8.GetByteCount(line) + 1);
+        Assert.Equal(SupervisedOutcome.Completed, result.Outcome);
+        Assert.True(result.LogTruncated);
+        Assert.True(capturedBytes <= 4096);
+        Assert.Single(result.CapturedLog);
+    }
+
+    [Fact]
     public async Task CrashingWorker_DistinctTerminalOutcome_AndExitCodePreserved()
     {
         var supervisor = new WorkerSupervisor();
@@ -112,5 +129,123 @@ public class SupervisionTests
         Assert.Equal(DiagnosticCodes.WkrTimeout, result.Failure!.Code);
         Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
         Assert.False(result.OrphanDetected);
+    }
+
+    [Fact]
+    public async Task CallerCancellation_KillsWindowsOrUnixChildTree()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-supervisor-cancel-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var pidPath = Path.Combine(workspace, "processes.txt");
+        var quotedPidPath = OperatingSystem.IsWindows()
+            ? "'" + pidPath.Replace("'", "''", StringComparison.Ordinal) + "'"
+            : "'" + pidPath.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+        var (exe, args) = Shell(
+            $"sleep 60 & child=$!; printf '%s\\n%s\\n' \"$$\" \"$child\" > {quotedPidPath}; wait",
+            $"$child = Start-Process -FilePath 'ping.exe' -ArgumentList @('-t','127.0.0.1') -PassThru -WindowStyle Hidden; [System.IO.File]::WriteAllLines({quotedPidPath}, @([string]$PID, [string]$child.Id)); while ($true) {{ Start-Sleep -Seconds 1 }}");
+
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            var supervisor = new WorkerSupervisor();
+            var running = supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30),
+                cancellationToken: cancellation.Token);
+            Assert.True(await WaitForFileAsync(pidPath, TimeSpan.FromSeconds(5)),
+                "The supervised process tree did not publish its test PIDs.");
+            var processIds = (await File.ReadAllLinesAsync(pidPath))
+                .Select(line => int.Parse(line, System.Globalization.CultureInfo.InvariantCulture))
+                .ToArray();
+            Assert.Equal(2, processIds.Length);
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running.WaitAsync(TimeSpan.FromSeconds(5)));
+            foreach (var processId in processIds)
+                Assert.True(await WaitForProcessExitAsync(processId, TimeSpan.FromSeconds(5)),
+                    $"Supervised process {processId} remained alive after caller cancellation.");
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task PipeDrainDeadlineAfterParentExit_IsTimedOutAndReportsUnreachableDescendant()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-supervisor-inherited-pipe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var pidPath = Path.Combine(workspace, "child.pid");
+        var quotedPidPath = OperatingSystem.IsWindows()
+            ? "'" + pidPath.Replace("'", "''", StringComparison.Ordinal) + "'"
+            : "'" + pidPath.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+        var (exe, args) = Shell(
+            $"IFS= read -r launch; sleep 60 & child=$!; echo \"$child\" > {quotedPidPath}; exit 0",
+            $"$null = [Console]::In.ReadLine(); $start = New-Object System.Diagnostics.ProcessStartInfo; $start.FileName = 'ping.exe'; $start.Arguments = '-t 127.0.0.1'; $start.UseShellExecute = $false; $start.CreateNoWindow = $true; $child = [System.Diagnostics.Process]::Start($start); [System.IO.File]::WriteAllText({quotedPidPath}, [string]$child.Id); exit 0");
+        int? childId = null;
+        try
+        {
+            var running = new WorkerSupervisor().RunAsync(exe, args,
+                TimeSpan.FromSeconds(5), stdinPayload: "launch\n");
+            Assert.True(await WaitForFileAsync(pidPath, TimeSpan.FromSeconds(5)),
+                "The parent did not start its pipe-inheriting child.");
+            childId = int.Parse(await File.ReadAllTextAsync(pidPath), System.Globalization.CultureInfo.InvariantCulture);
+            var result = await running.WaitAsync(TimeSpan.FromSeconds(8));
+
+            Assert.Equal(SupervisedOutcome.TimedOut, result.Outcome);
+            Assert.Equal(DiagnosticCodes.WkrTimeout, result.Failure!.Code);
+            Assert.False(result.OrphanDetected,
+                $"The process group/job cleanup reported an orphan; outcome={result.Outcome}, exit={result.ExitCode}, logs={string.Join(" | ", result.CapturedLog)}");
+            Assert.True(await WaitForProcessExitAsync(childId.Value, TimeSpan.FromSeconds(3)),
+                "The supervised process group/job must kill descendants after the direct parent exits.");
+        }
+        finally
+        {
+            if (childId is not null) TryKillProcess(childId.Value);
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static async Task<bool> WaitForFileAsync(string path, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(path)) return true;
+            await Task.Delay(25);
+        }
+        return File.Exists(path);
+    }
+
+    private static async Task<bool> WaitForProcessExitAsync(int processId, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!IsProcessAlive(processId)) return true;
+            await Task.Delay(50);
+        }
+        return !IsProcessAlive(processId);
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException) { return false; }
+    }
+
+    private static void TryKillProcess(int processId)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException) { }
     }
 }

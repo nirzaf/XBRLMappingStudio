@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using XBRLMappingStudio.Diagnostics;
 
 namespace XBRLMappingStudio.Worker;
@@ -63,15 +66,18 @@ public sealed class WorkerSupervisor
         };
         foreach (var a in arguments) psi.ArgumentList.Add(a);
 
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start '{executable}'.");
+        var started = WorkerProcessTree.Start(psi);
+        using var process = started.Process;
+        using var processTree = started.Tree;
 
         var log = new BoundedLog(_maxLogBytes);
-        var stdoutTask = PumpAsync(process.StandardOutput);
-        var stderrTask = PumpAsync(process.StandardError);
+        var stdoutTask = PumpAsync(process.StandardOutput, linked.Token);
+        var stderrTask = PumpAsync(process.StandardError, linked.Token);
 
         bool timedOut = false;
         bool callerCancelled = false;
+        bool awaitingPipeDrain = false;
+        bool orphan = false;
         try
         {
             if (stdinPayload is not null)
@@ -82,21 +88,25 @@ public sealed class WorkerSupervisor
             try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
 
             await process.WaitForExitAsync(linked.Token);
+            awaitingPipeDrain = true;
+            await Task.WhenAll(stdoutTask, stderrTask);
         }
         catch (OperationCanceledException) when (watchdog.IsCancellationRequested)
         {
             timedOut = true;
-            KillTree(process);
+            orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+            processTree.Kill(process);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Caller cancellation: same terminal treatment as the watchdog.
             callerCancelled = true;
-            KillTree(process);
+            orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+            processTree.Kill(process);
         }
         catch
         {
-            KillTree(process);
+            processTree.Kill(process);
             try
             {
                 await process.WaitForExitAsync(CancellationToken.None)
@@ -108,16 +118,25 @@ public sealed class WorkerSupervisor
             throw;
         }
 
-        await Task.WhenAll(stdoutTask, stderrTask);
+        // A worker can leave a descendant holding an inherited pipe open. The
+        // watchdog/caller cancellation also cancels these fixed-buffer drains so
+        // cleanup never waits forever for such a pipe to close. If the direct
+        // process exited before the drain deadline, the surviving pipe is evidence
+        // of a descendant that could not be reached through the exited parent.
+        try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch
+        {
+            orphan |= awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+            processTree.Kill(process);
+        }
 
         // Orphan check on shutdown: after tree-kill the supervised process must be gone.
-        bool orphan = false;
         if (!process.HasExited)
         {
-            KillTree(process);
+            processTree.Kill(process);
             try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); }
             catch { /* timeout below counts as orphan */ }
-            orphan = !process.HasExited;
+            orphan |= !process.HasExited;
         }
 
         var exitCode = process.HasExited ? (int?)process.ExitCode : null;
@@ -138,27 +157,73 @@ public sealed class WorkerSupervisor
         return new SupervisionResult(SupervisedOutcome.Completed, exitCode, log.Lines,
             log.Truncated, orphan, Failure: null);
 
-        async Task PumpAsync(StreamReader reader)
+        async Task PumpAsync(StreamReader reader, CancellationToken token)
         {
-            // Drain continuously; append only until the budget is spent.
-            while (true)
+            // Never use ReadLineAsync here: a worker can emit one newline-free
+            // record of arbitrary size. Keep at most one bounded line and drain
+            // the rest in fixed-size chunks.
+            var buffer = new char[4096];
+            var line = new StringBuilder();
+            long lineBytes = 0;
+            var discardingLine = false;
+            try
             {
-                var line = await reader.ReadLineAsync(CancellationToken.None);
-                if (line is null) break;
-                log.Append(line);
+                while (true)
+                {
+                    var count = await reader.ReadAsync(buffer.AsMemory(), token);
+                    if (count == 0) break;
+                    for (var index = 0; index < count; index++)
+                    {
+                        var character = buffer[index];
+                        if (character == '\n')
+                        {
+                            if (!discardingLine)
+                            {
+                                if (line.Length > 0 && line[^1] == '\r')
+                                    line.Length--;
+                                log.Append(line.ToString());
+                            }
+                            else
+                                log.MarkTruncated();
+                            line.Clear();
+                            lineBytes = 0;
+                            discardingLine = false;
+                            continue;
+                        }
+
+                        if (discardingLine) continue;
+                        var characterBytes = ConservativeUtf8ByteCount(character);
+                        // Reserve a byte for the line terminator in the public
+                        // captured-log accounting.
+                        if (lineBytes + characterBytes + 1 > _maxLogBytes)
+                        {
+                            if (line.Length > 0) log.Append(line.ToString());
+                            log.MarkTruncated();
+                            line.Clear();
+                            lineBytes = 0;
+                            discardingLine = true;
+                            continue;
+                        }
+
+                        line.Append(character);
+                        lineBytes += characterBytes;
+                    }
+                }
+
+                if (line.Length > 0 && !discardingLine)
+                    log.Append(line.ToString());
             }
+            catch (IOException) { /* process-tree shutdown closes redirected pipes */ }
         }
     }
 
-    private static void KillTree(Process process)
+    private static int ConservativeUtf8ByteCount(char character) => character switch
     {
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-        }
-        catch (InvalidOperationException) { /* raced with exit */ }
-        catch { /* best effort, mirroring ArelleWorker disposal */ }
-    }
+        <= '\u007f' => 1,
+        <= '\u07ff' => 2,
+        >= '\ud800' and <= '\udfff' => 2,
+        _ => 3,
+    };
 
     private static Diagnostic Diag(string code, string message) => new()
     {
@@ -175,6 +240,7 @@ public sealed class WorkerSupervisor
     {
         private readonly List<string> _lines = new();
         private long _bytes;
+        private readonly object _gate = new();
         public bool Truncated { get; private set; }
 
         public BoundedLog(long maxBytes) => _max = maxBytes;
@@ -184,9 +250,244 @@ public sealed class WorkerSupervisor
 
         public void Append(string line)
         {
-            _bytes += Encoding.UTF8.GetByteCount(line) + 1;
-            if (_bytes > _max) { Truncated = true; return; }
-            _lines.Add(line);
+            lock (_gate)
+            {
+                var bytes = Encoding.UTF8.GetByteCount(line) + 1;
+                if (_bytes + bytes > _max) { Truncated = true; return; }
+                _bytes += bytes;
+                _lines.Add(line);
+            }
+        }
+
+        public void MarkTruncated()
+        {
+            lock (_gate) Truncated = true;
         }
     }
+}
+
+/// <summary>
+/// Owns the process-tree boundary for the complete worker lifetime. Windows workers
+/// are assigned to a kill-on-close Job Object immediately after startup; Linux
+/// workers are started in a new session/process group so descendants remain
+/// addressable after the direct process exits. .NET Process.Start does not expose
+/// suspended launch: supported worker entry points must not create child processes
+/// before their first request, or a child could start before Windows job assignment.
+/// </summary>
+internal sealed class WorkerProcessTree : IDisposable
+{
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInformationClass = 9;
+    private const int SigKill = 9;
+    private const string WindowsJobNamePrefix = "XBRLMappingStudio.Worker.";
+    private readonly bool _linuxProcessGroup;
+    private SafeFileHandle? _job;
+    private Process? _process;
+    private bool _windowsJobAssigned;
+
+    private WorkerProcessTree(bool linuxProcessGroup) => _linuxProcessGroup = linuxProcessGroup;
+
+    public bool CanCleanDescendantsAfterParentExit
+        => _linuxProcessGroup || _windowsJobAssigned;
+
+    public static (Process Process, WorkerProcessTree Tree) Start(ProcessStartInfo startInfo)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        var linuxProcessGroup = false;
+        if (OperatingSystem.IsLinux())
+        {
+            var setsid = new[] { "/usr/bin/setsid", "/bin/setsid" }
+                .FirstOrDefault(File.Exists);
+            if (setsid is null)
+                throw new PlatformNotSupportedException("Linux worker isolation requires the 'setsid' executable.");
+
+            var executable = startInfo.FileName;
+            var arguments = startInfo.ArgumentList.ToArray();
+            startInfo.FileName = setsid;
+            startInfo.ArgumentList.Clear();
+            startInfo.ArgumentList.Add(executable);
+            foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+            linuxProcessGroup = true;
+        }
+
+        var tree = new WorkerProcessTree(linuxProcessGroup);
+        Process? process = null;
+        try
+        {
+            // The bundled Arelle and PDF workers do not create subprocesses during
+            // startup. Keep that invariant if changing their bootstrap; a worker
+            // that needs eager children requires a native suspended-process launch.
+            process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException($"Failed to start '{startInfo.FileName}'.");
+            tree._process = process;
+            if (OperatingSystem.IsWindows()) tree.AttachWindowsJob(process);
+            return (process, tree);
+        }
+        catch
+        {
+            if (process is not null)
+            {
+                tree.Kill(process);
+                process.Dispose();
+            }
+            tree.Dispose();
+            throw;
+        }
+    }
+
+    private void AttachWindowsJob(Process process)
+    {
+        // A stable, process-specific name also lets the failure-injection worker
+        // prove its descendants belong to this exact job (not merely an outer CI job).
+        var job = CreateJobObjectW(IntPtr.Zero, WindowsJobNamePrefix + process.Id);
+        if (job.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            job.Dispose();
+            TryKill(process);
+            throw new InvalidOperationException("Could not create the Windows worker Job Object.", new Win32Exception(error));
+        }
+
+        var limits = new JobObjectExtendedLimitInformation();
+        limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformationClass, ref limits,
+                (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+        {
+            var error = Marshal.GetLastWin32Error();
+            job.Dispose();
+            TryKill(process);
+            throw new InvalidOperationException("Could not configure the Windows worker Job Object.", new Win32Exception(error));
+        }
+
+        var confirmedLimits = new JobObjectExtendedLimitInformation();
+        if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformationClass, ref confirmedLimits,
+                (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>(), out _)
+            || (confirmedLimits.BasicLimitInformation.LimitFlags & JobObjectLimitKillOnJobClose) == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            job.Dispose();
+            TryKill(process);
+            throw new InvalidOperationException("Windows did not confirm kill-on-close worker Job Object semantics.", new Win32Exception(error));
+        }
+
+        if (!AssignProcessToJobObject(job, process.SafeHandle))
+        {
+            var error = Marshal.GetLastWin32Error();
+            job.Dispose();
+            TryKill(process);
+            throw new InvalidOperationException("Could not assign the worker process to its Windows Job Object.", new Win32Exception(error));
+        }
+
+        _job = job;
+        _windowsJobAssigned = true;
+    }
+
+    public void Kill(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        if (_job is { IsInvalid: false, IsClosed: false })
+        {
+            _ = TerminateJobObject(_job, 1);
+            // Closing the job is the authoritative kill-on-close path, including
+            // descendants whose direct parent has already exited.
+            _job.Dispose();
+            return;
+        }
+        if (_linuxProcessGroup && _process is not null)
+            _ = KillProcessGroup(_process.Id);
+        TryKill(process);
+    }
+
+    public void Dispose()
+    {
+        // KILL_ON_JOB_CLOSE also cleans descendants if the direct process exited
+        // while they still held an inherited stdout/stderr handle.
+        _job?.Dispose();
+        if (_linuxProcessGroup && _process is not null)
+            _ = KillProcessGroup(_process.Id);
+    }
+
+    private static int KillProcessGroup(int processId)
+    {
+        try { return kill(-processId, SigKill); }
+        catch (DllNotFoundException) { return -1; }
+        catch (EntryPointNotFoundException) { return -1; }
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException) { /* raced with exit */ }
+        catch { /* best effort after the job object was terminated */ }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateJobObjectW(IntPtr jobAttributes, string? name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetInformationJobObject(
+        SafeFileHandle job,
+        int jobObjectInformationClass,
+        ref JobObjectExtendedLimitInformation jobObjectInformation,
+        uint jobObjectInformationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(
+        SafeFileHandle job,
+        int jobObjectInformationClass,
+        ref JobObjectExtendedLimitInformation jobObjectInformation,
+        uint jobObjectInformationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AssignProcessToJobObject(SafeFileHandle job, SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int processId, int signal);
 }

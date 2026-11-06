@@ -268,6 +268,7 @@ public sealed class ArelleWorker : IWorkerClient
     private readonly Process _process;
     private readonly StreamWriter _stdin;
     private readonly StreamReader _stdout;
+    private readonly WorkerProcessTree _processTree;
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly Task _stderrDrain;
     private readonly string? _expectedProfileId;
@@ -312,8 +313,9 @@ public sealed class ArelleWorker : IWorkerClient
         };
         foreach (var a in args ?? Array.Empty<string>())
             psi.ArgumentList.Add(a);
-        _process = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start worker at {executablePath}.");
+        var started = WorkerProcessTree.Start(psi);
+        _process = started.Process;
+        _processTree = started.Tree;
         _stdin = _process.StandardInput;
         _stdout = _process.StandardOutput;
         _stderrDrain = DrainAsync(_process.StandardError);
@@ -399,8 +401,10 @@ public sealed class ArelleWorker : IWorkerClient
         }
         try
         {
-            if (Volatile.Read(ref _disposed) != 0 || _process.HasExited)
-                return Failure(req.OperationId, WorkerStatus.Crash, "Worker process is not running.");
+            if (Volatile.Read(ref _disposed) != 0)
+                return Failure(req.OperationId, WorkerStatus.Crash, "Worker is disposed.");
+            if (_process.HasExited)
+                return Failure(req.OperationId, WorkerStatus.Crash, ProcessUnavailableMessage());
             var msg = req.Encode();
             try { WorkerProtocol.ValidateByteLimit(msg); }
             catch (InvalidOperationException ex)
@@ -416,7 +420,16 @@ public sealed class ArelleWorker : IWorkerClient
                 await _stdin.WriteAsync(msg.AsMemory(), linked.Token);
                 await _stdin.FlushAsync(linked.Token);
                 var line = await ReadBoundedLineAsync(_stdout, linked.Token);
-                if (line is null) return Failure(req.OperationId, WorkerStatus.Crash, "Worker terminated without a response.");
+                if (line is null)
+                {
+                    // EOF can arrive just before Process.HasExited becomes true.
+                    // Wait within the same request deadline so crash reports keep
+                    // the exact exit code without turning a closed-pipe hang into
+                    // an unbounded wait.
+                    await _process.WaitForExitAsync(linked.Token);
+                    return Failure(req.OperationId, WorkerStatus.Crash,
+                        $"Worker terminated without a response (exit code {_process.ExitCode}).");
+                }
                 var response = WorkerResponse.Decode(line);
                 if (!string.Equals(response.OperationId, req.OperationId, StringComparison.Ordinal))
                 {
@@ -452,17 +465,24 @@ public sealed class ArelleWorker : IWorkerClient
             try { await _stderrDrain.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
             _process.Dispose();
         }
-        finally { _requestLock.Release(); }
+        finally
+        {
+            _processTree.Dispose();
+            _requestLock.Release();
+        }
     }
 
     private static WorkerResponse Failure(string operationId, WorkerStatus status, string message) => new(
         operationId, status, null, Array.Empty<Diagnostic>(), message);
 
+    private string ProcessUnavailableMessage()
+        => $"Worker process exited with code {_process.ExitCode}.";
+
     private async Task TerminateAsync()
     {
         try
         {
-            if (!_process.HasExited) _process.Kill(entireProcessTree: true);
+            _processTree.Kill(_process);
             await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
         }
         catch { /* process termination is best-effort after its pipes have failed */ }
@@ -470,7 +490,14 @@ public sealed class ArelleWorker : IWorkerClient
 
     private static async Task DrainAsync(StreamReader reader)
     {
-        try { while (await reader.ReadLineAsync(CancellationToken.None) is not null) { } }
+        // stderr is intentionally discarded, but it must still be consumed so a
+        // noisy worker cannot block on the pipe. Read fixed-size chunks rather
+        // than lines so one newline-free diagnostic cannot allocate without bound.
+        var buffer = new char[4096];
+        try
+        {
+            while (await reader.ReadAsync(buffer.AsMemory(), CancellationToken.None) > 0) { }
+        }
         catch (IOException) { }
     }
 

@@ -474,41 +474,44 @@ public sealed class ArelleExecutionTests
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(revisionInput))).ToLowerInvariant();
     }
 
-    [RequiresArelleRuntimeFact]
+    [RequiresPythonFact]
     public async Task CancellingArelleRequestKillsTheWorkerProcess()
     {
-        var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
-        Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
+        var python = PythonExecutable();
 
         var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-cancel-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspace);
         var scriptPath = Path.Combine(workspace, "blocked_worker.py");
         var pidPath = Path.Combine(workspace, "worker.pid");
-        await File.WriteAllTextAsync(scriptPath,
-            "import os, sys, time\n"
-            + "temporary = sys.argv[1] + '.tmp'\n"
-            + "with open(temporary, 'w', encoding='ascii') as marker: marker.write(str(os.getpid()))\n"
-            + "os.replace(temporary, sys.argv[1])\n"
-            + "while True: time.sleep(1)\n");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
 
         ArelleWorker? worker = null;
         try
         {
-            worker = new ArelleWorker(python!, new[] { scriptPath, pidPath });
+            worker = new ArelleWorker(python!, new[] { scriptPath, pidPath, "child-hang", "cancel-profile", "sha256:cancel" });
             using var cancellation = new CancellationTokenSource();
-            var handshake = worker.HandshakeAsync(cancellation.Token);
+            await worker.HandshakeAsync(CancellationToken.None);
+            var request = worker.RequestAsync(TestWorkerRequest("cancel", TimeSpan.FromSeconds(30)), cancellation.Token);
             Assert.True(await WaitForAsync(() => File.Exists(pidPath), TimeSpan.FromSeconds(5)),
                 "The test worker did not start and write its process ID.");
-            var processId = int.Parse(await File.ReadAllTextAsync(pidPath), CultureInfo.InvariantCulture);
+            var processLines = await File.ReadAllLinesAsync(pidPath);
+            var processIds = processLines.Take(2)
+                .Select(line => int.Parse(line, CultureInfo.InvariantCulture)).ToArray();
+            Assert.Equal(2, processIds.Length);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(processLines[2] == "True", "The worker must be assigned to the kill-on-close Job Object before it creates children.");
+                Assert.True(processLines[3] == "True", "The worker's child must inherit the Job Object.");
+            }
 
             cancellation.Cancel();
-            var startupFailure = await Assert.ThrowsAsync<WorkerStartupException>(
-                () => handshake.WaitAsync(TimeSpan.FromSeconds(5)));
-            Assert.Equal(WorkerStatus.Cancelled, startupFailure.Status);
+            var response = await request.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(WorkerStatus.Cancelled, response.Status);
             await worker.DisposeAsync();
 
-            Assert.True(await WaitForAsync(() => !IsProcessAlive(processId), TimeSpan.FromSeconds(5)),
-                "The worker process remained alive after its request was cancelled.");
+            foreach (var processId in processIds)
+                Assert.True(await WaitForAsync(() => !IsProcessAlive(processId), TimeSpan.FromSeconds(5)),
+                    $"Worker process-tree member {processId} remained alive after its request was cancelled.");
         }
         finally
         {
@@ -516,6 +519,227 @@ public sealed class ArelleExecutionTests
             try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
         }
     }
+
+    [RequiresPythonFact]
+    public async Task WorkerCrashPreservesExactExitCode_AndSubsequentWorkerStartsClean()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-crash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using (var worker = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "exit", "crash-profile", "sha256:crash")))
+            {
+                await worker.HandshakeAsync(CancellationToken.None);
+                var response = await worker.RequestAsync(TestWorkerRequest("crash"), CancellationToken.None);
+                Assert.Equal(WorkerStatus.Crash, response.Status);
+                Assert.Contains("23", response.Error, StringComparison.Ordinal);
+            }
+
+            await using var next = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "normal", "next-profile", "sha256:next"));
+            var handshake = await next.HandshakeAsync(CancellationToken.None);
+            Assert.Equal("next-profile", handshake.ProfileId);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresPythonFact]
+    public async Task OversizedWorkerResponseIsRejectedAndStderrDrainHandlesSingleLargeRecord()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-overflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using (var worker = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "overflow", "overflow-profile", "sha256:overflow")))
+            {
+                await worker.HandshakeAsync(CancellationToken.None);
+                var response = await worker.RequestAsync(TestWorkerRequest("overflow"), CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal(WorkerStatus.Crash, response.Status);
+                Assert.Contains("response exceeds", response.Error, StringComparison.OrdinalIgnoreCase);
+            }
+
+            await using var noisy = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "stderr-flood", "stderr-profile", "sha256:stderr"));
+            var handshake = await noisy.HandshakeAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("stderr-profile", handshake.ProfileId);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresPythonFact]
+    public async Task TimedOutArelleRequestIsDistinctFromCrash()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-timeout-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using var worker = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "hang", "timeout-profile", "sha256:timeout"));
+            await worker.HandshakeAsync(CancellationToken.None);
+            var response = await worker.RequestAsync(TestWorkerRequest("timeout", TimeSpan.FromMilliseconds(500)), CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(WorkerStatus.TimedOut, response.Status);
+            Assert.Contains("deadline", response.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresPythonFact]
+    public async Task ConcurrentWorkersKeepSwitchedProfileIdentityIsolated()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-profile-switch-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using var first = CreateExpectedProfileWorker(python!, scriptPath, "profile-a", "sha256:a");
+            await using var second = CreateExpectedProfileWorker(python!, scriptPath, "profile-b", "sha256:b");
+            var handshakes = await Task.WhenAll(
+                first.HandshakeAsync(CancellationToken.None),
+                second.HandshakeAsync(CancellationToken.None));
+            Assert.Equal(new[] { "profile-a", "profile-b" }, handshakes.Select(item => item.ProfileId));
+
+            var responses = await Task.WhenAll(
+                first.RequestAsync(TestWorkerRequest("profile-a"), CancellationToken.None),
+                second.RequestAsync(TestWorkerRequest("profile-b"), CancellationToken.None));
+            Assert.All(responses, response => Assert.Equal(WorkerStatus.Success, response.Status));
+            Assert.Equal(new[] { "profile-a", "profile-b" }, responses.Select(response => response.OperationId));
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresPythonFact]
+    public async Task RequestAfterWorkerDisposalReturnsCrashWithoutTouchingDisposedProcess()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-disposed-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        var worker = new ArelleWorker(python!, FakeWorkerArgs(scriptPath, "normal", "disposed-profile", "sha256:disposed"));
+        try
+        {
+            await worker.DisposeAsync();
+            var response = await worker.RequestAsync(TestWorkerRequest("after-dispose"), CancellationToken.None);
+            Assert.Equal(WorkerStatus.Crash, response.Status);
+            Assert.Contains("disposed", response.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await worker.DisposeAsync();
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static ArelleWorker CreateExpectedProfileWorker(string python, string scriptPath, string profileId, string digest)
+        => new(python, FakeWorkerArgs(scriptPath, "normal", profileId, digest),
+            expectedProfileId: profileId,
+            expectedProfileSchemaVersion: 3,
+            expectedProfileVersion: "1",
+            expectedProfileDigest: digest,
+            expectedTaxonomyEntryPoint: "taxonomy.xsd",
+            expectedRequiredPlugins: Array.Empty<string>(),
+            expectedRequiredChecks: Array.Empty<string>());
+
+    private static string PythonExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("XMS_WORKER_PYTHON")
+            ?? Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        if (OperatingSystem.IsWindows())
+            throw new InvalidOperationException("Set XMS_WORKER_PYTHON to a direct Python executable on Windows.");
+        return "python3";
+    }
+
+    private static string[] FakeWorkerArgs(string scriptPath, string mode, string profileId, string digest)
+        => new[] { scriptPath, Path.Combine(Path.GetTempPath(), "xms-worker-unused-" + Guid.NewGuid().ToString("N")), mode, profileId, digest };
+
+    private static WorkerRequest TestWorkerRequest(string operationId, TimeSpan? timeout = null)
+        => new(WorkerOperations.LoadTaxonomy, operationId, "test-job", "sha256:test",
+            DateTimeOffset.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(10)), Payload: null);
+
+    private const string FakeProtocolWorkerScript = """
+        import json, os, subprocess, sys, time
+
+        def in_job(process_id):
+            if os.name != "nt":
+                return "n/a"
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            handle = kernel32.OpenProcess(0x1000, 0, process_id)
+            kernel32.OpenJobObjectW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
+            kernel32.OpenJobObjectW.restype = ctypes.c_void_p
+            job = kernel32.OpenJobObjectW(0x0004, 0, f"XBRLMappingStudio.Worker.{os.getpid()}")
+            result = ctypes.c_int()
+            try:
+                if not handle or not job or not kernel32.IsProcessInJob(handle, job, ctypes.byref(result)):
+                    return "error"
+                return str(bool(result.value))
+            finally:
+                if handle:
+                    kernel32.CloseHandle(handle)
+                if job:
+                    kernel32.CloseHandle(job)
+
+        marker, mode, profile_id, profile_digest = sys.argv[1:5]
+        if mode == "stderr-flood":
+            for _ in range(4096):
+                sys.stderr.write("x" * 4096)
+            sys.stderr.flush()
+
+        def respond(request, result=None):
+            print(json.dumps({"operationId": request["operationId"], "status": "success",
+                              "result": result, "diagnostics": []}), flush=True)
+
+        for raw in sys.stdin:
+            request = json.loads(raw)
+            if request["operation"] == "handshake":
+                respond(request, {"protocolVersion": 2, "engineVersion": "test", "capabilities": ["validate-report"],
+                                  "arelleAvailable": True, "profileSchemaVersion": 3, "profileId": profile_id,
+                                  "profileVersion": "1", "profileDigest": profile_digest,
+                                  "taxonomyEntryPoint": "taxonomy.xsd", "requiredPlugins": [], "requiredChecks": []})
+            elif mode == "exit":
+                os._exit(23)
+            elif mode == "overflow":
+                sys.stdout.write("x" * (4 * 1024 * 1024 + 16))
+                sys.stdout.flush()
+                time.sleep(60)
+            elif mode == "hang":
+                while True:
+                    time.sleep(1)
+            elif mode == "child-hang":
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+                with open(marker + ".tmp", "w", encoding="ascii") as output:
+                    output.write(f"{os.getpid()}\n{child.pid}\n{in_job(os.getpid())}\n{in_job(child.pid)}\n")
+                os.replace(marker + ".tmp", marker)
+                while True:
+                    time.sleep(1)
+            else:
+                respond(request)
+        """;
 
     private static async Task<bool> WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
@@ -567,5 +791,42 @@ public sealed class RequiresArelleRuntimeFactAttribute : FactAttribute
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("XMS_ARELLE_E2E"), "1", StringComparison.Ordinal))
             Skip = "Set XMS_ARELLE_E2E=1 after installing the pinned Arelle worker runtime.";
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class RequiresPythonFactAttribute : FactAttribute
+{
+    public RequiresPythonFactAttribute()
+    {
+        var executable = Environment.GetEnvironmentVariable("XMS_WORKER_PYTHON")
+            ?? Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        if (string.IsNullOrWhiteSpace(executable) && OperatingSystem.IsWindows())
+        {
+            Skip = "Set XMS_WORKER_PYTHON to a direct Python executable on Windows; the Store alias can escape Job Object assignment.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(executable)) executable = "python3";
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable,
+                ArgumentList = { "--version" },
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            });
+            if (process is null || !process.WaitForExit(5000) || process.ExitCode != 0)
+            {
+                try { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); } catch { }
+                Skip = "A Python interpreter is required for the worker protocol fixture.";
+            }
+        }
+        catch
+        {
+            Skip = "A Python interpreter is required for the worker protocol fixture.";
+        }
     }
 }
