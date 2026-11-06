@@ -182,6 +182,64 @@ public sealed class DestinationPlanTests
     }
 
     [Fact]
+    public async Task PublishFileDestination_RestoresPriorBytesWhenAdapterFailsAfterReplacement()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-rollback-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var destinationPath = Path.Combine(dir, "report.csv");
+            var priorBytes = Encoding.UTF8.GetBytes("previous accepted artifact\r\n");
+            await File.WriteAllBytesAsync(destinationPath, priorBytes);
+
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = "csv",
+                Locator = "report.csv",
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "csv-records-v1",
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic),
+                null, null, null, () => throw new IOException("Injected failure after replacement."));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var error = await Assert.ThrowsAsync<IOException>(() => service.PublishFileDestinationAsync(
+                project, result, dir, allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal("Injected failure after replacement.", error.Message);
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destinationPath));
+            Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == destinationPath);
+            Assert.False(File.Exists(destinationPath + $".xms-rollback-{result.Manifest.RunId}"));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PublishFileDestination_RefusesProjectArtifactWithoutChangingIt()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-protected-" + Guid.NewGuid().ToString("N"));

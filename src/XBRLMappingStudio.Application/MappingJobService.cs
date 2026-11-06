@@ -33,6 +33,7 @@ public sealed class MappingJobService
     private readonly IWorkerClient _worker;
     private readonly Func<LocalApplicationDatabase> _applicationDatabaseFactory;
     private readonly ExecutionBudget _executionBudget;
+    private readonly Action? _afterFileDestinationPublish;
 
     public MappingJobService(
         FilingProfile profile,
@@ -40,12 +41,26 @@ public sealed class MappingJobService
         FunctionCatalog? catalog = null,
         Func<LocalApplicationDatabase>? applicationDatabaseFactory = null,
         ExecutionBudget? executionBudget = null)
+        : this(profile, worker, catalog, applicationDatabaseFactory, executionBudget, null)
+    {
+    }
+
+    // Deterministic fault injection for publication compensation tests. Production
+    // callers use the public constructor, which leaves this hook unset.
+    internal MappingJobService(
+        FilingProfile profile,
+        IWorkerClient worker,
+        FunctionCatalog? catalog,
+        Func<LocalApplicationDatabase>? applicationDatabaseFactory,
+        ExecutionBudget? executionBudget,
+        Action? afterFileDestinationPublish)
     {
         _profile = profile;
         _worker = worker;
         _catalog = catalog ?? FunctionCatalog.Default;
         _applicationDatabaseFactory = applicationDatabaseFactory ?? (() => new LocalApplicationDatabase());
         _executionBudget = executionBudget ?? ExecutionBudget.Default;
+        _afterFileDestinationPublish = afterFileDestinationPublish;
         _executionBudget.Validate();
     }
 
@@ -1850,6 +1865,7 @@ public sealed class MappingJobService
 
             await EnsureInputIdentityAsync(project, manifest, destinationPath, cancellationToken);
             var output = await adapter.PublishAsync(stagedPath, connection, cancellationToken);
+            _afterFileDestinationPublish?.Invoke();
             var finalDigest = CurrentFileDigest(destinationPath);
             if (finalDigest is null || !StringComparer.Ordinal.Equals(output.Digest, finalDigest))
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
