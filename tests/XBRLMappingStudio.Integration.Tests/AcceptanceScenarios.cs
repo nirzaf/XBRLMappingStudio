@@ -249,7 +249,12 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
 
         Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
         Assert.True(result.IsPublishable);
-        Assert.Equal(1_250_000m, Assert.Single(result.Facts).Value);
+        var fact = Assert.Single(result.Facts);
+        Assert.Equal(1_250_000m, fact.Value);
+        var factSource = Assert.Single(fact.ContributingSources);
+        Assert.Equal(original.BindingId, factSource.SourceId);
+        Assert.Equal("financials.Current", factSource.Locator);
+        Assert.Equal("pos:0", factSource.DisplayName);
         var input = Assert.Single(result.Manifest.Inputs);
         Assert.Equal("sqlite-table", input.Kind);
         Assert.False(input.IsReplayable);
@@ -259,6 +264,48 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Contains(result.Manifest.Diagnostics,
             diagnostic => diagnostic.Code == DiagnosticCodes.IoStableRowIdentityUnavailable
                 && diagnostic.Severity == DiagnosticSeverity.Warning);
+    }
+
+    [Fact]
+    public async Task SqliteCellEvidenceFlowsIntoFactConstructRejection()
+    {
+        var database = Path.Combine(_dir, "financials-rejected.db");
+        await using (var db = new SqliteConnection($"Data Source={database}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE financials (Line TEXT, Current TEXT, Prior TEXT); INSERT INTO financials VALUES ('Revenue','1250','1100');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var binding = project.Bindings[0];
+        project.Bindings[0] = binding with
+        {
+            Kind = "sqlite",
+            Locator = database,
+            Configuration = new Dictionary<string, object?>
+            {
+                ["table"] = "financials", ["decimalColumns"] = "Current,Prior"
+            }
+        };
+        var connection = new SourceConnection(binding.BindingId, "sqlite", database,
+            new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" });
+        project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct)
+            .Parameters["decimals"] = 31;
+
+        var result = await NewService().RunAsync(project,
+            new Dictionary<string, SourceConnection> { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.False(result.IsPublishable);
+        Assert.NotEqual(RunOutcome.Success, result.Manifest.Outcome);
+        var diagnostic = Assert.Single(result.Manifest.Diagnostics,
+            item => item.Code == DiagnosticCodes.XbrDecimalsOutOfRange && item.IsBlocking);
+        Assert.NotNull(diagnostic.Source);
+        Assert.Equal(binding.BindingId, diagnostic.Source.SourceId);
+        Assert.Equal("financials.Current", diagnostic.Source.Locator);
+        Assert.Equal("pos:0", diagnostic.Source.DisplayName);
     }
 
     [Fact]

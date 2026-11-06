@@ -99,6 +99,16 @@ public sealed class DataValue : IEquatable<DataValue>
     public bool IsMissing => Presence == ValuePresence.Missing;
     public bool IsNil => Presence == ValuePresence.ExplicitNil;
 
+    /// <summary>
+    /// Returns this value with the record's cell source when the adapter kept its
+    /// provenance beside the field instead of embedding it in the value.
+    /// A value-level source always takes precedence.
+    /// </summary>
+    public DataValue WithSourceIfMissing(XBRLMappingStudio.Diagnostics.SourceReference? source)
+        => Source is not null || source is null
+            ? this
+            : new DataValue(Shape, Presence, Raw, LexicalSource, source);
+
     public decimal AsDecimal()
     {
         if (Presence != ValuePresence.Present || Raw is null)

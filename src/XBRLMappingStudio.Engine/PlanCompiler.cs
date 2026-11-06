@@ -702,7 +702,12 @@ public sealed class PlanCompiler
                         break;
                     }
                 }
-                var cell = record.Fields.TryGetValue(column ?? "", out var v) ? v : DataValue.Missing();
+                var fieldName = column ?? "";
+                var cell = record.Fields.TryGetValue(fieldName, out var v) ? v : DataValue.Missing();
+                if (cell.Source is null
+                    && record.CellSources is not null
+                    && record.CellSources.TryGetValue(fieldName, out var cellSource))
+                    cell = cell.WithSourceIfMissing(cellSource);
                 var textCell = cell.Shape == PortShape.String ? cell : DataValue.Missing(PortShape.String);
                 // Emit at row granularity: for collection ports the frame stores per-row indexed values.
                 outputs["value"] = cell;
