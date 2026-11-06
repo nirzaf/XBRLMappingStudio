@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
 PROTOCOL_VERSION = 1
-PROFILE_SCHEMA_VERSION = 2
+SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
@@ -145,8 +145,33 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
         raise ValueError("Profile manifest is not valid UTF-8 JSON") from ex
     if not isinstance(manifest, dict):
         raise ValueError("Profile manifest must be a JSON object")
-    if manifest.get("schemaVersion") != PROFILE_SCHEMA_VERSION:
+    schema_version = manifest.get("schemaVersion")
+    if type(schema_version) is not int or schema_version not in SUPPORTED_PROFILE_SCHEMA_VERSIONS:
         raise ValueError("Profile manifest uses an unsupported schema version")
+    dimension_domains = manifest.get("dimensionDomains", {})
+    if not isinstance(dimension_domains, dict):
+        raise ValueError("Profile dimensionDomains must be an object")
+    if schema_version < 3 and dimension_domains:
+        raise ValueError("Profile dimension domains require manifest schema version 3")
+    if dimension_domains:
+        concepts = manifest.get("concepts")
+        if not isinstance(concepts, list) or len(concepts) > 250_000:
+            raise ValueError("Profile concepts must be an array within the 250000-concept limit")
+        qualified_names = set()
+        for concept in concepts:
+            qualified_name = concept.get("qualifiedName") if isinstance(concept, dict) else None
+            if not isinstance(qualified_name, str) or not qualified_name:
+                raise ValueError("Profile concepts must have qualified names for dimension domain validation")
+            qualified_names.add(qualified_name)
+        for dimension_qname, member_qnames in dimension_domains.items():
+            if not isinstance(dimension_qname, str) or dimension_qname not in qualified_names:
+                raise ValueError("Profile dimension domains must name indexed taxonomy concepts")
+            if (not isinstance(member_qnames, list) or not member_qnames
+                    or any(not isinstance(member, str) or not member for member in member_qnames)
+                    or len(set(member_qnames)) != len(member_qnames)):
+                raise ValueError("Profile dimension domains must contain unique, non-empty member arrays")
+            if any(member not in qualified_names for member in member_qnames):
+                raise ValueError("Profile dimension domains cannot refer to unindexed taxonomy members")
     for field in ("profileId", "version", "profileDigest", "entryPoint"):
         if not isinstance(manifest.get(field), str) or not manifest[field] or len(manifest[field]) > 1024:
             raise ValueError("Profile manifest has invalid " + field)

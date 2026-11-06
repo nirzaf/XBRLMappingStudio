@@ -231,6 +231,22 @@ class ArelleWorkerTests(unittest.TestCase):
 
         self.assertEqual("plugin-one|plugin-two", runtime_options.call_args.kwargs["plugins"])
 
+    def test_arelle_runtime_options_enforce_exact_offline_mode(self):
+        session = mock.MagicMock()
+        session.__enter__.return_value = session
+        session.run.return_value = True
+        session.get_log_messages.return_value = []
+        session.get_models.return_value = []
+
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "Session", return_value=session), \
+                mock.patch.object(arelle_worker, "RuntimeOptions") as runtime_options:
+            arelle_worker.run_arelle("entry.xsd", self.args)
+
+        options = runtime_options.call_args.kwargs
+        self.assertIs(options["workOffline"], True)
+        self.assertEqual("offline", options["internetConnectivity"])
+
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
     def test_local_taxonomy_report_passes_arelle(self):
@@ -451,6 +467,70 @@ class ArelleWorkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "changed after the application verified it"):
                 arelle_worker.load_profile_manifest(path, root, expected)
+
+    def test_profile_manifest_accepts_schema_v3_dimension_domains(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+            manifest = {
+                "schemaVersion": 3,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "packageFiles": {"entry.xsd": "sha256:" + digest},
+                "offlineReferences": {},
+                "concepts": [
+                    {"qualifiedName": "tax:Axis"},
+                    {"qualifiedName": "tax:Member"},
+                ],
+                "dimensionDomains": {"tax:Axis": ["tax:Member"]},
+            }
+            path = root / "profile.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            loaded = arelle_worker.load_profile_manifest(path, root)
+
+        self.assertEqual(3, loaded["schemaVersion"])
+        self.assertEqual({"tax:Axis": ["tax:Member"]}, loaded["dimensionDomains"])
+
+    def test_profile_manifest_validates_v3_dimension_domain_shape(self):
+        invalid_cases = [
+            (3, ["tax:Axis"], "dimensionDomains must be an object"),
+            (2, {"tax:Axis": ["tax:Member"]}, "require manifest schema version 3"),
+            (3, {"tax:Unknown": ["tax:Member"]}, "must name indexed taxonomy concepts"),
+            (3, {"tax:Axis": []}, "unique, non-empty member arrays"),
+            (3, {"tax:Axis": ["tax:Member", "tax:Member"]}, "unique, non-empty member arrays"),
+            (3, {"tax:Axis": ["tax:Missing"]}, "unindexed taxonomy members"),
+        ]
+        for schema_version, dimension_domains, expected_error in invalid_cases:
+            with self.subTest(schema_version=schema_version, dimension_domains=dimension_domains), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                entry = root / "entry.xsd"
+                entry.write_text("<schema/>", encoding="utf-8")
+                digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+                manifest = {
+                    "schemaVersion": schema_version,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "entry.xsd",
+                    "packageFiles": {"entry.xsd": "sha256:" + digest},
+                    "offlineReferences": {},
+                    "concepts": [
+                        {"qualifiedName": "tax:Axis"},
+                        {"qualifiedName": "tax:Member"},
+                    ],
+                    "dimensionDomains": dimension_domains,
+                }
+                path = root / "profile.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    arelle_worker.load_profile_manifest(path, root)
 
     def test_profile_package_symlinks_are_rejected_when_supported(self):
         with tempfile.TemporaryDirectory() as temporary:
