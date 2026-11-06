@@ -1089,7 +1089,9 @@ public sealed class PlanCompiler
                 var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.Decimal));
                 if (input.IsMissing || input.IsNil)
                 {
-                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    outputs["value"] = input.IsNil
+                        ? DataValue.ExplicitNil(PortShape.Decimal)
+                        : DataValue.Missing(PortShape.Decimal);
                     break;
                 }
                 outputs["value"] = DataValue.DecimalValue(-input.AsDecimal(), input.Source);

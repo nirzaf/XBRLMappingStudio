@@ -176,6 +176,47 @@ public class FunctionTests
         Assert.Null(fact.Value);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ChangeSign_DistinguishesExplicitNilFromMissing(bool explicitNil)
+    {
+        var input = GraphHarness.Node(NodeTypeConstants.ExcelField, "Input",
+            new() { ["bindingId"] = Binding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var changeSign = GraphHarness.Node(NodeTypeConstants.ChangeSign, "Change sign",
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge> { GraphHarness.Link(input, "value", changeSign, "input") };
+        var sink = GraphHarness.FactSink(out var factEdges, changeSign, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new[] { input, changeSign }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var value = explicitNil
+            ? DataValue.ExplicitNil(PortShape.Decimal)
+            : DataValue.Missing(PortShape.Decimal);
+        var context = GraphHarness.Ctx(new[]
+        {
+            (Binding, new[] { GraphHarness.Row(("amount", value)) } as IReadOnlyList<DataRecord>)
+        });
+
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Empty(result!.Diagnostics);
+        if (explicitNil)
+        {
+            var fact = Assert.Single(result.Facts);
+            Assert.True(fact.IsNil);
+            Assert.Null(fact.Value);
+        }
+        else
+        {
+            Assert.Empty(result.Facts);
+        }
+    }
+
     // ---- MAP04: rounding modes ------------------------------------------------------
 
     [Theory]
