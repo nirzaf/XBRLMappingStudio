@@ -64,7 +64,8 @@ jobs:
         run: dotnet tools/performance/taxonomy-benchmark/bin/Release/net10.0/XBRLMappingStudio.TaxonomyBenchmark.dll --self-test
 
       - name: Test (Release)
-        run: dotnet test ${{ env.SOLUTION }} -c Release --no-build --logger "trx;LogFileName=test-results-${{ matrix.os }}.trx"
+        # Subprocess-supervision tests launch nested workers; avoid host-load timeouts across projects.
+        run: dotnet test ${{ env.SOLUTION }} -c Release --no-build -m:1 --logger "trx;LogFileName=test-results-${{ matrix.os }}.trx"
 
       - name: Upload test results
         if: always()
