@@ -178,6 +178,10 @@ public class RetrievalDeterminismTests
     {
         var concepts = new[]
         {
+            new XBRL.ConceptMetadata("ex:Statement", "urn:example", "Statement",
+                "Statement", "string", "duration", IsAbstract: true),
+            new XBRL.ConceptMetadata("ex:CashFlow", "urn:example", "CashFlow",
+                "Cash Flow", "string", "duration", IsAbstract: true),
             new XBRL.ConceptMetadata("ex:RevenueDuration", "urn:example", "RevenueDuration",
                 "Revenue", "monetary", "duration", IsAbstract: false),
             new XBRL.ConceptMetadata("ex:RevenueInstant", "urn:example", "RevenueInstant",
