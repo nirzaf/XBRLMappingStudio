@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -61,7 +62,7 @@ public static class XbrlFactRecordMapper
                 : DataValue.ExplicitNil(PortShape.Integer),
             ["language"] = NullableText(fact.Language),
             ["dimensions_json"] = DataValue.StringValue(SerializeDimensions(fact.Dimensions)),
-            ["provenance_json"] = DataValue.StringValue(SerializeProvenance(fact.ContributingSources))
+            ["provenance_json"] = DataValue.StringValue(SerializeProvenance(fact))
         };
 
         return new DataRecord
@@ -157,6 +158,30 @@ public static class XbrlFactRecordMapper
             AppendPart(builder, source.Locator);
             AppendPart(builder, source.DisplayName ?? "");
         }
+
+        var paths = fact.SourceTransformationPaths
+            .OrderBy(path => path.Source.SourceId, StringComparer.Ordinal)
+            .ThenBy(path => path.Source.Locator, StringComparer.Ordinal)
+            .ThenBy(path => path.Source.DisplayName, StringComparer.Ordinal)
+            .ThenBy(path => path.TransformationIds,
+                Comparer<IReadOnlyList<string>>.Create(CompareTransformationPaths))
+            .ToArray();
+        if (paths.Length > 0)
+        {
+            // Keep pathless occurrence signatures byte-compatible with the historical
+            // key contract while binding traced occurrences to their source paths.
+            AppendPart(builder, "source-transformation-paths-v1");
+            builder.Append(paths.Length).Append(':');
+            foreach (var path in paths)
+            {
+                AppendPart(builder, path.Source.SourceId);
+                AppendPart(builder, path.Source.Locator);
+                AppendPart(builder, path.Source.DisplayName ?? "");
+                builder.Append(path.TransformationIds.Count).Append(':');
+                foreach (var nodeId in path.TransformationIds)
+                    AppendPart(builder, nodeId);
+            }
+        }
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
             .ToLowerInvariant();
     }
@@ -178,11 +203,58 @@ public static class XbrlFactRecordMapper
             .ThenBy(dimension => dimension.MemberName, StringComparer.Ordinal)
             .ThenBy(dimension => dimension.IsExplicit));
 
-    private static string SerializeProvenance(IReadOnlyList<SourceReference> sources)
-        => JsonSerializer.Serialize(sources
+    private static string SerializeProvenance(XbrlFact fact)
+    {
+        var orderedSources = fact.ContributingSources
             .OrderBy(source => source.SourceId, StringComparer.Ordinal)
             .ThenBy(source => source.Locator, StringComparer.Ordinal)
-            .ThenBy(source => source.DisplayName, StringComparer.Ordinal));
+            .ThenBy(source => source.DisplayName, StringComparer.Ordinal)
+            .ToList();
+        if (fact.SourceTransformationPaths.Count == 0)
+            return JsonSerializer.Serialize(orderedSources);
+
+        var pathsBySource = fact.SourceTransformationPaths
+            .GroupBy(path => path.Source)
+            .ToDictionary(group => group.Key,
+                group => (IReadOnlyList<string[]>)group.Select(path => path.TransformationIds.ToArray())
+                    .OrderBy(path => path, Comparer<IReadOnlyList<string>>.Create(CompareTransformationPaths))
+                    .ToArray());
+
+        // A well-formed fact normally lists every path source in ContributingSources.
+        // Keep an inconsistent path-only source visible instead of silently dropping it.
+        foreach (var source in pathsBySource.Keys)
+            if (!orderedSources.Contains(source))
+                orderedSources.Add(source);
+        orderedSources = orderedSources
+            .OrderBy(source => source.SourceId, StringComparer.Ordinal)
+            .ThenBy(source => source.Locator, StringComparer.Ordinal)
+            .ThenBy(source => source.DisplayName, StringComparer.Ordinal)
+            .ToList();
+
+        return JsonSerializer.Serialize(orderedSources.Select(source => new SourceProvenanceEntry(
+            source.SourceId,
+            source.Locator,
+            source.DisplayName,
+            pathsBySource.TryGetValue(source, out var paths) ? paths : null)));
+    }
+
+    private sealed record SourceProvenanceEntry(
+        string SourceId,
+        string Locator,
+        string? DisplayName,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<string[]>? TransformationPaths);
+
+    private static int CompareTransformationPaths(IReadOnlyList<string> left, IReadOnlyList<string> right)
+    {
+        var sharedLength = Math.Min(left.Count, right.Count);
+        for (var index = 0; index < sharedLength; index++)
+        {
+            var comparison = StringComparer.Ordinal.Compare(left[index], right[index]);
+            if (comparison != 0) return comparison;
+        }
+        return left.Count.CompareTo(right.Count);
+    }
 
     private static DataValue NullableText(string? value)
         => value is null ? DataValue.ExplicitNil(PortShape.String) : DataValue.StringValue(value);

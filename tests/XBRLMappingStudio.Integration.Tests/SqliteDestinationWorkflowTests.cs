@@ -8,6 +8,7 @@ using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
@@ -62,10 +63,23 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         command.CommandText = "SELECT value,decimals,provenance_json FROM facts";
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        Assert.Equal(result.Facts.Single().Value!.Value.ToString(CultureInfo.InvariantCulture), reader.GetString(0));
+        var fact = Assert.Single(result.Facts);
+        Assert.Equal(fact.Value!.Value.ToString(CultureInfo.InvariantCulture), reader.GetString(0));
         Assert.Equal(-3, reader.GetInt32(1));
-        var sourceLocator = Assert.Single(result.Facts).ContributingSources.Single().Locator;
-        Assert.Contains(sourceLocator, reader.GetString(2), StringComparison.Ordinal);
+        var sourceLocator = Assert.Single(fact.ContributingSources).Locator;
+        using (var provenance = JsonDocument.Parse(reader.GetString(2)))
+        {
+            var sourceEntry = Assert.Single(provenance.RootElement.EnumerateArray());
+            Assert.Equal(sourceLocator, sourceEntry.GetProperty("Locator").GetString());
+            var storedPath = Assert.Single(sourceEntry.GetProperty("TransformationPaths").EnumerateArray())
+                .EnumerateArray().Select(node => node.GetString()!).ToArray();
+            var factPath = Assert.Single(fact.SourceTransformationPaths);
+            Assert.Equal(factPath.TransformationIds, storedPath);
+            Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField).NodeId,
+                storedPath);
+            Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
+                storedPath);
+        }
         Assert.False(await reader.ReadAsync());
 
         var receiptOutput = Assert.Single(result.Manifest.Outputs, output => output.Kind == "db-receipt");
