@@ -47,6 +47,25 @@ public class FunctionTests
         return (result, compile);
     }
 
+    private static (ExecutionResult? Result, CompilationResult Compile) RunScaleGraph(
+        decimal amount, string factor)
+    {
+        var source = Driver(out var edges, amount);
+        var scale = GraphHarness.Node(NodeTypeConstants.Scale, "Scale",
+            new() { ["factor"] = factor },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        edges.Add(GraphHarness.Link(source, "value", scale, "input"));
+        var sink = GraphHarness.FactSink(out var factEdges, scale, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new[] { source, scale }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project, OneRow(amount), out var compile);
+        return (result, compile);
+    }
+
     private static (MappingProject Project, ExecutionContext Context) ParseDecimalGraph(
         DataValue inputValue, string culture)
     {
@@ -221,19 +240,7 @@ public class FunctionTests
     public void Scale_NonzeroUnderflowFailsWithNumericOverflowDiagnostic()
     {
         const decimal inputValue = 0.0000000000000000000000000001m;
-        var source = Driver(out var edges, inputValue);
-        var scale = GraphHarness.Node(NodeTypeConstants.Scale, "Scale",
-            new() { ["factor"] = "0.1" },
-            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
-            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
-        edges.Add(GraphHarness.Link(source, "value", scale, "input"));
-        var sink = GraphHarness.FactSink(out var factEdges, scale, "value", PortCardinality.Single);
-        edges.AddRange(factEdges);
-        var project = GraphHarness.Project(
-            new[] { source, scale }.Concat(sink), edges,
-            bindings: new[] { GraphHarness.Binding(Binding) });
-
-        var result = GraphHarness.Run(project, OneRow(inputValue), out var compile);
+        var (result, compile) = RunScaleGraph(inputValue, "0.1");
 
         Assert.True(compile.Success);
         Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
@@ -247,25 +254,27 @@ public class FunctionTests
     public void Scale_InexactProductFailsInsteadOfSilentlyRounding()
     {
         const decimal inputValue = 1.2345678901234567890123456789m;
-        var source = Driver(out var edges, inputValue);
-        var scale = GraphHarness.Node(NodeTypeConstants.Scale, "Scale",
-            new() { ["factor"] = "1.1" },
-            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
-            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
-        edges.Add(GraphHarness.Link(source, "value", scale, "input"));
-        var sink = GraphHarness.FactSink(out var factEdges, scale, "value", PortCardinality.Single);
-        edges.AddRange(factEdges);
-        var project = GraphHarness.Project(
-            new[] { source, scale }.Concat(sink), edges,
-            bindings: new[] { GraphHarness.Binding(Binding) });
-
-        var result = GraphHarness.Run(project, OneRow(inputValue), out var compile);
+        var (result, compile) = RunScaleGraph(inputValue, "1.1");
 
         Assert.True(compile.Success);
         Assert.Equal(RunOutcome.InvalidMapping, result!.Outcome);
         Assert.Contains(result.Diagnostics, diagnostic =>
             diagnostic.Code == DiagnosticCodes.MapNumericOverflow
             && diagnostic.Message.Contains("would lose precision", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Theory]
+    [InlineData("1.00000000000000000000000000000", "scale 29")]
+    [InlineData("1,000", "not a valid decimal")]
+    public void Scale_RejectsFactorOutsideInvariantDecimalInputContract(string factor, string reason)
+    {
+        var (result, compile) = RunScaleGraph(2m, factor);
+
+        Assert.True(compile.Success);
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidConstant
+            && diagnostic.Message.Contains(reason, StringComparison.OrdinalIgnoreCase));
         Assert.Empty(result.Facts);
     }
 

@@ -195,6 +195,7 @@ internal static class DecimalDomain
     public static int FractionalScaleOf(decimal value)
         => (decimal.GetBits(value)[3] >> 16) & 0xFF;
 
+    /// <summary>Checks CLR's product against the exact base-10 product without binary floating point.</summary>
     public static bool ProductIsExact(decimal left, decimal right, decimal product)
     {
         var leftCoefficient = GetCoefficient(left, out var leftScale);

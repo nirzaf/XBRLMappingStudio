@@ -1063,7 +1063,12 @@ public sealed class PlanCompiler
             case NodeTypeConstants.Scale:
             {
                 var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.Decimal));
-                var factor = decimal.Parse(GetString(node, "factor") ?? "1", CultureInfo.InvariantCulture);
+                if (!TryParseDecimalInvariant(GetString(node, "factor") ?? "1", ctx, diag, node,
+                        out var factor))
+                {
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
                 if (input.IsMissing || input.IsNil)
                 {
                     outputs["value"] = input.Presence == ValuePresence.ExplicitNil
