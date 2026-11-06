@@ -2,9 +2,12 @@
 """Offline Arelle worker using the supported Session API."""
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
+import posixpath
+import re
 import sys
 import tempfile
 import time
@@ -13,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
+from xml.parsers import expat
 
 PROTOCOL_VERSION = 1
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3)
@@ -25,6 +29,17 @@ MAX_PROFILE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PROFILE_FILES = 16384
 MAX_DOCUMENT_INFO_BYTES = 4 * 1024 * 1024
 MAX_LARGE_REPORT_BYTES = 2 * 1024 * 1024 * 1024
+MAX_TAXONOMY_GRAPH_FILES = 4096
+MAX_TAXONOMY_GRAPH_DEPTH = 128
+MAX_TAXONOMY_GRAPH_XML_BYTES = 256 * 1024 * 1024
+MAX_TAXONOMY_XML_FILE_BYTES = 16 * 1024 * 1024
+MAX_TAXONOMY_GRAPH_EDGES = 16384
+TAXONOMY_XML_READ_BYTES = 64 * 1024
+
+XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
+XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
+LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
+XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 
 try:
     from arelle.api.Session import Session
@@ -105,10 +120,10 @@ def safe_package_path(relative_path, taxonomy_root):
     for part in relative_path.split("/"):
         current = current / part
         if is_linklike(current):
-            raise ValueError("Taxonomy package paths cannot contain symbolic links")
+            raise ValueError("Taxonomy package paths cannot contain symbolic links: " + relative_path)
     target = within_root(current, root)
     if not target.is_file():
-        raise ValueError("Taxonomy package path is not a regular file")
+        raise ValueError("Taxonomy package path is not a regular file: " + relative_path)
     return target
 
 
@@ -232,6 +247,174 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
                 or relative_path not in verified_files):
             raise ValueError("Offline taxonomy references must map HTTP(S) URIs to pinned package files")
     return manifest
+
+
+def _xml_expanded_name(name):
+    if "}" not in name:
+        return "", name
+    namespace, local_name = name.rsplit("}", 1)
+    return namespace, local_name
+
+
+def _read_taxonomy_xml_edges(relative_path, path, expected_digest, remaining_budget, remaining_edges):
+    size = path.stat().st_size
+    if size > MAX_TAXONOMY_XML_FILE_BYTES:
+        raise ValueError("Taxonomy dependency XML file exceeds the size limit: " + relative_path)
+
+    parser = expat.ParserCreate(namespace_separator="}")
+    edges = []
+
+    def reject_xml_declaration(*_):
+        raise ValueError("Taxonomy XML DTD/entity declarations are forbidden: " + relative_path)
+
+    parser.StartDoctypeDeclHandler = reject_xml_declaration
+    parser.EntityDeclHandler = reject_xml_declaration
+    parser.UnparsedEntityDeclHandler = reject_xml_declaration
+    parser.ExternalEntityRefHandler = reject_xml_declaration
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+
+    def add_edge(value, kind):
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError("Taxonomy dependency has an empty or malformed " + kind + ": " + relative_path)
+        remaining_edges[0] += 1
+        if remaining_edges[0] > MAX_TAXONOMY_GRAPH_EDGES:
+            raise ValueError("Taxonomy dependency graph exceeds the edge limit")
+        edges.append((value, kind))
+
+    def on_start(name, attributes):
+        namespace, local_name = _xml_expanded_name(name)
+        if XML_NAMESPACE + "}base" in attributes:
+            raise ValueError("Taxonomy XML xml:base resolution is unsupported: " + relative_path)
+
+        if namespace == XSD_NAMESPACE and local_name in ("import", "include", "redefine", "override"):
+            schema_location = attributes.get("schemaLocation")
+            if not schema_location:
+                raise ValueError("Taxonomy XSD dependency has no schemaLocation: " + relative_path)
+            add_edge(schema_location, "schemaLocation")
+
+        href = attributes.get(XLINK_NAMESPACE + "}href")
+        if href is not None:
+            if namespace == LINK_NAMESPACE and local_name in ("linkbaseRef", "roleRef", "arcroleRef") and not href:
+                raise ValueError("Taxonomy XBRL reference has an empty xlink:href: " + relative_path)
+            add_edge(href, "xlink:href")
+
+    parser.StartElementHandler = on_start
+    digest = hashlib.sha256()
+    bytes_read = 0
+    try:
+        with path.open("rb") as source:
+            while True:
+                chunk = source.read(TAXONOMY_XML_READ_BYTES)
+                if not chunk:
+                    break
+                bytes_read += len(chunk)
+                remaining_budget[0] += len(chunk)
+                if bytes_read > MAX_TAXONOMY_XML_FILE_BYTES:
+                    raise ValueError("Taxonomy dependency XML file exceeds the size limit: " + relative_path)
+                if remaining_budget[0] > MAX_TAXONOMY_GRAPH_XML_BYTES:
+                    raise ValueError("Taxonomy dependency graph exceeds the XML byte limit")
+                digest.update(chunk)
+                parser.Parse(chunk, False)
+            parser.Parse(b"", True)
+    except expat.ExpatError as ex:
+        raise ValueError("Taxonomy dependency XML is malformed or unsupported: " + relative_path) from ex
+
+    if "sha256:" + digest.hexdigest() != expected_digest:
+        raise ValueError("Taxonomy package hash mismatch while scanning dependency: " + relative_path)
+    return edges
+
+
+def _resolve_taxonomy_edge(current_path, reference, kind, package_files):
+    try:
+        parsed = urlsplit(reference)
+    except ValueError as ex:
+        raise ValueError("Taxonomy dependency URI is malformed in " + current_path) from ex
+    if parsed.scheme or parsed.netloc:
+        raise ValueError(
+            "External taxonomy dependency is unsupported during Arelle taxonomy loading: "
+            + reference[:256]
+            + " (offlineReferences do not configure Arelle's package resolver)"
+        )
+    if parsed.query:
+        if kind == "schemaLocation":
+            raise ValueError("Taxonomy XSD schemaLocation queries are unsupported: " + current_path)
+        raise ValueError("Taxonomy dependency URI queries are unsupported: " + current_path)
+    if kind == "schemaLocation" and parsed.fragment:
+        raise ValueError("Taxonomy XSD schemaLocation fragments are unsupported: " + current_path)
+    if not parsed.path:
+        # Fragment-only xlink references point within the current XML document.
+        if kind == "schemaLocation":
+            raise ValueError("Taxonomy XSD schemaLocation must name a relative file: " + current_path)
+        return None
+    if re.search(r"%(?![0-9a-fA-F]{2})", parsed.path):
+        raise ValueError("Taxonomy dependency URI has invalid percent encoding: " + current_path)
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError as ex:
+        raise ValueError("Taxonomy dependency URI is not valid UTF-8: " + current_path) from ex
+    if "\\" in decoded_path or "\x00" in decoded_path or any(ch.isspace() for ch in decoded_path):
+        raise ValueError("Taxonomy dependency URI contains an unsafe path: " + current_path)
+    if decoded_path.startswith("/"):
+        raise ValueError("Taxonomy dependency URI is not relative to its source: " + current_path)
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(current_path), decoded_path))
+    if resolved in ("", "."):
+        resolved = current_path
+    if resolved == ".." or resolved.startswith("../") or resolved.startswith("/"):
+        raise ValueError("Taxonomy dependency path escapes the package root: " + current_path)
+    if resolved not in package_files:
+        raise ValueError("Taxonomy dependency is not hash-pinned by packageFiles: " + resolved)
+    if resolved.lower().endswith(".zip"):
+        raise ValueError("Arelle ZIP package catalog dependency is unsupported: " + resolved)
+    return resolved
+
+
+def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_files, offline_references=None):
+    """Validate the bounded, file-based taxonomy dependency graph before Arelle loads it.
+
+    The offlineReferences map is deliberately not used here: the current Arelle
+    RuntimeOptions package catalog contract does not bind those URIs to members.
+    """
+    if not isinstance(package_files, dict) or entry_point not in package_files:
+        raise ValueError("Taxonomy entry point is not hash-pinned by packageFiles")
+    zip_paths = sorted(path for path in package_files if isinstance(path, str) and path.lower().endswith(".zip"))
+    if zip_paths:
+        raise ValueError("Arelle ZIP package catalogs are unsupported for bounded taxonomy loading: " + zip_paths[0])
+
+    root = Path(taxonomy_root).resolve(strict=True)
+    pending = deque([(entry_point, 0)])
+    visited = set()
+    scanned = []
+    remaining_budget = [0]
+    remaining_edges = [0]
+    while pending:
+        relative_path, depth = pending.popleft()
+        if relative_path in visited:
+            continue
+        if depth > MAX_TAXONOMY_GRAPH_DEPTH:
+            raise ValueError("Taxonomy dependency graph exceeds the depth limit")
+        if len(visited) >= MAX_TAXONOMY_GRAPH_FILES:
+            raise ValueError("Taxonomy dependency graph exceeds the file limit")
+        expected_digest = package_files.get(relative_path)
+        if not isinstance(expected_digest, str):
+            raise ValueError("Taxonomy dependency is not hash-pinned by packageFiles: " + relative_path)
+        path = safe_package_path(relative_path, root)
+        visited.add(relative_path)
+        scanned.append(relative_path)
+        edges = _read_taxonomy_xml_edges(relative_path, path, expected_digest,
+                                         remaining_budget, remaining_edges)
+        discovered = set()
+        for reference, kind in edges:
+            target = _resolve_taxonomy_edge(relative_path, reference, kind, package_files)
+            if target is not None and target not in visited:
+                # Validate path/symlink/existence before it enters the work queue.
+                try:
+                    safe_package_path(target, root)
+                except (OSError, ValueError) as ex:
+                    raise ValueError("Pinned taxonomy dependency is unavailable: " + target) from ex
+                discovered.add(target)
+        for target in sorted(discovered):
+            pending.append((target, depth + 1))
+    return tuple(scanned)
 
 
 def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None):
@@ -546,6 +729,12 @@ def handle(req, args):
                 if relative not in profile["packageFiles"]:
                     raise ValueError("Taxonomy entry point is not hash-pinned by the installed profile")
                 taxonomy_path = safe_package_path(relative, args.taxonomy_root)
+                validate_taxonomy_dependency_closure(
+                    relative,
+                    args.taxonomy_root,
+                    profile["packageFiles"],
+                    profile.get("offlineReferences", {}),
+                )
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
             ok, logs, concept_count = run_arelle(taxonomy_path, args)

@@ -16,6 +16,17 @@ FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "XBRLMappingStudio.XB
 TAXONOMY_ROOT = WORKER_DIR / "taxonomy"
 
 
+def write_taxonomy_files(root, files):
+    package_files = {}
+    for relative_path, content in files.items():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = content if isinstance(content, bytes) else content.encode("utf-8")
+        path.write_bytes(raw)
+        package_files[relative_path] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return package_files
+
+
 def report(concept="synthetic:Assets"):
     return {
         "documentInfo": {
@@ -152,6 +163,7 @@ class ArelleWorkerTests(unittest.TestCase):
             root = Path(temporary)
             entry = root / "entry.xsd"
             entry.write_text("<schema/>", encoding="utf-8")
+            entry_digest = "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()
             self.args.taxonomy_root = str(root)
             self.args.plugin = ["validate/EFM"]
             self.args.profile_manifest_data = {
@@ -161,7 +173,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 "profileDigest": "sha256:fixture",
                 "entryPoint": "entry.xsd",
                 "requiredPlugins": ["validate/EFM"],
-                "packageFiles": {"entry.xsd": "sha256:entry"},
+                "packageFiles": {"entry.xsd": entry_digest},
             }
             request = self.handshake_request()
             request["operation"] = "load-taxonomy"
@@ -186,7 +198,9 @@ class ArelleWorkerTests(unittest.TestCase):
     def test_load_taxonomy_reports_configured_but_unavailable_required_plugin(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "entry.xsd").write_text("<schema/>", encoding="utf-8")
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            entry_digest = "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()
             self.args.taxonomy_root = str(root)
             self.args.plugin = ["validate/EFM"]
             self.args.profile_manifest_data = {
@@ -196,7 +210,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 "profileDigest": "sha256:fixture",
                 "entryPoint": "entry.xsd",
                 "requiredPlugins": ["validate/EFM"],
-                "packageFiles": {"entry.xsd": "sha256:entry"},
+                "packageFiles": {"entry.xsd": entry_digest},
             }
             request = self.handshake_request()
             request["operation"] = "load-taxonomy"
@@ -215,6 +229,215 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("incompleteValidation", result["status"])
         self.assertTrue(any(item["code"] == "XBR010" for item in result["diagnostics"]))
         self.assertIn("required Arelle plugin is unavailable", result["error"])
+
+    def test_taxonomy_dependency_closure_accepts_pinned_relative_xsd_and_xlink_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = {
+                "taxonomy/entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                    'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+                    'xmlns:xlink="http://www.w3.org/1999/xlink">'
+                    '<xs:include schemaLocation="common.xsd"/>'
+                    '<xs:annotation><xs:appinfo>'
+                    '<link:linkbaseRef xlink:href="labels.xml#labels"/>'
+                    '<link:roleRef xlink:href="roles.xsd#role" roleURI="urn:role"/>'
+                    '<link:arcroleRef xlink:href="arcroles.xsd#arcrole" arcroleURI="urn:arcrole"/>'
+                    '</xs:appinfo></xs:annotation></xs:schema>'
+                ),
+                "taxonomy/common.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:import namespace="urn:types" schemaLocation="nested/types.xsd"/>'
+                    '</xs:schema>'
+                ),
+                "taxonomy/nested/types.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="../common.xsd"/></xs:schema>'
+                ),
+                "taxonomy/labels.xml": '<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"/>',
+                "taxonomy/roles.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+                "taxonomy/arcroles.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            }
+            package_files = write_taxonomy_files(root, files)
+
+            first = arelle_worker.validate_taxonomy_dependency_closure(
+                "taxonomy/entry.xsd", root, package_files)
+            second = arelle_worker.validate_taxonomy_dependency_closure(
+                "taxonomy/entry.xsd", root, package_files)
+
+        self.assertEqual(first, second)
+        self.assertEqual(6, len(first))
+        self.assertEqual("taxonomy/entry.xsd", first[0])
+        self.assertIn("taxonomy/nested/types.xsd", first)
+
+    def test_taxonomy_dependency_rejects_present_but_unlisted_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="dependency.xsd"/></xs:schema>'
+                ),
+                "dependency.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            })
+            package_files.pop("dependency.xsd")
+
+            with self.assertRaisesRegex(ValueError, "not hash-pinned by packageFiles: dependency.xsd"):
+                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_taxonomy_dependency_rejects_missing_or_tampered_pinned_targets(self):
+        entry_xml = (
+            '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:include schemaLocation="dependency.xsd"/></xs:schema>'
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {"entry.xsd": entry_xml})
+            package_files["dependency.xsd"] = "sha256:" + "0" * 64
+
+            with self.assertRaisesRegex(ValueError, "dependency is unavailable: dependency.xsd"):
+                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": entry_xml,
+                "dependency.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            })
+            (root / "dependency.xsd").write_text(
+                '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" tampered="yes"/>',
+                encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "hash mismatch while scanning dependency: dependency.xsd"):
+                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_taxonomy_dependency_cycles_are_deterministic_and_limits_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="dependency.xsd"/></xs:schema>'
+                ),
+                "dependency.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="entry.xsd"/></xs:schema>'
+                ),
+            })
+            first = arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            second = arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            self.assertEqual(("entry.xsd", "dependency.xsd"), first)
+            self.assertEqual(first, second)
+
+            with mock.patch.object(arelle_worker, "MAX_TAXONOMY_GRAPH_FILES", 1):
+                with self.assertRaisesRegex(ValueError, "file limit"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            with mock.patch.object(arelle_worker, "MAX_TAXONOMY_GRAPH_DEPTH", 0):
+                with self.assertRaisesRegex(ValueError, "depth limit"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            with mock.patch.object(arelle_worker, "MAX_TAXONOMY_GRAPH_XML_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "XML byte limit"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            with mock.patch.object(arelle_worker, "MAX_TAXONOMY_XML_FILE_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "XML file exceeds the size limit"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            with mock.patch.object(arelle_worker, "MAX_TAXONOMY_GRAPH_EDGES", 0):
+                with self.assertRaisesRegex(ValueError, "edge limit"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_taxonomy_dependency_rejects_dtd_and_entity_payloads(self):
+        payloads = [
+            '<!DOCTYPE schema [<!ENTITY local "expanded">]><schema>&local;</schema>',
+            '<!DOCTYPE schema SYSTEM "https://example.invalid/external.dtd"><schema/>',
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                package_files = write_taxonomy_files(root, {"entry.xsd": payload})
+                with self.assertRaisesRegex(ValueError, "DTD/entity declarations are forbidden"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_taxonomy_dependency_rejects_xml_base_resolution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": '<schema xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:base="../"/>',
+            })
+            with self.assertRaisesRegex(ValueError, "xml:base resolution is unsupported"):
+                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_external_taxonomy_dependency_fails_before_arelle_even_with_offline_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:import namespace="urn:remote" '
+                    'schemaLocation="https://example.invalid/remote.xsd"/></xs:schema>'
+                ),
+                "mapped.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            })
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = {
+                "schemaVersion": 3,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": [],
+                "packageFiles": package_files,
+                "offlineReferences": {"https://example.invalid/remote.xsd": "mapped.xsd"},
+            }
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+                result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", result["status"])
+        self.assertIn("offlineReferences do not configure Arelle's package resolver", result["error"])
+        run_arelle.assert_not_called()
+
+    def test_taxonomy_dependency_rejects_zip_catalogs_before_arelle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+            })
+            package_files["catalog.zip"] = "sha256:" + "0" * 64
+            with self.assertRaisesRegex(ValueError, "ZIP package catalogs are unsupported"):
+                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+    def test_schema_location_rejects_query_or_fragment_but_xlink_fragment_only_is_local(self):
+        invalid_schema_locations = ("dependency.xsd?version=1", "dependency.xsd#schema")
+        for schema_location in invalid_schema_locations:
+            with self.subTest(schema_location=schema_location), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                package_files = write_taxonomy_files(root, {
+                    "entry.xsd": (
+                        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                        '<xs:include schemaLocation="' + schema_location + '"/></xs:schema>'
+                    ),
+                })
+                with self.assertRaisesRegex(ValueError, "schemaLocation (queries|fragments) are unsupported"):
+                    arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                    'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+                    'xmlns:xlink="http://www.w3.org/1999/xlink">'
+                    '<xs:annotation><xs:appinfo><link:roleRef xlink:href="#local-role" '
+                    'roleURI="urn:role"/></xs:appinfo></xs:annotation></xs:schema>'
+                ),
+            })
+            result = arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+        self.assertEqual(("entry.xsd",), result)
 
     def test_arelle_plugins_use_the_runtime_option_separator(self):
         self.args.plugin = ["plugin-one", "plugin-two"]
