@@ -30,8 +30,15 @@ public class FunctionTests
 
     private static (ExecutionResult? Result, CompilationResult Compile) RunRoundGraph(
         decimal amount, string mode, string digits)
+        => RunRoundGraph(DataValue.DecimalValue(amount), mode, digits);
+
+    private static (ExecutionResult? Result, CompilationResult Compile) RunRoundGraph(
+        DataValue amount, string mode, string digits)
     {
-        var source = Driver(out var edges, amount);
+        var source = GraphHarness.Node(NodeTypeConstants.ExcelField, "In",
+            new() { ["bindingId"] = Binding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge>();
         var round = GraphHarness.Node(NodeTypeConstants.Round, "Round",
             new() { ["mode"] = mode, ["digits"] = digits },
             inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
@@ -43,7 +50,11 @@ public class FunctionTests
         var project = GraphHarness.Project(
             new List<MappingNode> { source, round }.Concat(sink), edges,
             bindings: new[] { GraphHarness.Binding(Binding) });
-        var result = GraphHarness.Run(project, OneRow(amount), out var compile);
+        var context = GraphHarness.Ctx(new[]
+        {
+            (Binding, new[] { GraphHarness.Row(("amount", amount)) } as IReadOnlyList<DataRecord>)
+        });
+        var result = GraphHarness.Run(project, context, out var compile);
         return (result, compile);
     }
 
@@ -330,6 +341,33 @@ public class FunctionTests
         Assert.Contains(result!.Diagnostics, diagnostic =>
             diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
             && diagnostic.Message.Contains("HalfDown", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("HalfDown", "2", "HalfDown")]
+    [InlineData("HalfEven", "29", "0..28")]
+    public void Round_InvalidConfigurationFailsEvenWhenInputIsNil(
+        string mode, string digits, string expectedMessage)
+    {
+        var (result, compile) = RunRoundGraph(
+            DataValue.ExplicitNil(PortShape.Decimal), mode, digits);
+
+        Assert.True(compile.Success);
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
+            && diagnostic.Message.Contains(expectedMessage, StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void Round_ValidConfigurationPreservesNilInput()
+    {
+        var (result, compile) = RunRoundGraph(
+            DataValue.ExplicitNil(PortShape.Decimal), "HalfEven", "2");
+
+        Assert.True(compile.Success);
+        Assert.Empty(result!.Diagnostics);
+        Assert.True(Assert.Single(result.Facts).IsNil);
     }
 
     // ---- MAP04: divide-by-zero policies --------------------------------------------

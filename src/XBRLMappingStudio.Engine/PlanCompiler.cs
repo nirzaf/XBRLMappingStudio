@@ -1125,13 +1125,6 @@ public sealed class PlanCompiler
             case NodeTypeConstants.Round:
             {
                 var input = inputs.GetValueOrDefault("input", DataValue.Missing(PortShape.Decimal));
-                if (input.IsMissing || input.IsNil)
-                {
-                    outputs["value"] = input.IsNil
-                        ? DataValue.ExplicitNil(PortShape.Decimal)
-                        : DataValue.Missing(PortShape.Decimal);
-                    break;
-                }
                 var digitsStr = GetString(node, "digits") ?? "0";
                 if (!int.TryParse(digitsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits)
                     || digits < 0 || digits > DecimalDomain.MaximumScale)
@@ -1151,6 +1144,14 @@ public sealed class PlanCompiler
                         $"Unknown rounding mode '{modeStr}'.",
                         nodeId: node.NodeId, source: input.Source);
                     outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+
+                if (input.IsMissing || input.IsNil)
+                {
+                    outputs["value"] = input.IsNil
+                        ? DataValue.ExplicitNil(PortShape.Decimal)
+                        : DataValue.Missing(PortShape.Decimal);
                     break;
                 }
 
