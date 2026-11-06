@@ -492,6 +492,39 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void JoinCardinalityAndDuplicatePolicies_MatchIndependentOracle()
+    {
+        var leftRows = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("a", D(10m))),
+            GraphHarness.Row(("k", S("2")), ("a", D(20m)))
+        };
+        var rightRows = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("name", S("first"))),
+            GraphHarness.Row(("k", S("1")), ("name", S("duplicate"))),
+            GraphHarness.Row(("k", S("3")), ("name", S("right-only")))
+        };
+
+        decimal[] Values(string cardinality, string duplicateKey, int maxJoinRows = 200_000)
+            => RunJoinToGroupedFacts(leftRows, rightRows, cardinality, duplicateKey, maxJoinRows)
+                .Facts.Select(fact => fact.Value!.Value).OrderBy(value => value).ToArray();
+
+        Assert.Equal(new[] { 10m }, Values("Inner", "First"));
+        Assert.Equal(new[] { 10m, 20m }, Values("Left", "First"));
+        Assert.Equal(new[] { 0m, 10m }, Values("Right", "First"));
+        Assert.Equal(new[] { 0m, 10m, 20m }, Values("Full", "First"));
+        Assert.Equal(new[] { 20m }, Values("Inner", "All"));
+
+        var duplicateFailure = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "Fail");
+        Assert.Contains(duplicateFailure.Diagnostics, diagnostic => diagnostic.Code == "MAP017");
+        Assert.Empty(duplicateFailure.Facts);
+
+        var expansionFailure = RunJoinToGroupedFacts(leftRows, rightRows, "Inner", "All", maxJoinRows: 1);
+        Assert.Contains(expansionFailure.Diagnostics, diagnostic => diagnostic.Code == "MAP015");
+    }
+
+    [Fact]
     public void JoinExpansionBudget_BlocksBeforePublication()
     {
         const string Left = "L";
@@ -551,6 +584,59 @@ public class CollectionAndJoinTests
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
         // 2 left x 3 right = 6 join rows for key "1", budget 2 -> expansion exceeded.
         Assert.Contains(result!.Diagnostics, d => d.Code == "MAP015");
+    }
+
+    private static ExecutionResult RunJoinToGroupedFacts(
+        IReadOnlyList<DataRecord> leftRows,
+        IReadOnlyList<DataRecord> rightRows,
+        string cardinality,
+        string duplicateKey,
+        int maxJoinRows = 200_000)
+    {
+        const string leftBinding = "join-left";
+        const string rightBinding = "join-right";
+        var left = GraphHarness.Node(NodeTypeConstants.CollectRows, "Left",
+            new() { ["binding"] = leftBinding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var right = GraphHarness.Node(NodeTypeConstants.CollectRows, "Right",
+            new() { ["binding"] = rightBinding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var join = GraphHarness.Node(NodeTypeConstants.Join, "Join",
+            new() { ["leftKey"] = "k", ["rightKey"] = "k", ["cardinality"] = cardinality,
+                ["duplicateKey"] = duplicateKey },
+            inputs: new[]
+            {
+                GraphHarness.P("left", PortShape.Record, PortCardinality.Collection),
+                GraphHarness.P("right", PortShape.Record, PortCardinality.Collection)
+            },
+            outputs: new[] { GraphHarness.P("rows", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By key",
+            new() { ["keys"] = "k", ["sumField"] = "a" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection)
+            });
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(left, "items", join, "left"),
+            GraphHarness.Link(right, "items", join, "right"),
+            GraphHarness.Link(join, "rows", group, "items")
+        };
+        var sink = GraphHarness.FactSink(out var sinkEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        var project = GraphHarness.Project(new[] { left, right, join, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(leftBinding), GraphHarness.Binding(rightBinding) });
+        var context = GraphHarness.Ctx(new[]
+        {
+            (leftBinding, leftRows),
+            (rightBinding, rightRows)
+        }, maxJoinRows: maxJoinRows);
+
+        var result = GraphHarness.Run(project, context, out var compile);
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        return Assert.IsType<ExecutionResult>(result);
     }
 
     // ---- MAP06: lookup over a project-pinned dictionary -----------------------------

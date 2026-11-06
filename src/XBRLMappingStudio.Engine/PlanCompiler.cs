@@ -674,24 +674,24 @@ public sealed class PlanCompiler
 
                     var joined = new List<DataValue>();
                     var matchedRights = new HashSet<string>(StringComparer.Ordinal);
-                    void AddRow(
+                    bool AddRow(
                         Dictionary<string, DataValue>? l, int? leftItemIndex,
                         Dictionary<string, DataValue>? r, int? rightItemIndex)
                     {
+                        if (joined.Count >= ctx.MaxJoinExpansionRows)
+                        {
+                            diag.Error(DiagnosticCodes.MapJoinExpansionExceeded, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                $"Join expansion exceeded MaxJoinExpansionRows={ctx.MaxJoinExpansionRows}. "
+                                + "Publication is blocked before output.", nodeId: nodeId);
+                            return false;
+                        }
+
                         var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                         if (l is not null) foreach (var kv in l) merged[kv.Key] = kv.Value;
                         if (r is not null) foreach (var kv in r) merged[kv.Key] = kv.Value;
                         var outputIndex = joined.Count;
                         joined.Add(DataValue.Record(merged));
-                        if (joined.Count > ctx.MaxJoinExpansionRows)
-                        {
-                            joined.RemoveAt(joined.Count - 1);
-                            diag.Error(DiagnosticCodes.MapJoinExpansionExceeded, DiagnosticSubsystem.Mapping,
-                                DiagnosticStage.Execution,
-                                $"Join expansion exceeded MaxJoinExpansionRows={ctx.MaxJoinExpansionRows}. "
-                                + "Publication is blocked before output.", nodeId: nodeId);
-                            return;
-                        }
 
                         var leftJoinKeyPaths = leftItemIndex is { } leftIndex
                             ? ReadSetFieldPaths(leftEdge, leftIndex, leftKey)
@@ -715,6 +715,7 @@ public sealed class PlanCompiler
                             StoreSetPaths("rows", outputIndex, extendedPaths);
                             StoreSetPaths("rows", outputIndex, extendedPaths, fieldName);
                         }
+                        return true;
                     }
 
                     foreach (var (rec, itemIndex) in left.Select((record, index) => (record, index)))
@@ -726,13 +727,21 @@ public sealed class PlanCompiler
                         {
                             foreach (var rrow in bucket!)
                             {
-                                AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex);
+                                if (!AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex))
+                                {
+                                    outputs["rows"] = DataValue.Collection(joined);
+                                    return outputs;
+                                }
                                 matchedRights.Add(lk);
                             }
                         }
                         else if (cardinality is "Left" or "Full")
                         {
-                            AddRow(fields, itemIndex, null, null);
+                            if (!AddRow(fields, itemIndex, null, null))
+                            {
+                                outputs["rows"] = DataValue.Collection(joined);
+                                return outputs;
+                            }
                         }
                     }
 
@@ -742,7 +751,14 @@ public sealed class PlanCompiler
                         {
                             var bucket = index[rk];
                             if (matchedRights.Contains(rk)) continue;
-                            foreach (var rrow in bucket) AddRow(null, null, rrow.Fields, rrow.ItemIndex);
+                            foreach (var rrow in bucket)
+                            {
+                                if (!AddRow(null, null, rrow.Fields, rrow.ItemIndex))
+                                {
+                                    outputs["rows"] = DataValue.Collection(joined);
+                                    return outputs;
+                                }
+                            }
                         }
                     }
 
