@@ -3,9 +3,11 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from xml.etree import ElementTree
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKER_DIR))
@@ -475,7 +477,7 @@ class ArelleWorkerTests(unittest.TestCase):
                         '<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' + location + '/>'
                     ),
                 })
-                with self.assertRaisesRegex(ValueError, "External taxonomy dependency is unsupported"):
+                with self.assertRaisesRegex(ValueError, "no exact hash-pinned offlineReferences mapping"):
                     arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -490,7 +492,7 @@ class ArelleWorkerTests(unittest.TestCase):
             closure = arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
         self.assertEqual(("entry.xsd", "schemas/linkbase.xsd"), closure)
 
-    def test_external_taxonomy_dependency_fails_before_arelle_even_with_offline_mapping(self):
+    def test_external_taxonomy_dependency_uses_exact_pinned_offline_mapping(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             package_files = write_taxonomy_files(root, {
@@ -516,14 +518,42 @@ class ArelleWorkerTests(unittest.TestCase):
             request["operation"] = "load-taxonomy"
             request["profileDigest"] = "sha256:fixture"
             request["payload"] = {"taxonomyPath": "entry.xsd"}
+            observed = {}
+
+            def capture_arelle(snapshot_entry, run_args):
+                observed["entry"] = Path(snapshot_entry)
+                catalog_path = Path(run_args.package[-1])
+                with zipfile.ZipFile(catalog_path) as archive:
+                    observed["members"] = set(archive.namelist())
+                    observed["catalog"] = ElementTree.fromstring(
+                        archive.read("xms-offline/META-INF/catalog.xml"))
+                    observed["metadata"] = ElementTree.fromstring(
+                        archive.read("xms-offline/META-INF/taxonomyPackage.xml"))
+                rewrite = observed["catalog"].find(
+                    "{" + arelle_worker.OASIS_CATALOG_NAMESPACE + "}rewriteURI")
+                observed["mapped_content"] = (
+                    Path(rewrite.get("rewritePrefix")) / "remote.xsd").read_text(encoding="utf-8")
+                return True, [], 1
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                    mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+                    mock.patch.object(arelle_worker, "run_arelle", side_effect=capture_arelle) as run_arelle:
                 result = arelle_worker.handle(request, self.args)
+            dependency_closure = arelle_worker.validate_taxonomy_dependency_closure(
+                "entry.xsd", root, package_files,
+                {"https://example.invalid/remote.xsd": "mapped.xsd"})
 
-        self.assertEqual("domainFailure", result["status"])
-        self.assertIn("offlineReferences do not configure Arelle's package resolver", result["error"])
-        run_arelle.assert_not_called()
+        self.assertEqual("success", result["status"], result["error"])
+        self.assertEqual(("entry.xsd", "mapped.xsd"), dependency_closure)
+        self.assertEqual("taxonomyPackage", observed["metadata"].tag.rsplit("}", 1)[-1])
+        self.assertIn("xms-offline/META-INF/catalog.xml", observed["members"])
+        self.assertIn("xms-offline/META-INF/taxonomyPackage.xml", observed["members"])
+        mappings = observed["catalog"].findall("{" + arelle_worker.OASIS_CATALOG_NAMESPACE + "}rewriteURI")
+        self.assertEqual(1, len(mappings))
+        self.assertEqual("https://example.invalid/", mappings[0].get("uriStartString"))
+        self.assertEqual('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
+                         observed["mapped_content"])
+        self.assertFalse(observed["entry"].is_relative_to(root))
+        run_arelle.assert_called_once()
 
     def test_load_taxonomy_uses_hash_verified_snapshot_after_installed_files_change(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -687,6 +717,48 @@ class ArelleWorkerTests(unittest.TestCase):
         result = arelle_worker.handle(self.request(report()), self.args)
         self.assertEqual("success", result["status"], result["error"])
         self.assertTrue(result["result"]["completed"])
+        self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_profile_external_schema_loads_from_exact_hash_pinned_offline_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                    'xmlns:r="urn:remote" targetNamespace="urn:entry">'
+                    '<xs:import namespace="urn:remote" '
+                    'schemaLocation="https://example.invalid/remote%20schema.xsd"/>'
+                    '<xs:element name="Entry" type="r:RemoteType"/></xs:schema>'
+                ),
+                "remote.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                    'targetNamespace="urn:remote"><xs:simpleType name="RemoteType">'
+                    '<xs:restriction base="xs:string"/></xs:simpleType></xs:schema>'
+                ),
+            })
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = {
+                "schemaVersion": 3,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": [],
+                "packageFiles": package_files,
+                "offlineReferences": {"https://example.invalid/remote%20schema.xsd": "remote.xsd"},
+            }
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("success", result["status"], result["error"])
+        self.assertTrue(result["result"]["completed"])
+        self.assertEqual(2, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
 
     def test_large_path_payload_rehashes_and_streams_report_to_arelle_file_loader(self):
@@ -890,6 +962,29 @@ class ArelleWorkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 arelle_worker.load_profile_manifest(path, profile)
+
+    def test_profile_manifest_rejects_offline_reference_queries_and_fragments(self):
+        for suffix in ("?version=1", "?", "#schema-fragment", "#"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                entry = root / "entry.xsd"
+                entry.write_text("<schema/>", encoding="utf-8")
+                digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+                manifest = {
+                    "schemaVersion": 2,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "entry.xsd",
+                    "packageFiles": {"entry.xsd": "sha256:" + digest},
+                    "offlineReferences": {
+                        "https://example.invalid/taxonomy.xsd" + suffix: "entry.xsd"},
+                }
+                path = root / "profile.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, r"canonical HTTP\(S\) file URIs"):
+                    arelle_worker.load_profile_manifest(path, root)
 
     def test_profile_manifest_rejects_unsupported_schema_version(self):
         with tempfile.TemporaryDirectory() as temporary:

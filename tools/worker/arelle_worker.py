@@ -14,11 +14,14 @@ import sys
 import tempfile
 import time
 import stat
+import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 from urllib.request import url2pathname
 from xml.parsers import expat
+from xml.etree import ElementTree
 
 PROTOCOL_VERSION = 2
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4)
@@ -38,12 +41,14 @@ MAX_TAXONOMY_GRAPH_XML_BYTES = 256 * 1024 * 1024
 MAX_TAXONOMY_XML_FILE_BYTES = 16 * 1024 * 1024
 MAX_TAXONOMY_GRAPH_EDGES = 16384
 TAXONOMY_XML_READ_BYTES = 64 * 1024
+MAX_TAXONOMY_OFFLINE_ALIAS_BYTES = 256 * 1024 * 1024
 
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
 XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+OASIS_CATALOG_NAMESPACE = "urn:oasis:names:tc:entity:xmlns:xml:catalog"
 
 try:
     from arelle.api.Session import Session
@@ -300,11 +305,16 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
         raise ValueError("Taxonomy entry point is not a hash-pinned package file")
     for reference, relative_path in references.items():
         parsed_reference = urlsplit(reference) if isinstance(reference, str) else None
-        if (parsed_reference is None or parsed_reference.scheme not in ("http", "https")
+        if (parsed_reference is None or len(reference) > 2048
+                or parsed_reference.scheme not in ("http", "https")
                 or not parsed_reference.hostname or parsed_reference.username is not None
-                or parsed_reference.password is not None or not isinstance(relative_path, str)
+                or parsed_reference.password is not None or parsed_reference.query
+                or parsed_reference.fragment or "?" in reference or "#" in reference
+                or not parsed_reference.path or parsed_reference.path == "/"
+                or "\\" in reference or any(ch.isspace() or ord(ch) < 0x20 for ch in reference)
+                or not isinstance(relative_path, str)
                 or relative_path not in verified_files):
-            raise ValueError("Offline taxonomy references must map HTTP(S) URIs to pinned package files")
+            raise ValueError("Offline taxonomy references must map canonical HTTP(S) file URIs to pinned package files")
     return manifest
 
 
@@ -394,17 +404,44 @@ def _read_taxonomy_xml_edges(relative_path, path, expected_digest, remaining_bud
     return edges
 
 
-def _resolve_taxonomy_edge(current_path, reference, kind, package_files):
+class TaxonomyDependencyClosure(tuple):
+    """Ordered verified dependency paths plus the exact offline URI mappings they use."""
+
+    def __new__(cls, paths, offline_references):
+        result = super().__new__(cls, paths)
+        result.offline_references = dict(offline_references)
+        return result
+
+
+def _resolve_taxonomy_edge(current_path, reference, kind, package_files,
+                           offline_references=None, used_offline_references=None):
     try:
         parsed = urlsplit(reference)
     except ValueError as ex:
         raise ValueError("Taxonomy dependency URI is malformed in " + current_path) from ex
     if parsed.scheme or parsed.netloc:
-        raise ValueError(
-            "External taxonomy dependency is unsupported during Arelle taxonomy loading: "
-            + reference[:256]
-            + " (offlineReferences do not configure Arelle's package resolver)"
-        )
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("External taxonomy dependency must be an HTTP(S) URI without credentials: "
+                             + reference[:256])
+        if (not parsed.path or parsed.path == "/" or "\\" in reference
+                or any(ch.isspace() or ord(ch) < 0x20 for ch in reference)):
+            raise ValueError("External taxonomy dependency must identify a canonical file URI: "
+                             + reference[:256])
+        if parsed.query or "?" in reference.split("#", 1)[0]:
+            raise ValueError("External taxonomy dependency queries are unsupported: " + current_path)
+        if kind == "schemaLocation" and (parsed.fragment or "#" in reference):
+            raise ValueError("External taxonomy schemaLocation fragments are unsupported: " + current_path)
+        base_reference = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        target = (offline_references or {}).get(base_reference)
+        if not isinstance(target, str) or target not in package_files:
+            raise ValueError("External taxonomy dependency has no exact hash-pinned offlineReferences mapping: "
+                             + base_reference[:256])
+        if target.lower().endswith(".zip"):
+            raise ValueError("Arelle ZIP package catalog dependency is unsupported: " + target)
+        if used_offline_references is not None:
+            used_offline_references[base_reference] = target
+        return target
     if parsed.query:
         if kind == "schemaLocation":
             raise ValueError("Taxonomy XSD schemaLocation queries are unsupported: " + current_path)
@@ -441,8 +478,10 @@ def _resolve_taxonomy_edge(current_path, reference, kind, package_files):
 def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_files, offline_references=None):
     """Validate the bounded, file-based taxonomy dependency graph before Arelle loads it.
 
-    The offlineReferences map is deliberately not used here: the current Arelle
-    RuntimeOptions package catalog contract does not bind those URIs to members.
+    Exact external HTTP(S) references may resolve only through the profile's
+    hash-pinned offlineReferences map. Their closure targets are copied into a
+    private snapshot and an ephemeral local Arelle catalog maps only those URI
+    directories to the copied files.
     """
     if not isinstance(package_files, dict) or entry_point not in package_files:
         raise ValueError("Taxonomy entry point is not hash-pinned by packageFiles")
@@ -454,6 +493,7 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
     pending = deque([(entry_point, 0)])
     visited = set()
     scanned = []
+    used_offline_references = {}
     remaining_budget = [0]
     remaining_edges = [0]
     while pending:
@@ -474,7 +514,8 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
                                          remaining_budget, remaining_edges)
         discovered = set()
         for reference, kind in edges:
-            target = _resolve_taxonomy_edge(relative_path, reference, kind, package_files)
+            target = _resolve_taxonomy_edge(relative_path, reference, kind, package_files,
+                                            offline_references, used_offline_references)
             if target is not None and target not in visited:
                 # Validate path/symlink/existence before it enters the work queue.
                 try:
@@ -484,10 +525,119 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
                 discovered.add(target)
         for target in sorted(discovered):
             pending.append((target, depth + 1))
-    return tuple(scanned)
+    return TaxonomyDependencyClosure(scanned, used_offline_references)
 
 
-def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root, snapshot_root, package_files):
+def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
+    """Create a local-only Arelle catalog for the exact external references in the closure."""
+    root = Path(snapshot_root).resolve(strict=True)
+    alias_root = root / ".xms-offline-uri"
+    alias_root.mkdir(mode=0o700, exist_ok=True)
+    remappings = {}
+    copied_bytes = 0
+    alias_targets = {}
+    source_digests = {}
+
+    for reference, relative_path in sorted(offline_references.items()):
+        try:
+            parsed = urlsplit(reference)
+            decoded_path = unquote(parsed.path, errors="strict")
+        except (UnicodeDecodeError, ValueError) as ex:
+            raise ValueError("Offline taxonomy URI cannot be represented as a safe local path") from ex
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.query or parsed.fragment or "?" in reference or "#" in reference
+                or not parsed.path.startswith("/")
+                or "\\" in decoded_path or "\x00" in decoded_path
+                or any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in decoded_path)):
+            raise ValueError("Offline taxonomy URI is not a canonical HTTP(S) file reference: "
+                             + reference[:256])
+
+        parent_path, separator, raw_suffix = parsed.path.rpartition("/")
+        if not separator or not raw_suffix:
+            raise ValueError("Offline taxonomy URI must identify a file, not a directory: "
+                             + reference[:256])
+        prefix = urlunsplit((parsed.scheme, parsed.netloc, parent_path + "/", "", ""))
+        directory_key = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+        local_alias_directory = alias_root / directory_key
+        local_alias_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        source = safe_package_path(relative_path, root)
+        source_digest = source_digests.get(relative_path)
+        if source_digest is None:
+            digest = hashlib.sha256()
+            with source.open("rb") as source_file:
+                for chunk in iter(lambda: source_file.read(TAXONOMY_XML_READ_BYTES), b""):
+                    digest.update(chunk)
+            source_digest = digest.hexdigest()
+            source_digests[relative_path] = source_digest
+
+        # Arelle's package catalog remaps URI prefixes. Create a private alias whose
+        # suffix is the URI's path so an unmapped sibling still resolves to no file.
+        decoded_suffix = unquote(raw_suffix, errors="strict")
+        if ("/" in decoded_suffix or "\\" in decoded_suffix
+                or len(raw_suffix) > 255 or len(decoded_suffix) > 255
+                or len(os.fsencode(decoded_suffix)) > 255):
+            raise ValueError("Offline taxonomy URI encodes a path separator in its file name: "
+                             + reference[:256])
+        suffixes = {raw_suffix, decoded_suffix}
+        for suffix in suffixes:
+            normalized = posixpath.normpath(suffix)
+            parts = suffix.split("/")
+            if (not suffix or normalized != suffix or suffix.startswith("/")
+                    or any(part in ("", ".", "..") for part in parts)
+                    or any(ch in "\\:*?\"<>|\x00" or ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f
+                           for ch in suffix)):
+                raise ValueError("Offline taxonomy URI contains an unsafe relative file path: "
+                                 + reference[:256])
+            alias = local_alias_directory.joinpath(*suffix.split("/"))
+            alias.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            existing_digest = alias_targets.get(str(alias))
+            if existing_digest is not None:
+                if existing_digest != source_digest:
+                    raise ValueError("Offline taxonomy URI aliases collide on different pinned files")
+                continue
+            if alias.exists():
+                if not alias.is_file() or hashlib.sha256(alias.read_bytes()).hexdigest() != source_digest:
+                    raise ValueError("Offline taxonomy URI aliases collide with a different snapshot file")
+            else:
+                try:
+                    os.link(source, alias)
+                except OSError:
+                    copied_bytes += source.stat().st_size
+                    if copied_bytes > MAX_TAXONOMY_OFFLINE_ALIAS_BYTES:
+                        raise ValueError("Offline taxonomy URI aliases exceed the local copy budget")
+                    shutil.copyfile(source, alias)
+                    if os.name != "nt":
+                        alias.chmod(0o400)
+            alias_targets[str(alias)] = source_digest
+
+        remappings[prefix] = str(local_alias_directory) + os.sep
+
+    ElementTree.register_namespace("", OASIS_CATALOG_NAMESPACE)
+    catalog = ElementTree.Element("{" + OASIS_CATALOG_NAMESPACE + "}catalog")
+    for prefix, rewrite_prefix in sorted(remappings.items(), key=lambda pair: (-len(pair[0]), pair[0])):
+        ElementTree.SubElement(catalog, "{" + OASIS_CATALOG_NAMESPACE + "}rewriteURI", {
+            "uriStartString": prefix,
+            "rewritePrefix": rewrite_prefix,
+        })
+    catalog_bytes = ElementTree.tostring(catalog, encoding="utf-8", xml_declaration=True)
+    package_namespace = "http://xbrl.org/2016/taxonomy-package"
+    metadata = ElementTree.Element("{" + package_namespace + "}taxonomyPackage", {
+        "{" + XML_NAMESPACE + "}lang": "en",
+    })
+    ElementTree.SubElement(metadata, "{" + package_namespace + "}identifier").text = (
+        "urn:xbrlmappingstudio:worker:offline-taxonomy-catalog")
+    metadata_bytes = ElementTree.tostring(metadata, encoding="utf-8", xml_declaration=True)
+    catalog_path = root / "offline-taxonomy-catalog.zip"
+    with zipfile.ZipFile(catalog_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("xms-offline/META-INF/taxonomyPackage.xml", metadata_bytes)
+        archive.writestr("xms-offline/META-INF/catalog.xml", catalog_bytes)
+    if os.name != "nt":
+        catalog_path.chmod(0o400)
+    return catalog_path
+
+
+def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root, snapshot_root,
+                                     package_files, offline_references=None):
     """Copy verified closure bytes into a private tree so source edits cannot race Arelle."""
     source_root = Path(taxonomy_root).resolve(strict=True)
     target_root = Path(snapshot_root).resolve(strict=True)
@@ -522,6 +672,8 @@ def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root,
         except OSError as ex:
             raise ValueError("Could not create private taxonomy snapshot for: " + relative_path) from ex
 
+    if offline_references:
+        _write_offline_taxonomy_catalog(target_root, offline_references)
     return safe_package_path(entry_point, target_root)
 
 
@@ -530,8 +682,15 @@ def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root
     with tempfile.TemporaryDirectory(prefix="xms-taxonomy-") as snapshot_directory:
         os.chmod(snapshot_directory, 0o700)
         snapshot_entry = _copy_verified_taxonomy_snapshot(
-            entry_point, relative_paths, taxonomy_root, snapshot_directory, package_files)
-        return run_arelle(snapshot_entry, args)
+            entry_point, relative_paths, taxonomy_root, snapshot_directory, package_files,
+            getattr(relative_paths, "offline_references", {}))
+        run_args = args
+        if getattr(relative_paths, "offline_references", {}):
+            import copy
+            run_args = copy.copy(args)
+            run_args.package = list(getattr(args, "package", []) or [])
+            run_args.package.append(str(Path(snapshot_directory) / "offline-taxonomy-catalog.zip"))
+        return run_arelle(snapshot_entry, run_args)
 
 
 def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None):

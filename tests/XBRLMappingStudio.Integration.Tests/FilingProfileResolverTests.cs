@@ -456,6 +456,36 @@ public sealed class FilingProfileResolverTests
         }
     }
 
+    [Theory]
+    [InlineData("?version=1")]
+    [InlineData("?")]
+    [InlineData("#schema-fragment")]
+    [InlineData("#")]
+    public void CatalogRejectsOfflineReferenceQueriesAndFragments(string suffix)
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            WriteInvalidManifest(root, "fixture-reference-uri-profile", "1.0.0", manifest => manifest with
+            {
+                OfflineReferences = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["https://example.invalid/common.xsd" + suffix] = "imports/common.xsd"
+                }
+            });
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue => issue.ProfileId == "fixture-reference-uri-profile"
+                && issue.Message.Contains("without credentials, query, or fragment", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public void CatalogRejectsDuplicateJsonPropertiesAndChangedManifestDigest()
     {

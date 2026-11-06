@@ -388,8 +388,10 @@ public static class InstalledFilingProfileCatalog
         {
             if (uriText.Length > 2048 || !Uri.TryCreate(uriText, UriKind.Absolute, out var uri)
                 || uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host)
-                || uri.UserInfo.Length > 0)
-                throw new InvalidDataException($"Offline taxonomy reference '{uriText}' must be an HTTP(S) URI without credentials.");
+                || uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0
+                || uri.AbsolutePath == "/" || uriText.Contains('?') || uriText.Contains('#')
+                || uriText.Contains('\\') || uriText.Any(ch => char.IsWhiteSpace(ch) || char.IsControl(ch)))
+                throw new InvalidDataException($"Offline taxonomy reference '{uriText}' must be a canonical HTTP(S) file URI without credentials, query, or fragment.");
             EnsureSafeRelativePath(localPath, "offline reference target");
             if (!manifest.PackageFiles.ContainsKey(localPath))
                 throw new InvalidDataException($"Offline reference '{uriText}' targets unpinned file '{localPath}'.");

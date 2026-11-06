@@ -208,3 +208,19 @@ and real-profile qualification remain open.
 Focused Release verification passed: 23 profile-catalog integration tests, 80
 XBRL tests, 72 operations/cache tests, and 2 desktop explorer tests. The 48 Python
 worker tests passed with 6 environment-dependent skips.
+
+## TAX-02 exact offline reference loading
+
+The worker accepts an external taxonomy dependency only when its exact HTTP(S)
+file URI maps through the installed profile to a hash-pinned package file. It
+copies that dependency into the rehashed private snapshot and supplies Arelle
+with a temporary OASIS rewrite catalog containing only those URI directories
+and files. A pinned-Arelle integration fixture successfully loaded a schema
+through a percent-encoded URI using the local target; Arelle remained in
+`workOffline` / `internetConnectivity="offline"` mode. ZIP taxonomy packages
+and OS-level network-egress isolation remain unsupported/unverified.
+
+Local verification passed all 50 Python worker tests (one symlink-privilege
+skip) and all 4 focused profile-catalog .NET tests. Arelle 2.47.4 emitted one
+non-failing `ResourceWarning` while closing the temporary ZIP package stream;
+the taxonomy load and temporary-directory cleanup completed successfully.
