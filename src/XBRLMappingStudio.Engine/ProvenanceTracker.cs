@@ -209,6 +209,12 @@ public sealed class ExecutionContext
     /// <summary>MAP05 resource budget: maximum number of GroupBy buckets.</summary>
     public int MaxGroupCount { get; init; } = 100_000;
 
+    /// <summary>
+    /// MAP05 resource budget: conservative retained-byte estimate for GroupBy state,
+    /// including keys and provenance paths. Exceeding it blocks before adding more state.
+    /// </summary>
+    public long MaxGroupWorkingBytes { get; init; } = 64L * 1024 * 1024;
+
     /// <summary>MAP06 resource budget: maximum many-to-many expansion rows before block.</summary>
     public int MaxJoinExpansionRows { get; init; } = 200_000;
 

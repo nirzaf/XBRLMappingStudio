@@ -430,6 +430,51 @@ public sealed class PlanCompiler
                     var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
                     var groupKeyPaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
                     var groupValuePaths = new Dictionary<string, List<SourceTransformationPath>>(StringComparer.Ordinal);
+                    long groupWorkingBytes = 0;
+
+                    static long EstimateStringStorageBytes(string? value)
+                        => value is null ? 0 : 24L + (long)value.Length * sizeof(char);
+
+                    static long EstimateGroupPathBytes(SourceTransformationPath path)
+                    {
+                        var oneCopy = 96L
+                            + EstimateStringStorageBytes(path.Source.SourceId)
+                            + EstimateStringStorageBytes(path.Source.Locator)
+                            + EstimateStringStorageBytes(path.Source.DisplayName)
+                            + 24L + (long)path.TransformationIds.Count * 16L;
+                        foreach (var transformationId in path.TransformationIds)
+                            oneCopy = checked(oneCopy + EstimateStringStorageBytes(transformationId));
+                        // Include the retained source path plus headroom for the set-output
+                        // and fact provenance copies produced after aggregation.
+                        return checked(oneCopy * 3);
+                    }
+
+                    bool TryReserveGroupMemory(long bytes)
+                    {
+                        if (bytes < 0 || bytes > ctx.MaxGroupWorkingBytes
+                            || groupWorkingBytes > ctx.MaxGroupWorkingBytes - bytes)
+                            return false;
+                        groupWorkingBytes += bytes;
+                        return true;
+                    }
+
+                    bool TryAddGroupPaths(List<SourceTransformationPath> target,
+                        IEnumerable<SourceTransformationPath> candidates)
+                    {
+                        foreach (var candidate in candidates)
+                        {
+                            if (target.Any(existing => existing.Source == candidate.Source
+                                && existing.TransformationIds.SequenceEqual(candidate.TransformationIds,
+                                    StringComparer.Ordinal)))
+                                continue;
+                            if (!TryReserveGroupMemory(EstimateGroupPathBytes(candidate)))
+                                return false;
+                            target.Add(candidate);
+                        }
+                        return true;
+                    }
+
+                    bool exceededWorkingMemory = false;
                     foreach (var (rec, itemIndex) in items.Select((item, index) => (item, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
@@ -452,6 +497,16 @@ public sealed class PlanCompiler
                                     nodeId: nodeId);
                                 break;
                             }
+                            var bucketBytes = 512L + EstimateStringStorageBytes(bk);
+                            if (!TryReserveGroupMemory(bucketBytes))
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                exceededWorkingMemory = true;
+                                break;
+                            }
                             order.Add(bk);
                             totals[bk] = 0m;
                             groupKeyPaths[bk] = new List<SourceTransformationPath>();
@@ -462,9 +517,18 @@ public sealed class PlanCompiler
                             foreach (var keyField in keyFields)
                             {
                                 var paths = ReadSetFieldPaths(inputEdge, itemIndex, keyField);
-                                AddDistinctPaths(groupKeyPaths[bk], paths);
-                                AddDistinctPaths(groupValuePaths[bk], paths);
+                                if (!TryAddGroupPaths(groupKeyPaths[bk], paths)
+                                    || !TryAddGroupPaths(groupValuePaths[bk], paths))
+                                {
+                                    diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                        DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                        $"GroupBy exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional groups were added.",
+                                        nodeId: nodeId);
+                                    exceededWorkingMemory = true;
+                                    break;
+                                }
                             }
+                            if (exceededWorkingMemory) break;
                         }
                         var v = GetField(fields, sumField);
                         if (v.IsMissing || v.IsNil) continue;
@@ -473,8 +537,16 @@ public sealed class PlanCompiler
                         { throw new NumericOverflowException($"GroupBy sum overflow on node '{node.DisplayName}'."); }
                         if (inputEdge is not null)
                         {
-                            AddDistinctPaths(groupValuePaths[bk],
-                                ReadSetFieldPaths(inputEdge, itemIndex, sumField));
+                            if (!TryAddGroupPaths(groupValuePaths[bk],
+                                ReadSetFieldPaths(inputEdge, itemIndex, sumField)))
+                            {
+                                diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                                    DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                    $"GroupBy exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional groups were added.",
+                                    nodeId: nodeId);
+                                exceededWorkingMemory = true;
+                                break;
+                            }
                         }
                     }
                     var valueList = new List<DataValue>();

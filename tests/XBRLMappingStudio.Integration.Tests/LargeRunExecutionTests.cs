@@ -590,6 +590,23 @@ public sealed class LargeRunExecutionTests
             await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
                 project, result, root, allowSyntheticProfile: true));
             Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+
+            var memoryWorker = new DigestOnlyArtifactWorker(profile);
+            var memoryLimitedService = new MappingJobService(profile, memoryWorker,
+                executionBudget: new ExecutionBudget(MaxGroupWorkingBytes: 1));
+            using var memoryLimited = await memoryLimitedService.RunAsync(project,
+                Connections(project, database), new Dictionary<string, string>(),
+                preview: false, CancellationToken.None);
+
+            Assert.False(memoryLimited.IsPublishable);
+            Assert.Contains(memoryLimited.Manifest.Diagnostics, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.MapCollectionBudgetExceeded
+                && diagnostic.Message.Contains("MaxGroupWorkingBytes=1", StringComparison.Ordinal));
+            Assert.Empty(memoryLimited.Facts);
+            Assert.Equal(0, memoryWorker.ValidationRequests);
+            await Assert.ThrowsAsync<AdapterException>(() => memoryLimitedService.PublishFileDestinationAsync(
+                project, memoryLimited, root, allowSyntheticProfile: true));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
         }
         finally { TryDeleteDirectory(root); }
     }

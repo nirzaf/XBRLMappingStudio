@@ -81,7 +81,8 @@ internal static class GraphHarness
         int previewLimit = 10,
         int maxJoinRows = 200_000,
         int maxCollectionItems = 100_000,
-        int maxGroupCount = 100_000)
+        int maxGroupCount = 100_000,
+        long maxGroupWorkingBytes = 64L * 1024 * 1024)
     {
         var ctx = new ExecutionContext
         {
@@ -100,6 +101,7 @@ internal static class GraphHarness
             MaxJoinExpansionRows = maxJoinRows,
             MaxCollectionItems = maxCollectionItems,
             MaxGroupCount = maxGroupCount,
+            MaxGroupWorkingBytes = maxGroupWorkingBytes,
             CancellationToken = CancellationToken.None
         };
         foreach (var s in sources) ctx.LoadedSources[s.Binding] = s.Rows;

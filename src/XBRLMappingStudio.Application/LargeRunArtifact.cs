@@ -10,8 +10,8 @@ namespace XBRLMappingStudio.Application;
 /// <summary>
 /// Limits used by mapping execution. The probe limit includes all bindings, not a
 /// per-binding multiplier; the SQLite cache and batch size bound managed working
-/// memory after large mode is selected. Collection, group, and join limits are also
-/// passed to the engine so the configured execution budget applies to set-phase work.
+/// memory after large mode is selected. Collection, group-count, estimated
+/// group-state-byte, and join limits also reach the engine's set-phase work.
 /// </summary>
 public sealed record ExecutionBudget(
     int InMemorySourceRecordLimit = 50_000,
@@ -28,7 +28,8 @@ public sealed record ExecutionBudget(
     long MaxReportBytes = 2L * 1024 * 1024 * 1024,
     int MaxCollectionItems = 100_000,
     int MaxGroupCount = 100_000,
-    int MaxJoinExpansionRows = 200_000)
+    int MaxJoinExpansionRows = 200_000,
+    long MaxGroupWorkingBytes = 64L * 1024 * 1024)
 {
     public static ExecutionBudget Default { get; } = new();
 
@@ -50,6 +51,7 @@ public sealed record ExecutionBudget(
         if (MaxCollectionItems < 1) throw new ArgumentOutOfRangeException(nameof(MaxCollectionItems));
         if (MaxGroupCount < 1) throw new ArgumentOutOfRangeException(nameof(MaxGroupCount));
         if (MaxJoinExpansionRows < 1) throw new ArgumentOutOfRangeException(nameof(MaxJoinExpansionRows));
+        if (MaxGroupWorkingBytes < 1) throw new ArgumentOutOfRangeException(nameof(MaxGroupWorkingBytes));
     }
 }
 

@@ -365,6 +365,7 @@ public sealed class MappingJobService
             IsPreview = preview,
             MaxCollectionItems = _executionBudget.MaxCollectionItems,
             MaxGroupCount = _executionBudget.MaxGroupCount,
+            MaxGroupWorkingBytes = _executionBudget.MaxGroupWorkingBytes,
             MaxJoinExpansionRows = _executionBudget.MaxJoinExpansionRows,
             CancellationToken = cancellationToken
         };

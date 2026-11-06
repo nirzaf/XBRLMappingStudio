@@ -245,6 +245,50 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void GroupBy_BlocksBeforeExceedingConfiguredWorkingMemoryEstimate()
+    {
+        var rows = new[]
+        {
+            GraphHarness.Row(("entity", S("X")), ("amount", D(10m))),
+        };
+
+        var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
+            new() { ["binding"] = Binding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By entity",
+            new() { ["keys"] = "entity", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection),
+            });
+
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(collectRows, "items", group, "items"),
+        };
+        var sink = GraphHarness.FactSink(out var factEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new List<MappingNode> { collectRows, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, rows as IReadOnlyList<DataRecord>) },
+            maxGroupWorkingBytes: 1);
+
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.NotNull(result);
+        var budgetDiagnostic = Assert.Single(result!.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.MapCollectionBudgetExceeded);
+        Assert.True(budgetDiagnostic.IsBlocking);
+        Assert.Contains("MaxGroupWorkingBytes=1", budgetDiagnostic.Message, StringComparison.Ordinal);
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
     public void GroupBy_StopsBeforeExceedingCollectionOutputLimit()
     {
         const string Left = "L";
