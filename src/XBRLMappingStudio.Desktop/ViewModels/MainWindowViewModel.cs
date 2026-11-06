@@ -395,7 +395,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private FilingProfile _profile;
     private readonly FilingProfileResolver _profileResolver;
     private readonly FilingProfileWorkerFactory _workerFactory;
-    private TaxonomyIndex _taxonomy;
+    private TaxonomyIndex? _taxonomy;
     private DesignerSession _session;
     private SuggestionSession? _suggestionSession;
     private bool _isSuggestionHistoryMutation;
@@ -1183,8 +1183,8 @@ public sealed class MainWindowViewModel : ViewModelBase
             new PdfReviewAuditStore(new LocalApplicationDatabase()));
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
         _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
-        _profile = SyntheticProfile.Build();
-        _taxonomy = CreateTaxonomyIndex(_profile);
+        _profile = CreateUnresolvedProfileIdentity(project);
+        _taxonomy = CreateUnresolvedDisplayTaxonomyIndex(_profile);
         RefreshProfileForProject(project);
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
@@ -1320,7 +1320,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var conceptName = node.Parameters.GetValueOrDefault("concept")?.ToString();
         var concept = conceptName is null ? null : _profile.FindConcept(conceptName);
         SelectedFactConceptIdentity = concept is null
-            ? $"Concept '{conceptName ?? "(unset)"}' is unavailable in profile '{_profile.ProfileId}'."
+            ? $"Concept '{conceptName ?? "(unset)"}' is unavailable in profile '{_profile.ProfileId}' ({_profile.Digest})."
             : $"{concept.Label} · {concept.QualifiedName} · {{{concept.Namespace}}}{concept.LocalName} · {concept.DataType}, {concept.PeriodType} · profile {_profile.ProfileId} ({_profile.Digest})";
 
         RefreshSelectedFactSourceSummary();
@@ -1466,8 +1466,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                     ? "reopen the current project"
                     : "open another project")) return;
             if (reopeningCurrentProject) project = manager.Load();
-            ActivateProject(manager, project);
-            await LoadWorkspaceBindingsAsync();
+            var profileAvailable = ActivateProject(manager, project);
+            await LoadWorkspaceBindingsAsync(profileAvailable);
         }
         catch (Exception ex) { StatusText = $"Open failed: {ex.Message}"; }
     }
@@ -3399,7 +3399,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var contextUnit = targetFact.Parameters.GetValueOrDefault("unit")?.ToString();
             var contextPeriod = targetFact.Parameters.GetValueOrDefault("periodType")?.ToString();
             var projectDigest = Session.Project.ComputeSemanticDigest();
-            var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
+            var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy!);
             var batch = await service.SuggestAsync(
                 new[] { new SourceFieldDescriptor(id, sourceColumn, contextUnit, contextPeriod) }, CancellationToken.None);
             if (!string.Equals(SelectedSourceBindingId, sourceBindingId, StringComparison.Ordinal)
@@ -3420,7 +3420,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 .ToArray();
             var session = new SuggestionSession(
                 Session.Project,
-                new DraftValidator(_taxonomy, profile),
+                new DraftValidator(_taxonomy!, profile),
                 _auditSinkFactory?.Invoke(),
                 new SuggestionSessionContext(
                     Actor: Environment.UserName,
@@ -3551,7 +3551,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var suggestions = new List<Suggestion>();
             var abstentions = new List<SuggestionAbstention>();
             var diagnostics = new List<Diagnostic>(scopeDiagnostics);
-            var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy);
+            var service = new AiSuggestionService(AiPolicy.Offline, _taxonomy!);
             foreach (var chunk in descriptors.Chunk(100))
             {
                 var batch = await service.SuggestAsync(chunk, CancellationToken.None);
@@ -3569,7 +3569,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
             var session = new SuggestionSession(
                 project,
-                new DraftValidator(_taxonomy, profile),
+                new DraftValidator(_taxonomy!, profile),
                 _auditSinkFactory?.Invoke(),
                 new SuggestionSessionContext(
                     Actor: Environment.UserName,
@@ -3661,7 +3661,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
-        var concept = _taxonomy.Get(SelectedSuggestionConcept.Trim());
+        var concept = _taxonomy!.Get(SelectedSuggestionConcept.Trim());
         if (concept is null || !TaxonomyIndex.IsFactTargetable(concept))
         {
             StatusText = "The edited candidate is not a valid fact concept in the selected taxonomy.";
@@ -3828,7 +3828,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 return;
             }
 
-            var concept = _taxonomy.Get(suggestion.Draft.Concept ?? "");
+            var concept = _taxonomy!.Get(suggestion.Draft.Concept ?? "");
             if (concept is null || !TaxonomyIndex.IsFactTargetable(concept))
             {
                 StatusText = $"Candidate '{suggestion.Draft.Concept ?? "(none)"}' is not a targetable concept; no mappings changed.";
@@ -4213,11 +4213,11 @@ public sealed class MainWindowViewModel : ViewModelBase
         var fullPath = Path.GetFullPath(path);
         var manager = new ProjectManager(fullPath);
         var project = manager.Load();
-        ActivateProject(manager, project);
-        _ = LoadWorkspaceBindingsAsync();
+        var profileAvailable = ActivateProject(manager, project);
+        if (profileAvailable) _ = LoadWorkspaceBindingsAsync(profileAvailable);
     }
 
-    private void ActivateProject(ProjectManager manager, MappingProject project)
+    private bool ActivateProject(ProjectManager manager, MappingProject project)
     {
         var profileAvailable = RefreshProfileForProject(project);
         _session.Changed -= OnSessionChanged;
@@ -4235,11 +4235,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         RunSearch();
         StatusText = profileAvailable
             ? $"Opened {Path.GetFileName(manager.FullPath)}."
-            : $"Opened {Path.GetFileName(manager.FullPath)}, but its filing profile is not installed.";
+            : $"Opened {Path.GetFileName(manager.FullPath)}, but filing profile '{project.ProfileId}' "
+                + $"({project.ProfileDigest}) is unresolved or owner-gated; saved bindings were not loaded.";
+        return profileAvailable;
     }
 
-    private async Task LoadWorkspaceBindingsAsync()
+    private async Task LoadWorkspaceBindingsAsync(bool profileAvailable)
     {
+        if (!profileAvailable) return;
         await LoadSavedSourceAsync();
         await LoadSavedDestinationAsync();
     }
@@ -4572,9 +4575,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         var resolution = _profileResolver.Resolve(Session.Project, allowSyntheticProfile);
         if (!resolution.Success)
         {
-            Diagnostics.Clear();
-            ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
-            Raise(nameof(Diagnostics));
+            ReplaceProfileResolutionDiagnostics(Session.Project, resolution);
             StatusText = "Operation blocked by filing-profile resolution.";
             profile = null!;
             return false;
@@ -4587,6 +4588,11 @@ public sealed class MainWindowViewModel : ViewModelBase
     private bool RefreshProfileForProject(MappingProject project)
     {
         InvalidateTaxonomySearch();
+        SelectedConcept = null;
+        ConceptResults.Clear();
+        HasNextPage = false;
+        Raise(nameof(ConceptResults));
+        Raise(nameof(HasNextPage));
         var resolution = _profileResolver.Resolve(project, allowSyntheticProfile: true);
         if (resolution.Success)
         {
@@ -4596,18 +4602,46 @@ public sealed class MainWindowViewModel : ViewModelBase
             return true;
         }
 
-        // Keep the designer inspectable while profile-dependent commands remain blocked
-        // by TryResolveProfile. Never treat this display-only fallback as the project's
-        // selected profile.
-        _profile = SyntheticProfile.Build();
-        _taxonomy = CreateTaxonomyIndex(_profile);
+        // Keep the designer inspectable without substituting synthetic taxonomy data.
+        // This identity-only profile contains no concepts or validation rules and is
+        // never resolved by a profile-dependent operation.
+        _profile = CreateUnresolvedProfileIdentity(project);
+        _taxonomy = CreateUnresolvedDisplayTaxonomyIndex(_profile);
         RefreshSelectedConceptOccurrences();
-        Diagnostics.Clear();
-        ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
-        Raise(nameof(Diagnostics));
-        StatusText = "The project's filing profile is not installed; profile-dependent actions are blocked.";
+        ReplaceProfileResolutionDiagnostics(project, resolution);
+        StatusText = "The project's filing profile is unresolved or owner-gated; profile-dependent actions are blocked.";
         return false;
     }
+
+    private void ReplaceProfileResolutionDiagnostics(MappingProject project, FilingProfileResolution resolution)
+    {
+        Diagnostics.Clear();
+        ReplaceItems(Diagnostics, resolution.Diagnostics.Items.Select(ToDiagnosticRow));
+        Diagnostics.Add(new DiagnosticRow
+        {
+            Display = $"Project profile identity: ProfileId='{FormatProfileIdentityPart(project.ProfileId)}', "
+                + $"ProfileDigest='{FormatProfileIdentityPart(project.ProfileDigest)}'. No profile was substituted.",
+            Severity = "error"
+        });
+        Raise(nameof(Diagnostics));
+    }
+
+    private static FilingProfile CreateUnresolvedProfileIdentity(MappingProject project)
+        => new()
+        {
+            ProfileId = project.ProfileId ?? string.Empty,
+            Digest = project.ProfileDigest ?? string.Empty,
+            Concepts = Array.Empty<ConceptMetadata>(),
+            SupportedUnits = new HashSet<string>(StringComparer.Ordinal)
+        };
+
+    private static TaxonomyIndex? CreateUnresolvedDisplayTaxonomyIndex(FilingProfile profile)
+        => string.IsNullOrWhiteSpace(profile.ProfileId) || string.IsNullOrWhiteSpace(profile.Digest)
+            ? null
+            : new TaxonomyIndex(profile, Array.Empty<PresentationLink>());
+
+    private static string FormatProfileIdentityPart(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "(missing)" : value;
 
     private TaxonomyIndex CreateTaxonomyIndex(FilingProfile profile)
         => _taxonomyIndexStoreFactory?.Invoke().LoadOrBuild(profile).Index
@@ -4788,7 +4822,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             previous = _taxonomySearchCancellation;
             cancellation = new CancellationTokenSource();
             generation = ++_taxonomySearchGeneration;
-            index = _taxonomy;
+            index = _taxonomy!;
             query = SearchTerm;
             language = SearchLanguage;
             page = _resultPage;
@@ -4890,6 +4924,13 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (SelectedConcept is null)
         {
             SelectedConceptOccurrencesStatus = "Select a concept to inspect its presentation paths.";
+            Raise(nameof(SelectedConceptOccurrences));
+            return;
+        }
+
+        if (_taxonomy is null)
+        {
+            SelectedConceptOccurrencesStatus = "Presentation paths are unavailable until the project's filing profile is resolved.";
             Raise(nameof(SelectedConceptOccurrences));
             return;
         }

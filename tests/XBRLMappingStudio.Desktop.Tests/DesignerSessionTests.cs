@@ -594,6 +594,123 @@ public sealed class DesignerSessionTests
         }
     }
 
+    [Fact]
+    public void StaleSyntheticProfileDigest_DoesNotExposeSyntheticConceptsOrRelationships()
+    {
+        var profile = SyntheticProfile.Build();
+        var zeroDigest = "sha256:" + new string('0', 64);
+        var staleDigest = StringComparer.Ordinal.Equals(profile.Digest, zeroDigest)
+            ? "sha256:" + new string('1', 64)
+            : zeroDigest;
+        var project = WithProfileIdentity(Project(), SyntheticProfile.ProfileId, staleDigest);
+        var viewModel = new MainWindowViewModel(project, null,
+            (_, _) => Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                new InvalidOperationException("Source inspection must not run.")),
+            FilingProfileResolver.DevelopmentOnly());
+
+        Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR015", StringComparison.Ordinal));
+        Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains(staleDigest, StringComparison.Ordinal));
+        Assert.Empty(viewModel.ConceptResults);
+        Assert.Null(viewModel.SelectedConcept);
+
+        var taxonomyField = typeof(MainWindowViewModel).GetField("_taxonomy",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var taxonomy = Assert.IsType<TaxonomyIndex>(taxonomyField?.GetValue(viewModel));
+        Assert.Equal(SyntheticProfile.ProfileId, taxonomy.ProfileId);
+        Assert.Equal(staleDigest, taxonomy.ProfileDigest);
+        Assert.Empty(taxonomy.AllConcepts);
+        Assert.Empty(taxonomy.PresentationRolesFor("synthetic:Revenue"));
+        Assert.Empty(taxonomy.Network(SyntheticProfile.PresentationRole).Links);
+    }
+
+    [Fact]
+    public async Task OpeningOwnerGatedProfile_PreservesIdentityAndSkipsSavedBindings()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xms-desktop-owner-gated-open-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var databasePath = Path.Combine(root, "source.db");
+        try
+        {
+            var installed = WriteInstalledProfile(root, "desktop-owner-gated-profile", "1.0.0");
+            await using (var database = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+            {
+                await database.OpenAsync();
+                await using var command = database.CreateCommand();
+                command.CommandText = "CREATE TABLE source (value TEXT); INSERT INTO source VALUES ('1250');";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var sourceProject = TestFixtures.BuildRevenueMappingProject(databasePath);
+            sourceProject.Bindings[0] = sourceProject.Bindings[0] with
+            {
+                Kind = "sqlite",
+                Locator = Path.GetFileName(databasePath),
+                Configuration = new Dictionary<string, object?> { ["table"] = "source" }
+            };
+            var project = WithProfileIdentity(sourceProject, installed.Profile);
+            var projectPath = Path.Combine(root, "owner-gated.xmap");
+            new ProjectManager(projectPath).Save(project);
+
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = projectPath };
+            var sourceInspectionAttempted = 0;
+            var viewModel = new MainWindowViewModel(
+                Project(),
+                dialog,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref sourceInspectionAttempted);
+                    return Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                        new InvalidOperationException("A gated profile must not inspect saved sources."));
+                },
+                FilingProfileResolver.FromInstalledDirectory(root));
+            viewModel.SelectedConcept = new ConceptRow
+            {
+                QualifiedName = "synthetic:Revenue",
+                Label = "Revenue",
+                DataType = "monetary",
+                PeriodType = "duration",
+                IsFactTargetable = true
+            };
+
+            await viewModel.OpenProjectAsync();
+
+            Assert.Equal(project.ProfileId, viewModel.Session.Project.ProfileId);
+            Assert.Equal(project.ProfileDigest, viewModel.Session.Project.ProfileDigest);
+            Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains("XBR018", StringComparison.Ordinal)
+                && row.Display.Contains("GAT-01 and GAT-02", StringComparison.Ordinal));
+            Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains($"ProfileId='{project.ProfileId}'", StringComparison.Ordinal)
+                && row.Display.Contains($"ProfileDigest='{project.ProfileDigest}'", StringComparison.Ordinal));
+            Assert.Null(viewModel.SelectedSourceBindingId);
+            Assert.Empty(viewModel.SourceColumns);
+            Assert.Empty(viewModel.SourceTables);
+            Assert.Empty(viewModel.ConceptResults);
+            Assert.Null(viewModel.SelectedConcept);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.Equal(0, Volatile.Read(ref sourceInspectionAttempted));
+
+            var factNode = viewModel.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            viewModel.SelectedNode = factNode;
+            Assert.Contains(project.ProfileId, viewModel.SelectedFactConceptIdentity, StringComparison.Ordinal);
+            Assert.Contains(project.ProfileDigest, viewModel.SelectedFactConceptIdentity, StringComparison.Ordinal);
+            Assert.DoesNotContain(SyntheticProfile.ProfileId, viewModel.SelectedFactConceptIdentity, StringComparison.Ordinal);
+
+            // The synchronous reload route uses the same profile gate before it can
+            // start the fire-and-forget saved-source loader.
+            viewModel.LoadProject(projectPath);
+            Assert.Equal(project.ProfileId, viewModel.Session.Project.ProfileId);
+            Assert.Equal(project.ProfileDigest, viewModel.Session.Project.ProfileDigest);
+            Assert.Null(viewModel.SelectedSourceBindingId);
+            Assert.Empty(viewModel.SourceColumns);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.Equal(0, Volatile.Read(ref sourceInspectionAttempted));
+            Assert.Contains(viewModel.Diagnostics, row => row.Display.Contains($"ProfileDigest='{project.ProfileDigest}'", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static InstalledFilingProfile WriteInstalledProfile(string root, string profileId, string version)
     {
         var directory = Path.Combine(root, profileId, version);
@@ -631,13 +748,16 @@ public sealed class DesignerSessionTests
     private static string FileDigest(string path)
         => "sha256:" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
 
-    private static MappingProject WithProfileIdentity(MappingProject source, FilingProfile profile) => new()
+    private static MappingProject WithProfileIdentity(MappingProject source, FilingProfile profile)
+        => WithProfileIdentity(source, profile.ProfileId, profile.Digest);
+
+    private static MappingProject WithProfileIdentity(MappingProject source, string profileId, string profileDigest) => new()
     {
         SchemaVersion = source.SchemaVersion,
         ProjectId = source.ProjectId,
         Name = source.Name,
-        ProfileId = profile.ProfileId,
-        ProfileDigest = profile.Digest,
+        ProfileId = profileId,
+        ProfileDigest = profileDigest,
         FunctionCatalogVersion = source.FunctionCatalogVersion,
         SemanticRevision = source.SemanticRevision,
         LayoutGeneration = source.LayoutGeneration,
