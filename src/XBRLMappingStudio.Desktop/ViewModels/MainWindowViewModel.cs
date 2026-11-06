@@ -2241,11 +2241,14 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var operation = _activeMappingOperation;
         if (operation is null || operation.Cancellation.IsCancellationRequested) return;
+        // Publish the transient state before signaling cancellation. The
+        // operation may complete inline from CancellationToken callbacks; a
+        // status write after Cancel() could then overwrite its terminal result.
+        StatusText = "Cancellation requested; waiting for the active operation to stop…";
         operation.Cancellation.Cancel();
         Raise(nameof(CanCancelOperation));
         Raise(nameof(CancelOperationButtonText));
         CancelOperationCommand.NotifyCanExecuteChanged();
-        StatusText = "Cancellation requested; waiting for the active operation to stop…";
     }
 
     private bool IsMappingOperationCurrent(ActiveMappingOperation operation)
