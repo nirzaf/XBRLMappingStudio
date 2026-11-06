@@ -1,3 +1,4 @@
+using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
@@ -75,6 +76,67 @@ public class FunctionTests
         Assert.True(compile.Success);
         Assert.DoesNotContain(result!.Diagnostics, d => d.Code == "MAP009");
         Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void RatioFact_RecordsBothSourceNodesAndFactLevelTransformationIds()
+    {
+        const string numeratorBinding = "ratio-numerator";
+        const string denominatorBinding = "ratio-denominator";
+        var numerator = GraphHarness.Node(NodeTypeConstants.ExcelField, "Numerator",
+            new() { ["bindingId"] = numeratorBinding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var denominator = GraphHarness.Node(NodeTypeConstants.ExcelField, "Denominator",
+            new() { ["bindingId"] = denominatorBinding, ["column"] = "amount" },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var ratio = GraphHarness.Node(NodeTypeConstants.Ratio, "Ratio",
+            new() { ["divideByZero"] = "Diagnostic" },
+            inputs: new[]
+            {
+                GraphHarness.P("numerator", PortShape.Decimal),
+                GraphHarness.P("denominator", PortShape.Decimal)
+            },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var edges = new List<MappingEdge>
+        {
+            GraphHarness.Link(numerator, "value", ratio, "numerator"),
+            GraphHarness.Link(denominator, "value", ratio, "denominator")
+        };
+        var sink = GraphHarness.FactSink(out var sinkEdges, ratio, "value", PortCardinality.Single);
+        edges.AddRange(sinkEdges);
+        var project = GraphHarness.Project(
+            new[] { numerator, denominator, ratio }.Concat(sink), edges,
+            bindings: new[]
+            {
+                GraphHarness.Binding(numeratorBinding),
+                GraphHarness.Binding(denominatorBinding)
+            });
+        var numeratorSource = new SourceReference(numeratorBinding, "financials.Current", "pk:revenue");
+        var denominatorSource = new SourceReference(denominatorBinding, "comparatives.Prior", "pk:revenue");
+        var context = GraphHarness.Ctx(new[]
+        {
+            (numeratorBinding, new[]
+            {
+                GraphHarness.Row(("amount", DataValue.DecimalValue(10m, numeratorSource)))
+            } as IReadOnlyList<DataRecord>),
+            (denominatorBinding, new[]
+            {
+                GraphHarness.Row(("amount", DataValue.DecimalValue(2m, denominatorSource)))
+            } as IReadOnlyList<DataRecord>)
+        });
+
+        var execution = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        var fact = Assert.Single(execution!.Facts);
+        Assert.Equal(5m, fact.Value);
+        Assert.Contains(numeratorSource, fact.Sources);
+        Assert.Contains(denominatorSource, fact.Sources);
+        Assert.Contains(numerator.NodeId, fact.TransformationIds);
+        Assert.Contains(denominator.NodeId, fact.TransformationIds);
+        Assert.Contains(ratio.NodeId, fact.TransformationIds);
+        Assert.Contains(sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
+            fact.TransformationIds);
     }
 
     private static (MappingProject, ExecutionContext) RatioGraph(string policy, decimal num, decimal den)

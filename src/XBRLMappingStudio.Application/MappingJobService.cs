@@ -648,7 +648,8 @@ public sealed class MappingJobService
                 Decimals = pf.Decimals,
                 Language = pf.Language,
                 Dimensions = pf.Dimensions,
-                ContributingSources = pf.Sources
+                ContributingSources = pf.Sources,
+                TransformationIds = pf.TransformationIds
             });
         }
 
@@ -865,7 +866,8 @@ public sealed class MappingJobService
                         Decimals = pending.Decimals,
                         Language = pending.Language,
                         Dimensions = pending.Dimensions,
-                        ContributingSources = pending.Sources
+                        ContributingSources = pending.Sources,
+                        TransformationIds = pending.TransformationIds
                     }, _executionBudget.MaxFactBytes);
                 }
 

@@ -97,6 +97,12 @@ public sealed class XbrlFact
     public IReadOnlyList<SourceReference> ContributingSources { get; init; }
         = Array.Empty<SourceReference>();
 
+    /// <summary>
+    /// Row-phase mapping node IDs that reach this fact's FactConstruct, in deterministic order.
+    /// This fact-level union does not identify a separate transformation path for each source.
+    /// </summary>
+    public IReadOnlyList<string> TransformationIds { get; init; } = Array.Empty<string>();
+
     public bool ValidateValueAgainst(ConceptMetadata meta, out string reason)
         => ValidateValueAgainst(meta, out reason, out _);
 
@@ -299,6 +305,7 @@ public sealed class PendingFact
     public string? Language { get; set; }
     public IReadOnlyList<Dimension> Dimensions { get; set; } = Array.Empty<Dimension>();
     public List<SourceReference> Sources { get; } = new();
+    public List<string> TransformationIds { get; } = new();
 }
 
 /// <summary>

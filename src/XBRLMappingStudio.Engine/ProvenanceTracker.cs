@@ -11,6 +11,8 @@ public sealed class ProvenanceTracker
 {
     // Slot key (nodeId, portName, index) -> contributing sources.
     private readonly ConcurrentDictionary<string, List<SourceReference>> _sources = new();
+    // Slot key (nodeId, portName, index) -> row-phase evaluator node IDs in deterministic first-seen order.
+    private readonly ConcurrentDictionary<string, List<string>> _transformationIds = new();
 
     public static string SlotKey(string nodeId, string portName, int? rowIndex = null)
         => rowIndex.HasValue ? $"{nodeId}.{portName}[{rowIndex}]" : $"{nodeId}.{portName}";
@@ -43,16 +45,51 @@ public sealed class ProvenanceTracker
         }
     }
 
+    public void RecordTransformation(string slotKey, string nodeId)
+    {
+        var list = _transformationIds.GetOrAdd(slotKey, _ => new List<string>());
+        lock (list)
+        {
+            if (!list.Contains(nodeId, StringComparer.Ordinal)) list.Add(nodeId);
+        }
+    }
+
+    public void MergeTransformations(string targetSlotKey, IEnumerable<string> contributorSlotKeys)
+    {
+        var target = _transformationIds.GetOrAdd(targetSlotKey, _ => new List<string>());
+        lock (target)
+        {
+            foreach (var key in contributorSlotKeys)
+            {
+                if (!_transformationIds.TryGetValue(key, out var list)) continue;
+                lock (list)
+                {
+                    foreach (var nodeId in list)
+                        if (!target.Contains(nodeId, StringComparer.Ordinal)) target.Add(nodeId);
+                }
+            }
+        }
+    }
+
     public IReadOnlyList<SourceReference> GetContributors(string slotKey)
         => _sources.TryGetValue(slotKey, out var list)
             ? (IReadOnlyList<SourceReference>)list.ToArray()
             : Array.Empty<SourceReference>();
 
+    public IReadOnlyList<string> GetTransformationIds(string slotKey)
+        => _transformationIds.TryGetValue(slotKey, out var list)
+            ? list.ToArray()
+            : Array.Empty<string>();
+
     public IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Snapshot()
         => _sources.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<SourceReference>)kv.Value.ToArray());
 
     /// <summary>Release row-local provenance after a bounded row batch has been emitted.</summary>
-    public void Clear() => _sources.Clear();
+    public void Clear()
+    {
+        _sources.Clear();
+        _transformationIds.Clear();
+    }
 }
 
 /// <summary>

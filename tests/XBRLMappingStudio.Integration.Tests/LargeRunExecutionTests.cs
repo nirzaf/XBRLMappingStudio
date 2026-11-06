@@ -39,6 +39,12 @@ public sealed class LargeRunExecutionTests
             Assert.Equal(small.Manifest.Outputs.Single().Digest, large.Manifest.Outputs.Single().Digest);
             Assert.Equal(small.Manifest.Inputs.Single().Digest, large.Manifest.Inputs.Single().Digest);
             Assert.Equal(artifact.Sha256, large.Manifest.ValidatedArtifactDigest);
+            Assert.NotEmpty(small.Facts[0].TransformationIds);
+            Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField).NodeId,
+                small.Facts[0].TransformationIds);
+            Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
+                small.Facts[0].TransformationIds);
+            Assert.Equal(small.Facts[0].TransformationIds, artifact.Facts[0].TransformationIds);
         }
         finally { TryDeleteDirectory(root); }
     }
