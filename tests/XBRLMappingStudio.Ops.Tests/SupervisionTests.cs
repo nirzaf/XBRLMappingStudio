@@ -141,17 +141,25 @@ public class SupervisionTests
             ? "'" + pidPath.Replace("'", "''", StringComparison.Ordinal) + "'"
             : "'" + pidPath.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
         var (exe, args) = Shell(
-            $"sleep 60 & child=$!; printf '%s\\n%s\\n' \"$$\" \"$child\" > {quotedPidPath}; wait",
-            $"$child = Start-Process -FilePath 'ping.exe' -ArgumentList @('-t','127.0.0.1') -PassThru -WindowStyle Hidden; [System.IO.File]::WriteAllLines({quotedPidPath}, @([string]$PID, [string]$child.Id)); while ($true) {{ Start-Sleep -Seconds 1 }}");
+            $"IFS= read -r launch; sleep 60 & child=$!; printf '%s\\n%s\\n' \"$$\" \"$child\" > {quotedPidPath}; wait",
+            $"$null = [Console]::In.ReadLine(); $child = Start-Process -FilePath 'ping.exe' -ArgumentList @('-t','127.0.0.1') -PassThru -WindowStyle Hidden; [System.IO.File]::WriteAllLines({quotedPidPath}, @([string]$PID, [string]$child.Id)); while ($true) {{ Start-Sleep -Seconds 1 }}");
 
         using var cancellation = new CancellationTokenSource();
+        Task<SupervisionResult>? running = null;
         try
         {
             var supervisor = new WorkerSupervisor();
-            var running = supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30),
-                cancellationToken: cancellation.Token);
-            Assert.True(await WaitForFileAsync(pidPath, TimeSpan.FromSeconds(5)),
-                "The supervised process tree did not publish its test PIDs.");
+            running = supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30),
+                stdinPayload: "launch\n", cancellationToken: cancellation.Token);
+            var pidFileWait = WaitForFileAsync(pidPath, TimeSpan.FromSeconds(15));
+            if (await Task.WhenAny(pidFileWait, running) == running)
+            {
+                var completed = await running;
+                Assert.Fail(
+                    $"The supervised process exited before publishing its test PIDs: outcome={completed.Outcome}, exit={completed.ExitCode}, failure={completed.Failure?.Message}, log={string.Join(" | ", completed.CapturedLog)}.");
+            }
+            Assert.True(await pidFileWait,
+                "The supervised process tree did not publish its test PIDs within 15 seconds.");
             var processIds = (await File.ReadAllLinesAsync(pidPath))
                 .Select(line => int.Parse(line, System.Globalization.CultureInfo.InvariantCulture))
                 .ToArray();
@@ -166,6 +174,12 @@ public class SupervisionTests
         finally
         {
             cancellation.Cancel();
+            if (running is not null)
+            {
+                try { await running.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (OperationCanceledException) { }
+                catch (TimeoutException) { }
+            }
             try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
         }
     }
