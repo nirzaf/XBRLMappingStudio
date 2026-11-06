@@ -9,10 +9,11 @@ using XBRLMappingStudio.Project;
 namespace XBRLMappingStudio.Adapters.Excel;
 
 /// <summary>
-/// Reads ordinary XLSX workbooks (IO02). Discovery uses the first sheet or the
-/// configured sheet name. The header row is detected as the first non-empty row
-/// that is followed by at least one data row. Cell coordinates are preserved on
-/// every value for provenance.
+/// Reads ordinary XLSX workbooks (IO02). Discovery uses an explicitly configured
+/// worksheet, named range, A1 region, or the documented first-sheet default when
+/// none is configured. A requested worksheet or named range must resolve exactly;
+/// it never falls back to another sheet. Cell coordinates are preserved on every
+/// value for provenance.
 /// Formula policy: <see cref="FormulaPolicy"/> controls whether cached values are
 /// accepted or blocked pending review (per section 4 "Excel without a desktop Excel
 /// dependency").
@@ -146,8 +147,13 @@ public sealed class ExcelAdapter : ISourceAdapter
 
     private static ExcelSchema CreateSchema(XLWorkbook workbook, SourceConnection connection)
     {
+        if (HasConfiguredValue(connection, "range") && HasConfiguredValue(connection, "namedRange"))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "Configure either an Excel A1 range or a namedRange, not both.",
+                DiagnosticStage.Introspection);
+
         var sheet = SelectSheet(workbook, connection);
-        var region = SelectRegion(sheet, connection);
+        var region = SelectRegion(workbook, sheet, connection);
         int? explicitHeader = null;
         if (connection.Configuration is not null
             && connection.Configuration.TryGetValue("headerRow", out var headerText))
@@ -190,8 +196,18 @@ public sealed class ExcelAdapter : ISourceAdapter
 
     private sealed record ExcelRegion(int FirstRow, int FirstColumn, int LastRow, int LastColumn, string? Address);
 
-    private static ExcelRegion SelectRegion(IXLWorksheet sheet, SourceConnection connection)
+    private static ExcelRegion SelectRegion(XLWorkbook workbook, IXLWorksheet sheet, SourceConnection connection)
     {
+        if (TryGetConfiguredValue(connection, "namedRange", out var namedRangeName))
+        {
+            var preferSheetScoped = HasConfiguredValue(connection, "sheet");
+            var namedRange = ResolveNamedRange(workbook, sheet, namedRangeName, preferSheetScoped);
+            var bounds = namedRange.RangeAddress;
+            var namedRangeAddress = $"named-range:{namedRangeName}@{namedRange.Worksheet.Name}!{bounds}";
+            return new ExcelRegion(bounds.FirstAddress.RowNumber, bounds.FirstAddress.ColumnNumber,
+                bounds.LastAddress.RowNumber, bounds.LastAddress.ColumnNumber, namedRangeAddress);
+        }
+
         if (connection.Configuration is not null
             && connection.Configuration.TryGetValue("range", out var address)
             && !string.IsNullOrWhiteSpace(address))
@@ -318,6 +334,10 @@ public sealed class ExcelAdapter : ISourceAdapter
 
     private static IXLWorksheet SelectSheet(XLWorkbook wb, SourceConnection conn)
     {
+        if (TryGetConfiguredValue(conn, "namedRange", out var namedRangeName)
+            && !HasConfiguredValue(conn, "sheet"))
+            return ResolveNamedRange(wb, null, namedRangeName, preferSheetScoped: false).Worksheet;
+
         if (conn.Configuration is not null
             && conn.Configuration.TryGetValue("sheet", out var name)
             && !string.IsNullOrWhiteSpace(name))
@@ -334,6 +354,86 @@ public sealed class ExcelAdapter : ISourceAdapter
         }
         // No worksheet requested: the first sheet is a defined, documented default.
         return wb.Worksheets.First();
+    }
+
+    private static IXLRange ResolveNamedRange(
+        XLWorkbook workbook,
+        IXLWorksheet? selectedSheet,
+        string name,
+        bool preferSheetScoped)
+    {
+        IXLDefinedName? definedName = null;
+        if (preferSheetScoped && selectedSheet is not null)
+            definedName = FindDefinedName(selectedSheet.DefinedNames, name);
+        definedName ??= FindDefinedName(workbook.DefinedNames, name);
+        if (definedName is null && selectedSheet is not null)
+            definedName = FindDefinedName(selectedSheet.DefinedNames, name);
+
+        if (definedName is null && selectedSheet is null)
+        {
+            var sheetDefinitions = workbook.Worksheets
+                .Select(worksheet => FindDefinedName(worksheet.DefinedNames, name))
+                .Where(candidate => candidate is not null)
+                .Cast<IXLDefinedName>()
+                .ToArray();
+            if (sheetDefinitions.Length > 1)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"Excel named range '{name}' exists on multiple worksheets; configure the sheet explicitly.",
+                    DiagnosticStage.Introspection);
+            definedName = sheetDefinitions.SingleOrDefault();
+        }
+
+        if (definedName is null)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Configured Excel named range '{name}' was not found in the workbook or selected worksheet.",
+                DiagnosticStage.Introspection);
+        if (!definedName.IsValid)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Configured Excel named range '{name}' contains an invalid or external reference.",
+                DiagnosticStage.Introspection);
+
+        IXLRange[] ranges;
+        try
+        {
+            ranges = definedName.Ranges.ToArray();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Configured Excel named range '{name}' is not a supported cell range.",
+                DiagnosticStage.Introspection);
+        }
+
+        if (ranges.Length != 1)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Configured Excel named range '{name}' must refer to one contiguous cell range.",
+                DiagnosticStage.Introspection);
+        if (selectedSheet is not null
+            && !StringComparer.Ordinal.Equals(ranges[0].Worksheet.Name, selectedSheet.Name))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"Configured Excel named range '{name}' refers to worksheet '{ranges[0].Worksheet.Name}', not '{selectedSheet.Name}'.",
+                DiagnosticStage.Introspection);
+        return ranges[0];
+    }
+
+    private static IXLDefinedName? FindDefinedName(IXLDefinedNames definedNames, string name)
+    {
+        try { return definedNames.DefinedName(name); }
+        catch (KeyNotFoundException) { return null; }
+    }
+
+    private static bool HasConfiguredValue(SourceConnection connection, string key)
+        => TryGetConfiguredValue(connection, key, out _);
+
+    private static bool TryGetConfiguredValue(SourceConnection connection, string key, out string value)
+    {
+        value = string.Empty;
+        if (connection.Configuration is null
+            || !connection.Configuration.TryGetValue(key, out var configured)
+            || string.IsNullOrWhiteSpace(configured))
+            return false;
+        value = configured.Trim();
+        return true;
     }
 
     private static int DetectHeaderRow(IXLWorksheet sheet, ExcelRegion region)

@@ -68,6 +68,128 @@ public sealed class ExcelSourceQualificationTests
     }
 
     [Fact]
+    public async Task NamedRangeSelectsItsWorksheetAndBlocksRangeDrift()
+    {
+        using var workspace = new TempWorkspace();
+        var path = workspace.PathFor("named-template.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var cover = workbook.Worksheets.Add("Cover");
+            cover.Cell("A1").Value = "Wrong first-sheet data";
+            cover.Cell("A2").Value = "99";
+            var sheet = workbook.Worksheets.Add("Financials");
+            sheet.Cell("B3").Value = "FY2025 QAR thousands";
+            sheet.Cell("B4").Value = "Current";
+            sheet.Cell("C4").Value = "Prior";
+            sheet.Cell("B5").Value = 100;
+            sheet.Cell("C5").Value = 80;
+            sheet.Cell("B6").Value = 200;
+            sheet.Cell("C6").Value = 150;
+            workbook.DefinedNames.Add("AnnualFinancials", sheet.Range("B3:C6"));
+            workbook.SaveAs(path);
+        }
+
+        var connection = new SourceConnection("ledger", "excel", path,
+            new Dictionary<string, string> { ["namedRange"] = "AnnualFinancials", ["headerRow"] = "4" });
+        var adapter = new ExcelAdapter();
+        var schema = (ExcelSchema)await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+        var records = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var record in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) records.Add(record);
+
+        Assert.Equal("Financials", schema.SheetName);
+        Assert.Equal(new[] { "Current", "Prior" }, schema.Columns.Select(column => column.Name));
+        Assert.Contains("AnnualFinancials", schema.RegionAddress, StringComparison.Ordinal);
+        Assert.Equal(new[] { 100m, 200m }, records.Select(record => record["Current"].AsDecimal()));
+        Assert.All(records, record => Assert.StartsWith("Financials!", record.CellSources!["Current"].Locator, StringComparison.Ordinal));
+
+        using (var workbook = new XLWorkbook(path))
+        {
+            workbook.DefinedNames.Delete("AnnualFinancials");
+            workbook.DefinedNames.Add("AnnualFinancials", workbook.Worksheet("Financials").Range("B3:C5"));
+            workbook.Save();
+        }
+
+        var drift = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) { }
+        });
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, drift.Code);
+
+        var missingName = connection with
+        {
+            Configuration = new Dictionary<string, string> { ["namedRange"] = "MissingTemplate", ["headerRow"] = "1" }
+        };
+        var missing = await Assert.ThrowsAsync<AdapterException>(() => adapter.InspectSchemaAsync(missingName, CancellationToken.None));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, missing.Code);
+
+        var mismatchedSheet = connection with
+        {
+            Configuration = new Dictionary<string, string>
+            {
+                ["namedRange"] = "AnnualFinancials",
+                ["sheet"] = "Cover",
+                ["headerRow"] = "4"
+            }
+        };
+        var sheetMismatch = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(mismatchedSheet, CancellationToken.None));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, sheetMismatch.Code);
+
+        var conflictingRegion = connection with
+        {
+            Configuration = new Dictionary<string, string>
+            {
+                ["namedRange"] = "AnnualFinancials",
+                ["range"] = "B3:C6",
+                ["headerRow"] = "4"
+            }
+        };
+        var conflict = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(conflictingRegion, CancellationToken.None));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, conflict.Code);
+    }
+
+    [Fact]
+    public async Task UniqueSheetScopedNamedRangeResolvesAndHonorsItsConfiguredWorksheet()
+    {
+        using var workspace = new TempWorkspace();
+        var path = workspace.PathFor("sheet-scoped-name.xlsx");
+        using (var workbook = new XLWorkbook())
+        {
+            var sheet = workbook.Worksheets.Add("Financials");
+            sheet.Cell("A1").Value = "Current";
+            sheet.Cell("A2").Value = 125;
+            sheet.DefinedNames.Add("CurrentYear", sheet.Range("A1:A2"));
+            workbook.SaveAs(path);
+        }
+
+        var adapter = new ExcelAdapter();
+        var unresolved = new SourceConnection("ledger", "excel", path,
+            new Dictionary<string, string> { ["namedRange"] = "CurrentYear", ["headerRow"] = "1" });
+        var inferredSchema = (ExcelSchema)await adapter.InspectSchemaAsync(unresolved, CancellationToken.None);
+        Assert.Equal("Financials", inferredSchema.SheetName);
+        var inferredRecords = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var record in adapter.ReadFullAsync(unresolved, inferredSchema, CancellationToken.None)) inferredRecords.Add(record);
+        Assert.Equal(125m, Assert.Single(inferredRecords)["Current"].AsDecimal());
+
+        var configured = unresolved with
+        {
+            Configuration = new Dictionary<string, string>
+            {
+                ["namedRange"] = "CurrentYear",
+                ["sheet"] = "Financials",
+                ["headerRow"] = "1"
+            }
+        };
+        var schema = (ExcelSchema)await adapter.InspectSchemaAsync(configured, CancellationToken.None);
+        var records = new List<XBRLMappingStudio.Engine.DataRecord>();
+        await foreach (var record in adapter.ReadFullAsync(configured, schema, CancellationToken.None)) records.Add(record);
+
+        Assert.Equal("Financials", schema.SheetName);
+        Assert.Equal(125m, Assert.Single(records)["Current"].AsDecimal());
+    }
+
+    [Fact]
     public async Task ChangedHeadingOrFormulaCacheInvalidatesInspectedSchema()
     {
         using var workspace = new TempWorkspace();
