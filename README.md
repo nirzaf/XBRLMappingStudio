@@ -281,7 +281,7 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. The archived TRX artifacts and per-suite totals for that baseline are recorded in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 
-The latest exact-head run [42287847754](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42287847754) verified `0466ade29943a9452a92c13f6a102126f0eaa61e`: repository hygiene, Windows and Ubuntu Release build/tests, and the pinned Arelle worker integration all passed. The latest local full Release solution run passed **717 tests** with **5** environment-gated skips.
+The latest exact-head run [42292750869](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42292750869) verified `fbf34ca20e1b977f64d83b9a953bf0f8527643c0`: repository hygiene, Ubuntu and Windows Release build/tests, and the pinned Arelle worker integration all passed. The latest local full Release solution run passed **717 tests** with **5** environment-gated skips.
 
 | Suite | Count | Covers |
 |---|---:|---|

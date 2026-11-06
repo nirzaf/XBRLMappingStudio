@@ -433,5 +433,17 @@ directory because the open desktop process held the checkout's shared Release
 DLLs. The tests cover a valid source rebind and undo, an incompatible String to
 Decimal connection, and an instant source rejected for a duration concept with
 XBR004 while preserving the old edge and semantic digest. This is headless
-view-model/session verification; native Windows inspector navigation and visual
-acceptance remain open.
+view-model/session verification.
+
+Supplemental verification on 2026-11-07: the isolated Windows Desktop build
+used the synthetic development profile. In the selected-fact inspector, the
+Decimal value selector offered the Revenue source field and Scale output; selecting
+the Revenue source field changed the displayed value path and status, and Edit →
+Undo restored the original Scale connection. The temporary graph layout was
+undone and the isolated QA window was closed without saving. This smoke does not
+cover external source drift, save/reopen, or an installed filing profile.
+
+Exact-head GitHub Actions run
+[42292750869](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42292750869)
+for source SHA `fbf34ca20e1b977f64d83b9a953bf0f8527643c0` passed repository hygiene,
+Ubuntu and Windows Release build/tests, and the pinned Arelle worker integration.
