@@ -89,6 +89,69 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MixedPublication_FileSuccessSqliteRollback_IsManifestedAndRetryDoesNotReplaceFile()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        using var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+
+        await using (var target = new SqliteConnection($"Data Source={_databasePath};Pooling=False"))
+        {
+            await target.OpenAsync();
+            await using var trigger = target.CreateCommand();
+            trigger.CommandText = "CREATE TRIGGER fail_mixed_insert BEFORE INSERT ON facts BEGIN SELECT RAISE(ABORT,'injected mixed failure'); END;";
+            await trigger.ExecuteNonQueryAsync();
+        }
+
+        var outputPath = Path.Combine(_directory, "mixed-report.json");
+        var localStatePath = Path.Combine(_directory, "mixed-state.db");
+        var journal = new RunJournal(databasePath: localStatePath);
+        var publisher = new PublicationService(journal);
+        var coordinator = new MixedPublicationCoordinator(
+            new MixedPublicationStore(new LocalApplicationDatabase(localStatePath)));
+        var reportBytes = Encoding.UTF8.GetByteCount(result.XbrlJson);
+        var intent = MixedPublicationIntent.Create(project, result, outputPath, reportBytes,
+            _databasePath, "facts");
+        Func<string, CancellationToken, Task<string>> validate = (stagedPath, token) =>
+            service.ValidateStagedArtifactAsync(stagedPath, outputPath, result, token);
+
+        var first = await coordinator.PublishAsync(intent,
+            token => publisher.PublishAuthorizedAsync(outputPath, Encoding.UTF8.GetBytes(result.XbrlJson),
+                _directory, project, _profile, true, result, validate, token,
+                refuseDifferentExisting: true),
+            (prepared, token) => service.PublishDestinationAsync(project, result, _directory,
+                true, token, prepared));
+
+        Assert.IsType<SqliteException>(first.Failure);
+        Assert.Equal(DestinationPublicationState.Confirmed, first.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Unknown, first.Record.SqliteState);
+        Assert.Equal(Encoding.UTF8.GetBytes(result.XbrlJson), await File.ReadAllBytesAsync(outputPath));
+        Assert.Empty(await ReadFactsAsync(_databasePath));
+
+        await using (var target = new SqliteConnection($"Data Source={_databasePath};Pooling=False"))
+        {
+            await target.OpenAsync();
+            await using var drop = target.CreateCommand();
+            drop.CommandText = "DROP TRIGGER fail_mixed_insert";
+            await drop.ExecuteNonQueryAsync();
+        }
+
+        var retry = await coordinator.PublishAsync(intent,
+            token => throw new InvalidOperationException("A confirmed file must not be replaced on retry."),
+            (prepared, token) => service.PublishDestinationAsync(project, result, _directory,
+                true, token, prepared));
+
+        Assert.Null(retry.Failure);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.SqliteState);
+        Assert.Equal(Encoding.UTF8.GetBytes(result.XbrlJson), await File.ReadAllBytesAsync(outputPath));
+        Assert.Single(await ReadFactsAsync(_databasePath));
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task DestinationChangePreviewMatchesInsertCountAndLeavesDatabaseBytesUnchanged()
     {
         var project = ConfiguredProject(_workbookPath);
@@ -701,6 +764,27 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         return document.RootElement.EnumerateArray()
             .Select(source => source.GetProperty("Locator").GetString()!)
             .ToArray();
+    }
+
+    private static async Task<IReadOnlyList<string>> ReadFactsAsync(string path)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = "SELECT fact_key FROM facts ORDER BY fact_key";
+        await using var reader = await command.ExecuteReaderAsync();
+        var keys = new List<string>();
+        while (await reader.ReadAsync()) keys.Add(reader.GetString(0));
+        return keys;
+    }
+
+    private static async Task<int> ReadReceiptCountAsync(string path)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
     }
 
     private static async Task CreateDestinationDatabase(string path)

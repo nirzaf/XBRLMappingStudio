@@ -45,6 +45,31 @@ public class PublicationTests : IDisposable
     }
 
     [Fact]
+    public void MixedPublication_RefusesDifferentExistingFile_AndConfirmsIdenticalRetryWithoutReplacement()
+    {
+        var svc = new PublicationService(_journal);
+        var destination = Dest("mixed-no-overwrite.json");
+        var acceptedBytes = Encoding.UTF8.GetBytes("previously-accepted");
+        var intendedBytes = Encoding.UTF8.GetBytes("new-intent");
+        File.WriteAllBytes(destination, acceptedBytes);
+
+        var conflict = Assert.Throws<PublicationException>(() => svc.Publish(
+            destination, intendedBytes, runId: "mixed-conflict", refuseDifferentExisting: true));
+
+        Assert.Equal(DiagnosticCodes.PubReceiptConflict, conflict.Code);
+        Assert.Equal(acceptedBytes, File.ReadAllBytes(destination));
+
+        var sameDigest = DestinationLock.DigestBytes(acceptedBytes);
+        var receipt = svc.Publish(destination, acceptedBytes, runId: "mixed-same-content",
+            refuseDifferentExisting: true);
+
+        Assert.Equal(sameDigest, receipt.FinalDigest);
+        Assert.Equal(acceptedBytes, File.ReadAllBytes(destination));
+        Assert.Equal(JournalState.Aborted, _journal.Load("mixed-conflict")!.State);
+        Assert.Equal(JournalState.Finalized, _journal.Load("mixed-same-content")!.State);
+    }
+
+    [Fact]
     public void Publish_ValidatesExactStagedBytes_AndTiesReceiptToValidatedDigest()
     {
         var svc = new PublicationService(_journal);

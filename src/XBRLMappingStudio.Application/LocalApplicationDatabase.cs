@@ -14,9 +14,10 @@ public sealed class LocalApplicationDatabase
     /// columns. v3 adds the digest of the artifact accepted by the profile worker to
     /// the publication journal and durable receipt. v4 adds managed PDF evidence
     /// references, v5 adds append-only PDF review audit events, and v6 adds an
-    /// integrity-checked offline taxonomy metadata cache. Migrations are non-destructive.
+    /// integrity-checked offline taxonomy metadata cache, and v7 adds durable mixed
+    /// file/SQLite publication reconciliation. Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
     public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
@@ -370,6 +371,31 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=6;
                 """;
             migration6.ExecuteNonQuery();
+        }
+        if (version < 7)
+        {
+            using var migration7 = connection.CreateCommand();
+            migration7.Transaction = transaction;
+            migration7.CommandText = """
+                CREATE TABLE mixed_publication_reconciliation (
+                    operation_key TEXT PRIMARY KEY NOT NULL,
+                    intent_fingerprint TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_digest TEXT NOT NULL,
+                    file_state TEXT NOT NULL CHECK(file_state IN ('Pending','InProgress','Confirmed','Rejected','Unknown')),
+                    file_failure_code TEXT,
+                    sqlite_path TEXT NOT NULL,
+                    sqlite_table TEXT NOT NULL,
+                    sqlite_operation_key TEXT,
+                    sqlite_intent_fingerprint TEXT,
+                    sqlite_state TEXT NOT NULL CHECK(sqlite_state IN ('Pending','InProgress','Confirmed','Rejected','Unknown')),
+                    sqlite_rows_written INTEGER,
+                    sqlite_failure_code TEXT,
+                    updated_utc TEXT NOT NULL
+                );
+                PRAGMA user_version=7;
+                """;
+            migration7.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

@@ -36,6 +36,28 @@ public enum RunOutcome
     Unknown
 }
 
+/// <summary>Per-destination result for a publication that spans independent stores.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<DestinationPublicationState>))]
+public enum DestinationPublicationState
+{
+    Pending,
+    InProgress,
+    Confirmed,
+    Rejected,
+    Unknown
+}
+
+/// <summary>One destination's independently reconciled publication outcome.</summary>
+public sealed record DestinationPublicationOutcome(
+    string Kind,
+    string Path,
+    DestinationPublicationState State,
+    string? Digest = null,
+    string? OperationKey = null,
+    int? RowsWritten = null,
+    string? FailureCode = null,
+    string? IntentFingerprint = null);
+
 /// <summary>
 /// Structured identity of a run per BASE04. Records inputs, versions, and digests so
 /// that an outcome can be reconciled and, where supported, replayed after a fault.
@@ -62,6 +84,14 @@ public sealed class RunManifest
 
     /// <summary>Digest of each artifact produced.</summary>
     public IReadOnlyList<OutputIdentity> Outputs { get; set; } = Array.Empty<OutputIdentity>();
+
+    /// <summary>Stable key for explicitly reconciling a mixed file/SQLite publication.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PublicationReconciliationId { get; set; }
+
+    /// <summary>Independent durable outcomes; omitted for runs without mixed publication.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<DestinationPublicationOutcome>? PublicationOutcomes { get; set; }
 
     /// <summary>Digest of the exact staged bytes accepted by the selected profile worker.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

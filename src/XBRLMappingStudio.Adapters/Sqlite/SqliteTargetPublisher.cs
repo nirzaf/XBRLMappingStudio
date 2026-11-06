@@ -9,6 +9,7 @@ using XBRLMappingStudio.Project;
 namespace XBRLMappingStudio.Adapters.Sqlite;
 
 public sealed record SqlitePublishReceipt(string OperationKey, string IntentFingerprint, int WrittenRows, DateTimeOffset CompletedUtc);
+public enum SqliteReceiptReconciliation { Found, NotFound, TargetUnavailable, IntentConflict }
 public sealed record SqliteTargetChangeSample(int CandidateRow, string Outcome);
 public sealed record SqliteTargetChangePreview(
     int CandidateRows,
@@ -52,7 +53,7 @@ public sealed class SqliteTargetPublisher
         if (records.Any(record => businessKey.Any(key => record.Fields[key].Presence is ValuePresence.Missing or ValuePresence.ExplicitNil
                 || record.Fields[key].Raw is null)))
             throw new AdapterException(DiagnosticCodes.IoDuplicateKey, "SQLite business-key values cannot be missing or null.", DiagnosticStage.Publication);
-        var effectiveIntent = Fingerprint(destination, table, records, businessKey, intentFingerprint, columns);
+        var effectiveIntent = ComputeEffectiveIntentFingerprint(destination, table, records, businessKey, intentFingerprint, columns);
 
         await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -140,6 +141,48 @@ public sealed class SqliteTargetPublisher
         }
         await transaction.CommitAsync(cancellationToken);
         return new SqlitePublishReceipt(operationKey, effectiveIntent, records.Count, completed);
+    }
+
+    /// <summary>
+    /// Reconcile a durable destination receipt without writing. A missing receipt means
+    /// the transaction that owns the data changes did not commit, because rows and the
+    /// receipt are committed in the same SQLite transaction.
+    /// </summary>
+    public async Task<(SqliteReceiptReconciliation State, SqlitePublishReceipt? Receipt)> ReconcileReceiptAsync(
+        SourceConnection destination,
+        string operationKey,
+        string expectedIntentFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(destination.Path) || !File.Exists(destination.Path))
+            return (SqliteReceiptReconciliation.TargetUnavailable, null);
+
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.GetFullPath(destination.Path),
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+            DefaultTimeout = 5,
+            ForeignKeys = true
+        }.ToString());
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var table = connection.CreateCommand();
+        table.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts'";
+        if (await table.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+            return (SqliteReceiptReconciliation.TargetUnavailable, null);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT intent_fingerprint,written_rows,completed_utc FROM xms_idempotency_receipts WHERE operation_key=$key";
+        command.Parameters.AddWithValue("$key", operationKey);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            return (SqliteReceiptReconciliation.NotFound, null);
+        var intent = reader.GetString(0);
+        if (!StringComparer.Ordinal.Equals(intent, expectedIntentFingerprint))
+            return (SqliteReceiptReconciliation.IntentConflict, null);
+        var receipt = new SqlitePublishReceipt(operationKey, intent, reader.GetInt32(1),
+            DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture));
+        return (SqliteReceiptReconciliation.Found, receipt);
     }
 
     /// <summary>
@@ -479,7 +522,8 @@ public sealed class SqliteTargetPublisher
                 $"SQLite target does not support value shape '{value.Shape}'.")
         };
 
-    private static string Fingerprint(SourceConnection destination, string table, IReadOnlyList<DataRecord> records,
+    public static string ComputeEffectiveIntentFingerprint(SourceConnection destination, string table,
+        IReadOnlyList<DataRecord> records,
         IReadOnlyList<string> keys, string upstreamFingerprint, IReadOnlyList<string> columns)
     {
         var builder = new StringBuilder();

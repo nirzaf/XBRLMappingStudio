@@ -46,7 +46,8 @@ public sealed class PublicationService
         bool allowSyntheticProfile,
         JobResult result,
         Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool refuseDifferentExisting = false)
     {
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
@@ -81,7 +82,7 @@ public sealed class PublicationService
         var receipt = await PublishCoreAsync(safeDestination,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
             payloadDigest, payload.LongLength, manifest.RunId, validateStagedArtifactAsync,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs
             .Select(output => output.Kind == "xbrl-json"
@@ -101,7 +102,8 @@ public sealed class PublicationService
         bool allowSyntheticProfile,
         JobResult result,
         Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool refuseDifferentExisting = false)
     {
         ArgumentNullException.ThrowIfNull(artifact);
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
@@ -133,7 +135,7 @@ public sealed class PublicationService
         var receipt = await PublishCoreAsync(safeDestination,
             (stream, token) => artifact.CopyReportToAsync(stream, token),
             artifact.Sha256, artifact.Bytes, manifest.RunId, validateStagedArtifactAsync,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs.Select(output => output.Kind == "xbrl-json"
             ? output with { Path = safeDestination } : output).ToArray();
@@ -153,11 +155,12 @@ public sealed class PublicationService
         Action<string>? beforeReplaceFault = null,
         TimeSpan? lockTimeout = null,
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool refuseDifferentExisting = false)
         => PublishCoreAsync(destinationPath,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
             RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
-            cancellationToken, beforeReplaceFault, lockTimeout).GetAwaiter().GetResult();
+            cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -168,7 +171,8 @@ public sealed class PublicationService
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync,
         CancellationToken cancellationToken,
         Action<string>? beforeReplaceFault = null,
-        TimeSpan? lockTimeout = null)
+        TimeSpan? lockTimeout = null,
+        bool refuseDifferentExisting = false)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -301,6 +305,31 @@ public sealed class PublicationService
                     validateStagedArtifactAsync is null ? null : validatedDigest);
                 throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
                     $"Could not record the locked publication state: {ex.Message}", runId, full);
+            }
+
+            if (refuseDifferentExisting && lk.DestinationDigestAtAcquire is { } existingDigest)
+            {
+                if (!StringComparer.Ordinal.Equals(existingDigest, validatedDigest))
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token,
+                        validateStagedArtifactAsync is null ? null : validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                        "Mixed publication refuses to overwrite an existing file with different bytes.",
+                        runId, full);
+                }
+
+                // Same-content retry: the destination already satisfies this intent.
+                // Record the receipt without replacing or rewriting the existing file.
+                TryDelete(stagedPath);
+                var unchangedReceipt = new PublicationReceipt(runId, full, stagedDigest,
+                    existingDigest, lk.Token, DateTimeOffset.UtcNow)
+                {
+                    ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest
+                };
+                _journal.Save(new JournalEntry(runId, full, JournalState.Finalized,
+                    stagedDigest, existingDigest, lk.Token, unchangedReceipt.CompletedUtc)
+                { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+                return unchangedReceipt;
             }
 
             var backupPath = full + $".xbsl-prev-{runId}";

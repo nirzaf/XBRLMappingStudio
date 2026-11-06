@@ -255,3 +255,25 @@ as an audit-persistence failure, the graph semantic digest stays unchanged, the
 suggestion remains pending, and no durable acceptance row appears. The focused
 `DesignerSessionTests` Release filter passed 55/55. Organizational reviewer authority,
 retention policy, and multi-user governance remain owner decisions.
+
+## DST-08 mixed file/SQLite publication reconciliation
+
+CLI `execute --output <path> --publish-destination` writes xBRL-JSON and the saved
+SQLite destination as independent legs. A schema-v7 local record captures the stable
+combined intent and each destination state before writes; the manifest reports each
+receipt separately. File publication is create-or-confirm for this flow: same-digest
+retries do not rewrite, and different existing bytes are refused. SQLite publication
+persists its exact operation key and effective intent before the target transaction.
+`reconcile-publication <mix-key>` reads the file digest and SQLite receipt without
+publishing and refreshes the local outcome record.
+
+Verification: the Ops suite passed 75/75; the CLI parity and SQLite destination
+workflow filters passed 32/32; the focused mixed CLI test passed 1/1 and exercised
+both destinations plus explicit reconciliation. The mixed integration failure test
+injected a SQLite trigger rollback after file confirmation, then retried and verified
+one fact row and one receipt without rewriting the report. Ops coverage also verifies
+refusal of a different existing file, same-digest confirmation, missing-receipt
+classification, unavailable-target unknown state, and receipt matching after an
+ambiguous response. `git diff --check` passed. Process-kill coverage at every replace
+and journal transition and cross-process crash qualification remain open; this is a
+local SQLite implementation and does not imply cross-filesystem atomicity.

@@ -1563,7 +1563,8 @@ public sealed class MappingJobService
         JobResult result,
         string workspaceRoot,
         bool allowSyntheticProfile,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<string, string>? onIntentPrepared = null)
     {
         var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
         var plan = prepared.Plan;
@@ -1585,6 +1586,12 @@ public sealed class MappingJobService
             DestinationPlanValidator.SupportedKind,
             prepared.Path,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = plan.Table });
+
+        var effectiveIntent = SqliteTargetPublisher.ComputeEffectiveIntentFingerprint(
+            destination, plan.Table, prepared.Records, plan.BusinessKey, operationFingerprint,
+            prepared.Records.SelectMany(record => record.Fields.Keys)
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+        onIntentPrepared?.Invoke(operationKey, effectiveIntent);
 
         await EnsureInputIdentityAsync(project, manifest, plan.Locator, cancellationToken);
         var receipt = await new SqliteTargetPublisher().PublishAsync(

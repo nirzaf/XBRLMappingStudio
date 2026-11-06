@@ -35,6 +35,7 @@ return command switch
     "taxonomy-search" => TaxonomySearch(rest),
     "validate-artifact" => await ValidateArtifactAsync(rest),
     "inspect-run-result" => InspectRunResult(rest),
+    "reconcile-publication" => await ReconcilePublicationAsync(rest),
     "support-bundle" => SupportBundleCommand(rest),
     "execute" => await ExecuteAsync(rest, preview: false),
     "preview" => await ExecuteAsync(rest, preview: true),
@@ -61,11 +62,13 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
+    Console.Error.WriteLine("                       Combined --output and --publish-destination requires a saved SQLite plan; reconcile partial results by mixed operation key.");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
+    Console.Error.WriteLine("  xbrl-studio reconcile-publication <mixed-operation-key>");
     Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Exit codes: 0=success 1=success-with-warnings 2=invalid-mapping 3=data-error");
@@ -290,6 +293,48 @@ static int InspectRunResult(string[] args)
     }
     Console.WriteLine(JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
     return ExitCodesLocal.Success;
+}
+
+static async Task<int> ReconcilePublicationAsync(string[] args)
+{
+    if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
+    {
+        Console.Error.WriteLine("Usage: xbrl-studio reconcile-publication <mixed-operation-key>");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    try
+    {
+        var coordinator = new MixedPublicationCoordinator(
+            new MixedPublicationStore(new LocalApplicationDatabase()));
+        var record = await coordinator.ReconcileAsync(args[0]);
+        if (record is null)
+        {
+            Console.Error.WriteLine($"No mixed publication record for '{args[0]}'.");
+            return ExitCodesLocal.DataError;
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            operationKey = record.OperationKey,
+            intentFingerprint = record.IntentFingerprint,
+            updatedUtc = record.UpdatedUtc,
+            outcomes = record.ToManifestOutcomes()
+        }, new JsonSerializerOptions { WriteIndented = true }));
+
+        var states = new[] { record.FileState, record.SqliteState };
+        if (states.All(state => state == DestinationPublicationState.Confirmed))
+            return ExitCodesLocal.Success;
+        if (states.Any(state => state is DestinationPublicationState.Unknown or DestinationPublicationState.InProgress
+                or DestinationPublicationState.Pending))
+            return ExitCodesLocal.OperationalFailure;
+        return ExitCodesLocal.DataError;
+    }
+    catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidDataException)
+    {
+        Console.Error.WriteLine($"Publication reconciliation could not complete: {ex.Message}");
+        return ExitCodesLocal.OperationalFailure;
+    }
 }
 
 // OPS08 (partial): redacted diagnostic bundle for one run; scheduler integration stays owner-gated.
@@ -719,12 +764,6 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         Console.Error.WriteLine("Preview runs cannot publish to a durable destination.");
         return ExitCodesLocal.InvalidMapping;
     }
-    if (publishDestination && output is not null)
-    {
-        Console.Error.WriteLine("Choose either --output for xBRL-JSON or --publish-destination for the saved destination plan; combined publication is not supported.");
-        return ExitCodesLocal.InvalidMapping;
-    }
-
     try
     {
         var pm = new ProjectManager(projectPath);
@@ -753,6 +792,12 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             if (destinationDiagnostics.HasBlockingErrors)
             {
                 PrintDiagnostics(destinationDiagnostics.Items);
+                return ExitCodesLocal.InvalidMapping;
+            }
+            if (output is not null
+                && !StringComparer.Ordinal.Equals(p.Destination!.Kind, DestinationPlanValidator.SupportedKind))
+            {
+                Console.Error.WriteLine("Combined --output and --publish-destination requires a saved SQLite destination plan.");
                 return ExitCodesLocal.InvalidMapping;
             }
             if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
@@ -800,6 +845,27 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             if (conn.Path is not null) conns[id] = conn with { Path = GuardPath(conn.Path) };
         if (output is not null) output = GuardPath(output);
         if (manifestPath is not null) manifestPath = GuardPath(manifestPath);
+        if (publishDestination && output is not null)
+        {
+            var sqlitePath = Path.GetFullPath(Path.IsPathRooted(p.Destination!.Locator)
+                ? p.Destination.Locator : Path.Combine(projectDirectory, p.Destination.Locator));
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            if (comparer.Equals(output, sqlitePath))
+            {
+                Console.Error.WriteLine("The xBRL-JSON file and SQLite database must be different paths.");
+                return ExitCodesLocal.InvalidMapping;
+            }
+            if (manifestPath is not null && comparer.Equals(manifestPath, output))
+            {
+                Console.Error.WriteLine("The manifest and xBRL-JSON output must be different paths.");
+                return ExitCodesLocal.InvalidMapping;
+            }
+            if (manifestPath is not null && comparer.Equals(manifestPath, sqlitePath))
+            {
+                Console.Error.WriteLine("The manifest and SQLite database must be different paths.");
+                return ExitCodesLocal.InvalidMapping;
+            }
+        }
 
         // EG03/XG01: an unattended (non-preview) execute is a production publication and
         // must clear the profile-identity, explicit-synthetic-opt-in, and approval gates
@@ -876,7 +942,97 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             {
                 try
                 {
-                    if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
+                    if (output is not null)
+                    {
+                        var destinationPath = Path.GetFullPath(Path.IsPathRooted(p.Destination!.Locator)
+                            ? p.Destination.Locator : Path.Combine(projectDirectory, p.Destination.Locator));
+                        var reportBytes = result.LargeArtifact?.Bytes
+                            ?? System.Text.Encoding.UTF8.GetByteCount(result.XbrlJson);
+                        var intent = MixedPublicationIntent.Create(
+                            p, result, output, reportBytes, destinationPath, p.Destination.Table);
+                        var coordinator = new MixedPublicationCoordinator(
+                            new MixedPublicationStore(new LocalApplicationDatabase()));
+                        var publisher = new PublicationService(new RunJournal());
+                        var attempt = await coordinator.PublishAsync(
+                            intent,
+                            async token => result.LargeArtifact is { } largeArtifact
+                                ? await publisher.PublishAuthorizedLargeArtifactAsync(
+                                    output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
+                                    (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
+                                        stagedPath, output, result, validationToken), token,
+                                    refuseDifferentExisting: true)
+                                : await publisher.PublishAuthorizedAsync(
+                                    output, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), workspaceRoot,
+                                    p, profile, allowSyntheticProfile, result,
+                                    (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
+                                        stagedPath, output, result, validationToken), token,
+                                    refuseDifferentExisting: true),
+                            (onIntentPrepared, token) => service.PublishDestinationAsync(
+                                p, result, projectDirectory, allowSyntheticProfile, token, onIntentPrepared),
+                            cts.Token);
+                        result.Manifest.PublicationReconciliationId = intent.OperationKey;
+                        result.Manifest.PublicationOutcomes = attempt.Record.ToManifestOutcomes();
+                        if (attempt.Record.FileState == DestinationPublicationState.Confirmed)
+                        {
+                            result.Manifest.PublishedArtifactDigest = attempt.Record.FileDigest;
+                            result.Manifest.Outputs = result.Manifest.Outputs
+                                .Select(existing => existing.Kind == "xbrl-json"
+                                    ? existing with { Path = attempt.Record.FilePath }
+                                    : existing)
+                                .ToArray();
+                        }
+                        if (attempt.Record.SqliteState == DestinationPublicationState.Confirmed
+                            && !result.Manifest.Outputs.Any(existing => existing.Kind == "db-receipt"
+                                && Path.GetFullPath(existing.Path) == attempt.Record.SqlitePath))
+                        {
+                            result.Manifest.Outputs = result.Manifest.Outputs
+                                .Append(new OutputIdentity(attempt.Record.SqlitePath,
+                                    attempt.Record.SqliteIntentFingerprint ?? string.Empty, 0, "db-receipt")
+                                {
+                                    RowsWritten = attempt.Record.SqliteRowsWritten,
+                                    OperationKey = attempt.Record.SqliteOperationKey,
+                                    Table = attempt.Record.SqliteTable
+                                })
+                                .ToArray();
+                        }
+                        if (attempt.Failure is null)
+                        {
+                            Console.Error.WriteLine(
+                                $"Published mixed operation {intent.OperationKey}: file={attempt.Record.FileState}, "
+                                + $"sqlite={attempt.Record.SqliteState} ({attempt.Record.SqliteRowsWritten ?? 0} row(s)).");
+                        }
+                        else if (attempt.Failure is PublicationException publicationFailure)
+                        {
+                            RecordDestinationFailure(publicationFailure.ToDiagnostic(),
+                                attempt.Record.FileState == DestinationPublicationState.Unknown
+                                    || attempt.Record.SqliteState == DestinationPublicationState.Unknown
+                                    ? RunOutcome.Unknown : PublicationFailureOutcome(publicationFailure));
+                        }
+                        else if (attempt.Failure is AdapterException adapterFailure)
+                        {
+                            RecordDestinationFailure(adapterFailure.ToDiagnostic(operationId: result.Manifest.OperationId),
+                                attempt.Record.FileState == DestinationPublicationState.Unknown
+                                    || attempt.Record.SqliteState == DestinationPublicationState.Unknown
+                                    ? RunOutcome.Unknown : RunOutcome.DataError);
+                        }
+                        else
+                        {
+                            RecordDestinationFailure(new Diagnostic
+                            {
+                                Code = DiagnosticCodes.PubPartialFailure,
+                                Subsystem = DiagnosticSubsystem.Publication,
+                                Severity = DiagnosticSeverity.Error,
+                                Stage = DiagnosticStage.Publication,
+                                IsBlocking = true,
+                                Message = $"Mixed publication outcome requires reconciliation: {attempt.Failure.Message}",
+                                OperationId = result.Manifest.OperationId
+                            }, attempt.Record.FileState == DestinationPublicationState.Unknown
+                                || attempt.Record.SqliteState == DestinationPublicationState.Unknown
+                                ? RunOutcome.Unknown : RunOutcome.OperationalFailure);
+                        }
+                        Console.Error.WriteLine($"Reconcile this publication with: xbrl-studio reconcile-publication {intent.OperationKey}");
+                    }
+                    else if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
                     {
                         var outputIdentity = await service.PublishFileDestinationAsync(
                             p, result, projectDirectory, allowSyntheticProfile, cts.Token);
