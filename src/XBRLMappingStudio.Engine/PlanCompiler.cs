@@ -1179,9 +1179,14 @@ public sealed class PlanCompiler
 
                 var n = inputs.GetValueOrDefault("numerator", DataValue.Missing(PortShape.Decimal));
                 var d = inputs.GetValueOrDefault("denominator", DataValue.Missing(PortShape.Decimal));
-                if (n.IsMissing || d.IsMissing || n.IsNil || d.IsNil)
+                if (n.IsMissing || d.IsMissing)
                 {
                     outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+                if (n.IsNil || d.IsNil)
+                {
+                    outputs["value"] = DataValue.ExplicitNil(PortShape.Decimal);
                     break;
                 }
                 var dv = d.AsDecimal();

@@ -280,6 +280,27 @@ public class FunctionTests
         Assert.Empty(result.Facts);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Ratio_PreservesExplicitNilFromEitherOperand(bool nilNumerator)
+    {
+        var numerator = nilNumerator
+            ? DataValue.ExplicitNil(PortShape.Decimal)
+            : DataValue.DecimalValue(10m);
+        var denominator = nilNumerator
+            ? DataValue.DecimalValue(2m)
+            : DataValue.ExplicitNil(PortShape.Decimal);
+        var (project, ctx) = RatioGraph("Diagnostic", numerator, denominator);
+        var result = GraphHarness.Run(project, ctx, out var compile);
+
+        Assert.True(compile.Success);
+        Assert.Empty(result!.Diagnostics);
+        var fact = Assert.Single(result.Facts);
+        Assert.True(fact.IsNil);
+        Assert.Null(fact.Value);
+    }
+
     [Fact]
     public void RatioFact_RecordsBothSourceNodesAndFactLevelTransformationIds()
     {
@@ -456,12 +477,16 @@ public class FunctionTests
     }
 
     private static (MappingProject, ExecutionContext) RatioGraph(string policy, decimal num, decimal den)
+        => RatioGraph(policy, DataValue.DecimalValue(num), DataValue.DecimalValue(den));
+
+    private static (MappingProject, ExecutionContext) RatioGraph(
+        string policy, DataValue num, DataValue den)
     {
         var n = GraphHarness.Node(NodeTypeConstants.ExcelField, "Num",
             new() { ["bindingId"] = Binding, ["column"] = "num" },
             outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
-        var d = GraphHarness.Node(NodeTypeConstants.RunParameter, "Den",
-            new() { ["name"] = "den", ["shape"] = "Decimal" },
+        var d = GraphHarness.Node(NodeTypeConstants.ExcelField, "Den",
+            new() { ["bindingId"] = Binding, ["column"] = "den" },
             outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
         var ratio = GraphHarness.Node(NodeTypeConstants.Ratio, "Ratio",
             new() { ["divideByZero"] = policy },
@@ -484,8 +509,10 @@ public class FunctionTests
             new List<MappingNode> { n, d, ratio }.Concat(sink), edges,
             bindings: new[] { GraphHarness.Binding(Binding) });
         var ctx = GraphHarness.Ctx(
-            new[] { (Binding, new[] { GraphHarness.Row(("num", D(num))) } as IReadOnlyList<DataRecord>) },
-            parameters: new Dictionary<string, string> { ["den"] = den.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+            new[]
+            {
+                (Binding, new[] { GraphHarness.Row(("num", num), ("den", den)) } as IReadOnlyList<DataRecord>)
+            });
         return (project, ctx);
     }
 
