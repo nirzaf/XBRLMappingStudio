@@ -629,6 +629,7 @@ public sealed class PlanCompiler
                 var thisKey = ProvenanceTracker.SlotKey(nodeId, port.Name, row);
                 ctx.Provenance.MergeSources(thisKey, new[] { upstreamKey });
                 ctx.Provenance.MergeTransformations(thisKey, new[] { upstreamKey });
+                ctx.Provenance.MergeSourceTransformationPaths(thisKey, new[] { upstreamKey });
             }
 
             var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile, periodInputConnected);
@@ -646,11 +647,16 @@ public sealed class PlanCompiler
                     .ToArray();
                 ctx.Provenance.MergeSources(outputKey, inputKeys);
                 ctx.Provenance.MergeTransformations(outputKey, inputKeys);
+                ctx.Provenance.MergeSourceTransformationPaths(outputKey, inputKeys);
                 // Source adapters such as ExcelField are direct pass-throughs: their
                 // evaluator still identifies the mapping step that bound the cell.
                 ctx.Provenance.RecordTransformation(outputKey, nodeId);
+                ctx.Provenance.RecordTransformationOnSourcePaths(outputKey, nodeId);
                 if (value.Source is not null)
+                {
                     ctx.Provenance.RecordSource(outputKey, value.Source);
+                    ctx.Provenance.RecordSourceTransformation(outputKey, value.Source, nodeId);
+                }
             }
         };
     }

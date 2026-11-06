@@ -137,6 +137,14 @@ public class FunctionTests
         Assert.Contains(ratio.NodeId, fact.TransformationIds);
         Assert.Contains(sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
             fact.TransformationIds);
+
+        var factConstruct = sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        var numeratorPath = Assert.Single(fact.SourceTransformationPaths,
+            path => path.Source == numeratorSource);
+        Assert.Equal(new[] { numerator.NodeId, ratio.NodeId, factConstruct.NodeId }, numeratorPath.TransformationIds);
+        var denominatorPath = Assert.Single(fact.SourceTransformationPaths,
+            path => path.Source == denominatorSource);
+        Assert.Equal(new[] { denominator.NodeId, ratio.NodeId, factConstruct.NodeId }, denominatorPath.TransformationIds);
     }
 
     private static (MappingProject, ExecutionContext) RatioGraph(string policy, decimal num, decimal den)

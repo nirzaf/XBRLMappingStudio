@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Engine;
 
@@ -13,6 +14,8 @@ public sealed class ProvenanceTracker
     private readonly ConcurrentDictionary<string, List<SourceReference>> _sources = new();
     // Slot key (nodeId, portName, index) -> row-phase evaluator node IDs in deterministic first-seen order.
     private readonly ConcurrentDictionary<string, List<string>> _transformationIds = new();
+    // Slot key (nodeId, portName, index) -> distinct source-specific row-phase paths.
+    private readonly ConcurrentDictionary<string, List<SourceTransformationPath>> _sourceTransformationPaths = new();
 
     public static string SlotKey(string nodeId, string portName, int? rowIndex = null)
         => rowIndex.HasValue ? $"{nodeId}.{portName}[{rowIndex}]" : $"{nodeId}.{portName}";
@@ -71,6 +74,50 @@ public sealed class ProvenanceTracker
         }
     }
 
+    public void MergeSourceTransformationPaths(string targetSlotKey, IEnumerable<string> contributorSlotKeys)
+    {
+        var target = _sourceTransformationPaths.GetOrAdd(targetSlotKey, _ => new List<SourceTransformationPath>());
+        lock (target)
+        {
+            foreach (var key in contributorSlotKeys)
+            {
+                if (!_sourceTransformationPaths.TryGetValue(key, out var list)) continue;
+                lock (list)
+                {
+                    foreach (var path in list)
+                        AddPathIfMissing(target, path);
+                }
+            }
+        }
+    }
+
+    public void RecordSourceTransformation(string slotKey, SourceReference source, string nodeId)
+    {
+        var paths = _sourceTransformationPaths.GetOrAdd(slotKey, _ => new List<SourceTransformationPath>());
+        lock (paths)
+        {
+            // A transform may preserve one DataValue.Source even though its connected
+            // inputs already supplied the full source-specific path. Use the direct
+            // source only to seed adapters/literals that have no inherited path.
+            if (paths.Any(path => path.Source == source)) return;
+            AddPathIfMissing(paths, new SourceTransformationPath(source, new[] { nodeId }));
+        }
+    }
+
+    public void RecordTransformationOnSourcePaths(string slotKey, string nodeId)
+    {
+        if (!_sourceTransformationPaths.TryGetValue(slotKey, out var paths)) return;
+        lock (paths)
+        {
+            for (var index = 0; index < paths.Count; index++)
+            {
+                var path = paths[index];
+                if (path.TransformationIds.Contains(nodeId, StringComparer.Ordinal)) continue;
+                paths[index] = path with { TransformationIds = path.TransformationIds.Append(nodeId).ToArray() };
+            }
+        }
+    }
+
     public IReadOnlyList<SourceReference> GetContributors(string slotKey)
         => _sources.TryGetValue(slotKey, out var list)
             ? (IReadOnlyList<SourceReference>)list.ToArray()
@@ -81,6 +128,11 @@ public sealed class ProvenanceTracker
             ? list.ToArray()
             : Array.Empty<string>();
 
+    public IReadOnlyList<SourceTransformationPath> GetSourceTransformationPaths(string slotKey)
+        => _sourceTransformationPaths.TryGetValue(slotKey, out var list)
+            ? list.ToArray()
+            : Array.Empty<SourceTransformationPath>();
+
     public IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Snapshot()
         => _sources.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<SourceReference>)kv.Value.ToArray());
 
@@ -89,6 +141,14 @@ public sealed class ProvenanceTracker
     {
         _sources.Clear();
         _transformationIds.Clear();
+        _sourceTransformationPaths.Clear();
+    }
+
+    private static void AddPathIfMissing(List<SourceTransformationPath> paths, SourceTransformationPath candidate)
+    {
+        if (!paths.Any(path => path.Source == candidate.Source
+            && path.TransformationIds.SequenceEqual(candidate.TransformationIds, StringComparer.Ordinal)))
+            paths.Add(candidate);
     }
 }
 

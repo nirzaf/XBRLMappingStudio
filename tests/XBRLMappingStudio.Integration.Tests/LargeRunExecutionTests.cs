@@ -50,6 +50,75 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task TwoInputRatio_SourceTransformationPathsSurviveLargeFactSpool()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 40, variedValues: true);
+            var project = BuildRatioProject(database);
+            var profile = SyntheticProfile.Build();
+            using var small = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 64, RowBatchSize: 8));
+            using var large = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 8, RowBatchSize: 8));
+
+            Assert.Equal(RunOutcome.Success, small.Manifest.Outcome);
+            Assert.Equal(RunOutcome.Success, large.Manifest.Outcome);
+            var artifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
+            Assert.Equal(small.XbrlJson, await File.ReadAllTextAsync(artifact.XbrlJsonPath));
+            Assert.DoesNotContain(nameof(XbrlFact.SourceTransformationPaths), small.XbrlJson, StringComparison.Ordinal);
+
+            var numerator = project.Nodes.Single(node => node.DisplayName == "Current revenue");
+            var denominator = project.Nodes.Single(node => node.DisplayName == "Prior revenue");
+            var ratio = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Ratio);
+            var factConstruct = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var smallFact = small.Facts[0];
+            var largeFact = artifact.Facts[0];
+
+            Assert.Equal(2, smallFact.SourceTransformationPaths.Count);
+            Assert.Equal(2, largeFact.SourceTransformationPaths.Count);
+            AssertTransformationPath(smallFact, "financials.Current",
+                numerator.NodeId, ratio.NodeId, factConstruct.NodeId);
+            AssertTransformationPath(smallFact, "financials.Prior",
+                denominator.NodeId, ratio.NodeId, factConstruct.NodeId);
+            AssertTransformationPath(largeFact, "financials.Current",
+                numerator.NodeId, ratio.NodeId, factConstruct.NodeId);
+            AssertTransformationPath(largeFact, "financials.Prior",
+                denominator.NodeId, ratio.NodeId, factConstruct.NodeId);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
+    public async Task LargeSpoolBudgetExceeded_FailsClosedBeforeWorkerValidation()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 40, variedValues: false);
+            var project = BuildRatioProject(database);
+            var profile = SyntheticProfile.Build();
+            var worker = new DigestOnlyArtifactWorker(profile);
+            var priorDirectories = LargeRunDirectories();
+
+            using var result = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 8, RowBatchSize: 8,
+                    SqliteCacheKiB: 256, MaxSpoolBytes: 1024), worker);
+
+            Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+            Assert.Contains(result.Manifest.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.IoNumberOutOfBudget);
+            Assert.Empty(result.Facts);
+            Assert.Null(result.LargeArtifact);
+            Assert.Empty(result.Manifest.Outputs);
+            Assert.Null(result.Manifest.ValidatedArtifactDigest);
+            Assert.Null(worker.LastValidationPath);
+            Assert.Equal(priorDirectories, LargeRunDirectories());
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded()
     {
         const int rowCount = 100_000;
@@ -68,11 +137,12 @@ public sealed class LargeRunExecutionTests
                     samples.Add(GC.GetTotalMemory(forceFullCollection: true));
             });
             var budget = new ExecutionBudget(InMemorySourceRecordLimit: 128, RowBatchSize: 256,
-                SqliteCacheKiB: 256, MaxSpoolBytes: 256 * 1024 * 1024,
+                SqliteCacheKiB: 256, MaxSpoolBytes: 384 * 1024 * 1024,
                 MaxReportBytes: 256 * 1024 * 1024);
             using var result = await Run(project, database, profile, budget, worker, progress);
 
-            Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+            Assert.True(result.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}")));
             var artifact = Assert.IsType<LargeRunArtifact>(result.LargeArtifact);
             Assert.Equal(rowCount, artifact.FactCount);
             Assert.Equal(artifact.XbrlJsonPath, worker.LastValidationPath);
@@ -461,6 +531,64 @@ public sealed class LargeRunExecutionTests
             });
         }
         return project;
+    }
+
+    private static MappingProject BuildRatioProject(string database)
+    {
+        var project = BuildProject(database);
+        var current = project.Nodes.Single(node => node.DisplayName == "Current revenue");
+        var scale = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+        var factConstruct = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        var bindingId = project.Bindings[0].BindingId;
+        var denominator = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Prior revenue",
+            Parameters = new() { ["bindingId"] = bindingId, ["column"] = "Prior" },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        };
+        var ratio = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.Ratio,
+            DisplayName = "Current / prior ratio",
+            Parameters = new() { ["divideByZero"] = "Diagnostic" },
+            InputPorts = new()
+            {
+                new PortDefinition("numerator", PortShape.Decimal, PortCardinality.Single),
+                new PortDefinition("denominator", PortShape.Decimal, PortCardinality.Single)
+            },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        };
+
+        project.Nodes.Remove(scale);
+        project.Nodes.Add(denominator);
+        project.Nodes.Add(ratio);
+        project.Edges.RemoveAll(edge => edge.SourceNodeId == scale.NodeId || edge.TargetNodeId == scale.NodeId);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = current.NodeId, SourcePortName = "value",
+            TargetNodeId = ratio.NodeId, TargetPortName = "numerator"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = denominator.NodeId, SourcePortName = "value",
+            TargetNodeId = ratio.NodeId, TargetPortName = "denominator"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = ratio.NodeId, SourcePortName = "value",
+            TargetNodeId = factConstruct.NodeId, TargetPortName = "value"
+        });
+        return project;
+    }
+
+    private static void AssertTransformationPath(XbrlFact fact, string locator, params string[] expectedIds)
+    {
+        var path = Assert.Single(fact.SourceTransformationPaths,
+            candidate => StringComparer.Ordinal.Equals(candidate.Source.Locator, locator));
+        Assert.Equal(expectedIds, path.TransformationIds);
     }
 
     private static IReadOnlyDictionary<string, SourceConnection> Connections(MappingProject project, string database)

@@ -122,6 +122,7 @@ public sealed class ExecutionPlan
                         var slotKey = ProvenanceTracker.SlotKey(sinkId, "fact", row);
                         pf.Sources.AddRange(context.Provenance.GetContributors(slotKey));
                         pf.TransformationIds.AddRange(context.Provenance.GetTransformationIds(slotKey));
+                        pf.SourceTransformationPaths.AddRange(context.Provenance.GetSourceTransformationPaths(slotKey));
                         facts.Add(pf);
                     }
                 }

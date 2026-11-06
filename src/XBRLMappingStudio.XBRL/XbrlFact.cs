@@ -74,6 +74,10 @@ public sealed record XbrlUnit(
 /// Immutable fact value per XBR04. The G1 synthetic profile supports:
 /// monetary instant/duration facts with decimals accuracy and ISO language tags.
 /// </summary>
+public sealed record SourceTransformationPath(
+    SourceReference Source,
+    IReadOnlyList<string> TransformationIds);
+
 public sealed class XbrlFact
 {
     public required string ConceptName { get; init; }         // qualified name: "synthetic:Revenue"
@@ -102,6 +106,14 @@ public sealed class XbrlFact
     /// This fact-level union does not identify a separate transformation path for each source.
     /// </summary>
     public IReadOnlyList<string> TransformationIds { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Connected row-phase transformation IDs grouped by source occurrence. These paths
+    /// describe graph connectivity; nodes that merge alternatives may include inputs
+    /// that did not determine the selected value.
+    /// </summary>
+    public IReadOnlyList<SourceTransformationPath> SourceTransformationPaths { get; init; }
+        = Array.Empty<SourceTransformationPath>();
 
     public bool ValidateValueAgainst(ConceptMetadata meta, out string reason)
         => ValidateValueAgainst(meta, out reason, out _);
@@ -306,6 +318,7 @@ public sealed class PendingFact
     public IReadOnlyList<Dimension> Dimensions { get; set; } = Array.Empty<Dimension>();
     public List<SourceReference> Sources { get; } = new();
     public List<string> TransformationIds { get; } = new();
+    public List<SourceTransformationPath> SourceTransformationPaths { get; } = new();
 }
 
 /// <summary>

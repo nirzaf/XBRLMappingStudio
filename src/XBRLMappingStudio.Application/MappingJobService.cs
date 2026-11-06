@@ -649,7 +649,8 @@ public sealed class MappingJobService
                 Language = pf.Language,
                 Dimensions = pf.Dimensions,
                 ContributingSources = pf.Sources,
-                TransformationIds = pf.TransformationIds
+                TransformationIds = pf.TransformationIds,
+                SourceTransformationPaths = pf.SourceTransformationPaths
             });
         }
 
@@ -867,7 +868,8 @@ public sealed class MappingJobService
                         Language = pending.Language,
                         Dimensions = pending.Dimensions,
                         ContributingSources = pending.Sources,
-                        TransformationIds = pending.TransformationIds
+                        TransformationIds = pending.TransformationIds,
+                        SourceTransformationPaths = pending.SourceTransformationPaths
                     }, _executionBudget.MaxFactBytes);
                 }
 
