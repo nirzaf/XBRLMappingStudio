@@ -28,6 +28,25 @@ public class FunctionTests
     private static ExecutionContext OneRow(decimal amount)
         => GraphHarness.Ctx(new[] { (Binding, new[] { GraphHarness.Row(("amount", D(amount))) } as IReadOnlyList<DataRecord>) });
 
+    private static (ExecutionResult? Result, CompilationResult Compile) RunRoundGraph(
+        decimal amount, string mode, string digits)
+    {
+        var source = Driver(out var edges, amount);
+        var round = GraphHarness.Node(NodeTypeConstants.Round, "Round",
+            new() { ["mode"] = mode, ["digits"] = digits },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        edges.Add(GraphHarness.Link(source, "value", round, "input"));
+        var sink = GraphHarness.FactSink(out var factEdges, round, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+
+        var project = GraphHarness.Project(
+            new List<MappingNode> { source, round }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var result = GraphHarness.Run(project, OneRow(amount), out var compile);
+        return (result, compile);
+    }
+
     private static (MappingProject Project, ExecutionContext Context) ParseDecimalGraph(
         DataValue inputValue, string culture)
     {
@@ -167,23 +186,48 @@ public class FunctionTests
     [InlineData("Truncate", -2.9, -2)]
     public void Round_ModesProduceDeclaredTieBehaviour(string mode, decimal input, decimal expected)
     {
-        var excel = Driver(out var edges, input);
-        var round = GraphHarness.Node(NodeTypeConstants.Round, "Round",
-            new() { ["mode"] = mode, ["digits"] = "0" },
-            inputs: new[] { GraphHarness.P("input", PortShape.Decimal) },
-            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
-        edges.Add(GraphHarness.Link(excel, "value", round, "input"));
-        var sink = GraphHarness.FactSink(out var factEdges, round, "value", PortCardinality.Single);
-        edges.AddRange(factEdges);
-
-        var project = GraphHarness.Project(
-            new List<MappingNode> { excel, round }.Concat(sink), edges,
-            bindings: new[] { GraphHarness.Binding(Binding) });
-
-        var result = GraphHarness.Run(project, OneRow(input), out var compile);
+        var (result, compile) = RunRoundGraph(input, mode, "0");
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
         Assert.Single(result!.Facts);
         Assert.Equal(expected, result.Facts[0]!.Value);
+    }
+
+    [Theory]
+    [InlineData("29")]
+    [InlineData("30")]
+    public void Round_RejectsDigitsBeyondClrDecimalScale(string digits)
+    {
+        var (result, compile) = RunRoundGraph(1.25m, "HalfEven", digits);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
+            && diagnostic.Message.Contains("0..28", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("HalfUp")]
+    [InlineData("HalfEven")]
+    [InlineData("Truncate")]
+    public void Round_LargeValueAtRequestedScaleIsUnchanged(string mode)
+    {
+        const decimal input = 7922816251426433759354395033.5m;
+        var (result, compile) = RunRoundGraph(input, mode, "1");
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Empty(result!.Diagnostics);
+        Assert.Equal(input, Assert.Single(result.Facts).Value);
+    }
+
+    [Fact]
+    public void Round_InvalidModeStillFailsWhenPrecisionWouldBeNoOp()
+    {
+        var (result, compile) = RunRoundGraph(1.00m, "HalfDown", "2");
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Contains(result!.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidRoundingMode
+            && diagnostic.Message.Contains("HalfDown", StringComparison.Ordinal));
     }
 
     // ---- MAP04: divide-by-zero policies --------------------------------------------

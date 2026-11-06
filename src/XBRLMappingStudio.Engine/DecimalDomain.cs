@@ -192,6 +192,9 @@ internal static class DecimalDomain
         return coefficientDigits <= maxSignificantDigits;
     }
 
+    public static int FractionalScaleOf(decimal value)
+        => (decimal.GetBits(value)[3] >> 16) & 0xFF;
+
     public static void ValidateValue(DataValue value, int maxSignificantDigits, string nodeId)
     {
         if (value.Presence != ValuePresence.Present) return;

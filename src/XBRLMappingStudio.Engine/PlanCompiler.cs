@@ -1116,35 +1116,43 @@ public sealed class PlanCompiler
                 }
                 var digitsStr = GetString(node, "digits") ?? "0";
                 if (!int.TryParse(digitsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits)
-                    || digits < 0 || digits > 30)
+                    || digits < 0 || digits > DecimalDomain.MaximumScale)
                 {
                     diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
                         DiagnosticStage.Execution,
-                        $"Round digits '{digitsStr}' is outside the supported range 0..30.",
+                        $"Round digits '{digitsStr}' is outside the supported range 0..{DecimalDomain.MaximumScale}.",
                         nodeId: node.NodeId, source: input.Source);
                     outputs["value"] = DataValue.Missing(PortShape.Decimal);
                     break;
                 }
                 var modeStr = GetString(node, "mode") ?? "HalfEven";
+                if (modeStr is not ("HalfUp" or "HalfEven" or "Truncate"))
+                {
+                    diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
+                        DiagnosticStage.Execution,
+                        $"Unknown rounding mode '{modeStr}'.",
+                        nodeId: node.NodeId, source: input.Source);
+                    outputs["value"] = DataValue.Missing(PortShape.Decimal);
+                    break;
+                }
+
+                var originalValue = input.AsDecimal();
+                if (digits >= DecimalDomain.FractionalScaleOf(originalValue))
+                {
+                    outputs["value"] = DataValue.DecimalValue(originalValue, input.Source);
+                    break;
+                }
+
                 decimal rounded;
                 try
                 {
                     rounded = modeStr switch
                     {
-                        "HalfUp" => RoundHalfUp(input.AsDecimal(), digits),
-                        "HalfEven" => decimal.Round(input.AsDecimal(), digits, MidpointRounding.ToEven),
-                        "Truncate" => TruncateToDigits(input.AsDecimal(), digits),
-                        _ => decimal.MinValue // sentinel -> invalid mode
+                        "HalfUp" => RoundHalfUp(originalValue, digits),
+                        "HalfEven" => decimal.Round(originalValue, digits, MidpointRounding.ToEven),
+                        "Truncate" => TruncateToDigits(originalValue, digits),
+                        _ => throw new InvalidOperationException("A validated rounding mode was not recognized.")
                     };
-                    if (rounded == decimal.MinValue)
-                    {
-                        diag.Error(DiagnosticCodes.MapInvalidRoundingMode, DiagnosticSubsystem.Mapping,
-                            DiagnosticStage.Execution,
-                            $"Unknown rounding mode '{modeStr}'.",
-                            nodeId: node.NodeId, source: input.Source);
-                        outputs["value"] = DataValue.Missing(PortShape.Decimal);
-                        break;
-                    }
                 }
                 catch (OverflowException)
                 {
