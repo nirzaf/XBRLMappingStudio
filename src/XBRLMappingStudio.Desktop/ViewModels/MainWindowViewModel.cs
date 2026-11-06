@@ -5911,6 +5911,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                     {
                         new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, IsRequired: false),
                         new PortDefinition("textValue", PortShape.String, PortCardinality.Single, IsRequired: false),
+                        new PortDefinition("textValues", PortShape.String, PortCardinality.Collection, IsRequired: false),
                         new PortDefinition("entity", PortShape.String, PortCardinality.Single),
                         new PortDefinition("period", PortShape.Instant, PortCardinality.Single, IsRequired: false)
                     },

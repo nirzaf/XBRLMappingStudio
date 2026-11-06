@@ -310,8 +310,8 @@ public sealed class FunctionCatalog
             new Dictionary<string, ParameterRequirement>()),
 
         // Sink: fact construction. Emits one XBRL fact per input iteration. Accepts a
-        // scalar numeric `value`, a `values` Collection (set-driven), or a scalar
-        // `textValue` for language-tagged string concepts.
+        // scalar numeric `value`, a `values` Collection (set-driven), a scalar
+        // `textValue`, or a `textValues` Collection for language-tagged text concepts.
         new FunctionSignature(
             NodeTypeConstants.FactConstruct,
             "XBRL Fact",
@@ -320,6 +320,7 @@ public sealed class FunctionCatalog
                 new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, false),
                 new PortDefinition("values", PortShape.Decimal, PortCardinality.Collection, false),
                 new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("textValues", PortShape.String, PortCardinality.Collection, false),
                 new PortDefinition("entity", PortShape.String, PortCardinality.Single, true),
                 new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false),
                 new PortDefinition("instantDate", PortShape.Instant, PortCardinality.Single, false)

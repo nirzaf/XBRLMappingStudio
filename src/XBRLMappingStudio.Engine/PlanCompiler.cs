@@ -1571,7 +1571,32 @@ public sealed class PlanCompiler
                 var valueIn = inputs.GetValueOrDefault("value", DataValue.Missing(PortShape.Decimal));
                 if (valueIn.IsMissing)
                     valueIn = inputs.GetValueOrDefault("values", DataValue.Missing(PortShape.Decimal));
-                var textIn = inputs.GetValueOrDefault("textValue", DataValue.Missing(PortShape.String));
+                var scalarTextIn = inputs.GetValueOrDefault("textValue", DataValue.Missing(PortShape.String));
+                var collectedTextIn = inputs.GetValueOrDefault("textValues", DataValue.Missing(PortShape.String));
+                var hasScalarTextValue = scalarTextIn.Presence is ValuePresence.Present or ValuePresence.ExplicitNil;
+                var hasCollectedTextValue = collectedTextIn.Presence is ValuePresence.Present or ValuePresence.ExplicitNil;
+                if (hasScalarTextValue && hasCollectedTextValue)
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrUnsupportedConstruct,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        "FactConstruct cannot receive both scalar 'textValue' and set-driven 'textValues'.",
+                        nodeId: node.NodeId,
+                        portName: "textValues",
+                        source: collectedTextIn.Source ?? scalarTextIn.Source,
+                        sourceTransformationPaths: factConstructSourcePaths);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+                var textIn = hasScalarTextValue
+                    ? scalarTextIn
+                    : hasCollectedTextValue
+                        ? collectedTextIn
+                        : !scalarTextIn.IsMissing
+                            ? scalarTextIn
+                            : collectedTextIn;
+                var textValuePortName = hasCollectedTextValue && !hasScalarTextValue ? "textValues" : "textValue";
                 var hasNumericInput = !valueIn.IsMissing;
                 var hasTextInput = textIn.Presence is ValuePresence.Present or ValuePresence.ExplicitNil;
                 if (!hasNumericInput && !hasTextInput)
@@ -1587,14 +1612,14 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         "FactConstruct cannot receive both numeric and text values.",
                         nodeId: node.NodeId,
-                        portName: "textValue",
+                        portName: textValuePortName,
                         source: textIn.Source ?? valueIn.Source,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
                 var factValueSource = hasTextInput ? textIn.Source : valueIn.Source;
-                var factValuePortName = hasTextInput ? "textValue" : "value";
+                var factValuePortName = hasTextInput ? textValuePortName : "value";
 
                 var concept = GetString(node, "concept")
                     ?? throw new InvalidOperationException($"FactConstruct node '{node.DisplayName}' has no concept parameter.");
@@ -1817,7 +1842,8 @@ public sealed class PlanCompiler
                         ProvenanceTracker.SlotKey(node.NodeId, "entity", row),
                         ProvenanceTracker.SlotKey(node.NodeId, "period", row),
                         ProvenanceTracker.SlotKey(node.NodeId, "instantDate", row),
-                        ProvenanceTracker.SlotKey(node.NodeId, "textValue", row)
+                        ProvenanceTracker.SlotKey(node.NodeId, "textValue", row),
+                        ProvenanceTracker.SlotKey(node.NodeId, "textValues", row)
                     });
 
                 outputs["fact"] = DataValue.Opaque(PortShape.Fact, pf);

@@ -16,6 +16,50 @@ public class CollectionAndJoinTests
     private static DataValue D(decimal v) => DataValue.DecimalValue(v);
     private static DataValue S(string v) => DataValue.StringValue(v);
 
+    private static MappingNode ConfigureTextFactSink(
+        List<MappingNode> sink,
+        List<MappingEdge> edges,
+        string language)
+    {
+        var fact = sink.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        fact.Parameters["concept"] = SyntheticProfile.Qualified("EntityRegistrantName");
+        fact.Parameters.Remove("unit");
+        fact.Parameters["periodType"] = "duration";
+        fact.Parameters["language"] = language;
+
+        var textValuesIndex = fact.InputPorts.FindIndex(port => port.Name == "textValues");
+        fact.InputPorts[textValuesIndex] = GraphHarness.P(
+            "textValues", PortShape.String, PortCardinality.Collection, required: false);
+        fact.InputPorts.Add(GraphHarness.P("period", PortShape.Instant, required: false));
+
+        var instant = sink.Single(node => node.NodeType == NodeTypeConstants.BuildInstantDate);
+        var instantDate = sink.Single(node => node.NodeType == NodeTypeConstants.Constant
+            && node.DisplayName == "Instant");
+        edges.RemoveAll(edge => edge.SourceNodeId == instant.NodeId || edge.TargetNodeId == instant.NodeId
+            || edge.SourceNodeId == instantDate.NodeId || edge.TargetNodeId == instantDate.NodeId);
+        sink.Remove(instant);
+        sink.Remove(instantDate);
+
+        var start = GraphHarness.Node(NodeTypeConstants.Constant, "Duration start",
+            new() { ["literal"] = "2025-01-01", ["shape"] = "String" },
+            outputs: new[] { GraphHarness.P("value", PortShape.String) });
+        var end = GraphHarness.Node(NodeTypeConstants.Constant, "Duration end",
+            new() { ["literal"] = "2025-12-31", ["shape"] = "String" },
+            outputs: new[] { GraphHarness.P("value", PortShape.String) });
+        var duration = GraphHarness.Node(NodeTypeConstants.BuildDurationDate, "Duration period",
+            inputs: new[]
+            {
+                GraphHarness.P("startText", PortShape.String),
+                GraphHarness.P("endText", PortShape.String)
+            },
+            outputs: new[] { GraphHarness.P("value", PortShape.Instant) });
+        sink.AddRange(new[] { start, end, duration });
+        edges.Add(GraphHarness.Link(start, "value", duration, "startText"));
+        edges.Add(GraphHarness.Link(end, "value", duration, "endText"));
+        edges.Add(GraphHarness.Link(duration, "value", fact, "period"));
+        return fact;
+    }
+
     // ---- MAP05: scalar collection reduce -> single aggregate fact -------------------
 
     [Fact]
@@ -99,6 +143,130 @@ public class CollectionAndJoinTests
                 path.TransformationIds);
         }
         await Task.CompletedTask;
+    }
+
+    [Fact]
+    public void CollectTextValues_EmitsOneLanguageTaggedFactPerPresentItemAndPreservesOccurrences()
+    {
+        var excel = GraphHarness.Node(NodeTypeConstants.ExcelField, "Names",
+            new() { ["bindingId"] = Binding, ["column"] = "name" },
+            outputs: new[] { GraphHarness.P("textValue", PortShape.String) });
+        var collect = GraphHarness.Node(NodeTypeConstants.Collect, "Collect names",
+            inputs: new[] { GraphHarness.P("input", PortShape.String) },
+            outputs: new[] { GraphHarness.P("items", PortShape.String, PortCardinality.Collection) });
+        var edges = new List<MappingEdge>();
+        var sink = GraphHarness.FactSink(out var sinkEdges, collect, "textValues", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        edges.Add(GraphHarness.Link(excel, "textValue", collect, "input"));
+        var factConstruct = ConfigureTextFactSink(sink, edges, "en");
+
+        var sourceA = new SourceReference(Binding, "people.Name", "row:1");
+        var sourceB = new SourceReference(Binding, "people.Name", "row:2");
+        var sourceC = new SourceReference(Binding, "people.Name", "row:4");
+        var rows = new List<DataRecord>
+        {
+            GraphHarness.Row(("name", DataValue.StringValue("ACME", sourceA))),
+            GraphHarness.Row(("name", DataValue.StringValue("ACME", sourceB))),
+            GraphHarness.Row(("name", DataValue.Missing(PortShape.String))),
+            GraphHarness.Row(("name", DataValue.StringValue("Northwind", sourceC))),
+            GraphHarness.Row(("name", DataValue.ExplicitNil(PortShape.String))),
+            GraphHarness.Row(("name", DataValue.StringValue(" ")))
+        };
+        var project = GraphHarness.Project(new[] { excel, collect }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project,
+            GraphHarness.Ctx(new[] { (Binding, rows as IReadOnlyList<DataRecord>) }), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.NotNull(result);
+        var nonNilFacts = result!.Facts.Where(fact => !fact.IsNil).ToArray();
+        Assert.Equal(new[] { "ACME", "ACME", "Northwind" }, nonNilFacts.Select(fact => fact.TextValue));
+        Assert.True(Assert.Single(result.Facts, fact => fact.IsNil).TextValue is null);
+        Assert.All(result.Facts, fact =>
+        {
+            Assert.Null(fact.Value);
+            Assert.Null(fact.Unit);
+            Assert.Equal("en", fact.Language);
+        });
+        Assert.Equal(new[] { sourceA, sourceB, sourceC }, nonNilFacts
+            .Select(fact => Assert.Single(fact.Sources)));
+        Assert.All(nonNilFacts, fact => Assert.Contains(fact.SourceTransformationPaths,
+            path => path.TransformationIds.SequenceEqual(
+                new[] { excel.NodeId, collect.NodeId, factConstruct.NodeId }, StringComparer.Ordinal)));
+    }
+
+    [Fact]
+    public void CollectTextValues_UnsupportedLanguageDiagnosticRetainsSelectedItemSource()
+    {
+        var excel = GraphHarness.Node(NodeTypeConstants.ExcelField, "Names",
+            new() { ["bindingId"] = Binding, ["column"] = "name" },
+            outputs: new[] { GraphHarness.P("textValue", PortShape.String) });
+        var collect = GraphHarness.Node(NodeTypeConstants.Collect, "Collect names",
+            inputs: new[] { GraphHarness.P("input", PortShape.String) },
+            outputs: new[] { GraphHarness.P("items", PortShape.String, PortCardinality.Collection) });
+        var edges = new List<MappingEdge>();
+        var sink = GraphHarness.FactSink(out var sinkEdges, collect, "textValues", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        edges.Add(GraphHarness.Link(excel, "textValue", collect, "input"));
+        ConfigureTextFactSink(sink, edges, "de");
+
+        var source = new SourceReference(Binding, "people.Name", "row:1");
+        var rows = new List<DataRecord>
+        {
+            GraphHarness.Row(("name", DataValue.StringValue("ACME", source)))
+        };
+        var project = GraphHarness.Project(new[] { excel, collect }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project,
+            GraphHarness.Ctx(new[] { (Binding, rows as IReadOnlyList<DataRecord>) }), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.NotNull(result);
+        Assert.Empty(result!.Facts);
+        var diagnostic = Assert.Single(result.Diagnostics,
+            item => item.Code == DiagnosticCodes.XbrUnsupportedConstruct);
+        Assert.Equal("textValues", diagnostic.PortName);
+        Assert.Equal(source, diagnostic.Source);
+    }
+
+    [Fact]
+    public void CollectTextValues_RejectsSimultaneousScalarTextInput()
+    {
+        var excel = GraphHarness.Node(NodeTypeConstants.ExcelField, "Names",
+            new() { ["bindingId"] = Binding, ["column"] = "name" },
+            outputs: new[] { GraphHarness.P("textValue", PortShape.String) });
+        var collect = GraphHarness.Node(NodeTypeConstants.Collect, "Collect names",
+            inputs: new[] { GraphHarness.P("input", PortShape.String) },
+            outputs: new[] { GraphHarness.P("items", PortShape.String, PortCardinality.Collection) });
+        var edges = new List<MappingEdge>();
+        var sink = GraphHarness.FactSink(out var sinkEdges, collect, "textValues", PortCardinality.Collection);
+        edges.AddRange(sinkEdges);
+        edges.Add(GraphHarness.Link(excel, "textValue", collect, "input"));
+
+        var factConstruct = ConfigureTextFactSink(sink, edges, "en");
+        factConstruct.InputPorts.Add(GraphHarness.P("textValue", PortShape.String, required: false));
+        edges.Add(GraphHarness.Link(excel, "textValue", factConstruct, "textValue"));
+
+        var source = new SourceReference(Binding, "people.Name", "row:1");
+        var rows = new List<DataRecord>
+        {
+            GraphHarness.Row(("name", DataValue.StringValue("ACME", source)))
+        };
+        var project = GraphHarness.Project(new[] { excel, collect }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var result = GraphHarness.Run(project,
+            GraphHarness.Ctx(new[] { (Binding, rows as IReadOnlyList<DataRecord>) }), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.NotNull(result);
+        Assert.Empty(result!.Facts);
+        var diagnostic = Assert.Single(result.Diagnostics,
+            item => item.Code == DiagnosticCodes.XbrUnsupportedConstruct);
+        Assert.Equal("textValues", diagnostic.PortName);
+        Assert.Equal(source, diagnostic.Source);
     }
 
     [Fact]
