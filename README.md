@@ -278,18 +278,18 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Exact-head GitHub Actions run [42136073636](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42136073636) passed repository hygiene and the Windows/Ubuntu Release build/test matrix on `ae15a9072cde61a6bef4d5e5a7b4de3582cf8230`. Each .NET matrix passed **510 tests** and skipped **5** Arelle-gated subprocess cases. The pinned worker job passed **23 Python tests** and all **5 gated .NET Arelle integration tests**. The table shows the exact-head suite totals:
+GitHub Actions run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. The archived TRX artifacts and per-suite totals are recorded in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md):
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 34 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation |
-| XBRL.Tests | 59 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
+| Engine.Tests | 65 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps |
+| XBRL.Tests | 77 | Taxonomy index, dimensions/compound units, xBRL-JSON↔XML equivalence, report re-import, filing rules, conversion resilience, XBR07 required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 89 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
-| Ops.Tests | 68 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 123 | 118 passed; 5 Arelle-gated subprocess cases skipped locally. Covers CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 62 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
-| Project.Tests | 8 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
+| Ops.Tests | 72 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 158 passed; 5 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 64 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
+| Project.Tests | 15 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash
 dotnet test XBRLMappingStudio.slnx -c Release

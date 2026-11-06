@@ -66,3 +66,64 @@ read. Local Windows Release verification on the checkout based on `e5e303c` pass
 passed on `ae15a9072cde61a6bef4d5e5a7b4de3582cf8230`: Windows and Ubuntu each passed
 510 tests and skipped the same five gated cases; the pinned worker passed 23 Python
 tests and all five gated .NET Arelle integration cases.
+
+## Current main verification snapshot — source commit `563f74d`
+
+This snapshot records the pushed source head before the evidence-only README and status
+updates in the following commit. At capture time, local `main` and `origin/main` both
+resolved to `563f74d260af0a0f5e5066db11f135814d1ddbec`, and `git status --short --branch`
+reported a clean worktree. No existing changes were discarded. The active architecture
+guide is `XBRL_Mapping_Studio.md`; the pending-features specification remains the
+user-provided `XBRLMappingStudio_Pending_Features_Atomic_Implementation_Spec_2026-11-04.md`.
+
+### Local Release build and test matrix
+
+The verification command was:
+
+```powershell
+dotnet test XBRLMappingStudio.slnx --configuration Release -p:UseArtifactsOutput=true "-p:ArtifactsPath=$env:TEMP\XBRLMappingStudio-verification"
+```
+
+The .NET SDK was `10.0.401`; all projects targeted `net10.0`. `UseArtifactsOutput`
+isolated output under the Windows temp directory because an already-running Desktop
+process held the normal build outputs. The process was left untouched. The command built
+the full solution and produced these eight suite results:
+
+| Test project | Passed | Skipped | Failed |
+|---|---:|---:|---:|
+| `XBRLMappingStudio.Adapters.Tests` | 89 | 0 | 0 |
+| `XBRLMappingStudio.AI.Tests` | 72 | 0 | 0 |
+| `XBRLMappingStudio.Desktop.Tests` | 64 | 0 | 0 |
+| `XBRLMappingStudio.Engine.Tests` | 65 | 0 | 0 |
+| `XBRLMappingStudio.Integration.Tests` | 158 | 5 | 0 |
+| `XBRLMappingStudio.Ops.Tests` | 72 | 0 | 0 |
+| `XBRLMappingStudio.Project.Tests` | 15 | 0 | 0 |
+| `XBRLMappingStudio.XBRL.Tests` | 77 | 0 | 0 |
+| **Total per platform** | **612** | **5** | **0** |
+
+These Windows local totals matched the separate Ubuntu and Windows CI artifacts.
+
+The five default-matrix skips are `AuthorizedPublicationRevalidatesExactStagedArtifactWithOfflineArelle`,
+`CliPreviewUsesArelleToValidateExcelMappingOutput`,
+`CliValidateArtifactUsesLocalSyntheticRuleCompletionWithArelle`,
+`ExcelToXbrlMappingIsAdjudicatedByOfflineArelleWorker`, and
+`ReviewedDigitalPdf_MapsOnlyTargetYearAndBlocksWrongYearOnlySource`. Their
+`RequiresArelleRuntimeFact` gate requires `XMS_ARELLE_E2E=1` and the pinned Python
+runtime; a skip in the standard suite is not counted as execution evidence.
+
+### Exact-head CI and archived artifacts
+
+GitHub Actions run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514)
+ran on the exact source SHA above. Repository hygiene, Ubuntu Release build/tests,
+Windows Release build/tests, and the pinned Arelle worker integration job all succeeded.
+Both OS matrices matched the local eight-suite totals: 612 passed, 5 explicitly gated
+skips, 0 failures. The workflow uploaded eight TRX result files per OS; those archived
+files were downloaded and their per-suite counters checked.
+
+The separate worker job installed Python 3.12 using
+`python -m pip install --require-hashes -r tools/worker/requirements.lock`, ran
+`python -m unittest discover -s tools/worker/tests -v` (46 passed), then set
+`XMS_ARELLE_E2E=1` and `XMS_ARELLE_PYTHON=python` for the filtered Arelle integration
+suite (11 passed, including all five cases gated in the regular matrix). This evidence
+does not qualify a customer filing profile, customer data rights, native Windows GUI
+accessibility, or production hardware performance.
