@@ -419,3 +419,19 @@ Windows and Ubuntu Release build/tests, and the pinned Arelle worker integration
 Follow-up exact-head run [42287847754](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42287847754)
 for source SHA `0466ade29943a9452a92c13f6a102126f0eaa61e` passed the same four jobs
 after stabilizing the process-tree timeout test's child startup window.
+
+## UX-06 fact-input source rebinding
+
+The selected-fact inspector lists compatible graph outputs for each input. A
+rebind candidate is checked against the resolved profile and compiled graph before
+the connection is changed. Port mismatches and instant/duration period mismatches
+leave the old edge in place and show an inline reason; accepted rebinds are one
+undoable graph edit.
+
+Verification: the Release Desktop suite passed 78/78 in an isolated output
+directory because the open desktop process held the checkout's shared Release
+DLLs. The tests cover a valid source rebind and undo, an incompatible String to
+Decimal connection, and an instant source rejected for a duration concept with
+XBR004 while preserving the old edge and semantic digest. This is headless
+view-model/session verification; native Windows inspector navigation and visual
+acceptance remain open.

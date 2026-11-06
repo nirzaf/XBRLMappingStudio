@@ -489,6 +489,36 @@
                          AutomationProperties.Name="Source schema inspection status" />
               <TextBlock Text="{Binding SelectedFactPeriodSummary}" TextWrapping="Wrap"
                          AutomationProperties.Name="Fact reporting period sources" />
+              <Expander Header="Rebind connected fact inputs" IsExpanded="False" Margin="0,4,0,0"
+                        AutomationProperties.Name="Rebind selected fact input sources">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="Each selector lists outputs compatible with its input. Failed validation keeps the current connection."
+                             TextWrapping="Wrap" />
+                  <ItemsControl ItemsSource="{Binding SelectedFactInputBindings}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:FactInputBindingRow">
+                        <StackPanel Spacing="2" Margin="0,2,0,4">
+                          <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                          <ComboBox ItemsSource="{Binding Options}"
+                                    SelectedItem="{Binding SelectedOption, Mode=TwoWay}"
+                                    IsEnabled="{Binding IsEnabled}"
+                                    AutomationProperties.Name="{Binding AutomationName}">
+                            <ComboBox.ItemTemplate>
+                              <DataTemplate x:DataType="vm:FactInputOption">
+                                <TextBlock Text="{Binding Display}"
+                                           AutomationProperties.Name="{Binding AutomationName}" />
+                              </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                          </ComboBox>
+                          <TextBlock Text="{Binding ValidationMessage}" TextWrapping="Wrap"
+                                     Foreground="#B42318" IsVisible="{Binding HasValidationMessage}"
+                                     AutomationProperties.Name="{Binding ValidationAutomationName}" />
+                        </StackPanel>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </Expander>
               <TextBlock Text="Entity source" FontWeight="SemiBold" />
               <TextBlock Text="{Binding SelectedFactEntitySourceSummary}" TextWrapping="Wrap"
                          AutomationProperties.Name="Fact entity source and editability" />

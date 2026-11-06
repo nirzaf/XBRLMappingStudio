@@ -1652,11 +1652,122 @@ public sealed class DesignerSessionTests
         Assert.Contains("2025-01-01", viewModel.SelectedFactPeriodSummary, StringComparison.Ordinal);
         Assert.True(viewModel.CanEditSelectedFactEntity);
         Assert.Equal("ABC-Corp", viewModel.SelectedFactEntityIdentifier);
+        Assert.Contains(viewModel.SelectedFactInputBindings, row => row.TargetPortName == "value");
 
         viewModel.Session.ClearSelection();
 
         Assert.Null(viewModel.SelectedNode);
         Assert.False(viewModel.CanEditSelectedFact);
+    }
+
+    [Fact]
+    public void FactInspectorRebindsCompatibleInputAsOneUndoableValidatedEdit()
+    {
+        var seed = new MainWindowViewModel();
+        var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+        project.Nodes.Add(new MappingNode
+        {
+            NodeId = "sample-prior",
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Prior revenue",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["bindingId"] = "sample-source",
+                ["column"] = "Prior"
+            },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        });
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.AllowSyntheticProfile = true;
+        var fact = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedNode = fact;
+
+        var input = Assert.Single(viewModel.SelectedFactInputBindings, row => row.TargetPortName == "value");
+        var originalDigest = viewModel.Session.Project.ComputeSemanticDigest();
+        var priorOption = Assert.Single(input.Options, option => option.NodeId == "sample-prior");
+        input.SelectedOption = priorOption;
+
+        var rebound = Assert.Single(viewModel.Session.Project.Edges, edge =>
+            edge.TargetNodeId == "sample-fact" && edge.TargetPortName == "value");
+        Assert.Equal("sample-prior", rebound.SourceNodeId);
+        Assert.NotEqual(originalDigest, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.True(viewModel.StatusText.Contains("validation", StringComparison.OrdinalIgnoreCase),
+            $"Unexpected rebind feedback: {viewModel.StatusText}");
+
+        viewModel.Session.Undo();
+
+        var restored = Assert.Single(viewModel.Session.Project.Edges, edge =>
+            edge.TargetNodeId == "sample-fact" && edge.TargetPortName == "value");
+        Assert.Equal("sample-scale", restored.SourceNodeId);
+        Assert.Equal(originalDigest, viewModel.Session.Project.ComputeSemanticDigest());
+    }
+
+    [Fact]
+    public void DesignerSessionRejectsIncompatibleInputRebindWithoutChangingProject()
+    {
+        var viewModel = new MainWindowViewModel();
+        var digest = viewModel.Session.Project.ComputeSemanticDigest();
+
+        var rebound = viewModel.Session.TryRebindInput(
+            "sample-fact", "value", "sample-entity", "value", out var reason);
+
+        Assert.False(rebound);
+        Assert.Contains("Cannot connect String output", reason, StringComparison.Ordinal);
+        Assert.Equal(digest, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal("sample-scale", Assert.Single(viewModel.Session.Project.Edges,
+            edge => edge.TargetNodeId == "sample-fact" && edge.TargetPortName == "value").SourceNodeId);
+    }
+
+    [Fact]
+    public void FactInspectorKeepsPeriodBindingWhenProfileValidationRejectsTheCandidate()
+    {
+        var seed = new MainWindowViewModel();
+        var project = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(seed.Session.Project));
+        project.Nodes.AddRange(new[]
+        {
+            new MappingNode
+            {
+                NodeId = "instant-start",
+                NodeType = NodeTypeConstants.Constant,
+                DisplayName = "Instant start",
+                Parameters = new Dictionary<string, object?> { ["literal"] = "2026-01-01", ["shape"] = "String" },
+                OutputPorts = new() { new PortDefinition("value", PortShape.String, PortCardinality.Single) }
+            },
+            new MappingNode
+            {
+                NodeId = "instant-period",
+                NodeType = NodeTypeConstants.BuildInstantDate,
+                DisplayName = "Instant period",
+                InputPorts = new()
+                {
+                    new PortDefinition("dateText", PortShape.String, PortCardinality.Single)
+                },
+                OutputPorts = new() { new PortDefinition("value", PortShape.Instant, PortCardinality.Single) }
+            }
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "instant-start-edge",
+            SourceNodeId = "instant-start",
+            SourcePortName = "value",
+            TargetNodeId = "instant-period",
+            TargetPortName = "dateText"
+        });
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.AllowSyntheticProfile = true;
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        var periodInput = Assert.Single(viewModel.SelectedFactInputBindings, row => row.TargetPortName == "period");
+        var oldSource = Assert.IsType<FactInputOption>(periodInput.SelectedOption);
+        var instantSource = Assert.Single(periodInput.Options, option => option.NodeId == "instant-period");
+        var originalDigest = viewModel.Session.Project.ComputeSemanticDigest();
+
+        periodInput.SelectedOption = instantSource;
+
+        Assert.Equal(oldSource, periodInput.SelectedOption);
+        Assert.Contains("XBR004", periodInput.ValidationMessage, StringComparison.Ordinal);
+        Assert.Equal(originalDigest, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal("sample-period", Assert.Single(viewModel.Session.Project.Edges,
+            edge => edge.TargetNodeId == "sample-fact" && edge.TargetPortName == "period").SourceNodeId);
     }
 
     [Fact]

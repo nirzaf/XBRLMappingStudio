@@ -213,6 +213,52 @@ public sealed class DesignerSession
         return true;
     }
 
+    /// <summary>Rebinds one input to a different compatible output as a single undoable edit.</summary>
+    public bool TryRebindInput(
+        string targetNodeId,
+        string targetPortName,
+        string sourceNodeId,
+        string sourcePortName,
+        out string? refusalReason)
+    {
+        refusalReason = null;
+        var existingIndex = _project.Edges.FindIndex(edge =>
+            StringComparer.Ordinal.Equals(edge.TargetNodeId, targetNodeId)
+            && StringComparer.Ordinal.Equals(edge.TargetPortName, targetPortName));
+        var existing = existingIndex >= 0 ? _project.Edges[existingIndex] : null;
+        if (existing is not null
+            && StringComparer.Ordinal.Equals(existing.SourceNodeId, sourceNodeId)
+            && StringComparer.Ordinal.Equals(existing.SourcePortName, sourcePortName))
+            return false;
+
+        if (!TryValidateConnection(sourceNodeId, targetNodeId, sourcePortName, targetPortName,
+                existing?.EdgeId, out refusalReason))
+            return false;
+
+        PushUndo();
+        if (existing is not null)
+        {
+            _project.Edges[existingIndex] = existing with
+            {
+                SourceNodeId = sourceNodeId,
+                SourcePortName = sourcePortName
+            };
+        }
+        else
+        {
+            _project.Edges.Add(new MappingEdge
+            {
+                EdgeId = "e" + Id.New(),
+                SourceNodeId = sourceNodeId,
+                SourcePortName = sourcePortName,
+                TargetNodeId = targetNodeId,
+                TargetPortName = targetPortName
+            });
+        }
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
     private bool TryValidateConnection(string sourceNodeId, string targetNodeId,
         string sourcePortName, string targetPortName, string? ignoredEdgeId, out string? refusalReason)
     {

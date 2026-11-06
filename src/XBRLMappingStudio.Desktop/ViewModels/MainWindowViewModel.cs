@@ -313,6 +313,78 @@ public sealed record DestinationKeyOption(IReadOnlyList<string> Columns)
 
 public sealed record DestinationKindOption(string Kind, string Display);
 
+public sealed record FactInputOption(string NodeId, string PortName, string Display)
+{
+    public string AutomationName => $"{Display}, node ID {NodeId}";
+}
+
+/// <summary>A selected fact input and the compatible graph outputs it can be rebound to.</summary>
+public sealed class FactInputBindingRow : ViewModelBase
+{
+    private readonly Func<FactInputBindingRow, FactInputOption, string?> _applySelection;
+    private FactInputOption? _selectedOption;
+    private string _validationMessage = "";
+    private bool _isEnabled;
+
+    public FactInputBindingRow(
+        string targetNodeId,
+        string targetPortName,
+        string label,
+        IReadOnlyList<FactInputOption> options,
+        FactInputOption? selectedOption,
+        bool isEnabled,
+        Func<FactInputBindingRow, FactInputOption, string?> applySelection)
+    {
+        TargetNodeId = targetNodeId;
+        TargetPortName = targetPortName;
+        Label = label;
+        Options = options;
+        _selectedOption = selectedOption;
+        _isEnabled = isEnabled;
+        _applySelection = applySelection;
+    }
+
+    public string TargetNodeId { get; }
+    public string TargetPortName { get; }
+    public string Label { get; }
+    public string AutomationName => $"Fact {Label} source binding";
+    public string ValidationAutomationName => $"{AutomationName} validation";
+    public IReadOnlyList<FactInputOption> Options { get; }
+    public FactInputOption? SelectedOption
+    {
+        get => _selectedOption;
+        set
+        {
+            if (Equals(_selectedOption, value) || value is null) return;
+            var error = _applySelection(this, value);
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                ValidationMessage = error;
+                Raise(nameof(SelectedOption));
+                return;
+            }
+
+            _selectedOption = value;
+            ValidationMessage = "";
+            Raise(nameof(SelectedOption));
+        }
+    }
+    public bool IsEnabled
+    {
+        get => _isEnabled;
+        set => Set(ref _isEnabled, value);
+    }
+    public string ValidationMessage
+    {
+        get => _validationMessage;
+        private set
+        {
+            if (Set(ref _validationMessage, value)) Raise(nameof(HasValidationMessage));
+        }
+    }
+    public bool HasValidationMessage => !string.IsNullOrWhiteSpace(ValidationMessage);
+}
+
 public sealed record PdfRowDirectionOption(bool RowsAtLowLineCoordinate, string Display);
 
 public sealed record PresentationOccurrenceRow(string RoleUri, string Path)
@@ -437,6 +509,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactDimensions = "";
     private string _selectedFactEntityIdentifier = "";
     private bool _canEditSelectedFactEntity;
+    private bool _factInputRebindingProfileAllowed;
     private string _selectedStringConstantValue = "";
     private string _selectedScaleFactor = "1";
     private string _selectedRoundDigits = "0";
@@ -527,6 +600,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                RefreshFactInputRebindingAvailability();
                 SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
                 AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
@@ -551,6 +625,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             {
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                RefreshFactInputRebindingAvailability();
                 SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
                 AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
@@ -583,6 +658,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Diagnostics.Clear();
                 Raise(nameof(Diagnostics));
             }
+            RefreshFactInputRebindingAvailability(resolveProfile: true);
             RunSearch();
         }
     }
@@ -1153,6 +1229,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public ObservableCollection<ConceptRow> ConceptResults { get; } = new();
     public ObservableCollection<PresentationOccurrenceRow> SelectedConceptOccurrences { get; } = new();
+    public ObservableCollection<FactInputBindingRow> SelectedFactInputBindings { get; } = new();
     public ObservableCollection<string> SourceColumns { get; } = new();
     public ObservableCollection<string> SourceTables { get; } = new();
     public bool HasSourceTables => SourceTables.Count > 0;
@@ -1496,6 +1573,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var node = _selectedNode is null ? null : Session.Project.Nodes.FirstOrDefault(n => n.NodeId == _selectedNode.NodeId);
         LoadSelectedNodeParameters(node);
+        SelectedFactInputBindings.Clear();
         if (node?.NodeType != NodeTypeConstants.FactConstruct)
         {
             CanEditSelectedFactEntity = false;
@@ -1503,6 +1581,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             SelectedFactSourceSummary = "Select a fact to inspect its source mapping.";
             SelectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
             SelectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
+            RefreshFactInputRebindingAvailability();
             return;
         }
         SelectedFactUnit = node.Parameters.GetValueOrDefault("unit")?.ToString() ?? "";
@@ -1519,6 +1598,131 @@ public sealed class MainWindowViewModel : ViewModelBase
         RefreshSelectedFactSourceSummary();
         SelectedFactPeriodSummary = DescribeFactInputSources(node, "period", "instantDate");
         LoadSelectedFactEntity(node);
+        LoadSelectedFactInputBindings(node);
+    }
+
+    private void LoadSelectedFactInputBindings(MappingNode factNode)
+    {
+        foreach (var input in factNode.InputPorts)
+        {
+            var options = Session.Project.Nodes
+                .Where(node => !StringComparer.Ordinal.Equals(node.NodeId, factNode.NodeId))
+                .SelectMany(node => node.OutputPorts
+                    .Where(output => ShapeChecker.AreCompatible(output, input)
+                        && !(output.Cardinality == PortCardinality.Collection
+                            && input.Cardinality == PortCardinality.Single))
+                    .Select(output => new FactInputOption(
+                        node.NodeId,
+                        output.Name,
+                        $"{node.DisplayName} · {node.NodeType} · {output.Name} ({output.Shape}) · {ShortNodeId(node.NodeId)}")))
+                .OrderBy(option => option.Display, StringComparer.Ordinal)
+                .ToArray();
+            if (options.Length == 0) continue;
+
+            var currentEdge = Session.Project.Edges.FirstOrDefault(edge =>
+                StringComparer.Ordinal.Equals(edge.TargetNodeId, factNode.NodeId)
+                && StringComparer.Ordinal.Equals(edge.TargetPortName, input.Name));
+            var selected = currentEdge is null
+                ? null
+                : options.FirstOrDefault(option =>
+                    StringComparer.Ordinal.Equals(option.NodeId, currentEdge.SourceNodeId)
+                    && StringComparer.Ordinal.Equals(option.PortName, currentEdge.SourcePortName));
+            SelectedFactInputBindings.Add(new FactInputBindingRow(
+                factNode.NodeId,
+                input.Name,
+                input.Name,
+                Array.AsReadOnly(options),
+                selected,
+                isEnabled: false,
+                TryApplyFactInputRebinding));
+        }
+        RefreshFactInputRebindingAvailability(resolveProfile: true);
+    }
+
+    private static string ShortNodeId(string nodeId)
+        => nodeId.Length <= 8 ? nodeId : nodeId[^8..];
+
+    private void RefreshFactInputRebindingAvailability(bool resolveProfile = false)
+    {
+        if (resolveProfile)
+            _factInputRebindingProfileAllowed = _profileResolver.Resolve(
+                Session.Project, AllowSyntheticProfile).Success;
+        var canEdit = _factInputRebindingProfileAllowed && !IsBusy && !IsSourceLoading;
+        foreach (var row in SelectedFactInputBindings)
+            row.IsEnabled = canEdit && row.Options.Count > 0;
+    }
+
+    private string? TryApplyFactInputRebinding(FactInputBindingRow row, FactInputOption option)
+    {
+        if (IsBusy || IsSourceLoading)
+            return "Wait for the active operation to finish. No mapping was changed.";
+        if (SelectedNode is null
+            || !StringComparer.Ordinal.Equals(SelectedNode.NodeId, row.TargetNodeId)
+            || !Session.Project.Nodes.Any(node => StringComparer.Ordinal.Equals(node.NodeId, row.TargetNodeId)
+                && node.NodeType == NodeTypeConstants.FactConstruct))
+            return "The selected fact changed. Select it again before rebinding an input.";
+
+        var resolution = _profileResolver.Resolve(Session.Project, AllowSyntheticProfile);
+        if (!resolution.Success || resolution.Profile is null)
+            return "The selected filing profile is unavailable or not authorized. No mapping was changed.";
+        if (!row.Options.Contains(option))
+            return "The selected source is no longer available for this input. Refresh the inspector and try again.";
+
+        var candidate = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(Session.Project));
+        var edgeIndex = candidate.Edges.FindIndex(edge =>
+            StringComparer.Ordinal.Equals(edge.TargetNodeId, row.TargetNodeId)
+            && StringComparer.Ordinal.Equals(edge.TargetPortName, row.TargetPortName));
+        if (edgeIndex >= 0)
+        {
+            candidate.Edges[edgeIndex] = candidate.Edges[edgeIndex] with
+            {
+                SourceNodeId = option.NodeId,
+                SourcePortName = option.PortName
+            };
+        }
+        else
+        {
+            candidate.Edges.Add(new MappingEdge
+            {
+                EdgeId = "e" + Id.New(),
+                SourceNodeId = option.NodeId,
+                SourcePortName = option.PortName,
+                TargetNodeId = row.TargetNodeId,
+                TargetPortName = row.TargetPortName
+            });
+        }
+
+        if (row.TargetPortName is "period" or "instantDate")
+        {
+            var factNode = candidate.Nodes.FirstOrDefault(node =>
+                StringComparer.Ordinal.Equals(node.NodeId, row.TargetNodeId));
+            var conceptName = factNode?.Parameters.GetValueOrDefault("concept")?.ToString();
+            var concept = conceptName is null ? null : resolution.Profile.FindConcept(conceptName);
+            var graphPeriodType = factNode is null ? null : GetFactGraphPeriodType(candidate, factNode);
+            if (concept is not null && graphPeriodType is not null
+                && !StringComparer.Ordinal.Equals(concept.PeriodType, graphPeriodType))
+                return $"XBR004: concept '{concept.QualifiedName}' requires a {concept.PeriodType} period, "
+                    + $"but this source produces {graphPeriodType}. No mapping was changed.";
+        }
+
+        var validation = MappingJobService.ValidateProject(candidate, resolution.Profile);
+        if (!validation.Success)
+        {
+            var reason = validation.Diagnostics.Items.FirstOrDefault(diagnostic => diagnostic.IsBlocking)?.Message
+                ?? "The proposed connection failed mapping validation.";
+            return $"{reason} No mapping was changed.";
+        }
+
+        if (!Session.TryRebindInput(row.TargetNodeId, row.TargetPortName,
+                option.NodeId, option.PortName, out var refusalReason))
+        {
+            if (!string.IsNullOrWhiteSpace(refusalReason))
+                return $"{refusalReason} No mapping was changed.";
+            return null;
+        }
+
+        StatusText = $"Rebound the {row.Label} input to {option.Display} after mapping validation. The change is undoable.";
+        return null;
     }
 
     private void RefreshSelectedFactSourceSummary()
@@ -3708,13 +3912,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
 
     private string? GetFactGraphPeriodType(MappingNode factNode)
+        => GetFactGraphPeriodType(Session.Project, factNode);
+
+    private static string? GetFactGraphPeriodType(MappingProject project, MappingNode factNode)
     {
-        var edge = Session.Project.Edges.FirstOrDefault(candidate =>
+        var edge = project.Edges.FirstOrDefault(candidate =>
             candidate.TargetNodeId == factNode.NodeId
             && candidate.TargetPortName is "period" or "instantDate");
         var source = edge is null
             ? null
-            : Session.Project.Nodes.FirstOrDefault(node => node.NodeId == edge.SourceNodeId);
+            : project.Nodes.FirstOrDefault(node => node.NodeId == edge.SourceNodeId);
         return source?.NodeType switch
         {
             NodeTypeConstants.BuildDurationDate => "duration",
