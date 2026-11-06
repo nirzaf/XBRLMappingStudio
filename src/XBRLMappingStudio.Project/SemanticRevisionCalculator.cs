@@ -75,13 +75,24 @@ public static class SemanticRevisionCalculator
         sb.Append("|functions=[");
         var functions = project.Functions.OrderBy(f => f.FunctionId, StringComparer.Ordinal)
             .ThenBy(f => f.Revision).ToList();
+        if (functions.Count > 0)
+            sb.Append("catalog=").Append(project.FunctionCatalogVersion).Append(';');
         foreach (var f in functions)
         {
-            sb.Append(f.FunctionId).Append('@').Append(f.Revision).Append(':').Append(f.Name).Append(":{");
+            sb.Append(f.FunctionId).Append('@').Append(f.Revision).Append(':').Append(f.Name)
+                .Append(":catalog=").Append(f.CatalogVersion).Append(":inputs=");
+            AppendPorts(sb, f.Inputs);
+            sb.Append(":outputs=");
+            AppendPorts(sb, f.Outputs);
+            sb.Append(":{");
             foreach (var n in f.Nodes.OrderBy(n => n.NodeId, StringComparer.Ordinal))
             {
                 sb.Append(n.NodeId).Append('/').Append(n.NodeType).Append('/');
                 AppendSortedDict(sb, n.Parameters);
+                sb.Append(":in=");
+                AppendPorts(sb, n.InputPorts);
+                sb.Append(":out=");
+                AppendPorts(sb, n.OutputPorts);
                 sb.Append(',');
             }
             sb.Append("}:edges={");
@@ -137,6 +148,15 @@ public static class SemanticRevisionCalculator
             sb.Append(',');
         }
         sb.Append('}');
+    }
+
+    private static void AppendPorts(StringBuilder sb, IEnumerable<PortDefinition> ports)
+    {
+        foreach (var port in ports.OrderBy(port => port.Name, StringComparer.Ordinal))
+        {
+            sb.Append(port.Name).Append('/').Append(port.Shape).Append('/').Append(port.Cardinality)
+                .Append('/').Append(port.IsRequired ? "R" : "O").Append(',');
+        }
     }
 
     private static void AppendPart(StringBuilder sb, string value)

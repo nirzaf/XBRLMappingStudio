@@ -29,6 +29,10 @@ public static class DiagnosticCodes
     public const string MapInvalidComparisonOp = "MAP019";
     public const string MapFunctionRevisionMissing = "MAP020";
     public const string MapDiagnosticsTruncated = "MAP021";
+    public const string MapFunctionDefinitionInvalid = "MAP022";
+    public const string MapFunctionCycleDetected = "MAP023";
+    public const string MapFunctionCatalogMismatch = "MAP024";
+    public const string MapFunctionExpansionLimitExceeded = "MAP025";
 
     // PRJ - Project schema and lifecycle
     public const string PrjSchemaVersionUnsupported = "PRJ001";

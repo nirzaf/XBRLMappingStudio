@@ -410,6 +410,87 @@ public class FunctionTests
         };
     }
 
+    private static FunctionDefinition CallFunction(string fnId, int revision, string targetId, int targetRevision)
+    {
+        var input = GraphHarness.Node("functionInput", "in",
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var call = GraphHarness.Node(NodeTypeConstants.FunctionCall, "Nested call",
+            new() { ["functionId"] = targetId, ["revision"] = targetRevision.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal, required: false) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var output = GraphHarness.Node("functionOutput", "out",
+            inputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+
+        return new FunctionDefinition
+        {
+            FunctionId = fnId,
+            Name = fnId,
+            Revision = revision,
+            CatalogVersion = FunctionCatalog.Default.Version,
+            Inputs = new() { GraphHarness.P("input", PortShape.Decimal) },
+            Outputs = new() { GraphHarness.P("value", PortShape.Decimal) },
+            Nodes = new() { input, call, output },
+            Edges = new()
+            {
+                GraphHarness.Link(input, "value", call, "input"),
+                GraphHarness.Link(call, "value", output, "value")
+            }
+        };
+    }
+
+    private static FunctionDefinition PassThroughFunction(string fnId, int revision = 1)
+    {
+        var input = GraphHarness.Node("functionInput", "in",
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        var output = GraphHarness.Node("functionOutput", "out",
+            inputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        return new FunctionDefinition
+        {
+            FunctionId = fnId,
+            Name = fnId,
+            Revision = revision,
+            CatalogVersion = FunctionCatalog.Default.Version,
+            Inputs = new() { GraphHarness.P("input", PortShape.Decimal) },
+            Outputs = new() { GraphHarness.P("value", PortShape.Decimal) },
+            Nodes = new() { input, output },
+            Edges = new() { GraphHarness.Link(input, "value", output, "value") }
+        };
+    }
+
+    private static MappingProject CallingProject(
+        string functionId,
+        int revision,
+        IEnumerable<FunctionDefinition> functions,
+        string? catalogVersion = null)
+    {
+        var excel = Driver(out var edges, 5m);
+        var call = GraphHarness.Node(NodeTypeConstants.FunctionCall, "Call",
+            new() { ["functionId"] = functionId,
+                ["revision"] = revision.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            inputs: new[] { GraphHarness.P("input", PortShape.Decimal, required: false) },
+            outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+        edges.Add(GraphHarness.Link(excel, "value", call, "input"));
+        var sink = GraphHarness.FactSink(out var factEdges, call, "value", PortCardinality.Single);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(new[] { excel, call }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) },
+            functions: functions);
+        if (catalogVersion is null) return project;
+        return new MappingProject
+        {
+            SchemaVersion = project.SchemaVersion,
+            ProjectId = project.ProjectId,
+            Name = project.Name,
+            ProfileId = project.ProfileId,
+            ProfileDigest = project.ProfileDigest,
+            FunctionCatalogVersion = catalogVersion,
+            Nodes = project.Nodes,
+            Edges = project.Edges,
+            Bindings = project.Bindings,
+            Functions = project.Functions
+        };
+    }
+
     [Fact]
     public void FunctionCall_InlinesSubgraph_AtPinnedRevision()
     {
@@ -492,6 +573,107 @@ public class FunctionTests
     }
 
     [Fact]
+    public void FunctionCall_NestedRevisionIsPinnedAndReplayable()
+    {
+        var oldRevision = ScaleFunction("multiply", 1, "3");
+        var newerRevision = ScaleFunction("multiply", 2, "9");
+        var wrapper = CallFunction("wrapper", 1, "multiply", 1);
+        var project = CallingProject("wrapper", 1, new[] { oldRevision, newerRevision, wrapper });
+        var sourceRows = OneRow(5m);
+
+        var first = GraphHarness.Run(project, sourceRows, out var firstCompile);
+        var second = GraphHarness.Run(project, sourceRows, out var secondCompile);
+
+        Assert.True(firstCompile.Success, string.Join(" | ", firstCompile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.True(secondCompile.Success, string.Join(" | ", secondCompile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Equal(new[] { 15m }, first!.Facts.Select(fact => fact.Value!.Value));
+        Assert.Equal(
+            first.Facts.Select(fact => (fact.ConceptName, fact.Value, fact.TextValue, fact.IsNil)),
+            second!.Facts.Select(fact => (fact.ConceptName, fact.Value, fact.TextValue, fact.IsNil)));
+        Assert.Equal(
+            first.Facts.Select(fact => string.Join(",", fact.TransformationIds)),
+            second.Facts.Select(fact => string.Join(",", fact.TransformationIds)));
+    }
+
+    [Fact]
+    public void FunctionCall_RecursiveReferenceBlocksCompilation()
+    {
+        var project = CallingProject("first", 1, new[]
+        {
+            CallFunction("first", 1, "second", 1),
+            CallFunction("second", 1, "first", 1)
+        });
+
+        GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.False(compile.Success);
+        Assert.Contains(compile.Diagnostics.Items, diagnostic => diagnostic.Code == "MAP023");
+    }
+
+    [Fact]
+    public void FunctionCall_IncompatibleCatalogRevisionBlocksCompilation()
+    {
+        var incompatible = ScaleFunction("scale", 1, "10") with { CatalogVersion = "0.9" };
+        var project = CallingProject("scale", 1, new[] { incompatible });
+
+        GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.False(compile.Success);
+        Assert.Contains(compile.Diagnostics.Items, diagnostic => diagnostic.Code == "MAP024");
+    }
+
+    [Fact]
+    public void FunctionCall_IncompatibleProjectCatalogBlocksCompilation()
+    {
+        var project = CallingProject("scale", 1, new[] { ScaleFunction("scale", 1, "10") }, catalogVersion: "0.9");
+
+        GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.False(compile.Success);
+        Assert.Contains(compile.Diagnostics.Items, diagnostic => diagnostic.Code == "MAP024");
+    }
+
+    [Fact]
+    public void FunctionCall_DuplicatePinnedRevisionBlocksCompilation()
+    {
+        var first = ScaleFunction("scale", 1, "10");
+        var duplicate = ScaleFunction("scale", 1, "100");
+        var project = CallingProject("scale", 1, new[] { first, duplicate });
+
+        GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.False(compile.Success);
+        Assert.Contains(compile.Diagnostics.Items, diagnostic => diagnostic.Code == "MAP022");
+    }
+
+    [Fact]
+    public void FunctionCall_InvalidBodyBlocksCompilation()
+    {
+        var valid = ScaleFunction("scale", 1, "10");
+        var invalid = valid with
+        {
+            Nodes = valid.Nodes.Where(node => node.NodeType != "functionOutput").ToList()
+        };
+        var project = CallingProject("scale", 1, new[] { invalid });
+
+        GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.False(compile.Success);
+        Assert.Contains(compile.Diagnostics.Items, diagnostic => diagnostic.Code == "MAP022");
+    }
+
+    [Fact]
+    public void FunctionCall_PassThroughBodyPreservesExternalInput()
+    {
+        var project = CallingProject("pass", 1, new[] { PassThroughFunction("pass") });
+
+        var result = GraphHarness.Run(project, OneRow(5m), out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
+        Assert.Equal(new[] { 5m }, result!.Facts.Select(fact => fact.Value!.Value));
+    }
+
+    [Fact]
     public void EditingFunction_AltersSemanticDigest()
     {
         var fnA = ScaleFunction("scale10", 1, "10");
@@ -500,6 +682,44 @@ public class FunctionTests
         var p1 = GraphHarness.Project(new[] { excel }, e1, new[] { GraphHarness.Binding(Binding) }, new[] { fnA });
         var p2 = GraphHarness.Project(new[] { excel }, e1, new[] { GraphHarness.Binding(Binding) }, new[] { fnB });
         Assert.NotEqual(p1.ComputeSemanticDigest(), p2.ComputeSemanticDigest());
+    }
+
+    [Fact]
+    public void FunctionCatalogAndPortContracts_AffectSemanticDigest()
+    {
+        var function = ScaleFunction("scale", 1, "10");
+        var baseline = CallingProject("scale", 1, new[] { function });
+
+        MappingProject CopyProject(string catalogVersion, FunctionDefinition definition)
+            => new()
+            {
+                SchemaVersion = baseline.SchemaVersion,
+                ProjectId = baseline.ProjectId,
+                Name = baseline.Name,
+                ProfileId = baseline.ProfileId,
+                ProfileDigest = baseline.ProfileDigest,
+                FunctionCatalogVersion = catalogVersion,
+                Nodes = baseline.Nodes,
+                Edges = baseline.Edges,
+                Bindings = baseline.Bindings,
+                Functions = new() { definition }
+            };
+
+        var changedProjectCatalog = CopyProject("0.9", function);
+        var changedFunctionCatalog = CopyProject(FunctionCatalog.Default.Version,
+            function with { CatalogVersion = "0.9" });
+        var transform = function.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+        var changedPorts = function with
+        {
+            Nodes = function.Nodes.Select(node => node.NodeId == transform.NodeId
+                ? node with { OutputPorts = new() { GraphHarness.P("value", PortShape.String) } }
+                : node).ToList()
+        };
+
+        Assert.NotEqual(baseline.ComputeSemanticDigest(), changedProjectCatalog.ComputeSemanticDigest());
+        Assert.NotEqual(baseline.ComputeSemanticDigest(), changedFunctionCatalog.ComputeSemanticDigest());
+        Assert.NotEqual(baseline.ComputeSemanticDigest(), CopyProject(FunctionCatalog.Default.Version, changedPorts)
+            .ComputeSemanticDigest());
     }
 
     [Fact]
