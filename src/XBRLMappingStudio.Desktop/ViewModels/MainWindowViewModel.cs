@@ -5040,7 +5040,11 @@ public sealed class MainWindowViewModel : ViewModelBase
                     NodeId = "sample-value", NodeType = NodeTypeConstants.ExcelField,
                     DisplayName = "Revenue source field",
                     Parameters = new() { ["bindingId"] = source, ["column"] = "Revenue" },
-                    OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) },
+                    OutputPorts = new()
+                    {
+                        new PortDefinition("value", PortShape.Decimal, PortCardinality.Single),
+                        new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false)
+                    },
                     Layout = new LayoutPosition(40, 80)
                 },
                 new()
@@ -5097,6 +5101,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                     InputPorts = new()
                     {
                         new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, IsRequired: false),
+                        new PortDefinition("textValue", PortShape.String, PortCardinality.Single, IsRequired: false),
                         new PortDefinition("entity", PortShape.String, PortCardinality.Single),
                         new PortDefinition("period", PortShape.Instant, PortCardinality.Single, IsRequired: false)
                     },

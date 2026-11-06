@@ -84,6 +84,86 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
     }
 
     [Fact]
+    public async Task LanguageTaggedTextFactFlowsThroughServiceAndXbrlJson()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var bindingId = project.Bindings[0].BindingId;
+        var entityNode = project.Nodes.Single(node => node.DisplayName == "Entity");
+        var periodNode = project.Nodes.Single(node => node.DisplayName == "Period 2025");
+        var textSource = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Revenue label",
+            Parameters = new()
+            {
+                ["bindingId"] = bindingId,
+                ["column"] = "Line",
+                ["rowFilterColumn"] = "Line",
+                ["rowFilterValue"] = "Revenue"
+            },
+            OutputPorts = new()
+            {
+                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single),
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false)
+            }
+        };
+        var textFact = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.FactConstruct,
+            DisplayName = "Entity registrant name",
+            Parameters = new()
+            {
+                ["concept"] = SyntheticProfile.Qualified("EntityRegistrantName"),
+                ["periodType"] = "duration",
+                ["language"] = "fr"
+            },
+            InputPorts = new()
+            {
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("entity", PortShape.String, PortCardinality.Single),
+                new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false)
+            },
+            OutputPorts = new() { new PortDefinition("fact", PortShape.Fact, PortCardinality.Single) }
+        };
+        project.Nodes.Add(textSource);
+        project.Nodes.Add(textFact);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = textSource.NodeId, SourcePortName = "textValue",
+            TargetNodeId = textFact.NodeId, TargetPortName = "textValue"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = entityNode.NodeId, SourcePortName = "value",
+            TargetNodeId = textFact.NodeId, TargetPortName = "entity"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = periodNode.NodeId, SourcePortName = "value",
+            TargetNodeId = textFact.NodeId, TargetPortName = "period"
+        });
+
+        var result = await NewService().RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        var text = Assert.Single(result.Facts, fact => fact.ConceptName == SyntheticProfile.Qualified("EntityRegistrantName"));
+        Assert.Equal("Revenue", text.TextValue);
+        Assert.Equal("fr", text.Language);
+        Assert.Null(text.Value);
+        Assert.Null(text.Unit);
+        Assert.Null(text.Decimals);
+        Assert.NotEmpty(text.ContributingSources);
+
+        using var report = JsonDocument.Parse(result.XbrlJson);
+        var reportFact = Assert.Single(report.RootElement.GetProperty("facts").EnumerateObject(),
+            item => item.Value.GetProperty("value").GetString() == "Revenue").Value;
+        Assert.Equal("fr", reportFact.GetProperty("dimensions").GetProperty("language").GetString());
+    }
+
+    [Fact]
     public async Task WrongPeriodBinding_ProducesUsefulDiagnostic()
     {
         // Bind the revenue duration flow to the instant-only "Assets" concept.

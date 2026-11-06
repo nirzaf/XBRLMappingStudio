@@ -207,6 +207,31 @@ public sealed class FactSerializationTests
     }
 
     [Fact]
+    public void OimJson_PreservesExactDecimalScaleAndAccuracyLexicalValue()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 1.2300m,
+            Decimals = 4
+        };
+
+        var json = OimSerializer.Serialize(Profile, new[] { fact });
+        using var document = JsonDocument.Parse(json);
+        var serialized = Assert.Single(document.RootElement.GetProperty("facts").EnumerateObject()).Value;
+        Assert.Equal("1.2300", serialized.GetProperty("value").GetString());
+        Assert.Equal(4, serialized.GetProperty("decimals").GetInt32());
+
+        var reopened = Assert.Single(OimSerializer.ReadFacts(json));
+        Assert.Equal("1.2300", reopened.Value!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(4, reopened.Decimals);
+    }
+
+    [Fact]
     public void OimJson_FactIdsAreContentDerivedAndRepeatedFactsRemainDistinct()
     {
         var facts = new[] { GoldenFacts()[0], GoldenFacts()[1], GoldenFacts()[0] };
@@ -333,6 +358,117 @@ public sealed class FactSerializationTests
 
         Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { malformed }));
         Assert.Throws<XbrlExportException>(() => XmlSerializer.Serialize(Profile, new[] { malformed }));
+    }
+
+    [Fact]
+    public void FactValidationRejectsMalformedEntityPeriodDimensionsAndDecimals()
+    {
+        var valid = GoldenFacts()[0];
+
+        var invalidEntity = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "",
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        Assert.False(invalidEntity.ValidateAgainst(Profile.FindConcept(invalidEntity.ConceptName)!, out _, out var entityIssue));
+        Assert.Equal(FactValidationIssue.InvalidEntity, entityIssue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { invalidEntity }));
+
+        var malformedScheme = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "not a uri",
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        Assert.False(malformedScheme.ValidateAgainst(Profile.FindConcept(malformedScheme.ConceptName)!, out _, out var schemeIssue));
+        Assert.Equal(FactValidationIssue.InvalidEntity, schemeIssue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { malformedScheme }));
+
+        var uriStyleEntity = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = "https://example.test/entity-scheme",
+            EntityIdentifier = "https://example.test/entities/ACME Holdings",
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        Assert.True(uriStyleEntity.ValidateAgainst(Profile.FindConcept(uriStyleEntity.ConceptName)!, out var uriEntityReason), uriEntityReason);
+        Assert.Contains("https://example.test/entities/ACME Holdings", XmlSerializer.Serialize(Profile, new[] { uriStyleEntity }));
+
+        var invalidPeriod = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = valid.EntityScheme,
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = new XbrlPeriod(PeriodKind.Duration, null, new DateOnly(2026, 1, 1), new DateOnly(2025, 1, 1)),
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals
+        };
+        Assert.False(invalidPeriod.ValidateAgainst(Profile.FindConcept(invalidPeriod.ConceptName)!, out _, out var periodIssue));
+        Assert.Equal(FactValidationIssue.InvalidPeriod, periodIssue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { invalidPeriod }));
+
+        var duplicateDimensions = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = valid.EntityScheme,
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals,
+            Dimensions = new[]
+            {
+                new Dimension("synthetic:Region", "synthetic:EMEA"),
+                new Dimension("synthetic:Region", "synthetic:Domestic")
+            }
+        };
+        Assert.False(duplicateDimensions.ValidateAgainst(Profile.FindConcept(duplicateDimensions.ConceptName)!, out _, out var dimensionsIssue));
+        Assert.Equal(FactValidationIssue.InvalidDimensions, dimensionsIssue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { duplicateDimensions }));
+
+        var typedDimension = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = valid.EntityScheme,
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = valid.Decimals,
+            Dimensions = new[] { new Dimension("synthetic:TypedAxis", "https://example.test/typed-value", IsExplicit: false) }
+        };
+        Assert.False(typedDimension.ValidateAgainst(Profile.FindConcept(typedDimension.ConceptName)!, out var typedReason, out var typedIssue));
+        Assert.Equal(FactValidationIssue.InvalidDimensions, typedIssue);
+        Assert.Contains("typed dimensions", typedReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { typedDimension }));
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.Serialize(Profile, new[] { typedDimension }));
+
+        var invalidDecimals = new XbrlFact
+        {
+            ConceptName = valid.ConceptName,
+            EntityScheme = valid.EntityScheme,
+            EntityIdentifier = valid.EntityIdentifier,
+            Period = valid.Period,
+            Unit = valid.Unit,
+            Value = valid.Value,
+            Decimals = 31
+        };
+        Assert.False(invalidDecimals.ValidateAgainst(Profile.FindConcept(invalidDecimals.ConceptName)!, out _, out var decimalsIssue));
+        Assert.Equal(FactValidationIssue.InvalidDecimals, decimalsIssue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { invalidDecimals }));
     }
 
     private static void AssertMultisetEquivalent(IReadOnlyList<XbrlFact> expected, IReadOnlyList<XbrlFact> actual)

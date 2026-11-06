@@ -189,6 +189,34 @@ public class ExecutionPlanTests
         return (project, profile);
     }
 
+    private static MappingProject ConfigureTextFactProject(MappingProject project, string language)
+    {
+        var sourceNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
+        var scaleNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+        var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        sourceNode.Parameters["column"] = "Line";
+        sourceNode.OutputPorts.Add(new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false));
+        project.Nodes.Remove(scaleNode);
+        project.Edges.RemoveAll(edge => edge.SourceNodeId == scaleNode.NodeId || edge.TargetNodeId == scaleNode.NodeId
+            || (edge.TargetNodeId == factNode.NodeId && edge.TargetPortName == "value"));
+        factNode.Parameters["concept"] = SyntheticProfile.Qualified("EntityRegistrantName");
+        factNode.Parameters.Remove("unit");
+        factNode.Parameters.Remove("decimals");
+        factNode.Parameters["language"] = language;
+        var numericPortIndex = factNode.InputPorts.FindIndex(port => port.Name == "value");
+        factNode.InputPorts[numericPortIndex] = new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, false);
+        factNode.InputPorts.Add(new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false));
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = sourceNode.NodeId,
+            SourcePortName = "textValue",
+            TargetNodeId = factNode.NodeId,
+            TargetPortName = "textValue"
+        });
+        return project;
+    }
+
     [Fact]
     public void CompileProducesPlan_AndSinkIdentified()
     {
@@ -259,6 +287,238 @@ public class ExecutionPlanTests
             Assert.NotEmpty(result.Facts);
             Assert.Equal("ex:RegionAxis", Assert.Single(result.Facts[0]!.Dimensions).Name);
             Assert.Equal("ex:Domestic", result.Facts[0]!.Dimensions[0].MemberName);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructSupportsLanguageTaggedTextWithSourceProvenance()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-text-fact-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            ConfigureTextFactProject(project, "fr");
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            var fact = Assert.Single(result.Facts);
+            Assert.Null(fact.Value);
+            Assert.Equal("Revenue", fact.TextValue);
+            Assert.Equal("fr", fact.Language);
+            Assert.Null(fact.Unit);
+            Assert.Null(fact.Decimals);
+            Assert.NotEmpty(fact.Sources);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructRejectsUnsupportedTextLanguageWithSource()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-text-language-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            ConfigureTextFactProject(project, "de");
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrUnsupportedConstruct);
+            Assert.Equal("textValue", diagnostic.PortName);
+            Assert.NotNull(diagnostic.Source);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructRejectsDuplicateMalformedAndOverLimitDimensionsBeforeSerialization()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-invalid-dimensions-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, synthetic) = Prepare(path);
+            var profile = new FilingProfile
+            {
+                ProfileId = synthetic.ProfileId,
+                Digest = synthetic.Digest,
+                Concepts = synthetic.Concepts,
+                SupportedUnits = synthetic.SupportedUnits,
+                DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                {
+                    ["synthetic:RegionAxis"] = new[] { "synthetic:Domestic", "synthetic:International" }
+                },
+                TaxonomyVersion = synthetic.TaxonomyVersion,
+                OutputFormat = synthetic.OutputFormat,
+                NamespaceUris = synthetic.NamespaceUris,
+                TaxonomyUrls = synthetic.TaxonomyUrls,
+                PackageHashes = synthetic.PackageHashes,
+                RequiredPlugins = synthetic.RequiredPlugins,
+                RequiredChecks = synthetic.RequiredChecks
+            };
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var invalidDimensions = new[]
+            {
+                "synthetic:RegionAxis=synthetic:Domestic\nsynthetic:RegionAxis=synthetic:International",
+                "synthetic:RegionAxis=",
+                string.Join("\n", Enumerable.Repeat("synthetic:RegionAxis=synthetic:Domestic", FactDimensionParser.MaximumDimensions + 1))
+            };
+
+            foreach (var dimensions in invalidDimensions)
+            {
+                factNode.Parameters["dimensions"] = dimensions;
+                var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+                Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+                var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+                Assert.Empty(result.Facts);
+                var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrDimensionInvalid);
+                Assert.Equal(factNode.NodeId, diagnostic.NodeId);
+                Assert.NotNull(diagnostic.Source);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not-an-integer")]
+    [InlineData("31")]
+    public async Task FactConstructRejectsPresentInvalidDecimalsAndLinksSource(string decimals)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-decimals-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factNode.Parameters["decimals"] = decimals;
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrDecimalsOutOfRange);
+            Assert.Equal(factNode.NodeId, diagnostic.NodeId);
+            Assert.Equal("value", diagnostic.PortName);
+            Assert.NotNull(diagnostic.Source);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructAcceptsAbsentAndExplicitInfDecimalsAsInfiniteAccuracy()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-decimals-inf-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var compiler = new PlanCompiler(FunctionCatalog.Default);
+
+            factNode.Parameters["decimals"] = "INF";
+            var explicitInf = compiler.Compile(new MappingGraph(project), profile);
+            Assert.True(explicitInf.Success, string.Join(" | ", explicitInf.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+            var explicitResult = await explicitInf.Plan!.ExecuteAsync(MakeContext(project, path));
+            Assert.NotEmpty(explicitResult.Facts);
+            Assert.All(explicitResult.Facts, fact => Assert.Null(fact.Decimals));
+
+            factNode.Parameters.Remove("decimals");
+            var absent = compiler.Compile(new MappingGraph(project), profile);
+            Assert.True(absent.Success, string.Join(" | ", absent.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+            var absentResult = await absent.Plan!.ExecuteAsync(MakeContext(project, path));
+            Assert.NotEmpty(absentResult.Facts);
+            Assert.All(absentResult.Facts, fact => Assert.Null(fact.Decimals));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task FactConstructPeriodTypeRejectionIncludesSourceAndSpecificDiagnostic()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-period-aspect-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factNode.Parameters["concept"] = SyntheticProfile.Qualified("Assets");
+            factNode.Parameters["unit"] = "USD";
+            factNode.Parameters["periodType"] = "instant";
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrPeriodTypeMismatch);
+            Assert.Equal(factNode.NodeId, diagnostic.NodeId);
+            Assert.NotNull(diagnostic.Source);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Theory]
+    [InlineData("absent", "instantDate")]
+    [InlineData("malformed", "period")]
+    public async Task FactConstructRejectsAbsentOrMalformedPeriodWithoutPlaceholder(string periodIssue, string expectedPort)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-period-invalid-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            if (periodIssue == "absent")
+            {
+                project.Edges.RemoveAll(edge => edge.TargetNodeId == factNode.NodeId && edge.TargetPortName == "period");
+            }
+            else
+            {
+                var endDate = project.Nodes.Single(node => node.DisplayName == "Period end (2026-01-01)");
+                endDate.Parameters["literal"] = "2025-13-40";
+            }
+
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrPeriodInvalid);
+            Assert.Equal(factNode.NodeId, diagnostic.NodeId);
+            Assert.Equal(expectedPort, diagnostic.PortName);
+            Assert.NotNull(diagnostic.Source);
         }
         finally
         {

@@ -607,6 +607,7 @@ public sealed class PlanCompiler
     {
         var node = graph.Nodes[nodeId];
         var sig = _catalog.Find(node.NodeType)!;
+        var periodInputConnected = graph.IncomingEdge(nodeId, "period") is not null;
 
         return (row, frame, ctx, diag) =>
         {
@@ -629,7 +630,7 @@ public sealed class PlanCompiler
                 ctx.Provenance.MergeSources(thisKey, new[] { upstreamKey });
             }
 
-            var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile);
+            var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile, periodInputConnected);
             foreach (var (name, value) in outputs)
             {
                 frame.Set(nodeId, name, value);
@@ -656,7 +657,8 @@ public sealed class PlanCompiler
         int row,
         ExecutionContext ctx,
         DiagnosticBag diag,
-        FilingProfile profile)
+        FilingProfile profile,
+        bool periodInputConnected)
     {
         var outputs = new Dictionary<string, DataValue>(StringComparer.Ordinal);
 
@@ -701,13 +703,17 @@ public sealed class PlanCompiler
                     }
                 }
                 var cell = record.Fields.TryGetValue(column ?? "", out var v) ? v : DataValue.Missing();
+                var textCell = cell.Shape == PortShape.String ? cell : DataValue.Missing(PortShape.String);
                 // Emit at row granularity: for collection ports the frame stores per-row indexed values.
                 outputs["value"] = cell;
+                outputs["textValue"] = textCell;
                 if (cell.Source is not null)
                 {
                     var slotKey = ProvenanceTracker.SlotKey(node.NodeId, "value", row);
                     ctx.Provenance.RecordSource(slotKey, cell.Source);
                 }
+                if (textCell.Source is not null)
+                    ctx.Provenance.RecordSource(ProvenanceTracker.SlotKey(node.NodeId, "textValue", row), textCell.Source);
                 break;
             }
 
@@ -1079,11 +1085,29 @@ public sealed class PlanCompiler
                 var valueIn = inputs.GetValueOrDefault("value", DataValue.Missing(PortShape.Decimal));
                 if (valueIn.IsMissing)
                     valueIn = inputs.GetValueOrDefault("values", DataValue.Missing(PortShape.Decimal));
-                if (valueIn.IsMissing)
+                var textIn = inputs.GetValueOrDefault("textValue", DataValue.Missing(PortShape.String));
+                var hasNumericInput = !valueIn.IsMissing;
+                var hasTextInput = textIn.Presence is ValuePresence.Present or ValuePresence.ExplicitNil;
+                if (!hasNumericInput && !hasTextInput)
                 {
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
+                if (hasNumericInput && hasTextInput)
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrUnsupportedConstruct,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        "FactConstruct cannot receive both numeric and text values.",
+                        nodeId: node.NodeId,
+                        portName: "textValue",
+                        source: textIn.Source ?? valueIn.Source);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+                var factValueSource = hasTextInput ? textIn.Source : valueIn.Source;
+                var factValuePortName = hasTextInput ? "textValue" : "value";
 
                 var concept = GetString(node, "concept")
                     ?? throw new InvalidOperationException($"FactConstruct node '{node.DisplayName}' has no concept parameter.");
@@ -1095,7 +1119,9 @@ public sealed class PlanCompiler
                         DiagnosticSubsystem.XBRL,
                         DiagnosticStage.Execution,
                         $"Concept '{concept}' is not defined in profile '{profile.ProfileId}'.",
-                        nodeId: node.NodeId);
+                        nodeId: node.NodeId,
+                        portName: factValuePortName,
+                        source: factValueSource);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1106,7 +1132,9 @@ public sealed class PlanCompiler
                         DiagnosticSubsystem.XBRL,
                         DiagnosticStage.Execution,
                         $"Concept '{concept}' is abstract and cannot carry fact values.",
-                        nodeId: node.NodeId);
+                        nodeId: node.NodeId,
+                        portName: factValuePortName,
+                        source: factValueSource);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1122,7 +1150,9 @@ public sealed class PlanCompiler
                             DiagnosticSubsystem.XBRL,
                             DiagnosticStage.Execution,
                             $"Unit '{unitStr}' is not supported by profile '{profile.ProfileId}'.",
-                            nodeId: node.NodeId);
+                            nodeId: node.NodeId,
+                            portName: factValuePortName,
+                            source: factValueSource);
                         outputs["fact"] = DataValue.Missing(PortShape.Fact);
                         break;
                     }
@@ -1140,12 +1170,15 @@ public sealed class PlanCompiler
                         DiagnosticSubsystem.XBRL,
                         DiagnosticStage.Execution,
                         dimensionError,
-                        nodeId: node.NodeId);
+                        nodeId: node.NodeId,
+                        portName: factValuePortName,
+                        source: factValueSource);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
 
-                var entity = inputs.GetValueOrDefault("entity", DataValue.Missing(PortShape.String)).AsString();
+                var entityIn = inputs.GetValueOrDefault("entity", DataValue.Missing(PortShape.String));
+                var entity = entityIn.AsString();
                 var periodIn = inputs.GetValueOrDefault("period", DataValue.Missing(PortShape.Instant));
                 var instantIn = inputs.GetValueOrDefault("instantDate", DataValue.Missing(PortShape.Instant));
 
@@ -1158,11 +1191,42 @@ public sealed class PlanCompiler
                     _ => null
                 };
 
-                var decimalsStr = node.Parameters.TryGetValue("decimals", out var dv) ? dv?.ToString() : null;
-                int? decimals = null;
-                if (!string.IsNullOrEmpty(decimalsStr))
+                if (period is null)
                 {
-                    if (int.TryParse(decimalsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    diag.Error(
+                        DiagnosticCodes.XbrPeriodInvalid,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        "Fact requires a valid instant or duration period.",
+                        nodeId: node.NodeId,
+                        portName: periodInputConnected ? "period" : "instantDate",
+                        source: periodIn.Source ?? instantIn.Source ?? factValueSource);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+
+                int? decimals = null;
+                if (node.Parameters.TryGetValue("decimals", out var dv))
+                {
+                    var decimalsStr = dv?.ToString();
+                    if (string.Equals(decimalsStr, "INF", StringComparison.OrdinalIgnoreCase))
+                    {
+                        decimals = null;
+                    }
+                    else if (!int.TryParse(decimalsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    {
+                        diag.Error(
+                            DiagnosticCodes.XbrDecimalsOutOfRange,
+                            DiagnosticSubsystem.XBRL,
+                            DiagnosticStage.Execution,
+                            "Decimals must be an integer in the supported range [-30, 30] or INF.",
+                            nodeId: node.NodeId,
+                            portName: factValuePortName,
+                            source: factValueSource);
+                        outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                        break;
+                    }
+                    else
                     {
                         // Bounded exact-decimal range (section 3): reject just-outside limits.
                         if (parsed < -30 || parsed > 30)
@@ -1172,9 +1236,13 @@ public sealed class PlanCompiler
                                 DiagnosticSubsystem.XBRL,
                                 DiagnosticStage.Execution,
                                 $"Decimals value {parsed} is outside the supported range [-30, 30].",
-                                nodeId: node.NodeId);
+                                nodeId: node.NodeId,
+                                portName: factValuePortName,
+                                source: factValueSource);
+                            outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                            break;
                         }
-                        else decimals = parsed;
+                        decimals = parsed;
                     }
                 }
 
@@ -1188,8 +1256,9 @@ public sealed class PlanCompiler
                     Decimals = decimals,
                     Language = GetString(node, "language"),
                     Dimensions = dimensions,
-                    Value = valueIn.Presence == ValuePresence.Present ? valueIn.AsDecimal() : null,
-                    IsNil = valueIn.IsNil
+                    Value = hasNumericInput && valueIn.Presence == ValuePresence.Present ? valueIn.AsDecimal() : null,
+                    TextValue = textIn.Presence == ValuePresence.Present ? textIn.AsString() : null,
+                    IsNil = valueIn.IsNil || textIn.IsNil
                 };
 
                 // Period-vs-concept type check (acceptance: wrong period type produces useful error).
@@ -1198,22 +1267,47 @@ public sealed class PlanCompiler
                     ConceptName = concept,
                     EntityScheme = pf.EntityScheme,
                     EntityIdentifier = pf.EntityIdentifier,
-                    Period = period ?? XbrlPeriod.OfInstant(default),
+                    Period = period,
                     Unit = unit,
                     Value = pf.Value,
+                    TextValue = pf.TextValue,
                     Decimals = pf.Decimals,
                     Language = pf.Language,
                     Dimensions = pf.Dimensions,
                     IsNil = pf.IsNil
                 };
-                if (!probe.ValidateAgainst(conceptMeta, out var reason))
+                if (!probe.ValidateAgainst(conceptMeta, out var reason, out var issue))
                 {
+                    var (diagnosticCode, portName, source) = issue switch
+                    {
+                        FactValidationIssue.InvalidEntity =>
+                            (DiagnosticCodes.XbrEntityMissing, "entity", entityIn.Source ?? factValueSource),
+                        FactValidationIssue.InvalidPeriod =>
+                            (DiagnosticCodes.XbrPeriodInvalid, "period", periodIn.Source ?? instantIn.Source ?? factValueSource),
+                        FactValidationIssue.PeriodTypeMismatch =>
+                            (DiagnosticCodes.XbrPeriodTypeMismatch, "period", periodIn.Source ?? instantIn.Source ?? factValueSource),
+                        FactValidationIssue.InvalidUnit =>
+                            (DiagnosticCodes.XbrUnitMissing, factValuePortName, factValueSource ?? entityIn.Source),
+                        FactValidationIssue.InvalidDecimals =>
+                            (DiagnosticCodes.XbrDecimalsOutOfRange, factValuePortName, factValueSource),
+                        FactValidationIssue.InvalidDimensions =>
+                            (DiagnosticCodes.XbrDimensionInvalid, factValuePortName, factValueSource),
+                        FactValidationIssue.InvalidConcept =>
+                            (DiagnosticCodes.XbrConceptUnknown, factValuePortName, factValueSource),
+                        FactValidationIssue.InvalidLanguage =>
+                            (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source),
+                        FactValidationIssue.InvalidValue =>
+                            (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source),
+                        _ => (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source)
+                    };
                     diag.Error(
-                        DiagnosticCodes.XbrPeriodTypeMismatch,
+                        diagnosticCode,
                         DiagnosticSubsystem.XBRL,
                         DiagnosticStage.Execution,
                         reason,
-                        nodeId: node.NodeId);
+                        nodeId: node.NodeId,
+                        portName: portName,
+                        source: source);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1227,7 +1321,8 @@ public sealed class PlanCompiler
                         slotKey,
                         ProvenanceTracker.SlotKey(node.NodeId, "entity", row),
                         ProvenanceTracker.SlotKey(node.NodeId, "period", row),
-                        ProvenanceTracker.SlotKey(node.NodeId, "instantDate", row)
+                        ProvenanceTracker.SlotKey(node.NodeId, "instantDate", row),
+                        ProvenanceTracker.SlotKey(node.NodeId, "textValue", row)
                     });
 
                 outputs["fact"] = DataValue.Opaque(PortShape.Fact, pf);

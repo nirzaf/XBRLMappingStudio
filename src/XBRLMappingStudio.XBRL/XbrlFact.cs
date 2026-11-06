@@ -13,6 +13,21 @@ public enum PeriodKind
     Duration
 }
 
+/// <summary>Structured aspect category for a rejected fact.</summary>
+public enum FactValidationIssue
+{
+    None,
+    InvalidConcept,
+    InvalidEntity,
+    InvalidPeriod,
+    PeriodTypeMismatch,
+    InvalidUnit,
+    InvalidDecimals,
+    InvalidDimensions,
+    InvalidLanguage,
+    InvalidValue
+}
+
 /// <summary>
 /// XBRL period value. Dates are stored as <see cref="DateOnly"/> in the ISO proleptic
 /// Gregorian calendar. For an instant, <see cref="Instant"/> is set and start/end are null.
@@ -83,98 +98,133 @@ public sealed class XbrlFact
         = Array.Empty<SourceReference>();
 
     public bool ValidateValueAgainst(ConceptMetadata meta, out string reason)
+        => ValidateValueAgainst(meta, out reason, out _);
+
+    public bool ValidateValueAgainst(ConceptMetadata meta, out string reason, out FactValidationIssue issue)
     {
         if (Value is not null && TextValue is not null)
         {
-            reason = "A fact cannot have both a numeric and text value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, "A fact cannot have both a numeric and text value.", out reason, out issue);
         }
         if (IsNil && (Value is not null || TextValue is not null))
         {
-            reason = "A nil fact cannot also carry a value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, "A nil fact cannot also carry a value.", out reason, out issue);
         }
         if (!IsNil && Value is null && TextValue is null)
         {
-            reason = "A non-nil fact must carry a value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, "A non-nil fact must carry a value.", out reason, out issue);
         }
         if (Unit is not null && CompoundUnit is not null)
         {
-            reason = "A fact cannot have both a simple and compound unit.";
-            return false;
+            return Fail(FactValidationIssue.InvalidUnit, "A fact cannot have both a simple and compound unit.", out reason, out issue);
         }
         if (Decimals is not null && (IsNil || Value is null))
         {
-            reason = "Decimals are only valid for a non-nil numeric fact.";
-            return false;
+            return Fail(FactValidationIssue.InvalidDecimals, "Decimals are only valid for a non-nil numeric fact.", out reason, out issue);
+        }
+        if (Decimals is < -30 or > 30)
+        {
+            return Fail(FactValidationIssue.InvalidDecimals, "Decimals are outside the supported range [-30, 30].", out reason, out issue);
         }
         if (Value is not null && Language is not null)
         {
-            reason = "A numeric fact cannot carry a language tag.";
-            return false;
+            return Fail(FactValidationIssue.InvalidLanguage, "A numeric fact cannot carry a language tag.", out reason, out issue);
         }
         if (Value is not null && Unit is null && CompoundUnit is null)
         {
-            reason = "A numeric fact must carry a unit.";
-            return false;
+            return Fail(FactValidationIssue.InvalidUnit, "A numeric fact must carry a unit.", out reason, out issue);
         }
-        if (TextValue is not null && (Unit is not null || CompoundUnit is not null || Decimals is not null))
+        if (TextValue is not null && (Unit is not null || CompoundUnit is not null))
         {
-            reason = "A text fact cannot carry a unit or decimals.";
-            return false;
+            return Fail(FactValidationIssue.InvalidUnit, "A text fact cannot carry a unit.", out reason, out issue);
+        }
+        if (TextValue is not null && Decimals is not null)
+        {
+            return Fail(FactValidationIssue.InvalidDecimals, "A text fact cannot carry decimals.", out reason, out issue);
         }
         if (meta.DataType == "monetary" && Unit is null && CompoundUnit is null)
         {
-            reason = $"Concept '{ConceptName}' is monetary and requires a unit.";
-            return false;
+            return Fail(FactValidationIssue.InvalidUnit, $"Concept '{ConceptName}' is monetary and requires a unit.", out reason, out issue);
         }
         if (meta.DataType == "monetary" && TextValue is not null)
         {
-            reason = $"Monetary concept '{ConceptName}' requires a numeric value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, $"Monetary concept '{ConceptName}' requires a numeric value.", out reason, out issue);
         }
         if (meta.DataType == "string" && (Value is not null || Unit is not null || CompoundUnit is not null || Decimals is not null))
         {
-            reason = $"String concept '{ConceptName}' cannot carry a numeric value, unit, or decimals.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, $"String concept '{ConceptName}' cannot carry a numeric value, unit, or decimals.", out reason, out issue);
         }
         if (meta.DataType == "string" && !IsNil && TextValue is null)
         {
-            reason = $"String concept '{ConceptName}' requires a text value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidValue, $"String concept '{ConceptName}' requires a text value.", out reason, out issue);
         }
         if (Language is not null && meta.SupportedLanguages.Count > 0
             && !meta.SupportedLanguages.Contains(Language.ToLowerInvariant(), StringComparer.Ordinal))
         {
-            reason = $"Language '{Language}' is not supported by concept '{ConceptName}'.";
-            return false;
+            return Fail(FactValidationIssue.InvalidLanguage, $"Language '{Language}' is not supported by concept '{ConceptName}'.", out reason, out issue);
         }
         reason = "";
+        issue = FactValidationIssue.None;
         return true;
     }
 
     /// <summary>Verify the fact value and period against a taxonomy concept.</summary>
     public bool ValidateAgainst(ConceptMetadata meta, out string reason)
+        => ValidateAgainst(meta, out reason, out _);
+
+    public bool ValidateAgainst(ConceptMetadata meta, out string reason, out FactValidationIssue issue)
     {
-        if (!ValidateValueAgainst(meta, out reason)) return false;
+        if (string.IsNullOrWhiteSpace(EntityScheme)
+            || !Uri.TryCreate(EntityScheme, UriKind.Absolute, out _)
+            || string.IsNullOrWhiteSpace(EntityIdentifier))
+            return Fail(FactValidationIssue.InvalidEntity, "Fact entity scheme or identifier is missing or invalid.", out reason, out issue);
+
+        if (Period is null)
+            return Fail(FactValidationIssue.InvalidPeriod, "Fact period is incomplete or invalid.", out reason, out issue);
+
+        var validPeriod = Period.Kind switch
+        {
+            PeriodKind.Instant => Period.Instant.HasValue && Period.Start is null && Period.End is null,
+            PeriodKind.Duration => Period.Instant is null && Period.Start.HasValue && Period.End.HasValue
+                && Period.Start.Value < Period.End.Value,
+            _ => false
+        };
+        if (!validPeriod)
+            return Fail(FactValidationIssue.InvalidPeriod, "Fact period is incomplete or invalid.", out reason, out issue);
+
+        if (Dimensions?.Any(dimension => !dimension.IsExplicit) == true)
+            return Fail(FactValidationIssue.InvalidDimensions,
+                "Typed dimensions require filing-profile domain metadata and are unsupported.", out reason, out issue);
+
+        if (Dimensions is null || Dimensions.Count > FactDimensionParser.MaximumDimensions
+            || Dimensions.Any(dimension => string.IsNullOrWhiteSpace(dimension.Name)
+                || string.IsNullOrWhiteSpace(dimension.MemberName))
+            || Dimensions.Select(dimension => dimension.Name).Distinct(StringComparer.Ordinal).Count() != Dimensions.Count)
+            return Fail(FactValidationIssue.InvalidDimensions, "Fact dimensions are empty, duplicated, or exceed the supported limit.", out reason, out issue);
+
+        if (!ValidateValueAgainst(meta, out reason, out issue)) return false;
         if (meta.IsAbstract)
         {
-            reason = $"Concept '{ConceptName}' is abstract and cannot carry a fact value.";
-            return false;
+            return Fail(FactValidationIssue.InvalidConcept, $"Concept '{ConceptName}' is abstract and cannot carry a fact value.", out reason, out issue);
         }
         if (meta.PeriodType == "instant" && Period.Kind != PeriodKind.Instant)
         {
-            reason = $"Concept '{ConceptName}' requires an instant period.";
-            return false;
+            return Fail(FactValidationIssue.PeriodTypeMismatch, $"Concept '{ConceptName}' requires an instant period.", out reason, out issue);
         }
         if (meta.PeriodType == "duration" && Period.Kind != PeriodKind.Duration)
         {
-            reason = $"Concept '{ConceptName}' requires a duration period (start..end).";
-            return false;
+            return Fail(FactValidationIssue.PeriodTypeMismatch, $"Concept '{ConceptName}' requires a duration period (start..end).", out reason, out issue);
         }
         reason = "";
+        issue = FactValidationIssue.None;
         return true;
+    }
+
+    private static bool Fail(FactValidationIssue failure, string message, out string reason, out FactValidationIssue issue)
+    {
+        reason = message;
+        issue = failure;
+        return false;
     }
 
     /// <summary>
@@ -220,6 +270,7 @@ public sealed class PendingFact
     public XbrlPeriod? Period { get; set; }
     public XbrlUnit? Unit { get; set; }
     public decimal? Value { get; set; }
+    public string? TextValue { get; set; }
     public bool IsNil { get; set; }
     public int? Decimals { get; set; }
     public string? Language { get; set; }

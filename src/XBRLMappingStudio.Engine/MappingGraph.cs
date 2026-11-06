@@ -147,7 +147,11 @@ public sealed class FunctionCatalog
             NodeTypeConstants.ExcelField,
             "Excel Field",
             Array.Empty<PortDefinition>(),
-            new[] { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true) },
+            new[]
+            {
+                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, true),
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false)
+            },
             new Dictionary<string, ParameterRequirement>
             {
                 ["bindingId"] = new("bindingId", PortShape.Identifier, true, Description: "SourceBinding id"),
@@ -302,8 +306,8 @@ public sealed class FunctionCatalog
             new Dictionary<string, ParameterRequirement>()),
 
         // Sink: fact construction. Emits one XBRL fact per input iteration. Accepts a
-        // scalar `value` port (row-driven) or a `values` Collection port (set-driven,
-        // e.g. fed by GroupBy) which produces one fact per collection item.
+        // scalar numeric `value`, a `values` Collection (set-driven), or a scalar
+        // `textValue` for language-tagged string concepts.
         new FunctionSignature(
             NodeTypeConstants.FactConstruct,
             "XBRL Fact",
@@ -311,6 +315,7 @@ public sealed class FunctionCatalog
             {
                 new PortDefinition("value", PortShape.Decimal, PortCardinality.Single, false),
                 new PortDefinition("values", PortShape.Decimal, PortCardinality.Collection, false),
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false),
                 new PortDefinition("entity", PortShape.String, PortCardinality.Single, true),
                 new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false),
                 new PortDefinition("instantDate", PortShape.Instant, PortCardinality.Single, false)
@@ -319,7 +324,7 @@ public sealed class FunctionCatalog
             new Dictionary<string, ParameterRequirement>
             {
                 ["concept"] = new("concept", PortShape.QualifiedName, true),
-                ["unit"] = new("unit", PortShape.String, true),
+                ["unit"] = new("unit", PortShape.String, false),
                 ["periodType"] = new("periodType", PortShape.String, true, Description: "'instant'|'duration'"),
                 ["decimals"] = new("decimals", PortShape.Integer, false, Description: "e.g. -3 for thousands"),
                 ["language"] = new("language", PortShape.String, false, Description: "BCP-47 tag")
