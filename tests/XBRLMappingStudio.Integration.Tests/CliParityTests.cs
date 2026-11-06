@@ -484,6 +484,28 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_ExecuteWithMissingArelleRuntimeFailsBeforeOpeningSource()
+    {
+        var missingSource = Path.Combine(_dir, "source-must-not-be-opened.xlsx");
+        var project = TestFixtures.BuildRevenueMappingProject(missingSource, approved: true);
+        var projectPath = Path.Combine(_dir, "missing-arelle-runtime.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var missingPython = Path.Combine(_dir, "missing-python-runtime.exe");
+        var outputPath = Path.Combine(_dir, "must-not-be-created.json");
+
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--allow-synthetic-profile", "--arelle", "--python", missingPython);
+
+        Assert.Equal(4, exit);
+        Assert.Contains(DiagnosticCodes.XbrWorkerUnavailable, stderr, StringComparison.Ordinal);
+        Assert.Contains("Could not start the selected profile worker", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("IO001", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain(Path.GetFileName(missingSource), stderr, StringComparison.Ordinal);
+        Assert.Empty(stdout);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
     public async Task Cli_ExecuteBlocksUnqualifiedCatalogProfileBeforeOpeningSource()
     {
         var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();

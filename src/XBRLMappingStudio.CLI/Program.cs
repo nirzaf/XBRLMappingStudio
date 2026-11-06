@@ -830,6 +830,12 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             Console.Error.WriteLine(ex.Message);
             return ExitCodesLocal.IncompleteProfile;
         }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException
+            or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            Console.Error.WriteLine($"Worker: {DiagnosticCodes.XbrWorkerUnavailable}: Could not start the selected profile worker: {ex.Message}");
+            return ExitCodesLocal.IncompleteProfile;
+        }
         await using var workerLifetime = worker;
         var service = new MappingJobService(profile, worker);
         using var cts = new CancellationTokenSource();
