@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:XBRLMappingStudio.Desktop.ViewModels"
         xmlns:controls="using:XBRLMappingStudio.Desktop.Controls"
+        xmlns:app="using:XBRLMappingStudio.Application"
         x:Class="XBRLMappingStudio.Desktop.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="760"
@@ -178,6 +179,38 @@
                   </DataTemplate>
                 </ListBox.ItemTemplate>
               </ListBox>
+            </StackPanel>
+          </Expander>
+
+          <Expander DockPanel.Dock="Top" Header="Taxonomy upgrade proposal"
+                    IsVisible="{Binding HasTaxonomyMigrationTargets}" Margin="0,4,0,4">
+            <StackPanel Spacing="5">
+              <ComboBox ItemsSource="{Binding TaxonomyMigrationTargets}"
+                        SelectedItem="{Binding SelectedTaxonomyMigrationTarget}"
+                        AutomationProperties.Name="Target taxonomy profile version">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate x:DataType="app:TaxonomyMigrationTargetOption">
+                    <TextBlock Text="{Binding Display}" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+              <Button Content="Preview upgrade" Command="{Binding PreviewTaxonomyMigrationCommand}"
+                      AutomationProperties.Name="Preview taxonomy migration" />
+              <TextBlock Text="{Binding TaxonomyMigrationSummary}" TextWrapping="Wrap"
+                         AutomationProperties.Name="Taxonomy migration summary" />
+              <ListBox ItemsSource="{Binding TaxonomyMigrationChanges}" MaxHeight="120"
+                       AutomationProperties.Name="Taxonomy migration changes">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="app:TaxonomyMigrationChange">
+                    <TextBlock Text="{Binding Display}" TextWrapping="Wrap" />
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <Button Content="Create separate draft" Command="{Binding CreateTaxonomyMigrationDraftCommand}"
+                      AutomationProperties.Name="Create separate taxonomy migration draft" />
+              <Button Content="Discard draft and restore source" Command="{Binding RollbackTaxonomyMigrationCommand}"
+                      IsVisible="{Binding CanRollbackTaxonomyMigration}"
+                      AutomationProperties.Name="Discard unchanged or saved migration draft and restore pinned source revision" />
             </StackPanel>
           </Expander>
 

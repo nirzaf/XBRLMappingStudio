@@ -1,5 +1,6 @@
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
 
@@ -106,6 +107,101 @@ public sealed class TaxonomyExplorerTests
         Assert.Contains("2 presentation path(s)", viewModel.SelectedConceptOccurrencesStatus,
             StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void MigrationPanelCreatesSeparateDraftAndCanRestorePinnedSource()
+    {
+        var sourceProfile = MigrationProfile("sha256:migration-v1", "Revenue", "2025.1");
+        var targetProfile = MigrationProfile("sha256:migration-v2", "Sales revenue", "2026.1");
+        var project = new MappingProject
+        {
+            ProjectId = "desktop-migration-project",
+            Name = "Migration panel test",
+            ProfileId = sourceProfile.ProfileId,
+            ProfileDigest = sourceProfile.Digest,
+            Nodes = new List<MappingNode>
+            {
+                new()
+                {
+                    NodeId = "fact-1",
+                    NodeType = NodeTypeConstants.FactConstruct,
+                    DisplayName = "Revenue fact",
+                    Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["concept"] = "ex:Revenue"
+                    }
+                }
+            }
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "reviewer@example.invalid",
+            ApprovedUtc = DateTimeOffset.Parse("2026-01-02T00:00:00Z"),
+            ProfileDigest = sourceProfile.Digest
+        });
+        var root = Path.Combine(Path.GetTempPath(), "xms-taxonomy-migration-ui-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "source.xmap");
+        try
+        {
+            new ProjectManager(path).Save(project);
+            var viewModel = new MainWindowViewModel(
+                project,
+                null,
+                (_, _) => throw new NotSupportedException("No source adapter is needed."),
+                new FilingProfileResolver(new[] { sourceProfile, targetProfile }));
+            viewModel.LoadProject(path);
+
+            viewModel.SelectedTaxonomyMigrationTarget = Assert.Single(viewModel.TaxonomyMigrationTargets);
+            viewModel.PreviewTaxonomyMigrationCommand.Execute(null);
+            Assert.True(viewModel.CanApplyTaxonomyMigration);
+            Assert.Contains("Profile digest", viewModel.TaxonomyMigrationSummary, StringComparison.Ordinal);
+
+            viewModel.CreateTaxonomyMigrationDraftCommand.Execute(null);
+            Assert.Equal(targetProfile.Digest, viewModel.Session.Project.ProfileDigest);
+            Assert.Null(viewModel.ProjectPath);
+            Assert.True(viewModel.IsProjectDirty);
+            Assert.True(viewModel.CanRollbackTaxonomyMigration);
+            Assert.Throws<InvalidOperationException>(() => viewModel.SaveProjectTo(path));
+            Assert.Equal(sourceProfile.Digest, new ProjectManager(path).Load().ProfileDigest);
+            var draftPath = Path.Combine(root, "upgraded-draft.xmap");
+            viewModel.SaveProjectTo(draftPath);
+            Assert.Equal(targetProfile.Digest, new ProjectManager(draftPath).Load().ProfileDigest);
+            Assert.True(viewModel.CanRollbackTaxonomyMigration);
+
+            viewModel.RollbackTaxonomyMigrationCommand.Execute(null);
+
+            Assert.Equal(sourceProfile.Digest, viewModel.Session.Project.ProfileDigest);
+            Assert.Equal(path, viewModel.ProjectPath);
+            Assert.False(viewModel.IsProjectDirty);
+            Assert.Single(viewModel.Session.Project.Approvals);
+            Assert.Equal(targetProfile.Digest, new ProjectManager(draftPath).Load().ProfileDigest);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static FilingProfile MigrationProfile(string digest, string label, string version)
+        => new()
+        {
+            ProfileId = "desktop-migration-profile",
+            Digest = digest,
+            TaxonomyVersion = version,
+            Concepts = new[]
+            {
+                new ConceptMetadata("ex:Revenue", "urn:example", "Revenue", label,
+                    "monetary", "duration", IsAbstract: false)
+            },
+            SupportedUnits = new HashSet<string>(StringComparer.Ordinal) { "USD" },
+            NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ex"] = "urn:example"
+            }
+        };
 
     private static async Task WaitForTaxonomySearchAsync(MainWindowViewModel viewModel)
     {

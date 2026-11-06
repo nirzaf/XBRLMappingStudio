@@ -75,6 +75,13 @@ public sealed class FilingProfileResolver
     public InstalledFilingProfile? FindInstallation(string profileId, string digest)
         => _installations.TryGetValue((profileId, digest), out var installation) ? installation : null;
 
+    /// <summary>Return the installed versions for one exact filing profile ID in stable order.</summary>
+    public IReadOnlyList<FilingProfile> GetVersions(string profileId)
+        => _profiles.TryGetValue(profileId, out var versions)
+            ? versions.OrderBy(profile => profile.TaxonomyVersion, StringComparer.Ordinal)
+                .ThenBy(profile => profile.Digest, StringComparer.Ordinal).ToArray()
+            : Array.Empty<FilingProfile>();
+
     public FilingProfileResolution Resolve(
         MappingProject project,
         bool allowSyntheticProfile,

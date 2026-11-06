@@ -299,6 +299,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     private bool _isTaxonomySearchBusy;
     private string _taxonomySearchStatus = "Search the loaded taxonomy index.";
     private string _selectedConceptOccurrencesStatus = "Select a concept to inspect its presentation paths.";
+    private TaxonomyMigrationTargetOption? _selectedTaxonomyMigrationTarget;
+    private TaxonomyMigrationProposal? _taxonomyMigrationProposal;
+    private string _taxonomyMigrationSummary = "No alternate installed version is available for this profile.";
+    private bool _taxonomyMigrationTargetAllowed;
+    private bool _isApplyingTaxonomyMigration;
+    private string? _migrationSourceProjectSnapshot;
+    private string? _migrationSourceSavedSnapshot;
+    private string? _migrationSourcePath;
+    private int? _migrationSourceExpectedLayoutGeneration;
+    private string? _migrationDraftSnapshot;
     private bool _isBusy;
     private ActiveMappingOperation? _activeMappingOperation;
     private int _mappingOperationGeneration;
@@ -459,6 +469,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
                 AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
                 ChooseSourceCommand?.NotifyCanExecuteChanged();
+                NotifyTaxonomyMigrationCommands();
                 NotifyDestinationCommands();
                 RefreshPdfReviewCommandState();
             }
@@ -983,6 +994,40 @@ public sealed class MainWindowViewModel : ViewModelBase
         private set => Set(ref _selectedConceptOccurrencesStatus, value);
     }
 
+    public ObservableCollection<TaxonomyMigrationTargetOption> TaxonomyMigrationTargets { get; } = new();
+    public ObservableCollection<TaxonomyMigrationChange> TaxonomyMigrationChanges { get; } = new();
+    public bool HasTaxonomyMigrationTargets => TaxonomyMigrationTargets.Count > 0;
+    public string TaxonomyMigrationSummary
+    {
+        get => _taxonomyMigrationSummary;
+        private set => Set(ref _taxonomyMigrationSummary, value);
+    }
+    public TaxonomyMigrationTargetOption? SelectedTaxonomyMigrationTarget
+    {
+        get => _selectedTaxonomyMigrationTarget;
+        set
+        {
+            if (!Set(ref _selectedTaxonomyMigrationTarget, value)) return;
+            ClearTaxonomyMigrationProposal("Select a profile version and preview its migration.");
+            NotifyTaxonomyMigrationCommands();
+        }
+    }
+    public bool CanPreviewTaxonomyMigration => !IsBusy
+        && SelectedTaxonomyMigrationTarget is { } target
+        && !StringComparer.Ordinal.Equals(target.Profile.Digest, Session.Project.ProfileDigest);
+    public bool CanApplyTaxonomyMigration => !IsBusy
+        && _taxonomyMigrationTargetAllowed
+        && _migrationSourceProjectSnapshot is null
+        && _taxonomyMigrationProposal is { IsNoOp: false } proposal
+        && StringComparer.Ordinal.Equals(proposal.SourceProjectDigest, Session.Project.ComputeSemanticDigest())
+        && SelectedTaxonomyMigrationTarget is { } target
+        && StringComparer.Ordinal.Equals(target.Profile.Digest, proposal.TargetProfile.Digest);
+    public bool CanRollbackTaxonomyMigration => !IsBusy
+        && _migrationSourceProjectSnapshot is not null
+        && ((_migrationDraftSnapshot is not null
+                && StringComparer.Ordinal.Equals(_migrationDraftSnapshot, ProjectSerializer.Serialize(Session.Project)))
+            || (ProjectPath is not null && !IsProjectDirty));
+
     public ObservableCollection<ConceptRow> ConceptResults { get; } = new();
     public ObservableCollection<PresentationOccurrenceRow> SelectedConceptOccurrences { get; } = new();
     public ObservableCollection<string> SourceColumns { get; } = new();
@@ -1102,6 +1147,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand RedoCommand { get; }
     public RelayCommand SearchTaxonomyCommand { get; }
     public RelayCommand CancelTaxonomySearchCommand { get; }
+    public RelayCommand PreviewTaxonomyMigrationCommand { get; }
+    public RelayCommand CreateTaxonomyMigrationDraftCommand { get; }
+    public RelayCommand RollbackTaxonomyMigrationCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
     public RelayCommand ChooseDestinationCommand { get; }
     public RelayCommand SaveDestinationPlanCommand { get; }
@@ -1192,6 +1240,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         _session.SelectionChanged += OnSessionSelectionChanged;
+        RefreshTaxonomyMigrationTargets(_profile);
         _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         RefreshTitle();
 
@@ -1215,6 +1264,9 @@ public sealed class MainWindowViewModel : ViewModelBase
         RedoCommand = new RelayCommand(_ => Redo());
         SearchTaxonomyCommand = new RelayCommand(_ => RunSearch());
         CancelTaxonomySearchCommand = new RelayCommand(_ => CancelTaxonomySearch(), _ => CanCancelTaxonomySearch);
+        PreviewTaxonomyMigrationCommand = new RelayCommand(_ => PreviewTaxonomyMigration(), _ => CanPreviewTaxonomyMigration);
+        CreateTaxonomyMigrationDraftCommand = new RelayCommand(_ => CreateTaxonomyMigrationDraft(), _ => CanApplyTaxonomyMigration);
+        RollbackTaxonomyMigrationCommand = new RelayCommand(_ => RollbackTaxonomyMigration(), _ => CanRollbackTaxonomyMigration);
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync(), _ => !IsBusy && !IsSourceLoading);
         ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
             _ => !IsBusy && !IsDestinationLoading);
@@ -1252,6 +1304,17 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         InvalidateMappingOperationIfStale();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
+        var currentProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
+        if (!_isApplyingTaxonomyMigration && _taxonomyMigrationProposal is { } migrationProposal
+            && (!StringComparer.Ordinal.Equals(migrationProposal.SourceProjectSnapshotJson,
+                    currentProjectSnapshot)
+                || !StringComparer.Ordinal.Equals(migrationProposal.SourceProjectDigest,
+                    Session.Project.ComputeSemanticDigest())))
+            ClearTaxonomyMigrationProposal("Project changed after analysis; preview the migration again.");
+        if (!_isApplyingTaxonomyMigration && _migrationSourceProjectSnapshot is not null
+            && _migrationDraftSnapshot is not null && ProjectPath is null
+            && !StringComparer.Ordinal.Equals(_migrationDraftSnapshot, currentProjectSnapshot))
+            TaxonomyMigrationSummary = "The migration draft has unsaved edits. Undo them or save the draft as a separate project before restoring the source.";
         if (_destinationPreviewSemanticDigest is not null
             && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, Session.Project.ComputeSemanticDigest()))
             ResetDestinationPreviewSummary("The project changed after this preview; rerun the dry run to refresh its estimate.");
@@ -1262,6 +1325,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         Raise(nameof(SelectedNodeDisplayName));
         Raise(nameof(IsProjectDirty));
         RefreshTitle();
+        NotifyTaxonomyMigrationCommands();
     }
 
     private void OnSessionSelectionChanged() => SyncSelectedNodeWithSession();
@@ -1442,6 +1506,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         _session.SelectionChanged += OnSessionSelectionChanged;
+        ClearTaxonomyMigrationRollbackSnapshot();
+        RefreshTaxonomyMigrationTargets(_profile);
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = null;
@@ -4230,6 +4296,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         _session.SelectionChanged += OnSessionSelectionChanged;
+        ClearTaxonomyMigrationRollbackSnapshot();
+        RefreshTaxonomyMigrationTargets(profileAvailable ? _profile : null);
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = manager.FullPath;
@@ -4410,6 +4478,10 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var hadProjectPath = ProjectPath is not null;
         var fullPath = Path.GetFullPath(path);
+        if (!hadProjectPath && _migrationSourcePath is not null
+            && PathsEqual(_migrationSourcePath, fullPath))
+            throw new InvalidOperationException(
+                "A taxonomy migration draft must be saved separately from its pinned source project.");
         var manager = new ProjectManager(fullPath);
         var saved = manager.Save(Session.Project,
             PathsEqual(ProjectPath, manager.FullPath) ? _expectedLayoutGeneration : null);
@@ -4418,6 +4490,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _savedProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
         Raise(nameof(IsProjectDirty));
         RefreshTitle();
+        NotifyTaxonomyMigrationCommands();
         StatusText = $"Saved {Path.GetFileName(fullPath)} (semantic revision {saved.NewSemanticRevision}).";
         if (!hadProjectPath && _destinationPath is null && Session.Project.Destination is not null)
             _ = LoadSavedDestinationAsync();
@@ -4618,6 +4691,200 @@ public sealed class MainWindowViewModel : ViewModelBase
         ReplaceProfileResolutionDiagnostics(project, resolution);
         StatusText = "The project's filing profile is unresolved or owner-gated; profile-dependent actions are blocked.";
         return false;
+    }
+
+    private void RefreshTaxonomyMigrationTargets(FilingProfile? currentProfile, bool clearProposal = true)
+    {
+        TaxonomyMigrationTargets.Clear();
+        _selectedTaxonomyMigrationTarget = null;
+        Raise(nameof(SelectedTaxonomyMigrationTarget));
+        if (currentProfile is not null)
+        {
+            foreach (var profile in _profileResolver.GetVersions(currentProfile.ProfileId)
+                         .Where(profile => !StringComparer.Ordinal.Equals(profile.Digest, currentProfile.Digest)))
+                TaxonomyMigrationTargets.Add(new TaxonomyMigrationTargetOption(profile));
+        }
+        if (clearProposal)
+            ClearTaxonomyMigrationProposal(TaxonomyMigrationTargets.Count == 0
+                ? "No alternate installed version is available for this profile."
+                : "Select a profile version and preview its migration.");
+        else
+            NotifyTaxonomyMigrationCommands();
+        Raise(nameof(HasTaxonomyMigrationTargets));
+        NotifyTaxonomyMigrationCommands();
+    }
+
+    private void ClearTaxonomyMigrationProposal(string summary)
+    {
+        _taxonomyMigrationProposal = null;
+        _taxonomyMigrationTargetAllowed = false;
+        TaxonomyMigrationChanges.Clear();
+        TaxonomyMigrationSummary = summary;
+        NotifyTaxonomyMigrationCommands();
+    }
+
+    private void NotifyTaxonomyMigrationCommands()
+    {
+        Raise(nameof(HasTaxonomyMigrationTargets));
+        Raise(nameof(CanPreviewTaxonomyMigration));
+        Raise(nameof(CanApplyTaxonomyMigration));
+        Raise(nameof(CanRollbackTaxonomyMigration));
+        PreviewTaxonomyMigrationCommand?.NotifyCanExecuteChanged();
+        CreateTaxonomyMigrationDraftCommand?.NotifyCanExecuteChanged();
+        RollbackTaxonomyMigrationCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void PreviewTaxonomyMigration()
+    {
+        var selected = SelectedTaxonomyMigrationTarget;
+        if (selected is null || !CanPreviewTaxonomyMigration) return;
+        try
+        {
+            var proposal = TaxonomyMigrationService.Analyze(Session.Project, _profile, selected.Profile);
+            _taxonomyMigrationProposal = proposal;
+            _taxonomyMigrationTargetAllowed = false;
+            TaxonomyMigrationChanges.Clear();
+            foreach (var change in proposal.Changes.Take(250))
+                TaxonomyMigrationChanges.Add(change);
+            if (proposal.Changes.Count > TaxonomyMigrationChanges.Count)
+                TaxonomyMigrationChanges.Add(new TaxonomyMigrationChange(
+                    "additional-changes", "change list",
+                    $"{proposal.Changes.Count - TaxonomyMigrationChanges.Count} additional change(s) are omitted from this view.",
+                    TaxonomyMigrationSeverity.Information,
+                    Array.Empty<string>()));
+            TaxonomyMigrationSummary = proposal.Summary;
+
+            if (!proposal.IsNoOp)
+            {
+                var candidate = TaxonomyMigrationService.CreateDraft(proposal, Session.Project);
+                var resolution = _profileResolver.Resolve(candidate, allowSyntheticProfile: true);
+                if (resolution.Success)
+                    _taxonomyMigrationTargetAllowed = true;
+                else
+                {
+                    var reason = string.Join(" ", resolution.Diagnostics.Items.Take(3).Select(item => item.Message));
+                    TaxonomyMigrationSummary += $" Draft creation is blocked by the profile gate: {reason}";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ClearTaxonomyMigrationProposal($"Migration analysis failed: {ex.Message}");
+            StatusText = "Could not build the taxonomy migration proposal.";
+            return;
+        }
+        NotifyTaxonomyMigrationCommands();
+    }
+
+    private void CreateTaxonomyMigrationDraft()
+    {
+        var proposal = _taxonomyMigrationProposal;
+        if (proposal is null || !CanApplyTaxonomyMigration) return;
+        try
+        {
+            var sourceSnapshot = ProjectSerializer.Serialize(Session.Project);
+            var draft = TaxonomyMigrationService.CreateDraft(proposal, Session.Project);
+            var resolution = _profileResolver.Resolve(draft, allowSyntheticProfile: true);
+            if (!resolution.Success)
+            {
+                var reason = string.Join(" ", resolution.Diagnostics.Items.Take(3).Select(item => item.Message));
+                TaxonomyMigrationSummary += $" Draft creation is blocked by the profile gate: {reason}";
+                _taxonomyMigrationTargetAllowed = false;
+                NotifyTaxonomyMigrationCommands();
+                return;
+            }
+
+            _migrationSourceProjectSnapshot = sourceSnapshot;
+            _migrationSourceSavedSnapshot = _savedProjectSnapshot;
+            _migrationSourcePath = ProjectPath;
+            _migrationSourceExpectedLayoutGeneration = _expectedLayoutGeneration;
+            _migrationDraftSnapshot = ProjectSerializer.Serialize(draft);
+
+            _isApplyingTaxonomyMigration = true;
+            _session.Changed -= OnSessionChanged;
+            _session.SelectionChanged -= OnSessionSelectionChanged;
+            _profile = resolution.Profile!;
+            _taxonomy = CreateTaxonomyIndex(_profile);
+            _session = new DesignerSession(draft);
+            _session.Changed += OnSessionChanged;
+            _session.SelectionChanged += OnSessionSelectionChanged;
+            ProjectPath = null;
+            _expectedLayoutGeneration = draft.LayoutGeneration;
+            _savedProjectSnapshot = sourceSnapshot;
+            ClearSourceAndRunResults();
+            SelectedNode = null;
+            RefreshTaxonomyMigrationTargets(_profile, clearProposal: false);
+            TaxonomyMigrationSummary = proposal.Summary
+                + " A separate unsaved draft was created; the source revision remains unchanged.";
+            Raise(nameof(Session));
+            Raise(nameof(Nodes));
+            Raise(nameof(Edges));
+            OnSessionChanged();
+            RunSearch();
+            StatusText = "Created an independent taxonomy migration draft. Save it as a new project to preserve the pinned source revision.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not create the taxonomy migration draft: {ex.Message}";
+        }
+        finally
+        {
+            _isApplyingTaxonomyMigration = false;
+            NotifyTaxonomyMigrationCommands();
+        }
+    }
+
+    private void RollbackTaxonomyMigration()
+    {
+        if (!CanRollbackTaxonomyMigration || _migrationSourceProjectSnapshot is null) return;
+        try
+        {
+            var source = ProjectSerializer.Deserialize(_migrationSourceProjectSnapshot);
+            var resolution = _profileResolver.Resolve(source, allowSyntheticProfile: true);
+            if (!resolution.Success)
+            {
+                StatusText = "The pinned source profile is no longer available; rollback stopped without replacing the current draft.";
+                return;
+            }
+
+            var sourcePath = _migrationSourcePath;
+            var savedSnapshot = _migrationSourceSavedSnapshot ?? _migrationSourceProjectSnapshot;
+            var expectedGeneration = _migrationSourceExpectedLayoutGeneration;
+            _session.Changed -= OnSessionChanged;
+            _session.SelectionChanged -= OnSessionSelectionChanged;
+            _profile = resolution.Profile!;
+            _taxonomy = CreateTaxonomyIndex(_profile);
+            _session = new DesignerSession(source);
+            _session.Changed += OnSessionChanged;
+            _session.SelectionChanged += OnSessionSelectionChanged;
+            ProjectPath = sourcePath;
+            _expectedLayoutGeneration = expectedGeneration;
+            _savedProjectSnapshot = savedSnapshot;
+            ClearTaxonomyMigrationRollbackSnapshot();
+            ClearSourceAndRunResults();
+            SelectedNode = null;
+            RefreshTaxonomyMigrationTargets(_profile);
+            Raise(nameof(Session));
+            Raise(nameof(Nodes));
+            Raise(nameof(Edges));
+            OnSessionChanged();
+            RunSearch();
+            StatusText = "Restored the pinned source project revision. Any saved migration draft remains a separate file.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not restore the pinned source revision: {ex.Message}";
+        }
+    }
+
+    private void ClearTaxonomyMigrationRollbackSnapshot()
+    {
+        _migrationSourceProjectSnapshot = null;
+        _migrationSourceSavedSnapshot = null;
+        _migrationSourcePath = null;
+        _migrationSourceExpectedLayoutGeneration = null;
+        _migrationDraftSnapshot = null;
+        NotifyTaxonomyMigrationCommands();
     }
 
     private void ReplaceProfileResolutionDiagnostics(MappingProject project, FilingProfileResolution resolution)
