@@ -219,7 +219,22 @@ public static class XmlSerializer
 
     /// <summary>Re-read facts from a xBRL 2.1 XML instance document.</summary>
     public static IReadOnlyList<XbrlFact> ReadFacts(string xml)
+        => ReadFactsCore(xml, profile: null);
+
+    /// <summary>
+    /// Re-read facts while canonicalizing QName aliases against the selected profile.
+    /// Prefixes are document-local syntax; the expanded namespace name identifies the
+    /// concept, dimensions, members and custom unit measures.
+    /// </summary>
+    public static IReadOnlyList<XbrlFact> ReadFacts(string xml, FilingProfile profile)
     {
+        ArgumentNullException.ThrowIfNull(profile);
+        return ReadFactsCore(xml, profile);
+    }
+
+    private static IReadOnlyList<XbrlFact> ReadFactsCore(string xml, FilingProfile? profile)
+    {
+        ArgumentNullException.ThrowIfNull(xml);
         var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
@@ -269,13 +284,17 @@ public static class XmlSerializer
             if (string.IsNullOrEmpty(ctxRef) || !contexts.TryGetValue(ctxRef, out var ctx))
                 throw Unsupported($"Root element '{el.Name}' is not a supported fact with a known contextRef.");
 
-            var f = ParseFact(el, ctx, units);
+            var f = ParseFact(el, ctx, units, profile);
             if (f is not null) facts.Add(f);
         }
         return facts;
     }
 
-    private static XbrlFact? ParseFact(XElement el, XElement ctx, Dictionary<string, XElement> units)
+    private static XbrlFact? ParseFact(
+        XElement el,
+        XElement ctx,
+        Dictionary<string, XElement> units,
+        FilingProfile? profile)
     {
         EnsureOnlyAttributes(el, "contextRef", "unitRef", "decimals", "id",
             Xsi + "nil",
@@ -286,7 +305,9 @@ public static class XmlSerializer
 
         var local = el.Name.LocalName;
         var pfx = el.GetPrefixOfNamespace(el.Name.Namespace) ?? "synthetic";
-        var concept = $"{pfx}:{local}";
+        var concept = profile is null
+            ? $"{pfx}:{local}"
+            : CanonicalConceptName(el.Name.NamespaceName, local, profile);
 
         var contextChildren = ctx.Elements().ToArray();
         EnsureOnlyAttributes(ctx, "id");
@@ -330,7 +351,13 @@ public static class XmlSerializer
                 if (child.Elements().Any())
                     throw Unsupported("Explicit dimension members cannot contain nested elements.");
                 var dimName = (string?)child.Attribute("dimension") ?? "";
-                dims.Add(new Dimension(dimName, child.Value));
+                var memberName = child.Value;
+                if (profile is not null)
+                {
+                    dimName = CanonicalProfileQName(child, dimName, profile);
+                    memberName = CanonicalProfileQName(child, memberName, profile);
+                }
+                dims.Add(new Dimension(dimName, memberName));
             }
         }
 
@@ -400,8 +427,8 @@ public static class XmlSerializer
                     throw Unsupported("A divided unit contains unsupported or missing measures.");
                 foreach (var measure in numeratorChildren.Concat(denominatorChildren))
                     EnsureOnlyAttributes(measure);
-                var nums = numeratorChildren.Select(InternalMeasure).ToList();
-                var dens = denominatorChildren.Select(InternalMeasure).ToList();
+                var nums = numeratorChildren.Select(MeasureName).ToList();
+                var dens = denominatorChildren.Select(MeasureName).ToList();
                 if (nums.Intersect(dens, StringComparer.Ordinal).Any())
                     throw Unsupported("A divided unit must be expressed in its simplest form.");
                 if (nums.Count == 1 && StringComparer.Ordinal.Equals(nums[0], "pure")
@@ -419,12 +446,12 @@ public static class XmlSerializer
                 {
                     var measure = unitChildren[0];
                     EnsureOnlyAttributes(measure);
-                    unit = new XbrlUnit(InternalMeasure(measure));
+                    unit = new XbrlUnit(MeasureName(measure));
                 }
                 else
                 {
                     foreach (var measure in unitChildren) EnsureOnlyAttributes(measure);
-                    var measures = unitChildren.Select(InternalMeasure).ToList();
+                    var measures = unitChildren.Select(MeasureName).ToList();
                     if (measures.All(item => StringComparer.Ordinal.Equals(item, measures[0])))
                         unit = new XbrlUnit(measures[0], measures.Count);
                     else
@@ -481,6 +508,10 @@ public static class XmlSerializer
             Language = lang,
             ContributingSources = Array.Empty<SourceReference>()
         };
+
+        string MeasureName(XElement measure) => profile is null
+            ? InternalMeasure(measure)
+            : CanonicalProfileQName(measure, measure.Value, profile, normalizeStandardMeasures: true);
     }
 
     // ---- helpers --------------------------------------------------------------------
@@ -581,6 +612,66 @@ public static class XmlSerializer
         return ns == Iso4217.NamespaceName || ns == Xbrli.NamespaceName
             ? value[(separator + 1)..]
             : value;
+    }
+
+    private static string CanonicalConceptName(
+        string namespaceUri, string localName, FilingProfile profile)
+    {
+        var concept = profile.Concepts.FirstOrDefault(candidate =>
+            StringComparer.Ordinal.Equals(candidate.Namespace, namespaceUri)
+            && StringComparer.Ordinal.Equals(candidate.LocalName, localName));
+        if (concept is not null) return concept.QualifiedName;
+        var prefix = FindProfilePrefix(profile, namespaceUri);
+        if (prefix is null)
+            throw Unsupported($"Concept namespace '{namespaceUri}' is not declared by the selected filing profile.");
+        return $"{prefix}:{localName}";
+    }
+
+    private static string CanonicalProfileQName(
+        XElement scope, string qname, FilingProfile profile, bool normalizeStandardMeasures = false)
+    {
+        var value = qname.Trim();
+        var separator = value.IndexOf(':');
+        if (separator != value.LastIndexOf(':'))
+            throw Unsupported($"QName '{qname}' is invalid.");
+        var prefix = separator < 0 ? null : value[..separator];
+        var localName = separator < 0 ? value : value[(separator + 1)..];
+        try
+        {
+            XmlConvert.VerifyNCName(localName);
+            if (prefix is not null) XmlConvert.VerifyNCName(prefix);
+        }
+        catch (XmlException)
+        {
+            throw Unsupported($"QName '{qname}' is invalid.");
+        }
+
+        var namespaceUri = prefix is null
+            ? scope.GetDefaultNamespace().NamespaceName
+            : scope.GetNamespaceOfPrefix(prefix)?.NamespaceName;
+        if (string.IsNullOrEmpty(namespaceUri))
+            throw Unsupported($"QName '{qname}' has no namespace declaration in the XML instance.");
+        if (normalizeStandardMeasures && (namespaceUri == Iso4217.NamespaceName || namespaceUri == Xbrli.NamespaceName))
+            return localName;
+
+        var canonicalPrefix = FindProfilePrefix(profile, namespaceUri);
+        if (canonicalPrefix is null)
+            throw Unsupported($"QName '{qname}' uses a namespace that is not declared by the selected filing profile.");
+        return $"{canonicalPrefix}:{localName}";
+    }
+
+    private static string? FindProfilePrefix(FilingProfile profile, string namespaceUri)
+    {
+        var prefixes = profile.NamespaceUris
+            .Where(entry => StringComparer.Ordinal.Equals(entry.Value, namespaceUri))
+            .Select(entry => entry.Key)
+            .Concat(profile.Concepts
+                .Where(concept => StringComparer.Ordinal.Equals(concept.Namespace, namespaceUri))
+                .Select(concept => SplitQName(concept.QualifiedName).prefix)
+                .OfType<string>())
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal);
+        return prefixes.FirstOrDefault();
     }
 
     private static string? Iso(DateOnly? d) => d?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);

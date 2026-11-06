@@ -70,6 +70,45 @@ public sealed class XmlExportTests
     }
 
     [Fact]
+    public void ProfileAwareReader_NormalizesXmlQNameAliasesByNamespaceUri()
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 1_250_000m,
+            Decimals = -3,
+            Dimensions = new[]
+            {
+                new Dimension(SyntheticProfile.Qualified("Region"), SyntheticProfile.Qualified("EMEA"))
+            }
+        };
+        var xml = XmlSerializer.Serialize(Profile, new[] { fact })
+            .Replace("xmlns:synthetic=", "xmlns:taxonomy=", StringComparison.Ordinal)
+            .Replace("<synthetic:Revenue", "<taxonomy:Revenue", StringComparison.Ordinal)
+            .Replace("</synthetic:Revenue", "</taxonomy:Revenue", StringComparison.Ordinal)
+            .Replace("dimension=\"synthetic:Region\"", "dimension=\"taxonomy:Region\"", StringComparison.Ordinal)
+            .Replace(">synthetic:EMEA<", ">taxonomy:EMEA<", StringComparison.Ordinal)
+            .Replace("xmlns:iso4217=", "xmlns:currency=", StringComparison.Ordinal)
+            .Replace("iso4217:", "currency:", StringComparison.Ordinal);
+
+        var reopened = Assert.Single(XmlSerializer.ReadFacts(xml, Profile));
+
+        Assert.Equal(fact.SemanticKey(), reopened.SemanticKey());
+        Assert.Equal(SyntheticProfile.Qualified("Revenue"), reopened.ConceptName);
+        Assert.Equal(SyntheticProfile.Qualified("Region"), Assert.Single(reopened.Dimensions).Name);
+        Assert.Equal(SyntheticProfile.Qualified("EMEA"), Assert.Single(reopened.Dimensions).MemberName);
+        Assert.Equal("QAR", reopened.Unit?.Measure);
+
+        var unknownNamespace = xml.Replace(SyntheticProfile.Namespace, "urn:unapproved:taxonomy",
+            StringComparison.Ordinal);
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unknownNamespace, Profile));
+    }
+
+    [Fact]
     public void BothUnitForms_BlockExport_WithUnsupportedConstruct()
     {
         var bad = new XbrlFact
