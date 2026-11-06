@@ -357,3 +357,15 @@ Verification: the focused Release Desktop test passed 1/1, and the full Release
 solution suite passed 710 tests with five Arelle-gated skips. This is headless
 view-model coverage. Native visual/browser reconciliation, installed-profile runs,
 and one-to-many/null/duplicate UI qualification remain open.
+
+## MAP08 one-to-many contributor evidence in Desktop preview
+
+`MappingOperationViewModelTests.JoinedPreviewShowsOneToManyContributorsAndKeepsMissingDistinctFromZero`
+uses a two-sheet workbook where one Revenue transaction joins to two matching
+dimension rows. The view-model preview must show Revenue 20, retain the transaction
+amount and both matched dimension-row locators, omit the missing amount, and retain
+the separate numeric-zero fact. The fixture is synthetic and the test is headless.
+
+Verification: the focused Release Desktop test passed 1/1, and the full Release
+solution suite passed 711 tests with five Arelle-gated skips. Native visual/browser
+acceptance and broader null/duplicate/one-to-many user journeys remain open.

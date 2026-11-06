@@ -118,6 +118,43 @@ public static class TestFixtures
     }
 
     /// <summary>
+    /// Workbook for Desktop preview drill-down: one transaction joins to two matching
+    /// dimension rows, alongside a missing amount and an explicit numeric zero.
+    /// </summary>
+    public static string MaterializeOneToManyRevenueWorkbook(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "one-to-many-revenue.xlsx");
+        using var wb = new XLWorkbook();
+        var transactions = wb.Worksheets.Add("Transactions");
+        transactions.Cell("A3").Value = "Account";
+        transactions.Cell("B3").Value = "Line";
+        transactions.Cell("C3").Value = "Current";
+        transactions.Cell("A4").Value = "acct-revenue";
+        transactions.Cell("B4").Value = "Revenue";
+        transactions.Cell("C4").Value = 10m;
+        transactions.Cell("A5").Value = "acct-missing";
+        transactions.Cell("B5").Value = "Missing amount";
+        transactions.Cell("A6").Value = "acct-zero";
+        transactions.Cell("B6").Value = "Zero";
+        transactions.Cell("C6").Value = 0m;
+
+        var dimensions = wb.Worksheets.Add("Dimensions");
+        dimensions.Cell("A3").Value = "Account";
+        dimensions.Cell("B3").Value = "Entity";
+        dimensions.Cell("A4").Value = "acct-revenue";
+        dimensions.Cell("B4").Value = "Revenue";
+        dimensions.Cell("A5").Value = "acct-revenue";
+        dimensions.Cell("B5").Value = "Revenue";
+        dimensions.Cell("A6").Value = "acct-missing";
+        dimensions.Cell("B6").Value = "Missing amount";
+        dimensions.Cell("A7").Value = "acct-zero";
+        dimensions.Cell("B7").Value = "Zero";
+        wb.SaveAs(path);
+        return path;
+    }
+
+    /// <summary>
     /// A minimal revenue-mapping project on top of the fixture workbook:
     /// ExcelField(Revenue column) -> Scale(1000) -> FactConstruct(Revenue, QAR, decimals=-3).
     /// <paramref name="approved"/> adds an <see cref="ApprovalRecord"/> for the initial
@@ -412,6 +449,157 @@ public static class TestFixtures
             SourcePortName = "keys",
             TargetNodeId = factNode.NodeId,
             TargetPortName = "entity"
+        });
+        return project;
+    }
+
+    /// <summary>
+    /// Joins transaction rows to dimension rows with duplicate-match expansion, then
+    /// aggregates the joined amounts by the dimension entity for Desktop drill-down.
+    /// </summary>
+    public static MappingProject BuildOneToManyGroupedRevenueMappingProject(string workbookPath)
+    {
+        var project = BuildRevenueMappingProject(workbookPath);
+        var transactionBinding = project.Bindings.Single();
+        project.Bindings[0] = transactionBinding with
+        {
+            DisplayName = "Transactions",
+            Configuration = new Dictionary<string, object?>
+            {
+                ["sheet"] = "Transactions",
+                ["headerRow"] = "3"
+            }
+        };
+        var dimensionBindingId = Id.New();
+        project.Bindings.Add(new SourceBinding
+        {
+            BindingId = dimensionBindingId,
+            Kind = "excel",
+            DisplayName = "Dimensions",
+            Locator = workbookPath,
+            Configuration = new Dictionary<string, object?>
+            {
+                ["sheet"] = "Dimensions",
+                ["headerRow"] = "3"
+            }
+        });
+
+        var durationNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.BuildDurationDate);
+        var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+        var transactionCollect = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.CollectRows,
+            DisplayName = "Collect transactions",
+            Parameters = new Dictionary<string, object?> { ["binding"] = transactionBinding.BindingId },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("items", PortShape.Record, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(0, 0)
+        };
+        var dimensionCollect = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.CollectRows,
+            DisplayName = "Collect dimensions",
+            Parameters = new Dictionary<string, object?> { ["binding"] = dimensionBindingId },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("items", PortShape.Record, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(1, 0)
+        };
+        var join = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.Join,
+            DisplayName = "Match transaction dimensions",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["leftKey"] = "Account",
+                ["rightKey"] = "Account",
+                ["cardinality"] = "Inner",
+                ["duplicateKey"] = "All"
+            },
+            InputPorts = new List<PortDefinition>
+            {
+                new("left", PortShape.Record, PortCardinality.Collection),
+                new("right", PortShape.Record, PortCardinality.Collection)
+            },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("rows", PortShape.Record, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(1, 1)
+        };
+        var group = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.GroupBy,
+            DisplayName = "Sum joined revenue",
+            Parameters = new Dictionary<string, object?>
+            {
+                ["keys"] = "Entity",
+                ["sumField"] = "Current"
+            },
+            InputPorts = new List<PortDefinition>
+            {
+                new("items", PortShape.Record, PortCardinality.Collection)
+            },
+            OutputPorts = new List<PortDefinition>
+            {
+                new("values", PortShape.Decimal, PortCardinality.Collection),
+                new("keys", PortShape.String, PortCardinality.Collection)
+            },
+            Layout = new LayoutPosition(1, 2)
+        };
+
+        project.Nodes.RemoveAll(node => node.NodeType is NodeTypeConstants.ExcelField or NodeTypeConstants.Scale
+            || node.NodeType == NodeTypeConstants.Constant
+                && StringComparer.Ordinal.Equals(node.DisplayName, "Entity"));
+        var factIndex = project.Nodes.FindIndex(node => StringComparer.Ordinal.Equals(node.NodeId, factNode.NodeId));
+        project.Nodes[factIndex] = factNode with
+        {
+            DisplayName = "Joined Revenue fact",
+            InputPorts = new List<PortDefinition>
+            {
+                new("values", PortShape.Decimal, PortCardinality.Collection, IsRequired: false),
+                new("entity", PortShape.String, PortCardinality.Collection),
+                new("period", PortShape.Instant, PortCardinality.Single, IsRequired: false)
+            }
+        };
+        project.Nodes.AddRange(new[] { transactionCollect, dimensionCollect, join, group });
+
+        var retainedEdges = project.Edges.Where(edge => edge.TargetNodeId == durationNode.NodeId
+            || edge.TargetNodeId == factNode.NodeId && StringComparer.Ordinal.Equals(edge.TargetPortName, "period"))
+            .ToArray();
+        project.Edges.Clear();
+        project.Edges.AddRange(retainedEdges);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = transactionCollect.NodeId, SourcePortName = "items",
+            TargetNodeId = join.NodeId, TargetPortName = "left"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = dimensionCollect.NodeId, SourcePortName = "items",
+            TargetNodeId = join.NodeId, TargetPortName = "right"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = join.NodeId, SourcePortName = "rows",
+            TargetNodeId = group.NodeId, TargetPortName = "items"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = group.NodeId, SourcePortName = "values",
+            TargetNodeId = factNode.NodeId, TargetPortName = "values"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = group.NodeId, SourcePortName = "keys",
+            TargetNodeId = factNode.NodeId, TargetPortName = "entity"
         });
         return project;
     }
