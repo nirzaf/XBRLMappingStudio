@@ -181,6 +181,110 @@ public sealed class DestinationPlanTests
         }
     }
 
+    [Theory]
+    [InlineData("csv", "csv-records-v1", "nil-facts.csv")]
+    [InlineData("excel", "xlsx-records-v1", "nil-facts.xlsx")]
+    [InlineData("json", "json-records-v1", "nil-facts.json")]
+    [InlineData("xml", "xml-records-v1", "nil-facts.xml")]
+    public async Task PublishFileDestination_PreservesNilFactSemanticsAcrossFormats(
+        string kind, string format, string fileName)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-file-nil-destination-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var inputPath = Path.Combine(directory, "nil-input.json");
+            await File.WriteAllTextAsync(inputPath, "[{\"Line\":\"Revenue\",\"Current\":null}]");
+            var project = TestFixtures.BuildRevenueMappingProject(inputPath);
+            var binding = project.Bindings.Single();
+            project.Bindings[0] = binding with
+            {
+                Kind = "json",
+                DisplayName = "Nil facts",
+                Configuration = new Dictionary<string, object?>()
+            };
+            var factNodeIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var factNode = project.Nodes[factNodeIndex];
+            project.Nodes[factNodeIndex] = factNode with
+            {
+                Parameters = new Dictionary<string, object?>(factNode.Parameters, StringComparer.Ordinal)
+                {
+                    ["decimals"] = "INF"
+                }
+            };
+            project.Destination = new DestinationPlan
+            {
+                Kind = kind,
+                Locator = fileName,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = format,
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, "json", inputPath)
+                },
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable,
+                string.Join(Environment.NewLine, result.Diagnostics.Items.Select(item => item.Message)));
+            var nilFact = Assert.Single(result.Facts);
+            Assert.True(nilFact.IsNil);
+            Assert.Null(nilFact.Value);
+
+            var output = await service.PublishFileDestinationAsync(project, result, directory,
+                allowSyntheticProfile: true, CancellationToken.None);
+            Assert.True(File.Exists(output.Path));
+
+            if (kind == "json")
+            {
+                using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(output.Path));
+                var record = Assert.Single(document.RootElement.EnumerateArray());
+                Assert.Equal(JsonValueKind.Null, record.GetProperty("value").ValueKind);
+                Assert.True(record.GetProperty("is_nil").GetBoolean());
+                Assert.Equal("duration", record.GetProperty("period_kind").GetString());
+            }
+            else if (kind == "xml")
+            {
+                var document = XDocument.Load(output.Path);
+                var record = Assert.Single(document.Root!.Elements()).Elements().ToArray();
+                XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
+                var value = Assert.Single(record, element => element.Name.LocalName == "value");
+                Assert.Equal("true", (string?)value.Attribute(xsi + "nil"));
+                Assert.Equal("true", record.Single(element => element.Name.LocalName == "is_nil").Value);
+                Assert.Equal("duration", record.Single(element => element.Name.LocalName == "period_kind").Value);
+            }
+            else
+            {
+                var connection = new SourceConnection("output", kind, output.Path);
+                ISourceAdapter reader = kind == "csv" ? new CsvAdapter() : new ExcelAdapter();
+                var schema = await reader.InspectSchemaAsync(connection, CancellationToken.None);
+                var rows = new List<DataRecord>();
+                await foreach (var row in reader.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
+                var record = Assert.Single(rows);
+                Assert.True(record["value"].IsMissing);
+                Assert.True(record["is_nil"].AsBoolean());
+                Assert.Equal("duration", record["period_kind"].AsString());
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
     [Fact]
     public async Task PublishFileDestination_RestoresPriorBytesWhenAdapterFailsAfterReplacement()
     {

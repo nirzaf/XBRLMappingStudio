@@ -381,3 +381,15 @@ not qualify a complete native workflow.
 Verification: the focused Release Desktop test passed 1/1, and the full Release
 solution suite passed 712 tests with five Arelle-gated skips. Native visual/browser
 acceptance and broader duplicate/null/one-to-many user journeys remain open.
+
+## DST-05 nil fact semantics through versioned file destinations
+
+`DestinationPlanTests.PublishFileDestination_PreservesNilFactSemanticsAcrossFormats`
+executes a JSON-source null through the shared mapping and publication service for
+CSV, XLSX, JSON and XML. It verifies the produced row remains a nil Revenue fact.
+CSV/XLSX expose the nil through `is_nil=true` with an empty value cell; JSON uses a
+null value and XML uses `xsi:nil`. Arbitrary nullable-field null/missing separation
+remains unsupported by the CSV/XLSX record contracts.
+
+Verification: the focused Release integration test passed 4/4 contract cases, and
+the full Release solution suite passed 716 tests with five Arelle-gated skips.
