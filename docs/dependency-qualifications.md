@@ -10,17 +10,27 @@ changing the pin.
 - Every solution project has a checked-in `packages.lock.json`. Repository-wide
   restore targets `win-x64`, `linux-x64`, and `osx-x64`; the lock files record exact
   package versions, dependency edges, and NuGet content hashes for those targets.
+  Desktop also has `packages.Release.lock.json`: its Debug-only Avalonia diagnostics
+  package makes the Debug and Release dependency graphs differ.
 - CI and release restore use `--locked-mode`. Release publishing restores the
-  complete locked RID graph first and publishes each RID with `--no-restore`.
+  complete Release-configuration locked RID graph first and publishes each RID with
+  `--no-restore`; the Release graph excludes the Debug-only diagnostics package.
 - The Arelle worker uses `tools/worker/requirements.lock`, which pins package
-  versions and wheel hashes; CI installs it with `pip install --require-hashes`.
-- CI uploads the machine-readable direct/transitive NuGet vulnerability report with
-  each OS test artifact. PDF extraction's Apache-2.0 license and API qualification
-  are recorded below.
-- This is dependency-lock and vulnerability-review evidence, not a complete SPDX
-  inventory. Per-file license manifests for every transitive .NET/Python/native
-  component, OCR/rasterizer dependencies, platform artifact hashes, and redistribution
-  review remain open.
+  versions and Python distribution hashes; CI installs it with `pip install --require-hashes`.
+- `tools/dependency_inventory.py` builds an SPDX 2.3 component inventory from the
+  CLI/Desktop release lock graphs and worker lock. NuGet package hashes and
+  machine-readable license expressions are included where declared; Python SPDX
+  expressions are copied only from installed wheel `License-Expression` metadata.
+  Missing license assertions stay `NOASSERTION`, and accepted worker distribution hashes
+  remain listed in each Python component's evidence comment.
+- CI and release verification upload the SPDX document. The draft GitHub Release
+  includes the SBOM and `SHA256SUMS.txt` covering the release assets. CI also uploads
+  the direct/transitive NuGet vulnerability report with each OS test artifact.
+- This is component-level SBOM and dependency-lock evidence, not per-file license
+  analysis or redistribution approval. Package-contained native components are
+  represented at package level; no OCR/rasterizer is currently installed or qualified.
+  Any `NOASSERTION` entry, per-file license obligations, and redistribution terms
+  require review before distribution.
 
 ## PDF text extraction
 

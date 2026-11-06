@@ -57,11 +57,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install pinned worker dependency metadata
+        run: python -m pip install --require-hashes -r tools/worker/requirements.lock
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
       - run: dotnet restore ${{ env.SOLUTION }} --locked-mode
+      - name: Generate SPDX release dependency inventory
+        run: python tools/dependency_inventory.py --output artifacts/dependencies.spdx.json
       - run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
       - run: dotnet test ${{ env.SOLUTION }} -c Release --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-sbom
+          path: artifacts/dependencies.spdx.json
+          if-no-files-found: error
 
   publish-cli:
     name: CLI ${{ matrix.rid }}
@@ -82,7 +93,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
       - name: Restore locked multi-RID NuGet graph
-        run: dotnet restore src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj --locked-mode
+        run: dotnet restore src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj --locked-mode -p:Configuration=Release
       - name: Publish self-contained CLI
         run: >
           dotnet publish src/XBRLMappingStudio.CLI -c Release -r ${{ matrix.rid }}
@@ -118,7 +129,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
       - name: Restore locked multi-RID NuGet graph
-        run: dotnet restore src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj --locked-mode
+        run: dotnet restore src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj --locked-mode -p:Configuration=Release
       - name: Publish self-contained Desktop (unsigned portable build)
         run: >
           dotnet publish src/XBRLMappingStudio.Desktop -c Release -r ${{ matrix.rid }}
@@ -149,6 +160,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate release asset checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -174,3 +194,7 @@ jobs:
             - `desktop-<version>-win-x64.tar.gz`
             - `desktop-<version>-linux-x64.tar.gz`
             - `desktop-<version>-osx-x64.tar.gz`
+
+            ### Dependency evidence
+            - `dependencies.spdx.json` — locked release dependency and license inventory
+            - `SHA256SUMS.txt` — hashes for the SBOM and every packaged asset

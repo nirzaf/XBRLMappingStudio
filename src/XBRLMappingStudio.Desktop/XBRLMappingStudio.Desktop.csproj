@@ -11,6 +11,10 @@
     <AssemblyName>XBRLMappingStudio.Desktop</AssemblyName>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)/packages.Release.lock.json</NuGetLockFilePath>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="..\..\tools\worker\arelle_worker.py" Link="worker\arelle_worker.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\tools\worker\taxonomy\**\*" Link="worker\taxonomy\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

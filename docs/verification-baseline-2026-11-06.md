@@ -158,8 +158,28 @@ A local `dotnet list XBRLMappingStudio.slnx package --vulnerable
 and contained zero vulnerable package records at verification time. CI now uploads
 the equivalent per-OS JSON report with test results.
 
-Release publish probes succeeded with the locked multi-RID restore followed by
-`--no-restore`: CLI `win-x64`, `linux-x64`, and `osx-x64`; Desktop `win-x64`.
-`git diff --check` passed. These checks do not close OPS-05: complete SPDX/per-file
+CLI release publish probes succeeded with the locked multi-RID restore followed by
+`--no-restore` for `win-x64`, `linux-x64`, and `osx-x64`. Desktop initially restored
+under Debug and its publish included the Debug-only diagnostics package; this was
+corrected with `packages.Release.lock.json` and a Release-configuration restore.
+The Release `win-x64` Desktop publish then succeeded with `--no-restore`, and both
+its output directory and `.deps.json` excluded `Avalonia.Diagnostics`. `git diff --check`
+passed. These checks do not close OPS-05: complete SPDX/per-file
 license inventories (including native/OCR components), redistribution review,
 artifact hashes, and locked release bundles remain open.
+
+## OPS-05 SPDX and release-asset evidence
+
+`tools/dependency_inventory.py` and its standard-library tests generate an SPDX
+2.3 document for the CLI/Release-Desktop package graphs and pinned worker requirements.
+The local generation parsed 69 unique components and 147 dependency/document
+relationships; all referenced SPDX IDs resolved. The current local Python 3.14
+environment does not contain the pinned worker packages, so its output retained
+`NOASSERTION` for unavailable wheel license metadata. CI and release verification
+install the exact hash-locked worker dependencies before generation, and preserve
+any remaining unknown licenses as `NOASSERTION` for review.
+
+Release packaging now hashes every uploaded archive and the SPDX document into
+`SHA256SUMS.txt`. This provides package/artifact provenance evidence, not per-file
+license review, redistribution approval, native/OCR qualification, signatures, or
+clean-machine installation evidence.

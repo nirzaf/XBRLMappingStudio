@@ -102,6 +102,26 @@ jobs:
           XMS_ARELLE_PYTHON: python
         run: dotnet test tests/XBRLMappingStudio.Integration.Tests/XBRLMappingStudio.Integration.Tests.csproj -c Release --filter FullyQualifiedName~ArelleExecutionTests
 
+      - name: Test locked dependency inventory generator
+        run: python -m unittest discover -s tools/tests -v
+
+      - name: Restore locked release dependency graphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj --locked-mode -p:Configuration=Release
+          dotnet restore src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj --locked-mode -p:Configuration=Release
+
+      - name: Generate SPDX release dependency inventory
+        run: python tools/dependency_inventory.py --output artifacts/dependencies.spdx.json
+
+      - name: Upload SPDX release dependency inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-sbom
+          path: artifacts/dependencies.spdx.json
+          if-no-files-found: error
+
   hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest
