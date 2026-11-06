@@ -1,10 +1,12 @@
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
 using XBRLMappingStudio.XBRL;
+using System.Text.Json;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
@@ -77,6 +79,228 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.False(result.IsPublishable);
         Assert.Contains(result.Manifest.Diagnostics,
             d => d.IsBlocking && d.Code == DiagnosticCodes.XbrValidationFailed);
+    }
+
+    [Fact]
+    public async Task WorkerSuccess_WithoutCompletionReport_IsIncompleteAndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(req => new WorkerResponse(
+            req.OperationId, WorkerStatus.Success, Result: null, Array.Empty<Diagnostic>(), null),
+            autoCompletion: false);
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrValidationIncomplete && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task ZeroFactRun_IsIncompleteAndNeverRequestsReportValidation()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var source = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
+        source.Parameters["rowFilterValue"] = "No matching reporting row";
+        var validationRequests = 0;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation == WorkerOperations.ValidateReport) validationRequests++;
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null);
+        });
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Empty(result.Facts);
+        Assert.Equal(0, validationRequests);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrRequiredCheckMissing && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task WorkerSuccess_WithMissingMandatoryRule_IsIncompleteAndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+            var requirements = request.ValidationRequirements!;
+            var report = CompletionResult(requirements, requiredRules: requirements.RequiredRules.Skip(1).ToArray());
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, report,
+                Array.Empty<Diagnostic>(), null);
+        }, autoCompletion: false);
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrRequiredCheckMissing && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task WorkerCancelled_WithFailedMandatoryRule_IsInvalidMapping()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(request => request.Operation == WorkerOperations.ValidateReport
+            ? new WorkerResponse(request.OperationId, WorkerStatus.Cancelled,
+                FailedCompletionResult(request.ValidationRequirements!), Array.Empty<Diagnostic>(), "cancelled")
+            : new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null), autoCompletion: false);
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.InvalidMapping, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Single(result.Facts);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrValidationFailed && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task ArelleUnavailableRules_AreCoveredByLocalSyntheticValidator()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(request => request.Operation == WorkerOperations.ValidateReport
+            ? new WorkerResponse(request.OperationId, WorkerStatus.Success,
+                UnavailableRulesCompletionResult(request.ValidationRequirements!), Array.Empty<Diagnostic>(), null)
+            : new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null), autoCompletion: false);
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+        Assert.True(result.IsPublishable);
+        Assert.DoesNotContain(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrRequiredCheckMissing && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task SyntheticRun_WithUnavailableRequiredPlugin_IsIncompleteAndNotPublishable()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var baseProfile = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = baseProfile.ProfileId,
+            Digest = baseProfile.Digest,
+            Concepts = baseProfile.Concepts,
+            SupportedUnits = baseProfile.SupportedUnits,
+            TaxonomyVersion = baseProfile.TaxonomyVersion,
+            DimensionDomains = baseProfile.DimensionDomains,
+            OutputFormat = baseProfile.OutputFormat,
+            NamespaceUris = baseProfile.NamespaceUris,
+            TaxonomyUrls = baseProfile.TaxonomyUrls,
+            PackageHashes = baseProfile.PackageHashes,
+            RequiredChecks = baseProfile.RequiredChecks,
+            RequiredPlugins = new HashSet<string>(new[] { "validate/EFM" }, StringComparer.Ordinal)
+        };
+        var worker = new FakeWorker(request => request.Operation == WorkerOperations.ValidateReport
+            ? new WorkerResponse(request.OperationId, WorkerStatus.Success,
+                UnavailableRulesCompletionResult(request.ValidationRequirements!), Array.Empty<Diagnostic>(), null)
+            : new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null), autoCompletion: false);
+
+        var result = await new MappingJobService(profile, worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrWorkerUnavailable && diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public async Task StagedArtifactValidation_UsesExactStagedBytesForLocalSyntheticRuleEvidence()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var validationCount = 0;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+            validationCount++;
+            var completion = validationCount == 1
+                ? CompletionResult(request.ValidationRequirements!)
+                : UnavailableRulesCompletionResult(request.ValidationRequirements!);
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, completion,
+                Array.Empty<Diagnostic>(), null);
+        }, autoCompletion: false);
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        var run = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(run.IsPublishable);
+
+        var stagedPath = Path.Combine(_dir, "synthetic-local-rule-validation.json");
+        await File.WriteAllTextAsync(stagedPath, run.XbrlJson, new System.Text.UTF8Encoding(false));
+        // The mutable result facts are deliberately inconsistent with the digest-bound
+        // staged bytes; local rule completion must be derived from the latter.
+        var inconsistentResult = run with { Facts = Array.Empty<XbrlFact>() };
+        var validatedDigest = await service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "published-report.json"), inconsistentResult);
+
+        Assert.Equal(run.Manifest.Outputs.Single(output => output.Kind == "xbrl-json").Digest, validatedDigest);
+        Assert.Equal(validatedDigest, run.Manifest.ValidatedArtifactDigest);
+    }
+
+    [Fact]
+    public async Task LocalSyntheticWorker_ReturnsCompleteProfileBoundValidationReport()
+    {
+        var profile = SyntheticProfile.Build();
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "completion-fixture",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("USD"),
+            Value = 123m,
+            Decimals = 0
+        };
+        var request = new WorkerRequest(WorkerOperations.ValidateReport, "completion-op", "completion-job",
+            profile.Digest, DateTimeOffset.UtcNow.AddMinutes(1),
+            JsonSerializer.SerializeToElement(OimSerializer.Serialize(profile, new[] { fact })))
+        {
+            ValidationRequirements = new ValidationRequirements(profile.ProfileId, profile.Digest,
+                profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+                profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray())
+        };
+        await using var worker = new LocalSyntheticWorker(profile);
+        var response = await worker.RequestAsync(request, CancellationToken.None);
+
+        Assert.Equal(WorkerStatus.Success, response.Status);
+        var assessment = ValidationCompletionReportValidator.Evaluate(response.Result, profile);
+        Assert.Equal(ValidationCompletionState.Complete, assessment.State);
+    }
+
+    [Fact]
+    public void CompletionReport_FromDifferentProfileIsIncomplete()
+    {
+        var profile = SyntheticProfile.Build();
+        var requirements = new ValidationRequirements(profile.ProfileId, profile.Digest,
+            profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+            profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray());
+        var report = CompletionResult(requirements, profileId: "another-profile");
+
+        var assessment = ValidationCompletionReportValidator.Evaluate(report, profile);
+
+        Assert.Equal(ValidationCompletionState.Incomplete, assessment.State);
+        Assert.Contains("does not match", assessment.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -249,6 +473,37 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StagedArtifactValidation_RejectsMissingCompletionReport()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var validationCount = 0;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation != WorkerOperations.ValidateReport)
+                return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                    Array.Empty<Diagnostic>(), null);
+            validationCount++;
+            var result = validationCount == 1
+                ? CompletionResult(request.ValidationRequirements!)
+                : (JsonElement?)null;
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, result,
+                Array.Empty<Diagnostic>(), null);
+        }, autoCompletion: false);
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        var run = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(run.IsPublishable);
+
+        var stagedPath = Path.Combine(_dir, "missing-completion-report.json");
+        await File.WriteAllTextAsync(stagedPath, run.XbrlJson, new System.Text.UTF8Encoding(false));
+        var exception = await Assert.ThrowsAsync<PublicationException>(() => service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "published-report.json"), run));
+
+        Assert.Equal(DiagnosticCodes.XbrValidationIncomplete, exception.Code);
+        Assert.Null(run.Manifest.ValidatedArtifactDigest);
+    }
+
+    [Fact]
     public async Task IncompleteStagedValidation_AbortsAndPreservesPriorDestination()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
@@ -407,6 +662,24 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task WorkerSuccessWithV1Protocol_IsRejectedByV2ValidationContract()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var worker = new FakeWorker(_ => throw new InvalidOperationException(
+            "Request must not be sent after a v1 handshake."),
+            new WorkerHandshake(1, "fake/v1", new[] { WorkerOperations.ValidateReport }));
+
+        var result = await new MappingJobService(SyntheticProfile.Build(), worker).RunAsync(
+            project, Connections(project, _workbookPath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.WkrProtocolVersionMismatch && diagnostic.IsBlocking);
+    }
+
+    [Fact]
     public async Task TaxonomyPreflightFailureStopsBeforeMissingSourceIsRead()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
@@ -451,16 +724,86 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     /// <summary>Configurable in-process worker: answers every request via <paramref name="responder"/>.</summary>
+    private static JsonElement CompletionResult(
+        ValidationRequirements requirements,
+        IReadOnlyList<string>? requiredRules = null,
+        IReadOnlyList<string>? requiredPlugins = null,
+        string? profileId = null)
+        => JsonSerializer.SerializeToElement(new
+        {
+            validationCompletion = new
+            {
+                profileId = profileId ?? requirements.ProfileId,
+                profileDigest = requirements.ProfileDigest,
+                requiredRules = (requiredRules ?? requirements.RequiredRules).Select(identifier => new
+                {
+                    identifier,
+                    status = "pass"
+                }),
+                requiredPlugins = (requiredPlugins ?? requirements.RequiredPlugins).Select(identifier => new
+                {
+                    identifier,
+                    status = "pass"
+                })
+            }
+        });
+
+    private static JsonElement UnavailableRulesCompletionResult(ValidationRequirements requirements)
+        => JsonSerializer.SerializeToElement(new
+        {
+            validationCompletion = new
+            {
+                profileId = requirements.ProfileId,
+                profileDigest = requirements.ProfileDigest,
+                requiredRules = requirements.RequiredRules.Select(identifier => new
+                {
+                    identifier,
+                    status = "unavailable",
+                    detail = "Arelle did not provide a machine-readable rule completion signal."
+                }),
+                requiredPlugins = requirements.RequiredPlugins.Select(identifier => new
+                {
+                    identifier,
+                    status = "unavailable",
+                    detail = "Arelle did not provide a machine-readable plugin load signal."
+                })
+            }
+        });
+
+    private static JsonElement FailedCompletionResult(ValidationRequirements requirements)
+        => JsonSerializer.SerializeToElement(new
+        {
+            validationCompletion = new
+            {
+                profileId = requirements.ProfileId,
+                profileDigest = requirements.ProfileDigest,
+                requiredRules = requirements.RequiredRules.Select((identifier, index) => new
+                {
+                    identifier,
+                    status = index == 0 ? "fail" : "pass",
+                    detail = index == 0 ? "Mandatory rule failed." : null
+                }),
+                requiredPlugins = requirements.RequiredPlugins.Select(identifier => new
+                {
+                    identifier,
+                    status = "pass"
+                })
+            }
+        });
+
     private sealed class FakeWorker : IWorkerClient
     {
         private readonly Func<WorkerRequest, WorkerResponse> _responder;
         private readonly WorkerHandshake _handshake;
+        private readonly bool _autoCompletion;
 
-        public FakeWorker(Func<WorkerRequest, WorkerResponse> responder, WorkerHandshake? handshake = null)
+        public FakeWorker(Func<WorkerRequest, WorkerResponse> responder, WorkerHandshake? handshake = null,
+            bool autoCompletion = true)
         {
             _responder = responder;
             _handshake = handshake ?? new WorkerHandshake(WorkerProtocol.CurrentVersion, "fake/1.0",
                 new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport });
+            _autoCompletion = autoCompletion;
         }
 
         public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
@@ -469,7 +812,12 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(_responder(request));
+            var response = _responder(request);
+            if (_autoCompletion && request.Operation == WorkerOperations.ValidateReport
+                && response.Status == WorkerStatus.Success && response.Result is null
+                && request.ValidationRequirements is { } requirements)
+                response = response with { Result = CompletionResult(requirements) };
+            return Task.FromResult(response);
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

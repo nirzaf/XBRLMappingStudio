@@ -61,13 +61,21 @@ class ArelleWorkerTests(unittest.TestCase):
         )
 
     def request(self, value):
+        profile = self.args.profile_manifest_data or {}
+        profile_digest = profile.get("profileDigest", "test")
         return {
             "operation": "validate-report",
             "operationId": "test-op",
             "jobId": "test-job",
-            "profileDigest": "test",
+            "profileDigest": profile_digest,
             "deadlineUtc": "2999-01-01T00:00:00Z",
             "payload": json.dumps(value),
+            "validationRequirements": {
+                "profileId": profile.get("profileId", "test-profile"),
+                "profileDigest": profile_digest,
+                "requiredRules": profile.get("requiredChecks", []),
+                "requiredPlugins": profile.get("requiredPlugins", []),
+            },
         }
 
     def handshake_request(self):
@@ -77,7 +85,8 @@ class ArelleWorkerTests(unittest.TestCase):
             "jobId": "test-job",
             "profileDigest": "-",
             "deadlineUtc": "2999-01-01T00:00:00Z",
-            "payload": {"minimumProtocolVersion": 1, "maximumProtocolVersion": 1},
+            "payload": {"minimumProtocolVersion": arelle_worker.PROTOCOL_VERSION,
+                        "maximumProtocolVersion": arelle_worker.PROTOCOL_VERSION},
         }
 
     def test_handshake_negotiates_supported_protocol(self):
@@ -89,12 +98,23 @@ class ArelleWorkerTests(unittest.TestCase):
                     "jobId": "test",
                     "profileDigest": "-",
                     "deadlineUtc": "2999-01-01T00:00:00Z",
-                    "payload": {"minimumProtocolVersion": 1, "maximumProtocolVersion": 1},
+                    "payload": {"minimumProtocolVersion": arelle_worker.PROTOCOL_VERSION,
+                                "maximumProtocolVersion": arelle_worker.PROTOCOL_VERSION},
                 },
                 self.args,
             )
         self.assertEqual("success", result["status"])
+        self.assertEqual(2, result["result"]["protocolVersion"])
         self.assertIn("validate-report", result["result"]["capabilities"])
+
+    def test_handshake_rejects_v1_without_validation_completion_contract(self):
+        request = self.handshake_request()
+        request["payload"] = {"minimumProtocolVersion": 1, "maximumProtocolVersion": 1}
+
+        result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", result["status"])
+        self.assertIn("No mutually supported protocol version", result["error"])
 
     def test_handshake_reports_exact_profile_entrypoint_and_plugins(self):
         self.args.profile_manifest_data = {
@@ -104,6 +124,7 @@ class ArelleWorkerTests(unittest.TestCase):
             "profileDigest": "sha256:fixture",
             "entryPoint": "taxonomy/entry.xsd",
             "requiredPlugins": ["validate/EFM"],
+            "requiredChecks": ["rule:one"],
         }
         self.args.plugin = ["validate/EFM"]
         with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True):
@@ -114,6 +135,79 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("2.0.0", result["result"]["profileVersion"])
         self.assertEqual("taxonomy/entry.xsd", result["result"]["taxonomyEntryPoint"])
         self.assertEqual(["validate/EFM"], result["result"]["requiredPlugins"])
+        self.assertEqual(["rule:one"], result["result"]["requiredChecks"])
+
+    def test_validate_report_returns_profile_bound_completion_report(self):
+        request = self.request(report())
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)):
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("success", result["status"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual("test-profile", completion["profileId"])
+        self.assertEqual("test", completion["profileDigest"])
+        self.assertEqual([], completion["requiredRules"])
+        self.assertEqual([], completion["requiredPlugins"])
+
+    def test_validate_report_does_not_infer_required_rule_pass_from_engine_success(self):
+        request = self.request(report())
+        request["validationRequirements"]["requiredRules"] = ["rule:mandatory"]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("success", result["status"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual([{"identifier": "rule:mandatory", "status": "unavailable",
+                           "detail": "Arelle does not expose a machine-readable completion signal for this required rule."}],
+                         completion["requiredRules"])
+        self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+        run_arelle.assert_called_once()
+
+    def test_validate_report_absent_required_plugin_is_incomplete_before_arelle(self):
+        request = self.request(report())
+        request["validationRequirements"]["requiredPlugins"] = ["validate/EFM"]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle") as run_arelle:
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("incompleteValidation", result["status"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual("unavailable", completion["requiredPlugins"][0]["status"])
+        self.assertTrue(any(item["code"] == "XBR010" and item["isBlocking"]
+                            for item in result["diagnostics"]))
+        run_arelle.assert_not_called()
+
+    def test_validate_report_does_not_infer_required_plugin_loaded_from_configuration(self):
+        request = self.request(report())
+        request["validationRequirements"]["requiredPlugins"] = ["validate/EFM"]
+        self.args.plugin = ["validate/EFM"]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)):
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("success", result["status"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual("unavailable", completion["requiredPlugins"][0]["status"])
+        self.assertIn("machine-readable evidence", completion["requiredPlugins"][0]["detail"])
+
+    def test_validate_report_rejects_requirements_substituted_from_installed_profile(self):
+        self.args.profile_manifest_data = {
+            "profileId": "fixture-profile",
+            "profileDigest": "sha256:fixture",
+            "requiredChecks": ["rule:mandatory"],
+            "requiredPlugins": ["validate/EFM"],
+        }
+        request = self.request(report())
+        request["validationRequirements"]["requiredRules"] = []
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle") as run_arelle:
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", result["status"])
+        self.assertIn("do not match the installed profile", result["error"])
+        run_arelle.assert_not_called()
 
     def test_handshake_keeps_distinct_profile_identities(self):
         identities = [("profile-one", "sha256:one"), ("profile-two", "sha256:two")]
@@ -173,6 +267,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 "profileDigest": "sha256:fixture",
                 "entryPoint": "entry.xsd",
                 "requiredPlugins": ["validate/EFM"],
+                "requiredChecks": ["rule:taxonomy-check"],
                 "packageFiles": {"entry.xsd": entry_digest},
             }
             request = self.handshake_request()
@@ -192,6 +287,7 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("sha256:fixture", result["result"]["profileDigest"])
         self.assertEqual("entry.xsd", result["result"]["taxonomyEntryPoint"])
         self.assertEqual(["validate/EFM"], result["result"]["requiredPlugins"])
+        self.assertEqual(["rule:taxonomy-check"], result["result"]["requiredChecks"])
         self.assertIn("validate-report", result["result"]["capabilities"])
         self.assertEqual(42, result["result"]["conceptCount"])
 
@@ -605,6 +701,8 @@ class ArelleWorkerTests(unittest.TestCase):
             "operation": "validate-report", "operationId": "large-op", "jobId": "large-job",
             "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
             "payload": {"xbrlJsonPath": str(path), "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+            "validationRequirements": {"profileId": "test-profile", "profileDigest": "test",
+                                       "requiredRules": [], "requiredPlugins": []},
         }
         observed = {}
 
@@ -651,6 +749,8 @@ class ArelleWorkerTests(unittest.TestCase):
                         "operation": "validate-report", "operationId": "large-op", "jobId": "large-job",
                         "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
                         "payload": payload,
+                        "validationRequirements": {"profileId": "test-profile", "profileDigest": "test",
+                                                   "requiredRules": [], "requiredPlugins": []},
                     }
                     result = arelle_worker.handle(request, self.args)
                     self.assertEqual("domainFailure", result["status"])
@@ -683,6 +783,8 @@ class ArelleWorkerTests(unittest.TestCase):
                         "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
                         "payload": {"xbrlJsonPath": str(path),
                                     "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+                        "validationRequirements": {"profileId": "test-profile", "profileDigest": "test",
+                                                   "requiredRules": [], "requiredPlugins": []},
                     }
                     result = arelle_worker.handle(request, self.args)
                     self.assertEqual("domainFailure", result["status"])
@@ -779,6 +881,40 @@ class ArelleWorkerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "unsupported schema version"):
                 arelle_worker.load_profile_manifest(manifest_path, root)
+
+    def test_profile_manifest_required_check_limits_match_application_catalog(self):
+        cases = [
+            (["rule:" + "😀" * 507], None),  # 512 Unicode code points, despite 1014 UTF-16 code units.
+            (["x" * 513], "required check IDs"),
+            (["rule:bad\u0085id"], "required check IDs"),
+            ([f"rule:{index}" for index in range(2049)], "required check IDs"),
+        ]
+        for required_checks, expected_error in cases:
+            with self.subTest(required_check_count=len(required_checks), expected_error=expected_error), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                entry = root / "entry.xsd"
+                entry.write_text("<schema/>", encoding="utf-8")
+                digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+                manifest = {
+                    "schemaVersion": 2,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "entry.xsd",
+                    "packageFiles": {"entry.xsd": "sha256:" + digest},
+                    "offlineReferences": {},
+                    "requiredChecks": required_checks,
+                }
+                path = root / "profile.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                if expected_error is None:
+                    loaded = arelle_worker.load_profile_manifest(path, root)
+                    self.assertEqual(required_checks, loaded["requiredChecks"])
+                else:
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        arelle_worker.load_profile_manifest(path, root)
 
     def test_profile_manifest_must_match_application_verified_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 from xml.parsers import expat
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 ENGINE_VERSION = "arelle-worker/1.0"
@@ -208,6 +208,13 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
             for plugin in required_plugins)
             or len(set(required_plugins)) != len(required_plugins)):
         raise ValueError("Profile required plugin IDs are invalid or duplicated")
+    required_checks = manifest.get("requiredChecks", [])
+    if (not isinstance(required_checks, list) or len(required_checks) > 2048
+            or any(not isinstance(check, str) or not check.strip() or len(check) > 512
+                   or any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f for char in check)
+                   for check in required_checks)
+            or len(set(required_checks)) != len(required_checks)):
+        raise ValueError("Profile required check IDs must be unique non-empty strings within the 2048-check limit")
     total_bytes = 0
     verified_files = {}
     for relative_path, expected in files.items():
@@ -747,6 +754,7 @@ def handle(req, args):
                 op_id, "XBR015", "error", message)], error=message)
         profile = getattr(args, "profile_manifest_data", None)
         required_plugins = profile.get("requiredPlugins", []) if profile else []
+        required_checks = profile.get("requiredChecks", []) if profile else []
         missing_plugins = sorted(set(required_plugins) - set(args.plugin))
         if missing_plugins:
             message = "Required Arelle plugins were not configured: " + ", ".join(missing_plugins)
@@ -763,6 +771,7 @@ def handle(req, args):
             "profileDigest": profile.get("profileDigest") if profile else None,
             "taxonomyEntryPoint": profile.get("entryPoint") if profile else None,
             "requiredPlugins": required_plugins,
+            "requiredChecks": required_checks,
         })
 
     if operation == "shutdown":
@@ -824,6 +833,7 @@ def handle(req, args):
                 "profileDigest": profile.get("profileDigest") if profile else None,
                 "taxonomyEntryPoint": relative_entry_point,
                 "requiredPlugins": profile.get("requiredPlugins", []) if profile else [],
+                "requiredChecks": profile.get("requiredChecks", []) if profile else [],
                 "conceptCount": concept_count,
                 "completed": True,
             }, diags)
@@ -876,6 +886,56 @@ def handle(req, args):
             profile = getattr(args, "profile_manifest_data", None)
             if profile is not None and req["profileDigest"] != profile.get("profileDigest"):
                 raise ValueError("Worker request profile digest does not match the installed profile")
+            requirements = req.get("validationRequirements")
+            if not isinstance(requirements, dict):
+                raise ValueError("Missing validationRequirements for profile completion")
+            profile_id = requirements.get("profileId")
+            profile_digest = requirements.get("profileDigest")
+            required_rules = requirements.get("requiredRules")
+            required_plugins = requirements.get("requiredPlugins")
+            if (not isinstance(profile_id, str) or not profile_id or len(profile_id) > 1024
+                    or not isinstance(profile_digest, str) or profile_digest != req["profileDigest"]
+                    or not isinstance(required_rules, list) or len(required_rules) > 2048
+                    or not isinstance(required_plugins, list) or len(required_plugins) > 128
+                    or any(not isinstance(identifier, str) or not identifier or len(identifier) > 512
+                           for identifier in required_rules)
+                    or any(not isinstance(identifier, str) or not identifier or len(identifier) > 256
+                           for identifier in required_plugins)
+                    or len(set(required_rules)) != len(required_rules)
+                    or len(set(required_plugins)) != len(required_plugins)):
+                raise ValueError("Validation requirements are malformed")
+            if profile is not None and (
+                    profile_id != profile.get("profileId")
+                    or sorted(required_rules) != sorted(profile.get("requiredChecks", []))
+                    or sorted(required_plugins) != sorted(profile.get("requiredPlugins", []))):
+                raise ValueError("Validation requirements do not match the installed profile manifest")
+            missing_plugins = sorted(set(required_plugins) - set(args.plugin))
+            rule_completions = [{
+                "identifier": rule,
+                "status": "unavailable",
+                "detail": "Arelle does not expose a machine-readable completion signal for this required rule.",
+            } for rule in required_rules]
+            plugin_completions = [{
+                "identifier": plugin,
+                "status": "unavailable",
+                "detail": ("Required plugin was not configured for this worker."
+                           if plugin in missing_plugins else
+                           "Arelle did not provide machine-readable evidence that the required plugin loaded."),
+            } for plugin in required_plugins]
+            completion = {
+                "profileId": profile_id,
+                "profileDigest": profile_digest,
+                "requiredRules": rule_completions,
+                "requiredPlugins": plugin_completions,
+            }
+            if missing_plugins:
+                diags = [diagnostic(op_id, "XBR010", "error",
+                                    "Required Arelle plugin was not configured: " + plugin,
+                                    "plugin:" + plugin)
+                         for plugin in missing_plugins]
+                return response(op_id, "incompleteValidation", {
+                    "completed": False, "validationCompletion": completion,
+                }, diags, "A required Arelle plugin is unavailable")
             with tempfile.TemporaryDirectory(prefix="xms-arelle-") as workdir:
                 os.chmod(workdir, 0o700)
                 path = Path(workdir) / "report.json"
@@ -891,20 +951,25 @@ def handle(req, args):
                         profile.get("packageFiles") if profile else None)
                     path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
                 ok, logs, concept_count = run_arelle(path, args, workdir)
-                plugin_failures = required_plugin_load_failures(
-                    logs, profile.get("requiredPlugins", []) if profile else [])
+                plugin_failures = required_plugin_load_failures(logs, required_plugins)
                 if plugin_failures:
                     diags = [diagnostic(op_id, "XBR010", "error",
                                         "Required Arelle plugin could not be loaded: " + plugin,
                                         "plugin:" + plugin)
                              for plugin in plugin_failures]
+                    for item in plugin_completions:
+                        if item["identifier"] in plugin_failures:
+                            item["status"] = "unavailable"
+                            item["detail"] = "Arelle reported that the required plugin could not be loaded."
                     return response(op_id, "incompleteValidation", {
                         "engine": "Arelle", "engineVersion": ENGINE_VERSION,
                         "completed": False, "conceptCount": concept_count,
+                        "validationCompletion": completion,
                     }, diags, "A required Arelle plugin is unavailable")
                 diags = log_diagnostics(logs, op_id, workdir)
                 result = {"engine": "Arelle", "engineVersion": ENGINE_VERSION,
-                          "completed": True, "conceptCount": concept_count}
+                          "completed": True, "conceptCount": concept_count,
+                          "validationCompletion": completion}
                 return response(op_id, "success" if ok else "domainFailure", result, diags,
                                 None if ok else "Arelle did not complete report validation")
         except Exception as ex:

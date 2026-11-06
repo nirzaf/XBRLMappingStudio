@@ -587,7 +587,7 @@ public sealed class LargeRunExecutionTests
                 .ToLowerInvariant();
             return actual == expected
                 ? new WorkerResponse(request.OperationId, ValidationStatus,
-                    JsonSerializer.SerializeToElement(new { completed = ValidationStatus == WorkerStatus.Success }),
+                    CompletionResult(request, ValidationStatus == WorkerStatus.Success),
                     Array.Empty<Diagnostic>(), ValidationStatus == WorkerStatus.Success ? null : "Synthetic worker rejection.")
                 : Failure(request, "Report digest mismatch.");
         }
@@ -595,8 +595,25 @@ public sealed class LargeRunExecutionTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
         private static WorkerResponse Success(WorkerRequest request)
-            => new(request.OperationId, WorkerStatus.Success, JsonSerializer.SerializeToElement(new { completed = true }),
+            => new(request.OperationId, WorkerStatus.Success, CompletionResult(request, completed: true),
                 Array.Empty<Diagnostic>(), null);
+
+        private static JsonElement CompletionResult(WorkerRequest request, bool completed)
+        {
+            var requirements = request.ValidationRequirements
+                ?? throw new InvalidOperationException("Validation request omitted profile requirements.");
+            return JsonSerializer.SerializeToElement(new
+            {
+                completed,
+                validationCompletion = new
+                {
+                    profileId = requirements.ProfileId,
+                    profileDigest = requirements.ProfileDigest,
+                    requiredRules = requirements.RequiredRules.Select(identifier => new { identifier, status = "pass" }),
+                    requiredPlugins = requirements.RequiredPlugins.Select(identifier => new { identifier, status = "pass" })
+                }
+            });
+        }
         private static WorkerResponse Failure(WorkerRequest request, string error)
             => new(request.OperationId, WorkerStatus.DomainFailure, null, Array.Empty<Diagnostic>(), error);
     }

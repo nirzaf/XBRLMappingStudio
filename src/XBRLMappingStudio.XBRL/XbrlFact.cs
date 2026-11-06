@@ -270,6 +270,9 @@ public sealed class FilingProfile
     public IReadOnlyList<string> TaxonomyUrls { get; init; } = Array.Empty<string>();
     public IReadOnlyDictionary<string, string> PackageHashes { get; init; }
         = new Dictionary<string, string>();
+    /// <summary>Plugin identifiers required by the exact installed filing profile.</summary>
+    public IReadOnlySet<string> RequiredPlugins { get; init; }
+        = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>XBR07 check-completeness: rule identifiers the profile declares as
     /// mandatory. A full-file validation must produce at least one outcome for every

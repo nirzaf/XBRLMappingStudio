@@ -36,7 +36,13 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         => Task.FromResult(new WorkerHandshake(
             ProtocolVersion: WorkerProtocol.CurrentVersion,
             EngineVersion: "local-synthetic/1.0",
-            Capabilities: new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport }));
+            Capabilities: new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport })
+        {
+            ProfileId = _profile.ProfileId,
+            ProfileDigest = _profile.Digest,
+            RequiredPlugins = _profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+            RequiredChecks = _profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray()
+        });
 
     public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
     {
@@ -79,6 +85,28 @@ public sealed class LocalSyntheticWorker : IWorkerClient
 
         var diags = new List<Diagnostic>();
         var facts = OimSerializer.ReadFacts(payload);
+        var knownDimensionMembers = _profile.DimensionDomains.Values
+            .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
+        var filingValidation = new FilingRuleValidator(_profile, knownDimensionMembers).Validate(facts);
+        var requiredRules = CompletionItems(_profile.RequiredChecks,
+            filingValidation.Outcomes.Select(outcome => new ValidationCheckCompletion(
+                outcome.RuleId,
+                outcome.Status switch
+                {
+                    RuleStatus.Pass => ValidationCheckStatus.Pass,
+                    RuleStatus.Fail => ValidationCheckStatus.Fail,
+                    _ => ValidationCheckStatus.Unavailable
+                },
+                outcome.Detail)));
+        var requiredPlugins = _profile.RequiredPlugins.Order(StringComparer.Ordinal)
+            .Select(plugin => new ValidationCheckCompletion(plugin, ValidationCheckStatus.Unavailable,
+                "The local synthetic worker does not load Arelle plugins."))
+            .ToArray();
+        var completion = new ValidationCompletionReport(
+            _profile.ProfileId,
+            _profile.Digest,
+            requiredRules,
+            requiredPlugins);
         int i = 0;
         foreach (var fact in facts)
         {
@@ -186,13 +214,44 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             }
         }
 
-        var status = diags.Any(d => d.IsBlocking) ? WorkerStatus.DomainFailure : WorkerStatus.Success;
+        var completionFailed = requiredRules.Any(item => item.Status == ValidationCheckStatus.Fail);
+        var completionIncomplete = requiredRules.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable)
+            || requiredPlugins.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable);
+        var status = diags.Any(d => d.IsBlocking) || completionFailed
+            ? WorkerStatus.DomainFailure
+            : completionIncomplete ? WorkerStatus.IncompleteValidation : WorkerStatus.Success;
         return Task.FromResult(new WorkerResponse(
             request.OperationId,
             status,
-            JsonSerializer.SerializeToElement(new { factCount = facts.Count, errorCount = diags.Count(d => d.IsBlocking) }),
+            JsonSerializer.SerializeToElement(new
+            {
+                factCount = facts.Count,
+                errorCount = diags.Count(d => d.IsBlocking),
+                validationCompletion = completion
+            }, WorkerJson.Options),
             diags,
             Error: null));
+
+        static ValidationCheckCompletion[] CompletionItems(
+            IReadOnlySet<string> required,
+            IEnumerable<ValidationCheckCompletion> outcomes)
+        {
+            var byId = outcomes.GroupBy(item => item.Identifier, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key,
+                    group => group.OrderBy(item => item.Status switch
+                    {
+                        ValidationCheckStatus.Fail => 0,
+                        ValidationCheckStatus.Unavailable => 1,
+                        ValidationCheckStatus.Skipped => 2,
+                        _ => 3
+                    }).First(), StringComparer.Ordinal);
+            return required.Order(StringComparer.Ordinal)
+                .Select(identifier => byId.TryGetValue(identifier, out var outcome)
+                    ? outcome
+                    : new ValidationCheckCompletion(identifier, ValidationCheckStatus.Unavailable,
+                        "The required check did not produce a completion outcome."))
+                .ToArray();
+        }
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -217,6 +276,7 @@ public sealed class ArelleWorker : IWorkerClient
     private readonly string? _expectedProfileDigest;
     private readonly string? _expectedTaxonomyEntryPoint;
     private readonly IReadOnlyList<string>? _expectedRequiredPlugins;
+    private readonly IReadOnlyList<string>? _expectedRequiredChecks;
     private int _disposed;
     private int _disposeStarted;
 
@@ -228,7 +288,8 @@ public sealed class ArelleWorker : IWorkerClient
         string? expectedProfileVersion = null,
         string? expectedProfileDigest = null,
         string? expectedTaxonomyEntryPoint = null,
-        IReadOnlyList<string>? expectedRequiredPlugins = null)
+        IReadOnlyList<string>? expectedRequiredPlugins = null,
+        IReadOnlyCollection<string>? expectedRequiredChecks = null)
     {
         ExecutablePath = executablePath;
         _expectedProfileId = expectedProfileId;
@@ -237,6 +298,7 @@ public sealed class ArelleWorker : IWorkerClient
         _expectedProfileDigest = expectedProfileDigest;
         _expectedTaxonomyEntryPoint = expectedTaxonomyEntryPoint;
         _expectedRequiredPlugins = expectedRequiredPlugins?.ToArray();
+        _expectedRequiredChecks = expectedRequiredChecks?.Order(StringComparer.Ordinal).ToArray();
         var psi = new ProcessStartInfo
         {
             FileName = executablePath,
@@ -302,7 +364,9 @@ public sealed class ArelleWorker : IWorkerClient
                 || !StringComparer.Ordinal.Equals(_expectedProfileDigest, handshake.ProfileDigest)
                 || !StringComparer.Ordinal.Equals(_expectedTaxonomyEntryPoint, handshake.TaxonomyEntryPoint)
                 || !(_expectedRequiredPlugins ?? Array.Empty<string>()).SequenceEqual(
-                    handshake.RequiredPlugins, StringComparer.Ordinal)))
+                    handshake.RequiredPlugins, StringComparer.Ordinal)
+                || !(_expectedRequiredChecks ?? Array.Empty<string>()).SequenceEqual(
+                    handshake.RequiredChecks.Order(StringComparer.Ordinal), StringComparer.Ordinal)))
         {
             const string message = "Arelle worker profile metadata does not match the hash-verified installation.";
             throw new WorkerStartupException(WorkerStatus.DomainFailure, message,

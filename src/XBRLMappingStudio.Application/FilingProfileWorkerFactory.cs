@@ -110,7 +110,8 @@ public sealed class FilingProfileWorkerFactory
                 expectedTaxonomyEntryPoint: installation is null ? null
                     : Path.GetRelativePath(installation.InstallationDirectory, installation.EntryPointPath)
                         .Replace('\\', '/'),
-                expectedRequiredPlugins: installation?.RequiredPlugins);
+                expectedRequiredPlugins: installation?.RequiredPlugins,
+                expectedRequiredChecks: installation?.Profile.RequiredChecks);
         });
 
         static string? FindWorkerScript(string? configured)

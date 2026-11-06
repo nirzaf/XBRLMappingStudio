@@ -186,23 +186,38 @@ static async Task<int> ValidateArtifactAsync(string[] args)
                 Console.Error.WriteLine("Arelle worker does not support report validation.");
                 return ExitCodesLocal.IncompleteProfile;
             }
+            var syntheticProfile = SyntheticProfile.Build();
+            var reportText = File.ReadAllText(args[0]);
             var request = new WorkerRequest(
                 WorkerOperations.ValidateReport,
                 Guid.NewGuid().ToString("N"),
                 "cli-validate-artifact",
-                "-",
+                syntheticProfile.Digest,
                 DateTimeOffset.UtcNow.AddMinutes(2),
-                JsonSerializer.SerializeToElement(File.ReadAllText(args[0])));
+                JsonSerializer.SerializeToElement(reportText))
+            {
+                ValidationRequirements = new ValidationRequirements(
+                    syntheticProfile.ProfileId,
+                    syntheticProfile.Digest,
+                    syntheticProfile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+                    Array.Empty<string>())
+            };
             var response = await worker.RequestAsync(request, CancellationToken.None);
+            var localFacts = OimSerializer.ReadFacts(reportText);
+            var completion = ValidationCompletionReportValidator.Evaluate(
+                response.Result, syntheticProfile, localFacts);
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 artifact = Path.GetFileName(args[0]),
                 engine = handshake.EngineVersion,
                 status = response.Status.ToString(),
                 result = response.Result,
+                completion = completion.State.ToString(),
                 diagnostics = response.Diagnostics,
                 error = response.Error
             }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            if (completion.State == ValidationCompletionState.Failed) return ExitCodesLocal.InvalidMapping;
+            if (completion.State == ValidationCompletionState.Incomplete) return ExitCodesLocal.IncompleteProfile;
             return response.Status switch
             {
                 WorkerStatus.Success when !(response.Diagnostics ?? Array.Empty<Diagnostic>()).Any(d => d.IsBlocking) => ExitCodesLocal.Success,

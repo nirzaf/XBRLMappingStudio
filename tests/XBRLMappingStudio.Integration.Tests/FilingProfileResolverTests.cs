@@ -431,6 +431,43 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public void CatalogRequiredCheckLimitsMatchWorkerCodePointAndCountRules()
+    {
+        var cases = new (IReadOnlyList<string> Checks, bool Accepted)[]
+        {
+            (new[] { "rule:" + string.Concat(Enumerable.Repeat("😀", 507)) }, true), // 512 code points
+            (new[] { new string('x', 513) }, false),
+            (new[] { "rule:bad\u0085id" }, false),
+            (Enumerable.Range(0, 2049).Select(index => $"rule:{index}").ToArray(), false)
+        };
+
+        foreach (var (checks, accepted) in cases)
+        {
+            var root = NewCatalogDirectory();
+            try
+            {
+                WriteInvalidManifest(root, "fixture-check-limit-profile", "1.0.0", manifest => manifest with
+                {
+                    RequiredChecks = checks.ToList()
+                });
+
+                var result = InstalledFilingProfileCatalog.Load(root);
+                Assert.Equal(accepted, result.Profiles.Count == 1);
+                if (!accepted)
+                    Assert.Contains(result.Issues, issue => issue.Message.Contains(
+                        "required validation check", StringComparison.OrdinalIgnoreCase));
+                else
+                    Assert.Equal(checks.Order(StringComparer.Ordinal),
+                        result.Profiles.Single().Profile.RequiredChecks.Order(StringComparer.Ordinal));
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task WorkerFactoryUsesLocalWorkerOnlyForExplicitSyntheticRuntime()
     {
         var profile = SyntheticProfile.Build();

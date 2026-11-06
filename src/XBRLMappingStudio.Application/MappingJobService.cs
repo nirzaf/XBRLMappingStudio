@@ -223,7 +223,11 @@ public sealed class MappingJobService
             && (!StringComparer.Ordinal.Equals(_profile.ProfileId, handshake.ProfileId)
                 || !StringComparer.Ordinal.Equals(_profile.Digest, handshake.ProfileDigest)
                 || handshake.ProfileSchemaVersion is null
-                || string.IsNullOrWhiteSpace(handshake.TaxonomyEntryPoint)))
+                || string.IsNullOrWhiteSpace(handshake.TaxonomyEntryPoint)
+                || !handshake.RequiredPlugins.Order(StringComparer.Ordinal)
+                    .SequenceEqual(_profile.RequiredPlugins.Order(StringComparer.Ordinal), StringComparer.Ordinal)
+                || !handshake.RequiredChecks.Order(StringComparer.Ordinal)
+                    .SequenceEqual(_profile.RequiredChecks.Order(StringComparer.Ordinal), StringComparer.Ordinal)))
             return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
                 DiagnosticCodes.XbrProfileMismatch,
                 "Validation worker profile identity or taxonomy metadata does not match the selected profile.");
@@ -297,12 +301,14 @@ public sealed class MappingJobService
                 || !loadedProfile.Completed
                 || loadedProfile.Capabilities is null
                 || loadedProfile.RequiredPlugins is null
+                || loadedProfile.RequiredChecks is null
                 || loadedProfile.ProfileSchemaVersion != handshake.ProfileSchemaVersion
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileId, handshake.ProfileId)
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileVersion, handshake.ProfileVersion)
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileDigest, _profile.Digest)
                 || !StringComparer.Ordinal.Equals(loadedProfile.TaxonomyEntryPoint, taxonomyEntryPoint)
                 || !loadedProfile.RequiredPlugins.SequenceEqual(handshake.RequiredPlugins, StringComparer.Ordinal)
+                || !loadedProfile.RequiredChecks.SequenceEqual(handshake.RequiredChecks, StringComparer.Ordinal)
                 || !loadedProfile.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
                 return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,
                     DiagnosticCodes.XbrProfileMismatch,
@@ -694,7 +700,10 @@ public sealed class MappingJobService
             JobId: runId,
             ProfileDigest: _profile.Digest,
             DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-            Payload: JsonSerializer.SerializeToElement(json));
+            Payload: JsonSerializer.SerializeToElement(json))
+        {
+            ValidationRequirements = CreateValidationRequirements()
+        };
         progress?.Report(new MappingJobProgress("Validating generated report in validation worker"));
         var workerResp = await _worker.RequestAsync(validateReq, cancellationToken);
 
@@ -709,10 +718,17 @@ public sealed class MappingJobService
         // cancellation so the run manifest carries an unambiguous terminal cause: an
         // unresponsive worker that never dies must surface as WKR004 with the run
         // outcome OperationalFailure, never as Success-with-warnings or a silent pass.
+        var completion = ValidationCompletionReportValidator.Evaluate(
+            workerResp.Result, _profile,
+            StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId) ? facts : null);
         var workerBlocking = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).Any(d => d.IsBlocking);
         manifest.Outcome = workerResp.Status switch
         {
-            WorkerStatus.Success when !workerBlocking
+            _ when completion.State == ValidationCompletionState.Failed => RunOutcome.InvalidMapping,
+            WorkerStatus.Success when workerBlocking => RunOutcome.InvalidMapping,
+            WorkerStatus.Success when completion.State == ValidationCompletionState.Incomplete
+                => RunOutcome.IncompleteConfiguration,
+            WorkerStatus.Success
                 => preview || context.Diagnostics.Items.Any(d => d.Severity == DiagnosticSeverity.Warning)
                     ? RunOutcome.SuccessWithWarnings
                     : RunOutcome.Success,
@@ -728,6 +744,10 @@ public sealed class MappingJobService
         // (support bundle, inspect-run-result, scheduler alerting) see the specific cause
         // even when the worker returned no diagnostics of its own (fake or truncated pipe).
         var workerDiags = (workerResp.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+        if (completion.State == ValidationCompletionState.Failed
+            || (completion.State == ValidationCompletionState.Incomplete
+                && workerResp.Status is (WorkerStatus.Success or WorkerStatus.IncompleteValidation)))
+            workerDiags.Add(CompletionDiagnostic(completion, opId));
         if (workerResp.Status is WorkerStatus.TimedOut or WorkerStatus.Crash
             && !workerDiags.Any(d => d.Code is DiagnosticCodes.WkrTimeout or DiagnosticCodes.WkrCrash))
         {
@@ -935,14 +955,22 @@ public sealed class MappingJobService
             var request = new WorkerRequest(WorkerOperations.ValidateReport,
                 OperationId: operationId + "-validate", JobId: runId,
                 ProfileDigest: _profile.Digest, DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-                Payload: validatePayload);
+                Payload: validatePayload)
+            {
+                ValidationRequirements = CreateValidationRequirements()
+            };
             progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
             var workerResponse = await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
             var workerDiagnostics = (workerResponse.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
+            var completion = ValidationCompletionReportValidator.Evaluate(workerResponse.Result, _profile);
             var workerBlocking = workerDiagnostics.Any(diagnostic => diagnostic.IsBlocking);
             manifest.Outcome = workerResponse.Status switch
             {
-                WorkerStatus.Success when !workerBlocking
+                _ when completion.State == ValidationCompletionState.Failed => RunOutcome.InvalidMapping,
+                WorkerStatus.Success when workerBlocking => RunOutcome.InvalidMapping,
+                WorkerStatus.Success when completion.State == ValidationCompletionState.Incomplete
+                    => RunOutcome.IncompleteConfiguration,
+                WorkerStatus.Success
                     => context.Diagnostics.Items.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning)
                         ? RunOutcome.SuccessWithWarnings : RunOutcome.Success,
                 WorkerStatus.Cancelled => RunOutcome.Cancelled,
@@ -950,6 +978,10 @@ public sealed class MappingJobService
                 WorkerStatus.TimedOut or WorkerStatus.Crash => RunOutcome.OperationalFailure,
                 _ => RunOutcome.InvalidMapping
             };
+            if (completion.State == ValidationCompletionState.Failed
+                || (completion.State == ValidationCompletionState.Incomplete
+                    && workerResponse.Status is (WorkerStatus.Success or WorkerStatus.IncompleteValidation)))
+                workerDiagnostics.Add(CompletionDiagnostic(completion, operationId));
             if (workerResponse.Status is WorkerStatus.TimedOut or WorkerStatus.Crash
                 && !workerDiagnostics.Any(diagnostic => diagnostic.Code is DiagnosticCodes.WkrTimeout or DiagnosticCodes.WkrCrash))
             {
@@ -969,7 +1001,8 @@ public sealed class MappingJobService
             }
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiagnostics).ToArray();
-            if (workerResponse.Status != WorkerStatus.Success || workerBlocking)
+            if (workerResponse.Status != WorkerStatus.Success || workerBlocking
+                || completion.State != ValidationCompletionState.Complete)
             {
                 manifest.Outputs = Array.Empty<OutputIdentity>();
                 progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
@@ -1105,6 +1138,36 @@ public sealed class MappingJobService
         }
     }
 
+    private ValidationRequirements CreateValidationRequirements() => new(
+        _profile.ProfileId,
+        _profile.Digest,
+        _profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
+        _profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray());
+
+    private static Diagnostic CompletionDiagnostic(
+        ValidationCompletionAssessment assessment,
+        string operationId)
+    {
+        var code = assessment.State == ValidationCompletionState.Failed
+            ? DiagnosticCodes.XbrValidationFailed
+            : assessment.IsPlugin
+                ? DiagnosticCodes.XbrWorkerUnavailable
+                : assessment.Identifier is not null
+                    ? DiagnosticCodes.XbrRequiredCheckMissing
+                    : DiagnosticCodes.XbrValidationIncomplete;
+        return new Diagnostic
+        {
+            Code = code,
+            Subsystem = DiagnosticSubsystem.Worker,
+            Severity = DiagnosticSeverity.Error,
+            Stage = DiagnosticStage.Validation,
+            IsBlocking = true,
+            Message = assessment.Detail ?? "Required profile validation did not provide completion evidence.",
+            OperationId = operationId,
+            RuleIdentifier = assessment.Identifier
+        };
+    }
+
     /// <summary>
     /// Validate the exact bytes reread from the publisher's private staging file. This
     /// is a second profile-worker adjudication at the final publication boundary; the
@@ -1127,6 +1190,7 @@ public sealed class MappingJobService
         string digest;
         JsonElement workerPayload;
         string? workerScratch = null;
+        IReadOnlyList<XbrlFact>? localSyntheticStagedFacts = null;
         if (result.LargeArtifact is not null)
         {
             try
@@ -1215,6 +1279,22 @@ public sealed class MappingJobService
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                     $"Staged xBRL-JSON is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
             }
+            if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+            {
+                try
+                {
+                    // Adjudicate exactly what the worker and publisher are validating. The
+                    // in-memory JobResult facts are useful for the run but are not the staged
+                    // artifact's trust boundary.
+                    localSyntheticStagedFacts = OimSerializer.ReadFacts(reportJson);
+                }
+                catch (Exception ex) when (ex is JsonException or XbrlExportException)
+                {
+                    throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
+                        $"Staged xBRL-JSON could not be evaluated by the local synthetic rules: {ex.Message}",
+                        manifest.RunId, destinationPath);
+                }
+            }
             workerPayload = JsonSerializer.SerializeToElement(reportJson);
         }
 
@@ -1232,7 +1312,10 @@ public sealed class MappingJobService
                 JobId: manifest.RunId,
                 ProfileDigest: _profile.Digest,
                 DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-                Payload: workerPayload), cancellationToken)
+                Payload: workerPayload)
+            {
+                ValidationRequirements = CreateValidationRequirements()
+            }, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1262,7 +1345,17 @@ public sealed class MappingJobService
 
         var diagnostics = response.Diagnostics ?? Array.Empty<Diagnostic>();
         var blocking = diagnostics.FirstOrDefault(diagnostic => diagnostic.IsBlocking);
-        if (response.Status == WorkerStatus.Success && blocking is null)
+        var completion = ValidationCompletionReportValidator.Evaluate(
+            response.Result, _profile, localSyntheticStagedFacts);
+        if (completion.State == ValidationCompletionState.Failed)
+        {
+            var completionDiagnostic = CompletionDiagnostic(completion, operationId);
+            manifest.Diagnostics = manifest.Diagnostics.Concat(diagnostics).Append(completionDiagnostic).ToArray();
+            throw new PublicationException(completionDiagnostic.Code,
+                $"The staged report failed profile validation: {completion.Detail}", manifest.RunId, destinationPath);
+        }
+        if (response.Status == WorkerStatus.Success && blocking is null
+            && completion.State == ValidationCompletionState.Complete)
         {
             manifest.ValidatedArtifactDigest = digest;
             manifest.Diagnostics = manifest.Diagnostics.Concat(diagnostics).ToArray();
@@ -1284,7 +1377,15 @@ public sealed class MappingJobService
             WorkerStatus.Success or WorkerStatus.DomainFailure => blocking?.Code ?? DiagnosticCodes.XbrValidationFailed,
             _ => DiagnosticCodes.XbrValidationIncomplete
         };
-        var detail = blocking?.Message ?? response.Error ??
+        if (response.Status is (WorkerStatus.Success or WorkerStatus.IncompleteValidation)
+            && completion.State != ValidationCompletionState.Complete)
+        {
+            var completionDiagnostic = CompletionDiagnostic(completion, operationId);
+            manifest.Diagnostics = manifest.Diagnostics.Concat(diagnostics).Append(completionDiagnostic).ToArray();
+            if (response.Status == WorkerStatus.Success || code == DiagnosticCodes.XbrValidationIncomplete)
+                code = completionDiagnostic.Code;
+        }
+        var detail = blocking?.Message ?? completion.Detail ?? response.Error ??
             $"Validation worker ended with status '{response.Status}'.";
         throw new PublicationException(code,
             $"The staged report failed profile validation: {detail}", manifest.RunId, destinationPath);

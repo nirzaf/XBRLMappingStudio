@@ -150,6 +150,76 @@ public sealed class ArelleExecutionTests
     }
 
     [RequiresArelleRuntimeFact]
+    public async Task CliValidateArtifactUsesLocalSyntheticRuleCompletionWithArelle()
+    {
+        var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
+        var cliAssembly = Path.Combine(AppContext.BaseDirectory, "xbrl-studio.dll");
+        var taxonomyRoot = Path.Combine(AppContext.BaseDirectory, "worker", "taxonomy");
+        Assert.True(File.Exists(cliAssembly), $"CLI assembly is missing: {cliAssembly}");
+        Assert.True(File.Exists(Path.Combine(taxonomyRoot, SyntheticProfile.TaxonomyFileName)),
+            $"Synthetic development taxonomy is missing from {taxonomyRoot}.");
+
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-arelle-cli-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var fact = new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "cli-validation-fixture",
+                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Unit = new XbrlUnit("USD"),
+                Value = 123m,
+                Decimals = 0
+            };
+            var reportPath = Path.Combine(workspace, "report.xbrl.json");
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, new[] { fact }),
+                new UTF8Encoding(false));
+
+            var start = new ProcessStartInfo("dotnet")
+            {
+                WorkingDirectory = workspace,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            foreach (var argument in new[]
+            {
+                cliAssembly,
+                "validate-artifact",
+                reportPath,
+                "--arelle",
+                "--python",
+                python!,
+                "--taxonomy-root",
+                taxonomyRoot
+            })
+                start.ArgumentList.Add(argument);
+
+            using var process = Process.Start(start)
+                ?? throw new InvalidOperationException("Could not start the CLI process.");
+            var standardOutput = process.StandardOutput.ReadToEndAsync();
+            var standardError = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromMinutes(2));
+            var stdout = await standardOutput;
+            var stderr = await standardError;
+
+            Assert.Equal(0, process.ExitCode);
+            using var response = JsonDocument.Parse(stdout);
+            Assert.Equal("Success", response.RootElement.GetProperty("status").GetString());
+            Assert.Equal("Complete", response.RootElement.GetProperty("completion").GetString());
+            Assert.DoesNotContain("Arelle validation could not start", stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresArelleRuntimeFact]
     public async Task ExcelToXbrlMappingIsAdjudicatedByOfflineArelleWorker()
     {
         var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");

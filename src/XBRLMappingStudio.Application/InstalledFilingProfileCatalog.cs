@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using XBRLMappingStudio.XBRL;
@@ -52,6 +53,7 @@ public sealed record FilingProfileManifest
         NamespaceUris = new Dictionary<string, string>(NamespaceUris, StringComparer.Ordinal),
         TaxonomyUrls = OfflineReferences.Keys.Order(StringComparer.Ordinal).ToArray(),
         PackageHashes = new Dictionary<string, string>(PackageFiles, StringComparer.Ordinal),
+        RequiredPlugins = new HashSet<string>(RequiredPlugins, StringComparer.Ordinal),
         RequiredChecks = new HashSet<string>(RequiredChecks, StringComparer.Ordinal)
     };
 }
@@ -289,6 +291,8 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageFiles} package files.");
         if (manifest.RequiredPlugins.Count > 128)
             throw new InvalidDataException("A profile can declare at most 128 required Arelle plugins.");
+        if (manifest.RequiredChecks.Count > 2048)
+            throw new InvalidDataException("A profile can declare at most 2048 required validation checks.");
         EnsureUnique(manifest.PackageNames, "package name");
         EnsureUnique(manifest.SupportedUnits, "supported unit");
         EnsureUnique(manifest.RequiredPlugins, "required plugin");
@@ -299,6 +303,9 @@ public static class InstalledFilingProfileCatalog
                 || plugin.Split('/').Any(segment => segment is "" or "." or "..")
                 || plugin.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' or '+' or '.' or '/')))
                 throw new InvalidDataException($"Required plugin ID '{plugin}' contains unsupported characters.");
+        foreach (var check in manifest.RequiredChecks)
+            if (check.EnumerateRunes().Count() > 512 || check.Any(char.IsControl))
+                throw new InvalidDataException("Required validation check IDs must be at most 512 characters and contain no control characters.");
 
         foreach (var (prefix, namespaceUri) in manifest.NamespaceUris)
         {
