@@ -48,10 +48,14 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore
-        run: dotnet restore ${{ env.SOLUTION }} -warnaserror:NU1900,NU1901,NU1902,NU1903,NU1904
+        run: dotnet restore ${{ env.SOLUTION }} --locked-mode -warnaserror:NU1900,NU1901,NU1902,NU1903,NU1904
 
       - name: Report vulnerable NuGet packages (direct and transitive)
-        run: dotnet list ${{ env.SOLUTION }} package --vulnerable --include-transitive --format json --no-restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet list "$SOLUTION" package --vulnerable --include-transitive --format json --no-restore \
+            | tee "nuget-vulnerability-report-${{ matrix.os }}.json"
 
       - name: Build (Release)
         run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
@@ -63,8 +67,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}
-          path: '**/TestResults/*.trx'
+          name: test-and-dependency-reports-${{ matrix.os }}
+          path: |
+            **/TestResults/*.trx
+            nuget-vulnerability-report-${{ matrix.os }}.json
           if-no-files-found: ignore
 
   arelle-worker:

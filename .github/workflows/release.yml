@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
-      - run: dotnet restore ${{ env.SOLUTION }}
+      - run: dotnet restore ${{ env.SOLUTION }} --locked-mode
       - run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
       - run: dotnet test ${{ env.SOLUTION }} -c Release --no-build
 
@@ -81,10 +81,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
+      - name: Restore locked multi-RID NuGet graph
+        run: dotnet restore src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj --locked-mode
       - name: Publish self-contained CLI
         run: >
           dotnet publish src/XBRLMappingStudio.CLI -c Release -r ${{ matrix.rid }}
-          --self-contained true -p:PublishSingleFile=false
+          --no-restore --self-contained true -p:PublishSingleFile=false
           -p:Version=${{ needs.meta.outputs.version }}
           -o out/${{ matrix.rid }}
       - name: Archive
@@ -115,10 +117,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: '10.0.x' }
+      - name: Restore locked multi-RID NuGet graph
+        run: dotnet restore src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj --locked-mode
       - name: Publish self-contained Desktop (unsigned portable build)
         run: >
           dotnet publish src/XBRLMappingStudio.Desktop -c Release -r ${{ matrix.rid }}
-          --self-contained true -p:PublishSingleFile=false
+          --no-restore --self-contained true -p:PublishSingleFile=false
           -p:Version=${{ needs.meta.outputs.version }}
           -o out/desktop-${{ matrix.rid }}
       - name: Archive

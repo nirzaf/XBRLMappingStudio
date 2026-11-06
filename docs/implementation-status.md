@@ -63,7 +63,7 @@ where explicitly narrowed below.
 | OPS03 | Partially implemented | Worker process supervision and cancellation exist; no full desktop Arelle lifecycle. |
 | OPS04 | Partially implemented | `PublicationGate.cs` and path checks exist; centralized authorization and immutable trusted reviewer authority remain incomplete. |
 | OPS05 | Partially implemented | SQLite publication receipts and intent-bound idempotency are tested; mixed-destination reconciliation after an ambiguous database/file outcome is not implemented. |
-| OPS06 | Partially implemented | NuGet and worker dependencies are pinned, but locked self-contained release bundles and per-target dependency/license inventories are absent. |
+| OPS06 | Partially implemented | All 19 .NET projects have checked-in NuGet lock files with win-x64/linux-x64/osx-x64 dependency graphs and content hashes. CI and release restores run locked mode; release publish consumes the locked multi-RID restore with `--no-restore`. The pinned Arelle worker lock retains wheel hashes, and CI uploads machine-readable NuGet vulnerability reports. Complete per-file license/SPDX manifests, native/OCR dependency inventory, artifact file hashes, and locked release bundles remain open. |
 | OPS07 | Partially implemented | Versioned SQLite migrations and non-overwriting backups are tested; installed-release upgrade, compatible project restore and rollback are not qualified. |
 | OPS08 | Partially implemented | Structured diagnostics and redacted support bundles exist; scheduler integration and unattended recovery qualification are absent. |
 | PERF01 | Missing | No cold/warm startup measurements. |

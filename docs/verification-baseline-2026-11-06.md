@@ -147,3 +147,19 @@ The separate worker job installed Python 3.12 using
 suite (11 passed, including all five cases gated in the regular matrix). This evidence
 does not qualify a customer filing profile, customer data rights, native Windows GUI
 accessibility, or production hardware performance.
+
+## OPS-05 dependency lock and vulnerability evidence
+
+On the Windows checkout, `dotnet restore XBRLMappingStudio.slnx --locked-mode
+-warnaserror:NU1900,NU1901,NU1902,NU1903,NU1904` completed successfully. The
+solution has 19 project lock files covering `win-x64`, `linux-x64`, and `osx-x64`.
+A local `dotnet list XBRLMappingStudio.slnx package --vulnerable
+--include-transitive --format json --no-restore` report parsed for all 19 projects
+and contained zero vulnerable package records at verification time. CI now uploads
+the equivalent per-OS JSON report with test results.
+
+Release publish probes succeeded with the locked multi-RID restore followed by
+`--no-restore`: CLI `win-x64`, `linux-x64`, and `osx-x64`; Desktop `win-x64`.
+`git diff --check` passed. These checks do not close OPS-05: complete SPDX/per-file
+license inventories (including native/OCR components), redistribution review,
+artifact hashes, and locked release bundles remain open.

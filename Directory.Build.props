@@ -9,5 +9,7 @@
   -->
   <PropertyGroup>
     <LangVersion>14.0</LangVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
   </PropertyGroup>
 </Project>
