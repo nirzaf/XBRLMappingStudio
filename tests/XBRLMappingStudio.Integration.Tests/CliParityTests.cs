@@ -449,6 +449,81 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_MixedPublicationRecordsSqliteRefusalAndRetriesSameXmlIntent()
+    {
+        var targetPath = Path.Combine(_dir, "xml-mixed-retry-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: false);
+        var targetBeforeFailure = await File.ReadAllBytesAsync(targetPath);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "xml-mixed-retry-target.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "xml-mixed-refusal.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var outputPath = Path.Combine(_dir, "xml-mixed-refusal-report.xml");
+        var firstManifestPath = Path.Combine(_dir, "xml-mixed-refusal-manifest.json");
+
+        var (firstExit, _, firstError) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", firstManifestPath, "--allow-synthetic-profile");
+
+        Assert.Equal(3, firstExit);
+        Assert.Contains(DiagnosticCodes.IoSchemaMismatch, firstError, StringComparison.Ordinal);
+        var xmlDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath));
+        string reconciliationId;
+        using (var firstManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(firstManifestPath)))
+        {
+            var root = firstManifest.RootElement;
+            reconciliationId = root.GetProperty("PublicationReconciliationId").GetString()!;
+            var outcomes = root.GetProperty("PublicationOutcomes").EnumerateArray().ToArray();
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+                && outcome.GetProperty("State").GetString() == "Confirmed"
+                && outcome.GetProperty("Digest").GetString() == xmlDigest);
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "sqlite"
+                && outcome.GetProperty("State").GetString() == "Rejected");
+        }
+        Assert.Equal(targetBeforeFailure, await File.ReadAllBytesAsync(targetPath));
+
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var retryManifestPath = Path.Combine(_dir, "xml-mixed-refusal-retry-manifest.json");
+        var (retryExit, _, retryError) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", retryManifestPath, "--allow-synthetic-profile");
+
+        Assert.True(retryExit == 0, $"Retry after correcting the SQLite schema failed.\n{retryError}");
+        Assert.Equal(xmlDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
+        using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
+        {
+            var root = retryManifest.RootElement;
+            Assert.Equal(reconciliationId, root.GetProperty("PublicationReconciliationId").GetString());
+            Assert.All(root.GetProperty("PublicationOutcomes").EnumerateArray(), outcome =>
+                Assert.Equal("Confirmed", outcome.GetProperty("State").GetString()));
+        }
+
+        await using var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+        await target.OpenAsync();
+        await using var command = target.CreateCommand();
+        command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+    }
+
+    [Fact]
     public async Task Cli_ConfigureAndExecutePublishesExplicitJsonDestination()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
