@@ -3,12 +3,16 @@ using XBRLMappingStudio.Worker;
 
 namespace XBRLMappingStudio.Ops.Tests;
 
+[CollectionDefinition("Worker process supervision", DisableParallelization = true)]
+public sealed class WorkerProcessSupervisionCollection { }
+
 /// <summary>
 /// OPS03 — supervision of a real subprocess: stdout flood stays bounded, a crashing
 /// worker yields a distinct terminal outcome from a timeout, watchdog kills the tree,
 /// and the next job starts clean. Exercises the same supervision the Arelle Python
 /// host will run under (the interpreter itself is owner-gated for real profiles).
 /// </summary>
+[Collection("Worker process supervision")]
 public class SupervisionTests
 {
     // Two script variants per scenario: POSIX sh on Unix, PowerShell on Windows.
