@@ -68,6 +68,19 @@ public sealed class ProjectManager
     }
 
     /// <summary>
+    /// Read an exact project-file byte snapshot under the same writer-marker check
+    /// used by normal loads. Intended for explicit compatibility/migration flows.
+    /// </summary>
+    public byte[] ReadSnapshotBytes()
+    {
+        if (!File.Exists(FullPath))
+            throw new FileNotFoundException($"Project file not found: {FullPath}", FullPath);
+
+        using var _ = AcquireSharedLock();
+        return File.ReadAllBytes(FullPath);
+    }
+
+    /// <summary>
     /// Load the last saved backup for this project. The file is read twice with writer-lock
     /// checks around the reads so a backup being copied by a concurrent save is not accepted.
     /// </summary>

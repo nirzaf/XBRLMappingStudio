@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.CLI;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
@@ -152,6 +154,96 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Equal("1250000", actual.GetProperty("value").GetString());
         Assert.Equal("iso4217:QAR", dimensions.GetProperty("unit").GetString());
         Assert.Equal(-3, actual.GetProperty("decimals").GetInt32());
+    }
+
+    [Fact]
+    public async Task Cli_MigratesLegacyProjectOnlyToExplicitProfileSaveAsAndResetsApproval()
+    {
+        var profile = SyntheticProfile.Build();
+        var sourceProject = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var legacy = JsonNode.Parse(ProjectSerializer.Serialize(sourceProject))!.AsObject();
+        legacy.Remove("profileId");
+        legacy.Remove("profileDigest");
+        var sourcePath = Path.Combine(_dir, "legacy.xmap");
+        await File.WriteAllTextAsync(sourcePath, legacy.ToJsonString(ProjectSerializer.Options));
+        var originalBytes = await File.ReadAllBytesAsync(sourcePath);
+        var destinationPath = Path.Combine(_dir, "adopted.xmap");
+        var cli = LocateCli();
+
+        var (blockedExit, _, blockedError) = await RunCliAsync(cli,
+            "migrate-project-profile", sourcePath,
+            "--output", destinationPath,
+            "--profile-id", profile.ProfileId,
+            "--profile-digest", profile.Digest);
+
+        Assert.Equal(ExitCodes.IncompleteProfile, blockedExit);
+        Assert.Contains("explicit opt-in", blockedError, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(destinationPath));
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(sourcePath));
+
+        var (exit, stdout, stderr) = await RunCliAsync(cli,
+            "migrate-project-profile", sourcePath,
+            "--output", destinationPath,
+            "--profile-id", profile.ProfileId,
+            "--profile-digest", profile.Digest,
+            "--allow-synthetic-profile");
+
+        Assert.True(exit == ExitCodes.Success,
+            $"Expected adoption success but got {exit}.\nstdout:\n{stdout}\nstderr:\n{stderr}");
+        using var report = JsonDocument.Parse(stdout);
+        Assert.Equal("explicit-profile-adoption-save-as", report.RootElement.GetProperty("decision").GetString());
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(originalBytes)).ToLowerInvariant(),
+            report.RootElement.GetProperty("sourceSha256").GetString());
+        Assert.Equal(new[] { "profileId", "profileDigest" }, report.RootElement
+            .GetProperty("addedIdentityFields").EnumerateArray().Select(value => value.GetString()).ToArray());
+        Assert.True(report.RootElement.GetProperty("approvalsReset").GetBoolean());
+        Assert.False(report.RootElement.GetProperty("sourceModified").GetBoolean());
+
+        var adopted = new ProjectManager(destinationPath).Load();
+        Assert.Equal(profile.ProfileId, adopted.ProfileId);
+        Assert.Equal(profile.Digest, adopted.ProfileDigest);
+        Assert.NotEqual(sourceProject.ProjectId, adopted.ProjectId);
+        Assert.Empty(adopted.Approvals);
+        Assert.Equal(sourceProject.Nodes.Count, adopted.Nodes.Count);
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(sourcePath));
+    }
+
+    [Fact]
+    public async Task Cli_MigrateProjectProfileRefusesIdentityConflictAndDoesNotReplaceExistingOutput()
+    {
+        var profile = SyntheticProfile.Build();
+        var sourceProject = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var legacy = JsonNode.Parse(ProjectSerializer.Serialize(sourceProject))!.AsObject();
+        legacy["profileId"] = "declared-but-different";
+        legacy.Remove("profileDigest");
+        var sourcePath = Path.Combine(_dir, "conflicting-legacy.xmap");
+        await File.WriteAllTextAsync(sourcePath, legacy.ToJsonString(ProjectSerializer.Options));
+        var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
+        var destinationPath = Path.Combine(_dir, "existing.xmap");
+        var destinationBytes = Encoding.UTF8.GetBytes("preserve existing destination");
+        await File.WriteAllBytesAsync(destinationPath, destinationBytes);
+
+        var (samePathExit, _, samePathError) = await RunCliAsync(LocateCli(),
+            "migrate-project-profile", sourcePath,
+            "--output", sourcePath,
+            "--profile-id", profile.ProfileId,
+            "--profile-digest", profile.Digest,
+            "--allow-synthetic-profile");
+        Assert.Equal(ExitCodes.DataError, samePathExit);
+        Assert.Contains("source is never rewritten", samePathError, StringComparison.Ordinal);
+        Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(sourcePath));
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(),
+            "migrate-project-profile", sourcePath,
+            "--output", destinationPath,
+            "--profile-id", profile.ProfileId,
+            "--profile-digest", profile.Digest,
+            "--allow-synthetic-profile");
+
+        Assert.Equal(ExitCodes.DataError, exit);
+        Assert.Contains("conflicts with the identity already declared", stderr, StringComparison.Ordinal);
+        Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(sourcePath));
+        Assert.Equal(destinationBytes, await File.ReadAllBytesAsync(destinationPath));
     }
 
     [Fact]

@@ -183,3 +183,34 @@ Verification:
 - dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1 succeeded with 0 warnings and 0 errors.
 
 Limits: the XML semantic-parity publication case uses two facts under forced large mode. It does not qualify 100,000-row XML memory/throughput, Arelle's report-model memory, real filing-profile acceptance, multi-source or set-phase large runs, or desktop-native XML workflows. One context/unit per fact can increase output size; the configured report-byte cap remains enforced.
+
+## TAX-03 explicit legacy profile adoption
+
+`migrate-project-profile` accepts a legacy `.xmap` only when one or both profile
+identity fields are missing and the caller supplies the exact profile ID and
+digest. It validates the selected identity through the installed-profile
+resolver, writes a create-only independent project copy, changes no source
+bytes, and resets project identity and approvals. Synthetic adoption requires
+`--allow-synthetic-profile`; unapproved real profiles continue to fail under
+GAT-01/GAT-02. Unsupported project fields, duplicate identity keys, conflicting
+existing identity values, same-path output and existing output files are
+refused. No local SQLite cache is used to substitute profile identity or
+package hashes.
+
+Verification:
+
+- CLI Release build succeeded with 0 warnings and 0 errors.
+- Project Release tests passed 24/24, including missing and partial identity,
+  approval reset, independent-copy preservation, duplicate keys, conflicting
+  profile identity, and unsupported-field refusal.
+- The two CLI subprocess adoption tests passed 2/2. They verify the synthetic
+  opt-in gate, exact selected identity, unchanged source bytes, no same-path
+  replacement, and preservation of an existing destination.
+- The full Release Integration suite passed 232 tests, skipped 6 gated Arelle
+  tests, and had no failures.
+- `git diff --check` passed before commit.
+
+The ordinary project loader still refuses unpinned legacy files; the explicit
+CLI path is the compatibility decision and no profile is inferred. Desktop does
+not yet expose this migration flow. Adoption of real profiles remains gated by
+the owner and rights decisions, and the new exact-head CI result is pending.

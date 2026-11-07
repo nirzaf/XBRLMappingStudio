@@ -31,6 +31,7 @@ return command switch
     "inspect" => Inspect(rest),
     "inspect-source" => await InspectSourceAsync(rest),
     "validate" => await ValidateAsync(rest),
+    "migrate-project-profile" => MigrateProjectProfile(rest),
     "configure-destination" => ConfigureDestination(rest),
     "taxonomy-search" => TaxonomySearch(rest),
     "install-profile" => await InstallProfileAsync(rest),
@@ -59,6 +60,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio inspect-source <project.xmap> [--binding <id>] (SQLite source schema and capabilities)");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
+    Console.Error.WriteLine("  xbrl-studio migrate-project-profile <legacy.xmap> --output <new.xmap> --profile-id <id> --profile-digest <digest> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
@@ -77,6 +79,100 @@ static int PrintUsage()
     Console.Error.WriteLine("Exit codes: 0=success 1=success-with-warnings 2=invalid-mapping 3=data-error");
     Console.Error.WriteLine("            4=incomplete-profile 5=authorization-failure 6=cancelled 7=operational-failure");
     return ExitCodesLocal.Success;
+}
+
+static int MigrateProjectProfile(string[] args)
+{
+    if (args.Length < 1)
+    {
+        Console.Error.WriteLine("migrate-project-profile requires <legacy-project.xmap>.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    string? outputPath = null;
+    string? profileId = null;
+    string? profileDigest = null;
+    var allowSyntheticProfile = false;
+    for (var i = 1; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--output" when i + 1 < args.Length && outputPath is null:
+                outputPath = args[++i];
+                break;
+            case "--profile-id" when i + 1 < args.Length && profileId is null:
+                profileId = args[++i];
+                break;
+            case "--profile-digest" when i + 1 < args.Length && profileDigest is null:
+                profileDigest = args[++i];
+                break;
+            case "--allow-synthetic-profile":
+                allowSyntheticProfile = true;
+                break;
+            default:
+                Console.Error.WriteLine($"Unrecognized, duplicate, or incomplete migrate-project-profile option: {args[i]}");
+                return ExitCodesLocal.IncompleteProfile;
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(outputPath)
+        || string.IsNullOrWhiteSpace(profileId)
+        || string.IsNullOrWhiteSpace(profileDigest))
+    {
+        Console.Error.WriteLine("migrate-project-profile requires --output, --profile-id, and --profile-digest; no profile is inferred.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    try
+    {
+        var service = new LegacyProjectProfileAdoptionService(FilingProfileResolver.FromDefaultCatalog());
+        var result = service.Adopt(args[0], outputPath, profileId, profileDigest, allowSyntheticProfile);
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            decision = "explicit-profile-adoption-save-as",
+            sourcePath = result.SourcePath,
+            sourceSha256 = result.SourceSha256,
+            destinationPath = result.DestinationPath,
+            addedIdentityFields = result.AddedIdentityFields,
+            profileId = result.ProfileId,
+            profileDigest = result.ProfileDigest,
+            projectId = result.NewProjectId,
+            semanticDigest = result.NewSemanticDigest,
+            approvalsReset = true,
+            sourceModified = false
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        return ExitCodesLocal.Success;
+    }
+    catch (LegacyProjectProfileAdoptionBlockedException ex)
+    {
+        PrintDiagnostics(ex.Diagnostics);
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    catch (ProjectSchemaException ex)
+    {
+        Console.Error.WriteLine($"PRJ: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+    catch (ProjectSaveException ex)
+    {
+        Console.Error.WriteLine($"PRJ: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.OperationalFailure;
+    }
+    catch (InvalidOperationException ex)
+    {
+        Console.Error.WriteLine($"PRJ: profile adoption refused: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+    catch (ArgumentException ex)
+    {
+        Console.Error.WriteLine($"PRJ: invalid profile adoption request: {ex.Message}");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+    {
+        Console.Error.WriteLine($"PRJ: profile adoption failed: {ex.Message}");
+        return ExitCodesLocal.OperationalFailure;
+    }
 }
 
 static async Task<int> InstallProfileAsync(string[] args)
