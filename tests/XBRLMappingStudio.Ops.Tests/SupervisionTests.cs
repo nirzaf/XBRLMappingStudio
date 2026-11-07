@@ -99,6 +99,136 @@ public class SupervisionTests
     }
 
     [Fact]
+    public async Task ConcurrentWorkers_AreBoundedAcrossSupervisorInstances()
+    {
+        const int workerCount = 8;
+        const int maximumWorkers = 2;
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-limit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var quotedWorkspace = OperatingSystem.IsWindows()
+            ? "'" + workspace.Replace("'", "''", StringComparison.Ordinal) + "'"
+            : "'" + workspace.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+        var (exe, args) = OperatingSystem.IsWindows()
+            ? ("powershell.exe", new[]
+            {
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                $"$marker = Join-Path {quotedWorkspace} ('worker-' + $PID); " +
+                "[System.IO.File]::WriteAllText($marker, [string]$PID); " +
+                "Start-Sleep -Milliseconds 350; Remove-Item -LiteralPath $marker -Force"
+            })
+            : ("/bin/sh", new[]
+            {
+                "-c",
+                $"marker={quotedWorkspace}/worker-$$; : > \"$marker\"; sleep 0.35; rm -f \"$marker\""
+            });
+
+        try
+        {
+            var runs = Enumerable.Range(0, workerCount)
+                .Select(_ => new WorkerSupervisor().RunAsync(exe, args, TimeSpan.FromSeconds(15)))
+                .ToArray();
+            var allRuns = Task.WhenAll(runs);
+            var maximumObserved = 0;
+            while (!allRuns.IsCompleted)
+            {
+                maximumObserved = Math.Max(maximumObserved,
+                    Directory.EnumerateFiles(workspace, "worker-*").Count());
+                await Task.Delay(10);
+            }
+
+            var results = await allRuns.WaitAsync(TimeSpan.FromSeconds(15));
+            maximumObserved = Math.Max(maximumObserved,
+                Directory.EnumerateFiles(workspace, "worker-*").Count());
+
+            Assert.All(results, result => Assert.Equal(SupervisedOutcome.Completed, result.Outcome));
+            Assert.InRange(maximumObserved, 1, maximumWorkers);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task DeadlineWhileWaitingForWorkerSlot_DoesNotStartAnotherProcess()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-queue-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var quotedWorkspace = OperatingSystem.IsWindows()
+            ? "'" + workspace.Replace("'", "''", StringComparison.Ordinal) + "'"
+            : "'" + workspace.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+        var activeScript = OperatingSystem.IsWindows()
+            ? $"$marker = Join-Path {quotedWorkspace} ('active-' + $PID); " +
+              "[System.IO.File]::WriteAllText($marker, [string]$PID); " +
+              "Start-Sleep -Milliseconds 1400; Remove-Item -LiteralPath $marker -Force"
+            : $"marker={quotedWorkspace}/active-$$; : > \"$marker\"; sleep 1.4; rm -f \"$marker\"";
+        var queuedScript = OperatingSystem.IsWindows()
+            ? $"$marker = Join-Path {quotedWorkspace} 'queued'; " +
+              "[System.IO.File]::WriteAllText($marker, 'started')"
+            : $"marker={quotedWorkspace}/queued; : > \"$marker\"";
+        var (exe, activeArgs) = Shell(activeScript, activeScript);
+        var (_, queuedArgs) = Shell(queuedScript, queuedScript);
+
+        try
+        {
+            var activeRuns = Enumerable.Range(0, 2)
+                .Select(_ => new WorkerSupervisor().RunAsync(exe, activeArgs, TimeSpan.FromSeconds(10)))
+                .ToArray();
+            var waitUntil = DateTimeOffset.UtcNow.AddSeconds(10);
+            while (Directory.EnumerateFiles(workspace, "active-*").Count() < 2
+                   && DateTimeOffset.UtcNow < waitUntil)
+                await Task.Delay(10);
+
+            Assert.Equal(2, Directory.EnumerateFiles(workspace, "active-*").Count());
+
+            var queued = await new WorkerSupervisor().RunAsync(
+                exe, queuedArgs, TimeSpan.FromMilliseconds(150));
+
+            Assert.Equal(SupervisedOutcome.TimedOut, queued.Outcome);
+            Assert.Equal(DiagnosticCodes.WkrTimeout, queued.Failure!.Code);
+            Assert.False(File.Exists(Path.Combine(workspace, "queued")));
+            var activeResults = await Task.WhenAll(activeRuns).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.All(activeResults, result => Assert.Equal(SupervisedOutcome.Completed, result.Outcome));
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task ArelleWorkerLeases_ShareCapacityWithSupervisedProcesses()
+    {
+        var clients = Enumerable.Range(0, WorkerProcessCapacity.MaximumConcurrentProcesses)
+            .Select(_ => new BoundedWorkerClient(() => new StubWorkerClient()))
+            .ToArray();
+        var (exe, args) = Shell("echo supervised", "Write-Output supervised");
+
+        try
+        {
+            await Task.WhenAll(clients.Select(client =>
+                client.HandshakeAsync(CancellationToken.None))).WaitAsync(TimeSpan.FromSeconds(15));
+
+            var queued = await new WorkerSupervisor().RunAsync(
+                exe, args, TimeSpan.FromMilliseconds(150));
+            Assert.Equal(SupervisedOutcome.TimedOut, queued.Outcome);
+            Assert.Contains("waiting for a worker slot", queued.Failure!.Message,
+                StringComparison.OrdinalIgnoreCase);
+
+            await clients[0].DisposeAsync();
+            var admitted = await new WorkerSupervisor().RunAsync(
+                exe, args, TimeSpan.FromSeconds(5));
+            Assert.Equal(SupervisedOutcome.Completed, admitted.Outcome);
+            Assert.Contains("supervised", string.Join('\n', admitted.CapturedLog));
+        }
+        finally
+        {
+            foreach (var client in clients)
+                await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task StdinPayload_IsDelimitedToWorker_AndBoundedResponseCaptured()
     {
         // 'cat' echoes stdin on stdout: proves framed hand-off works end to end
@@ -261,5 +391,26 @@ public class SupervisionTests
         }
         catch (ArgumentException) { }
         catch (InvalidOperationException) { }
+    }
+
+    private sealed class StubWorkerClient : IWorkerClient
+    {
+        public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new WorkerHandshake(
+                WorkerProtocol.CurrentVersion,
+                "stub/1.0",
+                new[] { WorkerOperations.ValidateReport }));
+        }
+
+        public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new WorkerResponse(request.OperationId,
+                WorkerStatus.Success, null, Array.Empty<Diagnostic>(), null));
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

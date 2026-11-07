@@ -55,166 +55,182 @@ public sealed class WorkerSupervisor
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             watchdog.Token, cancellationToken);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = executable,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = new UTF8Encoding(false),
-        };
-        foreach (var a in arguments) psi.ArgumentList.Add(a);
-
-        var started = WorkerProcessTree.Start(psi);
-        using var process = started.Process;
-        using var processTree = started.Tree;
-
-        var log = new BoundedLog(_maxLogBytes);
-        var stdoutTask = PumpAsync(process.StandardOutput, linked.Token);
-        var stderrTask = PumpAsync(process.StandardError, linked.Token);
-
-        bool timedOut = false;
-        bool callerCancelled = false;
-        bool awaitingPipeDrain = false;
-        bool orphan = false;
+        IDisposable processSlot;
         try
         {
-            if (stdinPayload is not null)
-            {
-                await process.StandardInput.WriteAsync(stdinPayload.AsMemory(), linked.Token);
-                await process.StandardInput.FlushAsync(linked.Token);
-            }
-            try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
-
-            await process.WaitForExitAsync(linked.Token);
-            awaitingPipeDrain = true;
-            await Task.WhenAll(stdoutTask, stderrTask);
+            processSlot = await WorkerProcessCapacity.AcquireAsync(linked.Token);
         }
         catch (OperationCanceledException) when (watchdog.IsCancellationRequested)
         {
-            timedOut = true;
-            orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
-            processTree.Kill(process);
+            return new SupervisionResult(SupervisedOutcome.TimedOut, null,
+                Array.Empty<string>(), LogTruncated: false, OrphanDetected: false,
+                Diag(DiagnosticCodes.WkrTimeout,
+                    $"Worker '{executable}' exceeded its {deadline} deadline while waiting for a worker slot."));
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+
+        using (processSlot)
         {
-            // Caller cancellation: same terminal treatment as the watchdog.
-            callerCancelled = true;
-            orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
-            processTree.Kill(process);
-        }
-        catch
-        {
-            processTree.Kill(process);
+            var psi = new ProcessStartInfo
+            {
+                FileName = executable,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = new UTF8Encoding(false),
+            };
+            foreach (var a in arguments) psi.ArgumentList.Add(a);
+
+            var started = WorkerProcessTree.Start(psi);
+            using var process = started.Process;
+            using var processTree = started.Tree;
+
+            var log = new BoundedLog(_maxLogBytes);
+            var stdoutTask = PumpAsync(process.StandardOutput, linked.Token);
+            var stderrTask = PumpAsync(process.StandardError, linked.Token);
+
+            bool timedOut = false;
+            bool callerCancelled = false;
+            bool awaitingPipeDrain = false;
+            bool orphan = false;
             try
             {
-                await process.WaitForExitAsync(CancellationToken.None)
-                    .WaitAsync(TimeSpan.FromSeconds(2));
-            }
-            catch { /* the failure below remains authoritative */ }
-            try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
-            catch { /* the failure below remains authoritative */ }
-            throw;
-        }
-
-        // A worker can leave a descendant holding an inherited pipe open. The
-        // watchdog/caller cancellation also cancels these fixed-buffer drains so
-        // cleanup never waits forever for such a pipe to close. If the direct
-        // process exited before the drain deadline, the surviving pipe is evidence
-        // of a descendant that could not be reached through the exited parent.
-        try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
-        catch
-        {
-            orphan |= awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
-            processTree.Kill(process);
-        }
-
-        // Orphan check on shutdown: after tree-kill the supervised process must be gone.
-        if (!process.HasExited)
-        {
-            processTree.Kill(process);
-            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); }
-            catch { /* timeout below counts as orphan */ }
-            orphan |= !process.HasExited;
-        }
-
-        var exitCode = process.HasExited ? (int?)process.ExitCode : null;
-
-        if (callerCancelled)
-            throw new OperationCanceledException(cancellationToken);
-
-        if (timedOut)
-            return new SupervisionResult(SupervisedOutcome.TimedOut, exitCode, log.Lines,
-                log.Truncated, orphan, Diag(DiagnosticCodes.WkrTimeout,
-                    $"Worker '{executable}' exceeded its {deadline} deadline and was killed."));
-
-        if (exitCode is not 0)
-            return new SupervisionResult(SupervisedOutcome.Crashed, exitCode, log.Lines,
-                log.Truncated, orphan, Diag(DiagnosticCodes.WkrCrash,
-                    $"Worker '{executable}' terminated with exit code {exitCode}."));
-
-        return new SupervisionResult(SupervisedOutcome.Completed, exitCode, log.Lines,
-            log.Truncated, orphan, Failure: null);
-
-        async Task PumpAsync(StreamReader reader, CancellationToken token)
-        {
-            // Never use ReadLineAsync here: a worker can emit one newline-free
-            // record of arbitrary size. Keep at most one bounded line and drain
-            // the rest in fixed-size chunks.
-            var buffer = new char[4096];
-            var line = new StringBuilder();
-            long lineBytes = 0;
-            var discardingLine = false;
-            try
-            {
-                while (true)
+                if (stdinPayload is not null)
                 {
-                    var count = await reader.ReadAsync(buffer.AsMemory(), token);
-                    if (count == 0) break;
-                    for (var index = 0; index < count; index++)
-                    {
-                        var character = buffer[index];
-                        if (character == '\n')
-                        {
-                            if (!discardingLine)
-                            {
-                                if (line.Length > 0 && line[^1] == '\r')
-                                    line.Length--;
-                                log.Append(line.ToString());
-                            }
-                            else
-                                log.MarkTruncated();
-                            line.Clear();
-                            lineBytes = 0;
-                            discardingLine = false;
-                            continue;
-                        }
-
-                        if (discardingLine) continue;
-                        var characterBytes = ConservativeUtf8ByteCount(character);
-                        // Reserve a byte for the line terminator in the public
-                        // captured-log accounting.
-                        if (lineBytes + characterBytes + 1 > _maxLogBytes)
-                        {
-                            if (line.Length > 0) log.Append(line.ToString());
-                            log.MarkTruncated();
-                            line.Clear();
-                            lineBytes = 0;
-                            discardingLine = true;
-                            continue;
-                        }
-
-                        line.Append(character);
-                        lineBytes += characterBytes;
-                    }
+                    await process.StandardInput.WriteAsync(stdinPayload.AsMemory(), linked.Token);
+                    await process.StandardInput.FlushAsync(linked.Token);
                 }
+                try { process.StandardInput.Close(); } catch (IOException) { /* already gone */ }
 
-                if (line.Length > 0 && !discardingLine)
-                    log.Append(line.ToString());
+                await process.WaitForExitAsync(linked.Token);
+                awaitingPipeDrain = true;
+                await Task.WhenAll(stdoutTask, stderrTask);
             }
-            catch (IOException) { /* process-tree shutdown closes redirected pipes */ }
+            catch (OperationCanceledException) when (watchdog.IsCancellationRequested)
+            {
+                timedOut = true;
+                orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+                processTree.Kill(process);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Caller cancellation: same terminal treatment as the watchdog.
+                callerCancelled = true;
+                orphan = awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+                processTree.Kill(process);
+            }
+            catch
+            {
+                processTree.Kill(process);
+                try
+                {
+                    await process.WaitForExitAsync(CancellationToken.None)
+                        .WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch { /* the failure below remains authoritative */ }
+                try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
+                catch { /* the failure below remains authoritative */ }
+                throw;
+            }
+
+            // A worker can leave a descendant holding an inherited pipe open. The
+            // watchdog/caller cancellation also cancels these fixed-buffer drains so
+            // cleanup never waits forever for such a pipe to close. If the direct
+            // process exited before the drain deadline, the surviving pipe is evidence
+            // of a descendant that could not be reached through the exited parent.
+            try { await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch
+            {
+                orphan |= awaitingPipeDrain && process.HasExited && !processTree.CanCleanDescendantsAfterParentExit;
+                processTree.Kill(process);
+            }
+
+            // Orphan check on shutdown: after tree-kill the supervised process must be gone.
+            if (!process.HasExited)
+            {
+                processTree.Kill(process);
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2)); }
+                catch { /* timeout below counts as orphan */ }
+                orphan |= !process.HasExited;
+            }
+
+            var exitCode = process.HasExited ? (int?)process.ExitCode : null;
+
+            if (callerCancelled)
+                throw new OperationCanceledException(cancellationToken);
+
+            if (timedOut)
+                return new SupervisionResult(SupervisedOutcome.TimedOut, exitCode, log.Lines,
+                    log.Truncated, orphan, Diag(DiagnosticCodes.WkrTimeout,
+                        $"Worker '{executable}' exceeded its {deadline} deadline and was killed."));
+
+            if (exitCode is not 0)
+                return new SupervisionResult(SupervisedOutcome.Crashed, exitCode, log.Lines,
+                    log.Truncated, orphan, Diag(DiagnosticCodes.WkrCrash,
+                        $"Worker '{executable}' terminated with exit code {exitCode}."));
+
+            return new SupervisionResult(SupervisedOutcome.Completed, exitCode, log.Lines,
+                log.Truncated, orphan, Failure: null);
+
+            async Task PumpAsync(StreamReader reader, CancellationToken token)
+            {
+                // Never use ReadLineAsync here: a worker can emit one newline-free
+                // record of arbitrary size. Keep at most one bounded line and drain
+                // the rest in fixed-size chunks.
+                var buffer = new char[4096];
+                var line = new StringBuilder();
+                long lineBytes = 0;
+                var discardingLine = false;
+                try
+                {
+                    while (true)
+                    {
+                        var count = await reader.ReadAsync(buffer.AsMemory(), token);
+                        if (count == 0) break;
+                        for (var index = 0; index < count; index++)
+                        {
+                            var character = buffer[index];
+                            if (character == '\n')
+                            {
+                                if (!discardingLine)
+                                {
+                                    if (line.Length > 0 && line[^1] == '\r')
+                                        line.Length--;
+                                    log.Append(line.ToString());
+                                }
+                                else
+                                    log.MarkTruncated();
+                                line.Clear();
+                                lineBytes = 0;
+                                discardingLine = false;
+                                continue;
+                            }
+
+                            if (discardingLine) continue;
+                            var characterBytes = ConservativeUtf8ByteCount(character);
+                            // Reserve a byte for the line terminator in the public
+                            // captured-log accounting.
+                            if (lineBytes + characterBytes + 1 > _maxLogBytes)
+                            {
+                                if (line.Length > 0) log.Append(line.ToString());
+                                log.MarkTruncated();
+                                line.Clear();
+                                lineBytes = 0;
+                                discardingLine = true;
+                                continue;
+                            }
+
+                            line.Append(character);
+                            lineBytes += characterBytes;
+                        }
+                    }
+
+                    if (line.Length > 0 && !discardingLine)
+                        log.Append(line.ToString());
+                }
+                catch (IOException) { /* process-tree shutdown closes redirected pipes */ }
+            }
         }
     }
 

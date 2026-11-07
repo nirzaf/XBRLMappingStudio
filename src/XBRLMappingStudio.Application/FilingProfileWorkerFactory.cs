@@ -11,10 +11,18 @@ namespace XBRLMappingStudio.Application;
 public sealed class FilingProfileWorkerFactory
 {
     private readonly Func<FilingProfile, IWorkerClient>? _arelleFactory;
+    private readonly Func<FilingProfile, Func<IWorkerClient>>? _deferredArelleFactory;
 
     public FilingProfileWorkerFactory(Func<FilingProfile, IWorkerClient>? arelleFactory = null)
     {
         _arelleFactory = arelleFactory;
+    }
+
+    private FilingProfileWorkerFactory(
+        Func<FilingProfile, Func<IWorkerClient>> deferredArelleFactory,
+        bool deferProcessCreation)
+    {
+        _deferredArelleFactory = deferredArelleFactory;
     }
 
     public IWorkerClient Create(FilingProfile profile, bool useArelle = false)
@@ -24,9 +32,13 @@ public sealed class FilingProfileWorkerFactory
         var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
         if (useArelle || !isSynthetic)
         {
-            return _arelleFactory?.Invoke(profile)
+            if (_deferredArelleFactory is not null)
+                return new BoundedWorkerClient(_deferredArelleFactory(profile));
+
+            var arelleFactory = _arelleFactory
                 ?? throw new InvalidOperationException(
                     $"Profile '{profile.ProfileId}' requires Arelle, but no Arelle worker is configured.");
+            return new BoundedWorkerClient(() => arelleFactory(profile));
         }
 
         return new LocalSyntheticWorker(profile);
@@ -102,17 +114,17 @@ public sealed class FilingProfileWorkerFactory
             var executable = pythonExecutablePath
                 ?? Environment.GetEnvironmentVariable("XMS_PYTHON")
                 ?? (OperatingSystem.IsWindows() ? "python" : "python3");
-            return new ArelleWorker(executable, args.ToArray(),
-                expectedProfileId: installation?.Profile.ProfileId,
-                expectedProfileSchemaVersion: installation?.SchemaVersion,
-                expectedProfileVersion: installation?.Version,
-                expectedProfileDigest: installation?.Profile.Digest,
-                expectedTaxonomyEntryPoint: installation is null ? null
-                    : Path.GetRelativePath(installation.InstallationDirectory, installation.EntryPointPath)
-                        .Replace('\\', '/'),
-                expectedRequiredPlugins: installation?.RequiredPlugins,
-                expectedRequiredChecks: installation?.Profile.RequiredChecks);
-        });
+            return () => new ArelleWorker(executable, args.ToArray(),
+                    expectedProfileId: installation?.Profile.ProfileId,
+                    expectedProfileSchemaVersion: installation?.SchemaVersion,
+                    expectedProfileVersion: installation?.Version,
+                    expectedProfileDigest: installation?.Profile.Digest,
+                    expectedTaxonomyEntryPoint: installation is null ? null
+                        : Path.GetRelativePath(installation.InstallationDirectory, installation.EntryPointPath)
+                            .Replace('\\', '/'),
+                    expectedRequiredPlugins: installation?.RequiredPlugins,
+                    expectedRequiredChecks: installation?.Profile.RequiredChecks);
+        }, deferProcessCreation: true);
 
         static string? FindWorkerScript(string? configured)
         {

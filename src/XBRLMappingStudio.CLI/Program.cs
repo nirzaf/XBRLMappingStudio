@@ -249,7 +249,8 @@ static async Task<int> ValidateArtifactAsync(string[] args)
 
         try
         {
-            await using var worker = new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"), workerArgs.ToArray());
+            await using var worker = new BoundedWorkerClient(() =>
+                new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"), workerArgs.ToArray()));
             var handshake = await worker.HandshakeAsync(CancellationToken.None);
             if (!handshake.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
             {

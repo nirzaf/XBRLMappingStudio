@@ -794,6 +794,8 @@ public sealed class FilingProfileResolverTests
         });
 
         var worker = factory.Create(profile);
+        Assert.False(invoked);
+        await worker.HandshakeAsync(CancellationToken.None);
         await worker.DisposeAsync();
 
         Assert.True(invoked);
