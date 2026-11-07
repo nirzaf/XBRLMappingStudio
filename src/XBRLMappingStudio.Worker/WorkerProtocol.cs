@@ -198,10 +198,8 @@ public static class ValidationCompletionReportValidator
             && report.RequiredRules.All(item => item.Status == ValidationCheckStatus.Unavailable);
         if (canUseSyntheticRules)
         {
-            var knownDimensionMembers = profile.DimensionDomains.Values
-                .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
             var localOutcomes = localSyntheticValidation
-                ?? new FilingRuleValidator(profile, knownDimensionMembers).Validate(localSyntheticFacts!);
+                ?? new FilingRuleValidator(profile).Validate(localSyntheticFacts!);
             var byRule = localOutcomes.Outcomes.GroupBy(outcome => outcome.RuleId, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.OrderBy(outcome => outcome.Status switch
                 {

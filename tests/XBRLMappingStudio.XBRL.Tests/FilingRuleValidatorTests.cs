@@ -52,15 +52,18 @@ public sealed class FilingRuleValidatorTests
     }
 
     [Fact]
-    public void InvalidDimension_WithKnownMembers_Fails()
+    public void InvalidDimension_WithDeclaredAxisDomain_Fails()
     {
         // Declare a member domain that does NOT include the fixture's Atlantis member.
-        var known = new HashSet<string>(StringComparer.Ordinal)
+        var profile = ProfileWithDimensionMetadata(new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
         {
-            SyntheticProfile.Qualified("EMEA"),
-            SyntheticProfile.Qualified("APAC")
-        };
-        var validator = new FilingRuleValidator(Profile, known);
+            [SyntheticProfile.Qualified("Region")] = new[]
+            {
+                SyntheticProfile.Qualified("EMEA"),
+                SyntheticProfile.Qualified("APAC")
+            }
+        });
+        var validator = new FilingRuleValidator(profile);
         var result = validator.Validate(Load("invalid-dimension.xbrl.json"));
 
         Assert.True(result.HasFailures);
@@ -85,7 +88,7 @@ public sealed class FilingRuleValidatorTests
     }
 
     [Fact]
-    public void ValidDimension_WithKnownMember_Passes()
+    public void ValidDimension_WithDeclaredAxisMember_Passes()
     {
         // Build an in-memory fact whose member is declared; must pass the dimension rule.
         var fact = new XbrlFact
@@ -99,10 +102,147 @@ public sealed class FilingRuleValidatorTests
             Decimals = 0,
             Dimensions = new[] { new Dimension(SyntheticProfile.Qualified("Region"), SyntheticProfile.Qualified("EMEA")) }
         };
-        var known = new HashSet<string>(StringComparer.Ordinal) { SyntheticProfile.Qualified("EMEA") };
-        var result = new FilingRuleValidator(Profile, known).Validate(new[] { fact });
+        var profile = ProfileWithDimensionMetadata(new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+        {
+            [SyntheticProfile.Qualified("Region")] = new[] { SyntheticProfile.Qualified("EMEA") }
+        });
+        var result = new FilingRuleValidator(profile).Validate(new[] { fact });
         Assert.DoesNotContain(result.Outcomes, o => o.RuleId == "synthetic:dimension-member-valid" && o.Status != RuleStatus.Pass);
     }
+
+    [Fact]
+    public void ExplicitDefaultMember_FailsWithSourceLinkedDiagnostic()
+    {
+        var axis = SyntheticProfile.Qualified("RegionAxis");
+        var defaultMember = SyntheticProfile.Qualified("AllRegions");
+        var source = new SourceReference("input-1", "row=42", "Revenue row");
+        var profile = ProfileWithDimensionMetadata(
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                [axis] = new[] { SyntheticProfile.Qualified("EMEA"), defaultMember }
+            },
+            new[]
+            {
+                new DefinitionLink(
+                    "https://example.invalid/roles/dimensions",
+                    XbrlArcRoles.DimensionDefault,
+                    axis,
+                    defaultMember)
+            });
+        var fact = RevenueFact(new[] { new Dimension(axis, defaultMember) }, new[] { source });
+
+        var result = new FilingRuleValidator(profile).Validate(new[] { fact });
+        var dimensionOutcome = Assert.Single(result.Outcomes,
+            outcome => outcome.RuleId == "synthetic:dimension-member-valid");
+
+        Assert.Equal(RuleStatus.Fail, dimensionOutcome.Status);
+        Assert.Equal(DiagnosticCodes.XbrDimensionInvalid, dimensionOutcome.Diagnostic!.Code);
+        Assert.True(dimensionOutcome.Diagnostic.IsBlocking);
+        Assert.Equal(source, dimensionOutcome.Diagnostic.Source);
+        Assert.Contains("omit the dimension", dimensionOutcome.Diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OmittedDefaultDimension_IsAcceptedAsImplicitDefault()
+    {
+        var axis = SyntheticProfile.Qualified("RegionAxis");
+        var defaultMember = SyntheticProfile.Qualified("AllRegions");
+        var profile = ProfileWithDimensionMetadata(
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                [axis] = new[] { SyntheticProfile.Qualified("EMEA"), defaultMember }
+            },
+            new[]
+            {
+                new DefinitionLink(
+                    "https://example.invalid/roles/dimensions",
+                    XbrlArcRoles.DimensionDefault,
+                    axis,
+                    defaultMember)
+            });
+
+        var result = new FilingRuleValidator(profile).Validate(new[] { RevenueFact() });
+
+        Assert.True(result.IsClean, string.Join(", ", result.Diagnostics.Select(diagnostic => diagnostic.Message)));
+    }
+
+    [Fact]
+    public void DimensionMember_IsCheckedAgainstItsOwnProfileDomain()
+    {
+        var regionAxis = SyntheticProfile.Qualified("RegionAxis");
+        var countryAxis = SyntheticProfile.Qualified("CountryAxis");
+        var emea = SyntheticProfile.Qualified("EMEA");
+        var qatar = SyntheticProfile.Qualified("Qatar");
+        var profile = ProfileWithDimensionMetadata(
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                [regionAxis] = new[] { emea },
+                [countryAxis] = new[] { qatar }
+            });
+
+        // Qatar belongs to the Country domain and must not be valid for Region.
+        var result = new FilingRuleValidator(profile)
+            .Validate(new[] { RevenueFact(new[] { new Dimension(regionAxis, qatar) }) });
+        var dimensionOutcome = Assert.Single(result.Outcomes,
+            outcome => outcome.RuleId == "synthetic:dimension-member-valid");
+
+        Assert.Equal(RuleStatus.Fail, dimensionOutcome.Status);
+        Assert.Equal(DiagnosticCodes.XbrDimensionInvalid, dimensionOutcome.Diagnostic!.Code);
+    }
+
+    [Fact]
+    public void MissingAxisDomain_IsIncompleteEvenWhenAnotherAxisHasMembers()
+    {
+        var regionAxis = SyntheticProfile.Qualified("RegionAxis");
+        var countryAxis = SyntheticProfile.Qualified("CountryAxis");
+        var qatar = SyntheticProfile.Qualified("Qatar");
+        var profile = ProfileWithDimensionMetadata(
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                [countryAxis] = new[] { qatar }
+            });
+
+        var result = new FilingRuleValidator(profile)
+            .Validate(new[] { RevenueFact(new[] { new Dimension(regionAxis, qatar) }) });
+        var dimensionOutcome = Assert.Single(result.Outcomes,
+            outcome => outcome.RuleId == "synthetic:dimension-member-valid");
+
+        Assert.Equal(RuleStatus.Incomplete, dimensionOutcome.Status);
+        Assert.Equal(DiagnosticCodes.XbrRequiredCheckMissing, dimensionOutcome.Diagnostic!.Code);
+    }
+
+    private static FilingProfile ProfileWithDimensionMetadata(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> dimensionDomains,
+        IReadOnlyList<DefinitionLink>? definitionLinks = null)
+    {
+        var source = Profile;
+        return new FilingProfile
+        {
+            ProfileId = source.ProfileId,
+            Digest = source.Digest,
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            RequiredChecks = source.RequiredChecks,
+            DimensionDomains = dimensionDomains,
+            DefinitionLinks = definitionLinks ?? Array.Empty<DefinitionLink>()
+        };
+    }
+
+    private static XbrlFact RevenueFact(
+        Dimension[]? dimensions = null,
+        IReadOnlyList<SourceReference>? sources = null)
+        => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 100m,
+            Decimals = 0,
+            Dimensions = dimensions ?? Array.Empty<Dimension>(),
+            ContributingSources = sources ?? Array.Empty<SourceReference>()
+        };
 
     [Fact]
     public void AbstractConceptCarryingFact_Fails()

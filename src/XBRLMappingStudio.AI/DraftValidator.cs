@@ -39,18 +39,15 @@ public sealed class DraftValidator
 {
     private readonly TaxonomyIndex _taxonomy;
     private readonly FilingProfile _profile;
-    private readonly IReadOnlySet<string>? _knownDimensionMembers;
 
     public DraftValidator(
         TaxonomyIndex taxonomy,
-        FilingProfile profile,
-        IReadOnlySet<string>? knownDimensionMembers = null)
+        FilingProfile profile)
     {
         _taxonomy = taxonomy ?? throw new ArgumentNullException(nameof(taxonomy));
         _profile = profile ?? throw new ArgumentNullException(nameof(profile));
         if (!_taxonomy.IsCurrentFor(_profile))
             throw new ArgumentException("Draft validation requires the exact selected taxonomy profile and digest.", nameof(profile));
-        _knownDimensionMembers = knownDimensionMembers;
     }
 
     public DraftValidationResult Validate(IReadOnlyList<DraftMapping> drafts)
@@ -79,7 +76,7 @@ public sealed class DraftValidator
         }
         if (facts.Count > 0)
         {
-            var filing = new FilingRuleValidator(_profile, _knownDimensionMembers).Validate(facts);
+            var filing = new FilingRuleValidator(_profile).Validate(facts);
             foreach (var diag in filing.Diagnostics)
                 bag.Error(diag.Code, diag.Subsystem, diag.Stage, diag.Message,
                     nodeId: diag.NodeId, details: diag.Details);

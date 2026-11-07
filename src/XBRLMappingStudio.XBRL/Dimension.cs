@@ -1,5 +1,11 @@
 namespace XBRLMappingStudio.XBRL;
 
+/// <summary>Standard XBRL Dimensions arcrole identifiers used by profile metadata.</summary>
+public static class XbrlArcRoles
+{
+    public const string DimensionDefault = "http://xbrl.org/int/dim/arcrole/dimension-default";
+}
+
 /// <summary>
 /// A dimensional aspect carried by a fact (XBR04). Explicit dimensions pair a dimension
 /// concept with a member concept; the synthetic profile exercises explicit dimensions

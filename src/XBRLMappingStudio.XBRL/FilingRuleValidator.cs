@@ -49,15 +49,19 @@ public sealed record FilingValidationResult(IReadOnlyList<RuleOutcome> Outcomes)
 public sealed class FilingRuleValidator
 {
     private readonly FilingProfile _profile;
-    private readonly IReadOnlySet<string> _knownDimensionMembers;
+    private readonly IReadOnlyDictionary<string, IReadOnlySet<string>> _defaultMembersByDimension;
 
-    public FilingRuleValidator(
-        FilingProfile profile,
-        IReadOnlySet<string>? knownDimensionMembers = null)
+    public FilingRuleValidator(FilingProfile profile)
     {
-        _profile = profile;
-        _knownDimensionMembers = knownDimensionMembers
-            ?? new HashSet<string>(StringComparer.Ordinal);
+        _profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        _defaultMembersByDimension = (profile.DefinitionLinks ?? Array.Empty<DefinitionLink>())
+            .Where(link => StringComparer.Ordinal.Equals(link.ArcRoleUri, XbrlArcRoles.DimensionDefault))
+            .GroupBy(link => link.ParentQName, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlySet<string>)group.Select(link => link.ChildQName)
+                    .ToHashSet(StringComparer.Ordinal),
+                StringComparer.Ordinal);
     }
 
     public FilingValidationResult Validate(IReadOnlyList<XbrlFact> facts)
@@ -193,30 +197,65 @@ public sealed class FilingRuleValidator
 
     private RuleOutcome DimensionRule(XbrlFact f, Dimension d, string op)
     {
-        // Explicit dimension whose member domain is unknown cannot be validated offline.
-        if (_knownDimensionMembers.Count == 0)
-            return new RuleOutcome("synthetic:dimension-member-valid", RuleStatus.Incomplete,
-                $"Dimension '{d.Name}' member domain is not declared; check could not be completed.",
-                new Diagnostic
-                {
-                    Code = DiagnosticCodes.XbrRequiredCheckMissing,
-                    Subsystem = DiagnosticSubsystem.XBRL,
-                    Severity = DiagnosticSeverity.Warning,
-                    Stage = DiagnosticStage.Validation,
-                    IsBlocking = false,
-                    Message = $"Required dimension check for '{d.Name}' could not be completed.",
-                    OperationId = op
-                });
+        // XBRL Dimensions infers a default member when its axis is omitted and
+        // forbids spelling that same member explicitly in an instance.
+        if (_defaultMembersByDimension.TryGetValue(d.Name, out var defaultMembers)
+            && defaultMembers.Contains(d.MemberName))
+        {
+            return Fail("synthetic:dimension-member-valid", DiagnosticCodes.XbrDimensionInvalid,
+                $"Dimension '{d.Name}' reports its default member '{d.MemberName}' explicitly; omit the dimension so the default is inferred.",
+                op, GetFirstSource(f), f.SourceTransformationPaths);
+        }
 
-        return _knownDimensionMembers.Contains(d.MemberName)
+        // The same member may belong to one axis but not another. Only the exact
+        // selected profile's axis-to-domain mapping can complete this check.
+        if (_profile.DimensionDomains is null
+            || !_profile.DimensionDomains.TryGetValue(d.Name, out var allowedMembers)
+            || allowedMembers is null)
+            return IncompleteDimension(op, GetFirstSource(f),
+                $"Dimension '{d.Name}' has no declared member domain in profile '{_profile.ProfileId}'.",
+                f.SourceTransformationPaths);
+
+        return allowedMembers.Contains(d.MemberName, StringComparer.Ordinal)
             ? Pass("synthetic:dimension-member-valid")
             : Fail("synthetic:dimension-member-valid", DiagnosticCodes.XbrDimensionInvalid,
-                $"Dimension '{d.Name}' member '{d.MemberName}' is not a declared member.", op);
+                $"Dimension '{d.Name}' member '{d.MemberName}' is not declared in that dimension's domain.",
+                op, GetFirstSource(f), f.SourceTransformationPaths);
     }
+
+    private static RuleOutcome IncompleteDimension(
+        string op,
+        SourceReference? source,
+        string message,
+        IReadOnlyList<SourceTransformationPath>? sourceTransformationPaths = null)
+        => new("synthetic:dimension-member-valid", RuleStatus.Incomplete,
+            message,
+            new Diagnostic
+            {
+                Code = DiagnosticCodes.XbrRequiredCheckMissing,
+                Subsystem = DiagnosticSubsystem.XBRL,
+                Severity = DiagnosticSeverity.Warning,
+                Stage = DiagnosticStage.Validation,
+                IsBlocking = false,
+                Message = message,
+                Source = source,
+                SourceTransformationPaths = sourceTransformationPaths,
+                OperationId = op
+            });
+
+    private static SourceReference? GetFirstSource(XbrlFact fact)
+        => fact.ContributingSources?.FirstOrDefault()
+            ?? fact.SourceTransformationPaths?.FirstOrDefault()?.Source;
 
     private static RuleOutcome Pass(string rule) => new(rule, RuleStatus.Pass);
 
-    private static RuleOutcome Fail(string rule, string code, string message, string op) => new(
+    private static RuleOutcome Fail(
+        string rule,
+        string code,
+        string message,
+        string op,
+        SourceReference? source = null,
+        IReadOnlyList<SourceTransformationPath>? sourceTransformationPaths = null) => new(
         rule, RuleStatus.Fail, message,
         new Diagnostic
         {
@@ -226,6 +265,8 @@ public sealed class FilingRuleValidator
             Stage = DiagnosticStage.Validation,
             IsBlocking = true,
             Message = message,
+            Source = source,
+            SourceTransformationPaths = sourceTransformationPaths,
             OperationId = op,
             RuleIdentifier = rule
         });

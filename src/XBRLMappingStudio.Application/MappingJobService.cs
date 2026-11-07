@@ -1274,9 +1274,7 @@ public sealed class MappingJobService
         CancellationToken cancellationToken)
     {
         var hasDuplicates = artifact.TryGetFirstDuplicate(out var duplicateKey, cancellationToken);
-        var knownDimensionMembers = _profile.DimensionDomains.Values
-            .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
-        return new FilingRuleValidator(_profile, knownDimensionMembers)
+        return new FilingRuleValidator(_profile)
             .ValidateStreaming(artifact.InInputOrder(cancellationToken),
                 hasDuplicates ? duplicateKey : null, cancellationToken);
     }

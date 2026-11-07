@@ -131,9 +131,7 @@ public sealed class LocalSyntheticWorker : IWorkerClient
         var facts = factEntries.Select(entry => entry.Fact).ToArray();
         var firstDuplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
             .FirstOrDefault(group => group.Skip(1).Any())?.Key;
-        var knownDimensionMembers = _profile.DimensionDomains.Values
-            .SelectMany(members => members).ToHashSet(StringComparer.Ordinal);
-        var filingValidation = new FilingRuleValidator(_profile, knownDimensionMembers)
+        var filingValidation = new FilingRuleValidator(_profile)
             .ValidateStreaming(facts, firstDuplicateKey, cancellationToken);
         return Task.FromResult(CreateValidationResponse(
             request, factEntries, filingValidation, facts.Length, cancellationToken));

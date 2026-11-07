@@ -405,8 +405,26 @@ public class ProviderContractTests
 /// </summary>
 public class DraftValidationTests
 {
-    private static DraftValidator Validator(IReadOnlySet<string>? members = null) =>
-        new(TestProjects.Taxonomy(), TestProjects.Profile(), members);
+    private static DraftValidator Validator() =>
+        new(TestProjects.Taxonomy(), TestProjects.Profile());
+
+    private static DraftValidator ValidatorWithRegionDomain()
+    {
+        var source = TestProjects.Profile();
+        var profile = new FilingProfile
+        {
+            ProfileId = source.ProfileId,
+            Digest = "sha256:ai-draft-region-domain",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            RequiredChecks = source.RequiredChecks,
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                ["synthetic:Region"] = new[] { "synthetic:EMEA", "synthetic:APAC" }
+            }
+        };
+        return new DraftValidator(new TaxonomyIndex(profile), profile);
+    }
 
     private static DraftMapping Good(string id = "m1") => new(id, "Sales", "synthetic:Revenue", "USD", "duration");
 
@@ -513,11 +531,10 @@ public class DraftValidationTests
     }
 
     [Fact]
-    public void InventedDimensionMember_IsRejectedWhenDomainKnown()
+    public void InventedDimensionMember_IsRejectedWhenAxisDomainKnown()
     {
-        var members = new HashSet<string>(StringComparer.Ordinal) { "EMEA", "APAC" };
         var draft = Good() with { DimensionName = "synthetic:Region", DimensionMember = "Atlantis" };
-        var result = Validator(members).Validate(new[] { draft });
+        var result = ValidatorWithRegionDomain().Validate(new[] { draft });
         Assert.False(result.Accepted);
         Assert.Contains(result.Diagnostics, d => d.Code == DiagnosticCodes.XbrDimensionInvalid);
     }

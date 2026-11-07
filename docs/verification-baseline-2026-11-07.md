@@ -239,3 +239,24 @@ suite passed 845 tests and skipped 6 environment-gated Arelle cases. The native
 UI helper could not activate the isolated app window after a refreshed retry;
 no UI interaction occurred, so visual native acceptance remains unverified.
 Real-profile adoption remains owner-gated.
+
+## XBR-04 declared dimension validation
+
+The XBRL Dimensions specification says a default dimension member is inferred when
+the dimension is omitted and MUST NOT be reported explicitly in an instance
+([Dimensions 1.0, Sections 3.1.4.1–3.1.4.2](https://www.xbrl.org/specification/dimensions/per-2011-11-20/dimensions-per-2011-11-20.html)).
+`FilingRuleValidator` now applies that rule from the selected profile's
+`dimension-default` definition arcs, validates explicit members against the
+declared domain for that exact axis, and includes source evidence in dimension
+failure diagnostics. Missing axis-specific profile metadata resolves to an
+incomplete validation instead of accepting a member based on a different axis.
+The XBRL suite covers explicit default-member rejection, implicit default by
+omission, per-axis domain isolation, and source-linked diagnostics.
+
+The focused XBRL Release suite passed 114/114. The full Release solution suite
+passed 851 tests, skipped 6 environment-gated Arelle tests, and had no failures;
+build artifacts were isolated under a temporary path because an open Desktop
+process held the normal Release output assemblies. `git diff --check` passed.
+These results do not establish customer taxonomy or regulator
+qualification; typed dimensions, concept-to-hypercube applicability, complete
+BCP-47 metadata, and owner gates remain open.

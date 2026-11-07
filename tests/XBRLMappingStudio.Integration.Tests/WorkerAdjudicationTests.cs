@@ -608,8 +608,7 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
             profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
             profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray());
         var report = UnavailableRulesCompletionResult(requirements);
-        var localValidation = new FilingRuleValidator(profile,
-            profile.DimensionDomains.Values.SelectMany(members => members).ToHashSet(StringComparer.Ordinal))
+        var localValidation = new FilingRuleValidator(profile)
             .ValidateStreaming(new[] { fact }, firstDuplicateSemanticKey: null);
 
         var assessment = ValidationCompletionReportValidator.Evaluate(
