@@ -126,8 +126,10 @@ filename. XML is generated from the successful run's facts, recorded as an
 service. Before replacement, the service verifies strict UTF-8, the artifact
 digest, and exact equality with a fresh serialization of the run facts. It
 passes a private copy of those exact bytes to the validation worker; the Arelle
-worker rehashes that copy and streams an offline schemaRef localization before
-loading the XML with network access disabled.
+worker rehashes that copy, snapshots the selected offline taxonomy closure beside
+the private report, and rewrites schemaRef values to relative local files before
+loading the XML with network access disabled. This keeps file references valid
+on both Windows and POSIX.
 
 Verification:
 
@@ -135,9 +137,12 @@ Verification:
 - The full Release solution suite passed 750 tests; 6 Arelle-backed tests were
   environment-gated locally, with 0 failures.
 - Focused CLI publication and staged-artifact mutation tests passed 2/2.
-- The Python worker suite passed 55 tests with 8 environment-gated skips.
-  The local Python environment has no pinned Arelle/lxml runtime, so the actual
-  Arelle staged-XML path remains to be verified by exact-head CI.
+- The pinned worker job ran 55 Python tests (1 skipped) and passed all 12
+  Arelle integration tests on the exact pushed head in
+  [CI run 42318170439](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42318170439).
+- Windows, Ubuntu, repository hygiene, and Arelle jobs all passed on that exact
+  head. The pinned Windows runtime also passed the focused staged-XML
+  publication integration test locally.
 - `git diff --check` passed.
 
 Current limits: the CLI XML output path requires an in-memory full run and is
