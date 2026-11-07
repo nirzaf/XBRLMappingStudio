@@ -1,0 +1,1565 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "taxonomy-search-20k",
+  "measurementStatus": "measured_synthetic_only",
+  "thresholdPassClaimed": false,
+  "capturedUtc": "2026-11-07T06:37:12.7165469+00:00",
+  "runtime": {
+    "framework": ".NET 10.0.12",
+    "operatingSystem": "Microsoft Windows 10.0.26300",
+    "operatingSystemArchitecture": "X64",
+    "processArchitecture": "X64",
+    "processorDescription": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+    "processorCount": 8,
+    "configuration": "Release",
+    "stopwatchHighResolution": true,
+    "stopwatchFrequency": 10000000
+  },
+  "fixture": {
+    "generator": "synthetic-taxonomy-v1",
+    "profileId": "synthetic-financial-disclosures-v1",
+    "profileDigest": "sha256:122c292da2e92edb2917fbe79d220c11dbbe7d397ae668608f8134dd4914c14c",
+    "conceptCount": 20000,
+    "relationshipCount": 19999,
+    "roleUri": "urn:xbrlms:synthetic:roles:financial-statements",
+    "groupCount": 200,
+    "digestBinding": "sha256 of version, profile identity, ordered concepts and relationships, supported units, and namespace bindings"
+  },
+  "measurements": {
+    "fixtureGenerationMs": 226.1142,
+    "indexConstructionMs": 203.8772,
+    "roleNetworkConstructionMs": 20.4715,
+    "indexRecreationMs": 201.3148,
+    "warmSearch": {
+      "warmupCount": 5,
+      "sampleCount": 100,
+      "p50Ms": 3.1895,
+      "p95Ms": 6.3932,
+      "maximumMs": 27.5184,
+      "rawSamples": [
+        {
+          "index": 0,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 4.0756,
+          "resultCount": 20000
+        },
+        {
+          "index": 1,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 5.0486,
+          "resultCount": 1
+        },
+        {
+          "index": 2,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.4777,
+          "resultCount": 20000
+        },
+        {
+          "index": 3,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.0686,
+          "resultCount": 1
+        },
+        {
+          "index": 4,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.8687,
+          "resultCount": 20000
+        },
+        {
+          "index": 5,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.0146,
+          "resultCount": 1
+        },
+        {
+          "index": 6,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.1895,
+          "resultCount": 20000
+        },
+        {
+          "index": 7,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.0942,
+          "resultCount": 1
+        },
+        {
+          "index": 8,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.188,
+          "resultCount": 20000
+        },
+        {
+          "index": 9,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.0578,
+          "resultCount": 1
+        },
+        {
+          "index": 10,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.3096,
+          "resultCount": 20000
+        },
+        {
+          "index": 11,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.9397,
+          "resultCount": 1
+        },
+        {
+          "index": 12,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3774,
+          "resultCount": 20000
+        },
+        {
+          "index": 13,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.1469,
+          "resultCount": 1
+        },
+        {
+          "index": 14,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.1241,
+          "resultCount": 20000
+        },
+        {
+          "index": 15,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.7215,
+          "resultCount": 1
+        },
+        {
+          "index": 16,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 4.3296,
+          "resultCount": 20000
+        },
+        {
+          "index": 17,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.8821,
+          "resultCount": 1
+        },
+        {
+          "index": 18,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3608,
+          "resultCount": 20000
+        },
+        {
+          "index": 19,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.9424,
+          "resultCount": 1
+        },
+        {
+          "index": 20,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 4.4087,
+          "resultCount": 20000
+        },
+        {
+          "index": 21,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 5.3983,
+          "resultCount": 1
+        },
+        {
+          "index": 22,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.9844,
+          "resultCount": 20000
+        },
+        {
+          "index": 23,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.4272,
+          "resultCount": 1
+        },
+        {
+          "index": 24,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.1959,
+          "resultCount": 20000
+        },
+        {
+          "index": 25,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.4735,
+          "resultCount": 1
+        },
+        {
+          "index": 26,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3513,
+          "resultCount": 20000
+        },
+        {
+          "index": 27,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.9217,
+          "resultCount": 1
+        },
+        {
+          "index": 28,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.1396,
+          "resultCount": 20000
+        },
+        {
+          "index": 29,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.3981,
+          "resultCount": 1
+        },
+        {
+          "index": 30,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.017,
+          "resultCount": 20000
+        },
+        {
+          "index": 31,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.3823,
+          "resultCount": 1
+        },
+        {
+          "index": 32,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.398,
+          "resultCount": 20000
+        },
+        {
+          "index": 33,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.9215,
+          "resultCount": 1
+        },
+        {
+          "index": 34,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.6644,
+          "resultCount": 20000
+        },
+        {
+          "index": 35,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.7392,
+          "resultCount": 1
+        },
+        {
+          "index": 36,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.3959,
+          "resultCount": 20000
+        },
+        {
+          "index": 37,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.0634,
+          "resultCount": 1
+        },
+        {
+          "index": 38,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.1754,
+          "resultCount": 20000
+        },
+        {
+          "index": 39,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.2358,
+          "resultCount": 1
+        },
+        {
+          "index": 40,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.634,
+          "resultCount": 20000
+        },
+        {
+          "index": 41,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.9273,
+          "resultCount": 1
+        },
+        {
+          "index": 42,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3934,
+          "resultCount": 20000
+        },
+        {
+          "index": 43,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.2383,
+          "resultCount": 1
+        },
+        {
+          "index": 44,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.2183,
+          "resultCount": 20000
+        },
+        {
+          "index": 45,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.9799,
+          "resultCount": 1
+        },
+        {
+          "index": 46,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.6944,
+          "resultCount": 20000
+        },
+        {
+          "index": 47,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.0701,
+          "resultCount": 1
+        },
+        {
+          "index": 48,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3257,
+          "resultCount": 20000
+        },
+        {
+          "index": 49,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.9649,
+          "resultCount": 1
+        },
+        {
+          "index": 50,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.9712,
+          "resultCount": 20000
+        },
+        {
+          "index": 51,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.6329,
+          "resultCount": 1
+        },
+        {
+          "index": 52,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.0141,
+          "resultCount": 20000
+        },
+        {
+          "index": 53,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.2076,
+          "resultCount": 1
+        },
+        {
+          "index": 54,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.2325,
+          "resultCount": 20000
+        },
+        {
+          "index": 55,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.9238,
+          "resultCount": 1
+        },
+        {
+          "index": 56,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.1195,
+          "resultCount": 20000
+        },
+        {
+          "index": 57,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.8884,
+          "resultCount": 1
+        },
+        {
+          "index": 58,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.5239,
+          "resultCount": 20000
+        },
+        {
+          "index": 59,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.8645,
+          "resultCount": 1
+        },
+        {
+          "index": 60,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.3734,
+          "resultCount": 20000
+        },
+        {
+          "index": 61,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.2468,
+          "resultCount": 1
+        },
+        {
+          "index": 62,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.1576,
+          "resultCount": 20000
+        },
+        {
+          "index": 63,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.1523,
+          "resultCount": 1
+        },
+        {
+          "index": 64,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.191,
+          "resultCount": 20000
+        },
+        {
+          "index": 65,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.943,
+          "resultCount": 1
+        },
+        {
+          "index": 66,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.8762,
+          "resultCount": 20000
+        },
+        {
+          "index": 67,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.5642,
+          "resultCount": 1
+        },
+        {
+          "index": 68,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.6144,
+          "resultCount": 20000
+        },
+        {
+          "index": 69,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 6.3932,
+          "resultCount": 1
+        },
+        {
+          "index": 70,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 6.5974,
+          "resultCount": 20000
+        },
+        {
+          "index": 71,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 9.1184,
+          "resultCount": 1
+        },
+        {
+          "index": 72,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 7.1888,
+          "resultCount": 20000
+        },
+        {
+          "index": 73,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 6.5822,
+          "resultCount": 1
+        },
+        {
+          "index": 74,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.9588,
+          "resultCount": 20000
+        },
+        {
+          "index": 75,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 5.3557,
+          "resultCount": 1
+        },
+        {
+          "index": 76,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.3573,
+          "resultCount": 20000
+        },
+        {
+          "index": 77,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.0712,
+          "resultCount": 1
+        },
+        {
+          "index": 78,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.2594,
+          "resultCount": 20000
+        },
+        {
+          "index": 79,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.1833,
+          "resultCount": 1
+        },
+        {
+          "index": 80,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.8399,
+          "resultCount": 20000
+        },
+        {
+          "index": 81,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.7023,
+          "resultCount": 1
+        },
+        {
+          "index": 82,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.7161,
+          "resultCount": 20000
+        },
+        {
+          "index": 83,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.4226,
+          "resultCount": 1
+        },
+        {
+          "index": 84,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.4746,
+          "resultCount": 20000
+        },
+        {
+          "index": 85,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.876,
+          "resultCount": 1
+        },
+        {
+          "index": 86,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.8588,
+          "resultCount": 20000
+        },
+        {
+          "index": 87,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.1819,
+          "resultCount": 1
+        },
+        {
+          "index": 88,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.0599,
+          "resultCount": 20000
+        },
+        {
+          "index": 89,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.0336,
+          "resultCount": 1
+        },
+        {
+          "index": 90,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 3.6501,
+          "resultCount": 20000
+        },
+        {
+          "index": 91,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.3723,
+          "resultCount": 1
+        },
+        {
+          "index": 92,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.2211,
+          "resultCount": 20000
+        },
+        {
+          "index": 93,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.032,
+          "resultCount": 1
+        },
+        {
+          "index": 94,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.0316,
+          "resultCount": 20000
+        },
+        {
+          "index": 95,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 3.7274,
+          "resultCount": 1
+        },
+        {
+          "index": 96,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 27.5184,
+          "resultCount": 20000
+        },
+        {
+          "index": 97,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 2.8084,
+          "resultCount": 1
+        },
+        {
+          "index": 98,
+          "queryKind": "broad",
+          "query": "Disclosure",
+          "elapsedMs": 2.0262,
+          "resultCount": 20000
+        },
+        {
+          "index": 99,
+          "queryKind": "exact_label",
+          "query": "Disclosure 01999",
+          "elapsedMs": 4.0977,
+          "resultCount": 1
+        }
+      ]
+    },
+    "lazyRoleExpansion": {
+      "sampleCount": 100,
+      "pageSize": 25,
+      "p50Ms": 0.0016,
+      "p95Ms": 0.0073,
+      "maximumMs": 1.3213,
+      "rawSamples": [
+        {
+          "index": 0,
+          "parentQName": "t1:Disclosure00001",
+          "page": 0,
+          "elapsedMs": 1.3213,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 1,
+          "parentQName": "t2:Disclosure00002",
+          "page": 0,
+          "elapsedMs": 0.0235,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 2,
+          "parentQName": "t3:Disclosure00003",
+          "page": 0,
+          "elapsedMs": 0.0127,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 3,
+          "parentQName": "t0:Disclosure00004",
+          "page": 0,
+          "elapsedMs": 0.0019,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 4,
+          "parentQName": "t1:Disclosure00005",
+          "page": 0,
+          "elapsedMs": 0.0018,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 5,
+          "parentQName": "t2:Disclosure00006",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 6,
+          "parentQName": "t3:Disclosure00007",
+          "page": 0,
+          "elapsedMs": 0.003,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 7,
+          "parentQName": "t0:Disclosure00008",
+          "page": 0,
+          "elapsedMs": 0.0018,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 8,
+          "parentQName": "t1:Disclosure00009",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 9,
+          "parentQName": "t2:Disclosure00010",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 10,
+          "parentQName": "t3:Disclosure00011",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 11,
+          "parentQName": "t0:Disclosure00012",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 12,
+          "parentQName": "t1:Disclosure00013",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 13,
+          "parentQName": "t2:Disclosure00014",
+          "page": 0,
+          "elapsedMs": 0.0019,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 14,
+          "parentQName": "t3:Disclosure00015",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 15,
+          "parentQName": "t0:Disclosure00016",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 16,
+          "parentQName": "t1:Disclosure00017",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 17,
+          "parentQName": "t2:Disclosure00018",
+          "page": 0,
+          "elapsedMs": 0.0013,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 18,
+          "parentQName": "t3:Disclosure00019",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 19,
+          "parentQName": "t0:Disclosure00020",
+          "page": 0,
+          "elapsedMs": 0.0053,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 20,
+          "parentQName": "t1:Disclosure00021",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 21,
+          "parentQName": "t2:Disclosure00022",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 22,
+          "parentQName": "t3:Disclosure00023",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 23,
+          "parentQName": "t0:Disclosure00024",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 24,
+          "parentQName": "t1:Disclosure00025",
+          "page": 0,
+          "elapsedMs": 0.0023,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 25,
+          "parentQName": "t2:Disclosure00026",
+          "page": 0,
+          "elapsedMs": 0.0018,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 26,
+          "parentQName": "t3:Disclosure00027",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 27,
+          "parentQName": "t0:Disclosure00028",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 28,
+          "parentQName": "t1:Disclosure00029",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 29,
+          "parentQName": "t2:Disclosure00030",
+          "page": 0,
+          "elapsedMs": 0.003,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 30,
+          "parentQName": "t3:Disclosure00031",
+          "page": 0,
+          "elapsedMs": 0.0018,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 31,
+          "parentQName": "t0:Disclosure00032",
+          "page": 0,
+          "elapsedMs": 0.0023,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 32,
+          "parentQName": "t1:Disclosure00033",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 33,
+          "parentQName": "t2:Disclosure00034",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 34,
+          "parentQName": "t3:Disclosure00035",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 35,
+          "parentQName": "t0:Disclosure00036",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 36,
+          "parentQName": "t1:Disclosure00037",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 37,
+          "parentQName": "t2:Disclosure00038",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 38,
+          "parentQName": "t3:Disclosure00039",
+          "page": 0,
+          "elapsedMs": 0.0019,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 39,
+          "parentQName": "t0:Disclosure00040",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 40,
+          "parentQName": "t1:Disclosure00041",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 41,
+          "parentQName": "t2:Disclosure00042",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 42,
+          "parentQName": "t3:Disclosure00043",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 43,
+          "parentQName": "t0:Disclosure00044",
+          "page": 0,
+          "elapsedMs": 0.0018,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 44,
+          "parentQName": "t1:Disclosure00045",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 45,
+          "parentQName": "t2:Disclosure00046",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 46,
+          "parentQName": "t3:Disclosure00047",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 47,
+          "parentQName": "t0:Disclosure00048",
+          "page": 0,
+          "elapsedMs": 0.0088,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 48,
+          "parentQName": "t1:Disclosure00049",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 49,
+          "parentQName": "t2:Disclosure00050",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 50,
+          "parentQName": "t3:Disclosure00051",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 51,
+          "parentQName": "t0:Disclosure00052",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 52,
+          "parentQName": "t1:Disclosure00053",
+          "page": 0,
+          "elapsedMs": 0.002,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 53,
+          "parentQName": "t2:Disclosure00054",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 54,
+          "parentQName": "t3:Disclosure00055",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 55,
+          "parentQName": "t0:Disclosure00056",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 56,
+          "parentQName": "t1:Disclosure00057",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 57,
+          "parentQName": "t2:Disclosure00058",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 58,
+          "parentQName": "t3:Disclosure00059",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 59,
+          "parentQName": "t0:Disclosure00060",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 60,
+          "parentQName": "t1:Disclosure00061",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 61,
+          "parentQName": "t2:Disclosure00062",
+          "page": 0,
+          "elapsedMs": 0.0017,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 62,
+          "parentQName": "t3:Disclosure00063",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 63,
+          "parentQName": "t0:Disclosure00064",
+          "page": 0,
+          "elapsedMs": 0.0265,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 64,
+          "parentQName": "t1:Disclosure00065",
+          "page": 0,
+          "elapsedMs": 0.0025,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 65,
+          "parentQName": "t2:Disclosure00066",
+          "page": 0,
+          "elapsedMs": 0.002,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 66,
+          "parentQName": "t3:Disclosure00067",
+          "page": 0,
+          "elapsedMs": 0.002,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 67,
+          "parentQName": "t0:Disclosure00068",
+          "page": 0,
+          "elapsedMs": 0.002,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 68,
+          "parentQName": "t1:Disclosure00069",
+          "page": 0,
+          "elapsedMs": 0.0022,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 69,
+          "parentQName": "t2:Disclosure00070",
+          "page": 0,
+          "elapsedMs": 0.0022,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 70,
+          "parentQName": "t3:Disclosure00071",
+          "page": 0,
+          "elapsedMs": 0.0023,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 71,
+          "parentQName": "t0:Disclosure00072",
+          "page": 0,
+          "elapsedMs": 0.0024,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 72,
+          "parentQName": "t1:Disclosure00073",
+          "page": 0,
+          "elapsedMs": 0.0024,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 73,
+          "parentQName": "t2:Disclosure00074",
+          "page": 0,
+          "elapsedMs": 0.0024,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 74,
+          "parentQName": "t3:Disclosure00075",
+          "page": 0,
+          "elapsedMs": 0.0024,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 75,
+          "parentQName": "t0:Disclosure00076",
+          "page": 0,
+          "elapsedMs": 0.0024,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 76,
+          "parentQName": "t1:Disclosure00077",
+          "page": 0,
+          "elapsedMs": 0.0025,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 77,
+          "parentQName": "t2:Disclosure00078",
+          "page": 0,
+          "elapsedMs": 0.0025,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 78,
+          "parentQName": "t3:Disclosure00079",
+          "page": 0,
+          "elapsedMs": 0.0022,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 79,
+          "parentQName": "t0:Disclosure00080",
+          "page": 0,
+          "elapsedMs": 0.0025,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 80,
+          "parentQName": "t1:Disclosure00081",
+          "page": 0,
+          "elapsedMs": 0.0073,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 81,
+          "parentQName": "t2:Disclosure00082",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 82,
+          "parentQName": "t3:Disclosure00083",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 83,
+          "parentQName": "t0:Disclosure00084",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 84,
+          "parentQName": "t1:Disclosure00085",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 85,
+          "parentQName": "t2:Disclosure00086",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 86,
+          "parentQName": "t3:Disclosure00087",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 87,
+          "parentQName": "t0:Disclosure00088",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 88,
+          "parentQName": "t1:Disclosure00089",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 89,
+          "parentQName": "t2:Disclosure00090",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 90,
+          "parentQName": "t3:Disclosure00091",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 91,
+          "parentQName": "t0:Disclosure00092",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 92,
+          "parentQName": "t1:Disclosure00093",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 93,
+          "parentQName": "t2:Disclosure00094",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 94,
+          "parentQName": "t3:Disclosure00095",
+          "page": 0,
+          "elapsedMs": 0.0014,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 95,
+          "parentQName": "t0:Disclosure00096",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 96,
+          "parentQName": "t1:Disclosure00097",
+          "page": 0,
+          "elapsedMs": 0.0015,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 97,
+          "parentQName": "t2:Disclosure00098",
+          "page": 0,
+          "elapsedMs": 0.0067,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 98,
+          "parentQName": "t3:Disclosure00099",
+          "page": 0,
+          "elapsedMs": 0.0016,
+          "returnedCount": 25,
+          "totalChildren": 99
+        },
+        {
+          "index": 99,
+          "parentQName": "t0:Disclosure00100",
+          "page": 0,
+          "elapsedMs": 0.0013,
+          "returnedCount": 25,
+          "totalChildren": 99
+        }
+      ]
+    }
+  },
+  "integrity": {
+    "fixtureAndIndexIdentityVerified": true,
+    "recreatedIndexMatches": true,
+    "preCancelledSearchObserved": true,
+    "rapidSupersedingQueryCoverage": "covered by TaxonomyExplorerTests.RapidSearchCriteriaChanges_LeaveOnlyTheNewestTwentyThousandConceptQuery"
+  },
+  "interpretation": {
+    "notes": [
+      "These measurements cover the synthetic TaxonomyIndex and PresentationNetwork only.",
+      "They do not measure desktop rendering, a licensed taxonomy, target hardware, or any product threshold.",
+      "Warm search uses a broad label query and exact-label query in alternating order; role expansion requests bounded pages after network construction."
+    ]
+  }
+}

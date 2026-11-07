@@ -24,6 +24,28 @@ Both output paths must be new files. The index record contains the generated
 profile digest; the process-tree record includes the machine description,
 compiled artifact digest, and resource samples.
 
+## Captured synthetic sample
+
+One local Windows Release run was captured on 2026-11-07 at source revision
+3a42b0bc1bc163169109ce1212495cb8bf3fbc5c. The synthetic profile contained
+20,000 concepts and its digest was
+sha256:122c292da2e92edb2917fbe79d220c11dbbe7d397ae668608f8134dd4914c14c.
+Across 100 warm searches, p50 was 3.1895 ms, p95 was 6.3932 ms, and maximum
+was 27.5184 ms. Across 100 bounded role-page expansions, p50 was 0.0016 ms,
+p95 was 0.0073 ms, and maximum was 1.3213 ms. The process-tree harness ran for
+1.59 seconds and captured four samples, three complete; its observed peaks
+were 75,337,728 working-set bytes and 55,595,008 private bytes.
+
+The raw index and process-tree records are
+[taxonomy-search-20k-windows-release-run-01.json](../results/taxonomy-search-20k-windows-release-run-01.json)
+and
+[taxonomy-search-20k-process-windows-release-run-01.json](../results/taxonomy-search-20k-process-windows-release-run-01.json).
+They record the local machine, runtime, artifact/profile digests and all query
+samples. The process sample is short and coarse; these observations are
+synthetic component measurements only. Both records explicitly claim no
+threshold pass and do not qualify a real taxonomy, native UI interaction,
+customer hardware or release performance.
+
 The output schema is `taxonomy_benchmark.schema.json`. Measurements are labeled
 `measured_synthetic_only` and always set `thresholdPassClaimed` to `false`.
 They describe the .NET taxonomy index on the recorded machine; they do not

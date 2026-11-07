@@ -40,11 +40,15 @@
     },
     {
       "id": "taxonomy-search-20k",
-      "status": "synthetic-runner-available",
+      "status": "measured-synthetic-only",
       "depends_on": "BEN-05",
       "fixture": "synthetic digest-bound profile with 20000 concepts",
       "interaction": "100 warm searches and 100 bounded lazy role-page expansions, with index recreation and cancellation integrity checks",
-      "automation_status": "digest-bound synthetic fixture and p50/p95 raw-sample runner available; real taxonomy, native UI, and target-hardware qualification remain gated"
+      "automation_status": "one Windows Release synthetic component run and process-tree capture are retained; real taxonomy, native UI, repeatability, and target-hardware qualification remain open",
+      "measurement_records": [
+        "results/taxonomy-search-20k-windows-release-run-01.json",
+        "results/taxonomy-search-20k-process-windows-release-run-01.json"
+      ]
     },
     {
       "id": "arelle-foreground-validation",

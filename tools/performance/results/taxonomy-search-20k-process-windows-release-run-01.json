@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "measurement_status": "measured",
+  "captured_utc": "2026-11-07T06:37:11.474841+00:00",
+  "scenario_id": "taxonomy-search-20k",
+  "command_id": "taxonomy-index-release-v1",
+  "executable_name": "dotnet",
+  "repository_revision": "3a42b0bc1bc163169109ce1212495cb8bf3fbc5c",
+  "build_configuration": "Release",
+  "build_configuration_is_declared": true,
+  "artifact_sha256": "b71458b59eeb40e058e9df8c36ab8c9c7c82b058ae26bde0a3f32410d8fdfcce",
+  "fixture_sha256": null,
+  "hardware": {
+    "os": "Windows-11-10.0.26300-SP0",
+    "architecture": "AMD64",
+    "cpu_model": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+    "logical_cpu_count": 8,
+    "total_memory_bytes": 16893386752
+  },
+  "clock": {
+    "implementation": "QueryPerformanceCounter()",
+    "resolution_seconds": 1e-07,
+    "monotonic": true,
+    "adjustable": false,
+    "observed_minimum_tick_seconds": 1.9997241906821728e-07
+  },
+  "measurement_policy": {
+    "sample_interval_seconds": 0.5,
+    "working_set_definition": "Resident working set; shared pages may be included.",
+    "private_memory_kind": "private_commit_bytes",
+    "cpu_measurement_definition": "Cumulative CPU seconds summed across observed processes.",
+    "command_arguments_recorded": false,
+    "threshold_pass_claimed": false
+  },
+  "execution": {
+    "duration_seconds": 1.5851158000004943,
+    "exit_code": 0,
+    "timed_out": false,
+    "sample_count": 4
+  },
+  "summary": {
+    "working_set_peak_bytes": 75337728.0,
+    "working_set_p95_bytes": 75337728.0,
+    "private_peak_bytes": 55595008.0,
+    "private_p95_bytes": 55595008.0,
+    "cpu_seconds_peak": 1.140625,
+    "process_count_peak": 1,
+    "complete_sample_count": 3
+  },
+  "samples": [
+    {
+      "elapsed_seconds": 0.016824699996504933,
+      "process_count": 1,
+      "working_set_bytes": 5357568,
+      "private_bytes": 925696,
+      "cpu_seconds": 0.015625,
+      "complete": true
+    },
+    {
+      "elapsed_seconds": 0.5356552000157535,
+      "process_count": 1,
+      "working_set_bytes": 67035136,
+      "private_bytes": 46080000,
+      "cpu_seconds": 0.546875,
+      "complete": true
+    },
+    {
+      "elapsed_seconds": 1.0567186000116635,
+      "process_count": 1,
+      "working_set_bytes": 75337728,
+      "private_bytes": 55595008,
+      "cpu_seconds": 1.140625,
+      "complete": true
+    },
+    {
+      "elapsed_seconds": 1.5712443999946117,
+      "process_count": 0,
+      "working_set_bytes": null,
+      "private_bytes": null,
+      "cpu_seconds": null,
+      "complete": false
+    }
+  ]
+}
