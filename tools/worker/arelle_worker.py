@@ -45,6 +45,33 @@ MAX_TAXONOMY_GRAPH_EDGES = 16384
 TAXONOMY_XML_READ_BYTES = 64 * 1024
 MAX_TAXONOMY_OFFLINE_ALIAS_BYTES = 256 * 1024 * 1024
 
+_OFFLINE_NETWORK_AUDIT_EVENTS = frozenset({
+    "socket.connect",
+    "socket.connect_ex",
+    "socket.sendto",
+    "socket.getaddrinfo",
+    "socket.gethostbyname",
+    "socket.gethostbyname_ex",
+    "socket.gethostbyaddr",
+    "socket.getnameinfo",
+})
+
+
+def install_offline_network_denial():
+    """Deny Python socket connection and name-resolution requests for this process."""
+
+    def deny_network(event, _args):
+        if event in _OFFLINE_NETWORK_AUDIT_EVENTS:
+            raise PermissionError("Network access is disabled for the offline Arelle worker")
+
+    sys.addaudithook(deny_network)
+
+
+if __name__ == "__main__":
+    # Install before importing Arelle so worker initialization and every request
+    # run under the same offline socket boundary.
+    install_offline_network_denial()
+
 XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema"
 XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"

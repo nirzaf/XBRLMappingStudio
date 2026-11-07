@@ -2,6 +2,8 @@ import hashlib
 import http.server
 import io
 import json
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -756,6 +758,89 @@ class ArelleWorkerTests(unittest.TestCase):
         options = runtime_options.call_args.kwargs
         self.assertIs(options["workOffline"], True)
         self.assertEqual("offline", options["internetConnectivity"])
+
+    def test_worker_process_denies_dns_and_loopback_socket_connections(self):
+        class ConnectionCanaryServer(http.server.ThreadingHTTPServer):
+            def __init__(self, server_address, request_handler):
+                self.accepted_connections = []
+                super().__init__(server_address, request_handler)
+
+            def get_request(self):
+                request, address = super().get_request()
+                self.accepted_connections.append(address)
+                return request, address
+
+        class SilentHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+        canary = ConnectionCanaryServer(("127.0.0.1", 0), SilentHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+        datagram_canary = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        datagram_canary.bind(("127.0.0.1", 0))
+        datagram_canary.settimeout(0.2)
+        probe = """
+import socket
+import sys
+import arelle_worker
+
+arelle_worker.install_offline_network_denial()
+def expect_blocked(action, description):
+    try:
+        action()
+    except PermissionError as error:
+        assert "disabled" in str(error)
+    else:
+        raise SystemExit(description + " was allowed")
+
+expect_blocked(lambda: socket.getaddrinfo("localhost", 80), "DNS resolution")
+
+connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    address = ("127.0.0.1", int(sys.argv[1]))
+    expect_blocked(lambda: connection.connect(address), "The loopback connection")
+    expect_blocked(lambda: connection.connect_ex(address), "The loopback connect_ex call")
+finally:
+    connection.close()
+
+datagram = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    expect_blocked(lambda: datagram.sendto(b"offline probe", ("127.0.0.1", int(sys.argv[2]))),
+                   "The loopback UDP send")
+finally:
+    datagram.close()
+
+print("offline-network-denied")
+"""
+        datagram_received = False
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, str(canary.server_address[1]),
+                 str(datagram_canary.getsockname()[1])],
+                cwd=WORKER_DIR,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            try:
+                datagram_canary.recvfrom(4096)
+                datagram_received = True
+            except socket.timeout:
+                pass
+        finally:
+            canary.shutdown()
+            canary.server_close()
+            canary_thread.join(timeout=2)
+            datagram_canary.close()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("offline-network-denied", completed.stdout)
+        self.assertEqual([], canary.accepted_connections,
+                         "The worker process opened a loopback connection despite offline mode.")
+        self.assertFalse(datagram_received,
+                         "The worker process sent a loopback datagram despite offline mode.")
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
