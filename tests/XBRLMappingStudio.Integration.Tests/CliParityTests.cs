@@ -354,6 +354,38 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_MixedPublicationRejectsXmlWithoutChangingEitherDestination()
+    {
+        var targetPath = Path.Combine(_dir, "xml-mixed-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "xml-mixed-target.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        var projectPath = Path.Combine(_dir, "xml-mixed-publication.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var targetBefore = await File.ReadAllBytesAsync(targetPath);
+        var outputPath = Path.Combine(_dir, "xml-mixed-report.xml");
+        var manifestPath = Path.Combine(_dir, "xml-mixed-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.Equal(2, exit);
+        Assert.Contains("cannot be combined with preview or --publish-destination", stderr,
+            StringComparison.Ordinal);
+        Assert.Equal(targetBefore, await File.ReadAllBytesAsync(targetPath));
+        Assert.False(File.Exists(outputPath));
+        Assert.False(File.Exists(manifestPath));
+    }
+
+    [Fact]
     public async Task Cli_ConfigureAndExecutePublishesExplicitJsonDestination()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
