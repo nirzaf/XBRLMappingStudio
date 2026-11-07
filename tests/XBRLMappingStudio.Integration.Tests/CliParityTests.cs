@@ -599,6 +599,29 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_InstallProfileMissingSourceReturnsDataErrorWithoutCatalogMutation()
+    {
+        var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();
+        try
+        {
+            var missingSource = Path.Combine(_dir, "missing-offline-profile", "1.0.0");
+
+            var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "install-profile",
+                missingSource, "--catalog", catalogRoot);
+
+            Assert.Equal(3, exit);
+            Assert.Empty(stdout);
+            Assert.Contains("source", stderr, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(InstalledFilingProfileCatalog.Load(catalogRoot).Profiles);
+            Assert.False(Directory.Exists(Path.Combine(catalogRoot, "missing-offline-profile")));
+        }
+        finally
+        {
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Cli_LocalArtifactValidationRequiresSyntheticProfileOptIn()
     {
         var artifactPath = Path.Combine(_dir, "local-validation.xbrl.json");

@@ -126,7 +126,8 @@ static async Task<int> InstallProfileAsync(string[] args)
         }, new JsonSerializerOptions { WriteIndented = true }));
         return ExitCodesLocal.Success;
     }
-    catch (Exception ex) when (ex is InvalidDataException or JsonException or ArgumentException or InvalidOperationException)
+    catch (Exception ex) when (ex is InvalidDataException or JsonException or ArgumentException or InvalidOperationException
+        or DirectoryNotFoundException or FileNotFoundException)
     {
         Console.Error.WriteLine($"Profile install rejected: {ex.Message}");
         return ExitCodesLocal.DataError;
