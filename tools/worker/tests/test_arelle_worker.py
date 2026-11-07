@@ -1,8 +1,10 @@
 import hashlib
+import http.server
 import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -765,45 +767,73 @@ class ArelleWorkerTests(unittest.TestCase):
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
-    def test_profile_external_schema_loads_from_exact_hash_pinned_offline_reference(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            package_files = write_taxonomy_files(root, {
-                "entry.xsd": (
-                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
-                    'xmlns:r="urn:remote" targetNamespace="urn:entry">'
-                    '<xs:import namespace="urn:remote" '
-                    'schemaLocation="https://example.invalid/remote%20schema.xsd"/>'
-                    '<xs:element name="Entry" type="r:RemoteType"/></xs:schema>'
-                ),
-                "remote.xsd": (
-                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
-                    'targetNamespace="urn:remote"><xs:simpleType name="RemoteType">'
-                    '<xs:restriction base="xs:string"/></xs:simpleType></xs:schema>'
-                ),
-            })
-            self.args.taxonomy_root = str(root)
-            self.args.profile_manifest_data = {
-                "schemaVersion": 3,
-                "profileId": "fixture-profile",
-                "version": "1.0.0",
-                "profileDigest": "sha256:fixture",
-                "entryPoint": "entry.xsd",
-                "requiredPlugins": [],
-                "packageFiles": package_files,
-                "offlineReferences": {"https://example.invalid/remote%20schema.xsd": "remote.xsd"},
-            }
-            request = self.handshake_request()
-            request["operation"] = "load-taxonomy"
-            request["profileDigest"] = "sha256:fixture"
-            request["payload"] = {"taxonomyPath": "entry.xsd"}
+    def test_profile_external_schema_loads_from_exact_hash_pinned_offline_reference_without_network_request(self):
+        requests = []
 
-            result = arelle_worker.handle(request, self.args)
+        class RequestCanaryHandler(http.server.BaseHTTPRequestHandler):
+            observed_requests = requests
+
+            def parse_request(self):
+                parsed = super().parse_request()
+                if parsed:
+                    self.observed_requests.append((self.command, self.path))
+                return parsed
+
+            def do_GET(self):
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        canary = http.server.HTTPServer(("127.0.0.1", 0), RequestCanaryHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+        try:
+            remote_uri = f"http://127.0.0.1:{canary.server_port}/remote%20schema.xsd"
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                package_files = write_taxonomy_files(root, {
+                    "entry.xsd": (
+                        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                        'xmlns:r="urn:remote" targetNamespace="urn:entry">'
+                        '<xs:import namespace="urn:remote" '
+                        f'schemaLocation="{remote_uri}"/>'
+                        '<xs:element name="Entry" type="r:RemoteType"/></xs:schema>'
+                    ),
+                    "remote.xsd": (
+                        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                        'targetNamespace="urn:remote"><xs:simpleType name="RemoteType">'
+                        '<xs:restriction base="xs:string"/></xs:simpleType></xs:schema>'
+                    ),
+                })
+                self.args.taxonomy_root = str(root)
+                self.args.profile_manifest_data = {
+                    "schemaVersion": 3,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "entry.xsd",
+                    "requiredPlugins": [],
+                    "packageFiles": package_files,
+                    "offlineReferences": {remote_uri: "remote.xsd"},
+                }
+                request = self.handshake_request()
+                request["operation"] = "load-taxonomy"
+                request["profileDigest"] = "sha256:fixture"
+                request["payload"] = {"taxonomyPath": "entry.xsd"}
+
+                result = arelle_worker.handle(request, self.args)
+        finally:
+            canary.shutdown()
+            canary.server_close()
+            canary_thread.join(timeout=2)
 
         self.assertEqual("success", result["status"], result["error"])
         self.assertTrue(result["result"]["completed"])
         self.assertEqual(2, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+        self.assertEqual([], requests, "Arelle attempted an HTTP request instead of using its pinned local file.")
 
     def test_large_path_payload_rehashes_and_streams_report_to_arelle_file_loader(self):
         temporary = tempfile.mkdtemp(prefix="xms-large-")
