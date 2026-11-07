@@ -52,6 +52,56 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task LargeXmlRun_StreamsEquivalentFactsAndPublishesOnlyTheValidatedXmlArtifact()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 2, variedValues: true);
+            var project = BuildProject(database, approved: true);
+            var profile = SyntheticProfile.Build();
+            using var small = await Run(project, database, profile,
+                new ExecutionBudget(InMemorySourceRecordLimit: 10, RowBatchSize: 3));
+            await using var worker = new LocalSyntheticWorker(profile);
+            var service = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 1, RowBatchSize: 1));
+            using var large = await service.RunAsync(project, Connections(project, database),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None,
+                outputKind: "xbrl-xml");
+
+            Assert.Equal(RunOutcome.Success, small.Manifest.Outcome);
+            Assert.True(large.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", large.Manifest.Diagnostics.Select(diagnostic => diagnostic.Message)));
+            var artifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
+            Assert.Equal("xbrl-xml", artifact.OutputKind);
+            Assert.EndsWith(".xml", artifact.ReportPath, StringComparison.OrdinalIgnoreCase);
+            var identity = Assert.Single(large.Manifest.Outputs);
+            Assert.Equal("xbrl-xml", identity.Kind);
+            Assert.Equal(artifact.Sha256, identity.Digest);
+
+            var xml = await File.ReadAllTextAsync(artifact.ReportPath);
+            var roundTripped = XmlSerializer.ReadFacts(xml, profile);
+            Assert.Equal(
+                small.Facts.Select(fact => fact.SemanticKey()).Order(StringComparer.Ordinal),
+                roundTripped.Select(fact => fact.SemanticKey()).Order(StringComparer.Ordinal));
+
+            var destination = Path.Combine(root, "published-report.xml");
+            var publisher = new PublicationService(new RunJournal());
+            var receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
+                destination, artifact, root, project, profile, allowSyntheticProfile: true,
+                result: large,
+                validateStagedArtifactAsync: (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                    stagedPath, destination, large, token, "xbrl-xml"),
+                outputKind: "xbrl-xml");
+
+            Assert.Equal(artifact.Sha256, receipt.FinalDigest);
+            Assert.Equal(await File.ReadAllBytesAsync(artifact.ReportPath), await File.ReadAllBytesAsync(destination));
+            Assert.Equal(destination, Assert.Single(large.Manifest.Outputs).Path);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task CompoundUnitsSurviveSmallAndLargeFactFolds()
     {
         var root = NewDirectory();

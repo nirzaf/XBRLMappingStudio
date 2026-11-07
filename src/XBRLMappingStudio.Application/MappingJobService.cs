@@ -141,8 +141,11 @@ public sealed class MappingJobService
         IReadOnlyDictionary<string, string> parameters,
         bool preview,
         CancellationToken cancellationToken,
-        IProgress<MappingJobProgress>? progress = null)
+        IProgress<MappingJobProgress>? progress = null,
+        string outputKind = "xbrl-json")
     {
+        if (outputKind is not ("xbrl-json" or "xbrl-xml"))
+            throw new ArgumentOutOfRangeException(nameof(outputKind), "Output kind must be xbrl-json or xbrl-xml.");
         progress?.Report(new MappingJobProgress("Checking filing profile and mapping"));
         var runId = Guid.NewGuid().ToString("N");
         var opId = Guid.NewGuid().ToString("N");
@@ -554,12 +557,11 @@ public sealed class MappingJobService
             if (binding is null || project.Bindings.Count != 1
                 || compile.Plan!.SetSteps.Count != 0
                 || !StringComparer.OrdinalIgnoreCase.Equals(sourceConnections[binding.BindingId].Kind, "sqlite")
-                || project.Destination is not null
-                || !StringComparer.Ordinal.Equals(_profile.OutputFormat, "xbrl-json"))
+                || project.Destination is not null)
             {
                 context.Diagnostics.Error(DiagnosticCodes.IoUnsupportedOperation,
                     DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
-                    "Large-run execution is currently qualified only for one streamed SQLite source, a row-scoped plan, no configured destination, and xBRL-JSON output.",
+                    "Large-run execution is currently qualified only for one streamed SQLite source, a row-scoped plan, and no configured destination.",
                     operationId: opId);
                 manifest.Outcome = RunOutcome.IncompleteConfiguration;
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
@@ -580,7 +582,7 @@ public sealed class MappingJobService
             context.Diagnostics.SetMaximumRetainedItems(255);
             return await RunLargeRowScopedAsync(project, binding, connection, schema,
                 sourceReaders[binding.BindingId], compile.Plan!, context, manifest, runId, opId, probedBytes,
-                progress, cancellationToken, hasPrimaryKey);
+                progress, cancellationToken, hasPrimaryKey, outputKind);
         }
 
         if (preview)
@@ -827,7 +829,8 @@ public sealed class MappingJobService
         long probeBytes,
         IProgress<MappingJobProgress>? progress,
         CancellationToken cancellationToken,
-        bool hasPrimaryKey)
+        bool hasPrimaryKey,
+        string outputKind)
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-large-" + Guid.NewGuid().ToString("N"));
         LargeRunFactStore? store = null;
@@ -937,15 +940,18 @@ public sealed class MappingJobService
             progress?.Report(new MappingJobProgress("Computing bounded source digest"));
             var digest = store.ComputeSourceDigest(table, cancellationToken);
             UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
-            var reportPath = Path.Combine(directory, "report.json");
+            var reportPath = Path.Combine(directory, outputKind == "xbrl-xml" ? "report.xml" : "report.json");
             long reportBytes;
             try
             {
                 using var report = new FileStream(reportPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
                     64 * 1024, FileOptions.SequentialScan);
-                reportBytes = OimSerializer.WriteLargeReport(_profile, store.InInputOrder(cancellationToken),
-                    store.InSemanticOrderWithOccurrences(cancellationToken),
-                    report, _executionBudget.MaxReportBytes, _executionBudget.MaxNamespaces, cancellationToken);
+                reportBytes = outputKind == "xbrl-json"
+                    ? OimSerializer.WriteLargeReport(_profile, store.InInputOrder(cancellationToken),
+                        store.InSemanticOrderWithOccurrences(cancellationToken), report,
+                        _executionBudget.MaxReportBytes, _executionBudget.MaxNamespaces, cancellationToken)
+                    : XmlSerializer.WriteLargeReport(_profile, store.InInputOrder(cancellationToken), report,
+                        _executionBudget.MaxReportBytes, _executionBudget.MaxNamespaces, cancellationToken);
                 report.Flush(flushToDisk: true);
             }
             catch (XbrlExportException ex)
@@ -975,33 +981,63 @@ public sealed class MappingJobService
                 var actualBytes = new FileInfo(reportPath).Length;
                 if (actualBytes != reportBytes)
                     throw new InvalidDataException("The streamed report byte count changed before worker validation.");
-                artifact = new LargeRunArtifact(directory, store, reportPath, actualDigest, actualBytes);
+                artifact = new LargeRunArtifact(directory, store, reportPath, actualDigest, actualBytes, outputKind);
                 store = null;
             }
 
-            var validatePayload = JsonSerializer.SerializeToElement(new
-            {
-                xbrlJsonPath = artifact.XbrlJsonPath,
-                sha256 = artifact.Sha256
-            });
-            var request = new WorkerRequest(WorkerOperations.ValidateReport,
-                OperationId: operationId + "-validate", JobId: runId,
-                ProfileDigest: _profile.Digest, DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
-                Payload: validatePayload)
-            {
-                ValidationRequirements = CreateValidationRequirements()
-            };
             FilingValidationResult? localSyntheticValidation = null;
             if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
                 localSyntheticValidation = ValidateLargeSyntheticArtifact(artifact, cancellationToken);
 
-            progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
-            var workerResponse = _worker is LocalSyntheticWorker localWorker
-                && localSyntheticValidation is not null
-                ? await localWorker.ValidateLargeReport(request,
-                    LocatedFacts(artifact, cancellationToken), localSyntheticValidation,
-                    artifact.FactCount, cancellationToken).ConfigureAwait(false)
-                : await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+            string? validationScratch = null;
+            WorkerResponse workerResponse;
+            try
+            {
+                var workerPath = artifact.ReportPath;
+                if (outputKind == "xbrl-xml")
+                {
+                    // The worker accepts XML only from its private staged-XML area.
+                    // Validate a streamed, digest-checked copy so the run artifact can
+                    // remain in its own spool directory and never inflate the protocol.
+                    validationScratch = Path.Combine(Path.GetTempPath(),
+                        "xms-staged-xml-" + Guid.NewGuid().ToString("N"));
+                    CreatePrivateArtifactDirectory(validationScratch);
+                    workerPath = Path.Combine(validationScratch, "report.xml");
+                    await using (var target = new FileStream(workerPath, FileMode.CreateNew, FileAccess.Write,
+                        FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    {
+                        await artifact.CopyReportToAsync(target, cancellationToken).ConfigureAwait(false);
+                        await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    await using var workerArtifact = new FileStream(workerPath, FileMode.Open, FileAccess.Read,
+                        FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    if (!StringComparer.Ordinal.Equals(RunManifest.ComputeSha256(workerArtifact), artifact.Sha256))
+                        throw new InvalidDataException("The streamed xBRL-XML artifact changed before worker validation.");
+                }
+
+                var validatePayload = outputKind == "xbrl-xml"
+                    ? JsonSerializer.SerializeToElement(new { xbrlXmlPath = workerPath, sha256 = artifact.Sha256 })
+                    : JsonSerializer.SerializeToElement(new { xbrlJsonPath = workerPath, sha256 = artifact.Sha256 });
+                var request = new WorkerRequest(WorkerOperations.ValidateReport,
+                    OperationId: operationId + "-validate", JobId: runId,
+                    ProfileDigest: _profile.Digest, DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
+                    Payload: validatePayload)
+                {
+                    ValidationRequirements = CreateValidationRequirements()
+                };
+
+                progress?.Report(new MappingJobProgress("Validating staged report artifact in validation worker"));
+                workerResponse = _worker is LocalSyntheticWorker localWorker
+                    && localSyntheticValidation is not null
+                    ? await localWorker.ValidateLargeReport(request,
+                        LocatedFacts(artifact, cancellationToken), localSyntheticValidation,
+                        artifact.FactCount, cancellationToken).ConfigureAwait(false)
+                    : await _worker.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (validationScratch is not null) TryDeleteDirectory(validationScratch);
+            }
             var workerDiagnostics = (workerResponse.Diagnostics ?? Array.Empty<Diagnostic>()).ToList();
             EnrichWorkerDiagnosticsWithFactPaths(workerDiagnostics, artifact, cancellationToken);
             var completion = ValidationCompletionReportValidator.Evaluate(
@@ -1054,7 +1090,7 @@ public sealed class MappingJobService
             manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.Outputs = new[]
             {
-                new OutputIdentity(artifact.XbrlJsonPath, artifact.Sha256, artifact.Bytes, "xbrl-json")
+                new OutputIdentity(artifact.ReportPath, artifact.Sha256, artifact.Bytes, artifact.OutputKind)
             };
             progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
             ownershipTransferred = true;
@@ -1293,9 +1329,10 @@ public sealed class MappingJobService
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                 $"The completed run has no '{outputKind}' output identity to validate.",
                 manifest.RunId, destinationPath);
-        if (result.LargeArtifact is not null && outputKind != "xbrl-json")
+        if (result.LargeArtifact is not null
+            && !StringComparer.Ordinal.Equals(outputKind, result.LargeArtifact.OutputKind))
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                $"Large-run staged validation does not support output kind '{outputKind}'.",
+                $"Large-run artifact kind '{result.LargeArtifact.OutputKind}' cannot be validated as '{outputKind}'.",
                 manifest.RunId, destinationPath);
 
         string digest;
@@ -1316,9 +1353,11 @@ public sealed class MappingJobService
                         "Staged report bytes do not match the artifact recorded by the completed run.",
                         manifest.RunId, destinationPath);
 
-                workerScratch = Path.Combine(Path.GetTempPath(), "xms-large-stage-" + Guid.NewGuid().ToString("N"));
+                var isXml = outputKind == "xbrl-xml";
+                workerScratch = Path.Combine(Path.GetTempPath(),
+                    (isXml ? "xms-staged-xml-" : "xms-large-stage-") + Guid.NewGuid().ToString("N"));
                 CreatePrivateArtifactDirectory(workerScratch);
-                var workerPath = Path.Combine(workerScratch, "report.json");
+                var workerPath = Path.Combine(workerScratch, isXml ? "report.xml" : "report.json");
                 await using var source = new FileStream(stagedPath, FileMode.Open, FileAccess.Read,
                     FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
                 await using var target = new FileStream(workerPath, FileMode.CreateNew, FileAccess.Write,
@@ -1347,7 +1386,9 @@ public sealed class MappingJobService
                             "Staged report bytes changed while they were copied for profile validation.",
                             manifest.RunId, destinationPath);
                 }
-                workerPayload = JsonSerializer.SerializeToElement(new { xbrlJsonPath = workerPath, sha256 = digest });
+                workerPayload = isXml
+                    ? JsonSerializer.SerializeToElement(new { xbrlXmlPath = workerPath, sha256 = digest })
+                    : JsonSerializer.SerializeToElement(new { xbrlJsonPath = workerPath, sha256 = digest });
                 if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
                 {
                     try

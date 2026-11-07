@@ -60,8 +60,8 @@ public sealed record ExecutionBudget(
 
 /// <summary>
 /// A private, disk-backed full-run result. It owns both the ordered fact spool and
-/// exact xBRL-JSON artifact. Callers must dispose it when the run result is no longer
-/// needed; incomplete and cancelled runs never transfer ownership to a result.
+/// exact streamed XBRL artifact. Callers must dispose it when the run result is no
+/// longer needed; incomplete and cancelled runs never transfer ownership to a result.
 /// </summary>
 public sealed class LargeRunArtifact : IDisposable
 {
@@ -69,20 +69,24 @@ public sealed class LargeRunArtifact : IDisposable
     private readonly LargeRunFactStore _facts;
     private bool _disposed;
 
-    public string XbrlJsonPath { get; }
+    public string ReportPath { get; }
+    public string OutputKind { get; }
+    /// <summary>Compatibility alias for callers compiled against the original JSON-only large-run API.</summary>
+    public string XbrlJsonPath => ReportPath;
     public string Sha256 { get; }
     public long Bytes { get; }
     public IReadOnlyList<XbrlFact> Facts => _facts;
     public int FactCount => _facts.Count;
 
-    internal LargeRunArtifact(string directory, LargeRunFactStore facts, string xbrlJsonPath,
-        string sha256, long bytes)
-        => (_directory, _facts, XbrlJsonPath, Sha256, Bytes) = (directory, facts, xbrlJsonPath, sha256, bytes);
+    internal LargeRunArtifact(string directory, LargeRunFactStore facts, string reportPath,
+        string sha256, long bytes, string outputKind = "xbrl-json")
+        => (_directory, _facts, ReportPath, Sha256, Bytes, OutputKind)
+            = (directory, facts, reportPath, sha256, bytes, outputKind);
 
     public Stream OpenReportRead()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return new FileStream(XbrlJsonPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+        return new FileStream(ReportPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
             64 * 1024, FileOptions.SequentialScan);
     }
 
@@ -126,7 +130,7 @@ public sealed class LargeRunArtifact : IDisposable
     {
         ArgumentNullException.ThrowIfNull(destination);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        await using var source = new FileStream(XbrlJsonPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+        await using var source = new FileStream(ReportPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var buffer = new byte[64 * 1024];
         int read;

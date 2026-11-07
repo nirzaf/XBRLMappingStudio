@@ -38,6 +38,18 @@ public sealed class XmlExportTests
     }
 
     [Fact]
+    public void WriteLargeReport_StopsAtConfiguredByteBudget()
+    {
+        using var destination = new MemoryStream();
+
+        var error = Assert.Throws<InvalidDataException>(() => XmlSerializer.WriteLargeReport(
+            Profile, new[] { Revenue() }, destination, maxOutputBytes: 16, maxNamespaces: 64));
+
+        Assert.Contains("xBRL-XML report exceeded", error.Message, StringComparison.Ordinal);
+        Assert.InRange(destination.Length, 0, 16);
+    }
+
+    [Fact]
     public void Serialize_SharedContextsAreDeduplicated()
     {
         // Two facts identical except value share one context and one unit.

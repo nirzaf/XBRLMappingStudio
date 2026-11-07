@@ -1031,7 +1031,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-        using var result = await service.RunAsync(p, conns, parameters, preview, cts.Token);
+        using var result = await service.RunAsync(p, conns, parameters, preview, cts.Token,
+            outputKind: outputFormat);
         PrintDiagnostics(result.Diagnostics.Items);
         var selectedOutputKind = outputFormat;
         byte[]? selectedOutputPayload = null;
@@ -1047,19 +1048,23 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
 
         if (!preview && output is not null && outputFormat == "xbrl-xml" && result.IsPublishable)
         {
-            if (result.LargeArtifact is not null)
+            if (result.LargeArtifact is { } largeXmlArtifact
+                && StringComparer.Ordinal.Equals(largeXmlArtifact.OutputKind, "xbrl-xml"))
             {
+                // The application streamed, validated and recorded this XML artifact
+                // directly from its disk-backed fact spool; do not materialize facts.
+            }
+            else if (result.LargeArtifact is not null)
                 RecordDestinationFailure(new Diagnostic
                 {
-                    Code = DiagnosticCodes.IoUnsupportedOperation,
+                    Code = DiagnosticCodes.PubDigestMismatch,
                     Subsystem = DiagnosticSubsystem.XBRL,
                     Severity = DiagnosticSeverity.Error,
                     Stage = DiagnosticStage.Serialization,
                     IsBlocking = true,
-                    Message = "xBRL-XML publication is currently limited to in-memory runs; this large run remains unpublished.",
+                    Message = "The large-run artifact kind does not match the requested xBRL-XML output.",
                     OperationId = result.Manifest.OperationId
                 }, RunOutcome.IncompleteConfiguration);
-            }
             else
             {
                 try
@@ -1127,8 +1132,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                                 ? await publisher.PublishAuthorizedLargeArtifactAsync(
                                     output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
                                     (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
-                                        stagedPath, output, result, validationToken), token,
-                                    refuseDifferentExisting: true)
+                                        stagedPath, output, result, validationToken, selectedOutputKind), token,
+                                    refuseDifferentExisting: true, outputKind: selectedOutputKind)
                                 : await publisher.PublishAuthorizedAsync(
                                     output, mixedFilePayload, workspaceRoot,
                                     p, profile, allowSyntheticProfile, result,
@@ -1273,7 +1278,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                         receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
                             output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
                             (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token), cts.Token);
+                                stagedPath, output, result, token, selectedOutputKind), cts.Token,
+                            outputKind: selectedOutputKind);
                         payloadBytes = largeArtifact.Bytes;
                     }
                     else

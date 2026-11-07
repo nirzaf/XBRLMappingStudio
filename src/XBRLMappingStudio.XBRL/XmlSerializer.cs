@@ -23,6 +23,170 @@ public static class XmlSerializer
     private static readonly XNamespace Xsi = "http://www.w3.org/2001/XMLSchema-instance";
     private static readonly XNamespace Iso4217 = "http://www.xbrl.org/2003/iso4217";
 
+    /// <summary>
+    /// Streams a large xBRL-XML instance while retaining only one fact/context/unit
+    /// element at a time. Contexts and units are deliberately emitted as one per
+    /// fact, so no report-sized aspect dictionary is needed. Repeated equivalent
+    /// contexts and units are valid XBRL and preserve the exact fact semantics.
+    /// </summary>
+    public static long WriteLargeReport(
+        FilingProfile profile,
+        IEnumerable<XbrlFact> facts,
+        Stream destination,
+        long maxOutputBytes,
+        int maxNamespaces,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (maxOutputBytes < 1) throw new ArgumentOutOfRangeException(nameof(maxOutputBytes));
+        if (maxNamespaces < 1) throw new ArgumentOutOfRangeException(nameof(maxNamespaces));
+
+        var namespaces = BuildLargeNamespaces(profile, maxNamespaces);
+        string ResolveQName(string qname)
+        {
+            var (prefix, local) = SplitQName(qname);
+            if (prefix is null || !namespaces.ContainsKey(prefix))
+                throw Unsupported($"QName '{qname}' has no namespace URI in the filing profile.");
+            try
+            {
+                XmlConvert.VerifyNCName(prefix);
+                XmlConvert.VerifyNCName(local);
+            }
+            catch (XmlException)
+            {
+                throw Unsupported($"QName '{qname}' is invalid.");
+            }
+            return qname;
+        }
+
+        void ValidateFact(XbrlFact fact)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssertSupported(fact);
+            var concept = profile.FindConcept(fact.ConceptName)
+                ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
+            if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
+                throw Unsupported(unitError);
+            if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
+            _ = ResolveQName(fact.ConceptName);
+            foreach (var dimension in fact.Dimensions)
+            {
+                if (!dimension.IsExplicit)
+                    throw Unsupported($"Typed dimension '{dimension.Name}' requires taxonomy domain metadata and is not exportable in this profile.");
+                _ = ResolveQName(dimension.Name);
+                _ = ResolveQName(dimension.MemberName);
+            }
+            foreach (var measure in (fact.Unit is null ? Enumerable.Empty<string>() : new[] { fact.Unit.Measure })
+                         .Concat(fact.CompoundUnit?.Numerators ?? Array.Empty<string>())
+                         .Concat(fact.CompoundUnit?.DenominatorList ?? Array.Empty<string>()))
+                _ = ResolveQName(MeasureQName(measure, profile));
+        }
+
+        using var bounded = new BoundedXmlWriteStream(destination, maxOutputBytes);
+        using (var writer = XmlWriter.Create(bounded, new XmlWriterSettings
+        {
+            Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true),
+            Indent = true,
+            CloseOutput = false,
+            OmitXmlDeclaration = false
+        }))
+        {
+            writer.WriteStartDocument();
+            writer.WriteStartElement("xbrli", "xbrl", Xbrli.NamespaceName);
+            foreach (var entry in namespaces.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            {
+                // WriteStartElement already binds the instance prefix on the root.
+                if (StringComparer.Ordinal.Equals(entry.Key, "xbrli")) continue;
+                writer.WriteAttributeString("xmlns", entry.Key, null, entry.Value);
+            }
+            foreach (var url in profile.TaxonomyUrls)
+                new XElement(Link + "schemaRef",
+                    new XAttribute(Xlink + "type", "simple"),
+                    new XAttribute(Xlink + "href", url)).WriteTo(writer);
+            writer.Flush();
+
+            long ordinal = 0;
+            // XBRL instance order requires all contexts before units and all units
+            // before facts, so the private fact spool is read in three bounded passes.
+            foreach (var fact in facts)
+            {
+                ValidateFact(fact);
+                ordinal = checked(ordinal + 1);
+                BuildContext("c" + ordinal.ToString(CultureInfo.InvariantCulture), fact, ResolveQName).WriteTo(writer);
+                writer.Flush();
+            }
+
+            ordinal = 0;
+            foreach (var fact in facts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ordinal = checked(ordinal + 1);
+                if (UnitPresent(fact))
+                    BuildUnit("u" + ordinal.ToString(CultureInfo.InvariantCulture), fact, profile, ResolveQName).WriteTo(writer);
+                writer.Flush();
+            }
+
+            ordinal = 0;
+            foreach (var fact in facts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ordinal = checked(ordinal + 1);
+                var contextId = "c" + ordinal.ToString(CultureInfo.InvariantCulture);
+                var unitId = "u" + ordinal.ToString(CultureInfo.InvariantCulture);
+                var contextIds = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [ContextKey(fact)] = contextId
+                };
+                var unitIds = UnitPresent(fact)
+                    ? new Dictionary<string, string>(StringComparer.Ordinal) { [UnitKey(fact)] = unitId }
+                    : new Dictionary<string, string>(StringComparer.Ordinal);
+                BuildFact(fact, namespaces, ResolveQName, contextIds, unitIds).WriteTo(writer);
+                writer.Flush();
+            }
+
+            writer.WriteEndElement();
+            writer.WriteEndDocument();
+        }
+        return bounded.BytesWritten;
+    }
+
+    private static Dictionary<string, string> BuildLargeNamespaces(FilingProfile profile, int maxNamespaces)
+    {
+        var namespaces = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["xbrli"] = Xbrli.NamespaceName,
+            ["link"] = Link.NamespaceName,
+            ["xbrldi"] = Xbrldi.NamespaceName,
+            ["xlink"] = Xlink.NamespaceName,
+            ["iso4217"] = Iso4217.NamespaceName,
+            ["xsi"] = Xsi.NamespaceName
+        };
+
+        void AddNamespace(string prefix, string uri)
+        {
+            try { XmlConvert.VerifyNCName(prefix); }
+            catch (XmlException) { throw Unsupported($"Namespace prefix '{prefix}' is invalid."); }
+            if (namespaces.TryGetValue(prefix, out var prior) && !StringComparer.Ordinal.Equals(prior, uri))
+                throw Unsupported($"Namespace prefix '{prefix}' has conflicting URIs.");
+            namespaces[prefix] = uri;
+            if (namespaces.Count > maxNamespaces)
+                throw Unsupported($"The report exceeded its {maxNamespaces} namespace budget.");
+        }
+
+        foreach (var (prefix, uri) in profile.NamespaceUris) AddNamespace(prefix, uri);
+        foreach (var concept in profile.Concepts)
+        {
+            var (prefix, _) = SplitQName(concept.QualifiedName);
+            if (prefix is null) throw Unsupported($"Concept '{concept.QualifiedName}' has no namespace prefix.");
+            AddNamespace(prefix, concept.Namespace);
+        }
+        if (namespaces.Count > maxNamespaces)
+            throw Unsupported($"The report exceeded its {maxNamespaces} namespace budget.");
+        return namespaces;
+    }
+
     public static string Serialize(FilingProfile profile, IReadOnlyList<XbrlFact> facts)
     {
         foreach (var f in facts)
@@ -682,6 +846,45 @@ public static class XmlSerializer
     }
 
     private static string? Iso(DateOnly? d) => d?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+    private sealed class BoundedXmlWriteStream(Stream inner, long maximumBytes) : Stream
+    {
+        public long BytesWritten { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => BytesWritten;
+        public override long Position { get => BytesWritten; set => throw new NotSupportedException(); }
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            EnsureCapacity(count);
+            inner.Write(buffer, offset, count);
+            BytesWritten += count;
+        }
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            EnsureCapacity(buffer.Length);
+            inner.Write(buffer);
+            BytesWritten += buffer.Length;
+        }
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            EnsureCapacity(buffer.Length);
+            await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+            BytesWritten += buffer.Length;
+        }
+        protected override void Dispose(bool disposing) => base.Dispose(disposing);
+        private void EnsureCapacity(int count)
+        {
+            if (count > maximumBytes - BytesWritten)
+                throw new InvalidDataException($"The xBRL-XML report exceeded its {maximumBytes} byte budget.");
+        }
+    }
 
     private sealed class Utf8StringWriter(StringBuilder builder)
         : StringWriter(builder, CultureInfo.InvariantCulture)

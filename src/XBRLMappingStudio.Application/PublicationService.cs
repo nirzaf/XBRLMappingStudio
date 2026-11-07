@@ -99,7 +99,7 @@ public sealed class PublicationService
         return receipt;
     }
 
-    /// <summary>Authorize and stream a disk-backed xBRL-JSON artifact through the same staged publication boundary.</summary>
+    /// <summary>Authorize and stream a disk-backed XBRL artifact through the same staged publication boundary.</summary>
     public async Task<PublicationReceipt> PublishAuthorizedLargeArtifactAsync(
         string destinationPath,
         LargeRunArtifact artifact,
@@ -110,11 +110,18 @@ public sealed class PublicationService
         JobResult result,
         Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
         CancellationToken cancellationToken = default,
-        bool refuseDifferentExisting = false)
+        bool refuseDifferentExisting = false,
+        string? outputKind = null)
     {
         ArgumentNullException.ThrowIfNull(artifact);
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
+        var selectedOutputKind = outputKind ?? artifact.OutputKind;
+        if (selectedOutputKind is not ("xbrl-json" or "xbrl-xml")
+            || !StringComparer.Ordinal.Equals(selectedOutputKind, artifact.OutputKind))
+            throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                $"Large-run artifact kind '{artifact.OutputKind}' does not match requested output kind '{selectedOutputKind}'.",
+                manifest.RunId, destinationPath);
         var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
         if (gate.HasBlockingErrors)
         {
@@ -133,7 +140,7 @@ public sealed class PublicationService
                 "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
                 manifest.RunId, destinationPath);
 
-        if (!manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+        if (!manifest.Outputs.Any(output => output.Kind == selectedOutputKind
                 && output.Digest == artifact.Sha256 && output.Bytes == artifact.Bytes))
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
                 "Publication artifact does not match the report recorded by the run.", manifest.RunId, destinationPath);
@@ -145,7 +152,7 @@ public sealed class PublicationService
             artifact.Sha256, artifact.Bytes, manifest.RunId, validateStagedArtifactAsync,
             cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
-        manifest.Outputs = manifest.Outputs.Select(output => output.Kind == "xbrl-json"
+        manifest.Outputs = manifest.Outputs.Select(output => output.Kind == selectedOutputKind
             ? output with { Path = safeDestination } : output).ToArray();
         return receipt;
     }

@@ -170,3 +170,16 @@ Verification:
   execution tests.
 - Arelle emitted a non-failing `ResourceWarning` for its temporary offline
   catalog ZIP stream; the taxonomy test and cleanup succeeded.
+
+## XBR-03 streamed large xBRL-XML slice
+
+The qualified large-run path now accepts `xbrl-xml` as an explicit output kind. It streams a byte-capped XML instance from the private SQLite fact spool, emits contexts before units and facts as required by the instance structure, and uses one context/unit pair per fact to avoid row-count-sized deduplication state. The resulting artifact kind, digest, byte count and path are carried through CLI publication. The validation worker receives a private copy whose digest is checked against the generated artifact; publication rechecks the exact staged bytes before replacement. The new integration case compares the XML round-trip semantic fact multiset with the small-mode output and publishes the validated large artifact.
+
+Verification:
+
+- The complete Release `LargeRunExecutionTests` class passed 21/21, including existing 100,000-row JSON streaming coverage and the new large XML publication case.
+- The Release XBRL test project passed 110/110, including the new streamed XML byte-budget test.
+- The full Release solution suite passed 823 tests, skipped 6 environment-gated Arelle tests, and had 0 failures after restoring all solution test projects.
+- dotnet build XBRLMappingStudio.slnx -c Release --no-restore -m:1 succeeded with 0 warnings and 0 errors.
+
+Limits: the XML semantic-parity publication case uses two facts under forced large mode. It does not qualify 100,000-row XML memory/throughput, Arelle's report-model memory, real filing-profile acceptance, multi-source or set-phase large runs, or desktop-native XML workflows. One context/unit per fact can increase output size; the configured report-byte cap remains enforced.
