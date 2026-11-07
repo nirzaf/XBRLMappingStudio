@@ -52,6 +52,72 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    public async Task LargeRun_KeepsWalSnapshotForFactsAndFingerprintWhileWriterCommits()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateWalSourceDatabase(root, rowCount: 8);
+            var project = BuildProject(database);
+            var profile = SyntheticProfile.Build();
+            var budget = new ExecutionBudget(InMemorySourceRecordLimit: 1, RowBatchSize: 2);
+
+            using var baseline = await Run(project, database, profile, budget);
+            Assert.Equal(RunOutcome.Success, baseline.Manifest.Outcome);
+            var baselineArtifact = Assert.IsType<LargeRunArtifact>(baseline.LargeArtifact);
+            var expectedDigest = Assert.Single(baseline.Manifest.Inputs).Digest;
+
+            var writerCommitted = false;
+            var progress = new InlineProgress<MappingJobProgress>(stage =>
+            {
+                if (writerCommitted || stage.Stage != "Executing bounded row batch" || stage.Current != 2)
+                    return;
+
+                using var writer = new SqliteConnection($"Data Source={database};Pooling=False");
+                writer.Open();
+                using var transaction = writer.BeginTransaction();
+                using var command = writer.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = "UPDATE financials SET Current='9000' WHERE Id >= 3; "
+                    + "INSERT INTO financials(Id, Line, Current, Prior) VALUES(9, 'Revenue', '7777', '1100');";
+                command.ExecuteNonQuery();
+                transaction.Commit();
+                writerCommitted = true;
+            });
+
+            using var observed = await Run(project, database, profile, budget, progress: progress);
+
+            Assert.True(writerCommitted, "The WAL writer did not commit between source batches.");
+            Assert.True(observed.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", observed.Manifest.Diagnostics.Select(item => item.Message)));
+            var observedArtifact = Assert.IsType<LargeRunArtifact>(observed.LargeArtifact);
+            var input = Assert.Single(observed.Manifest.Inputs);
+            Assert.Equal(expectedDigest, input.Digest);
+            Assert.False(input.IsReplayable);
+            Assert.Equal("sqlite-read-transaction", input.SnapshotStrategy);
+            Assert.Equal(SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy, input.RowIdentityStrategy);
+            Assert.Equal(baselineArtifact.Sha256, observedArtifact.Sha256);
+            Assert.Equal(baselineArtifact.Facts.Select(FactSnapshot), observedArtifact.Facts.Select(FactSnapshot));
+            Assert.Equal(Enumerable.Range(0, 8).Select(row => (decimal?)((1_250 + row % 3) * 1_000m)),
+                observedArtifact.Facts.Select(fact => fact.Value));
+
+            await using var verify = new SqliteConnection(
+                $"Data Source={database};Pooling=False;Mode=ReadOnly");
+            await verify.OpenAsync();
+            await using var verifyCommand = verify.CreateCommand();
+            verifyCommand.CommandText = "SELECT COUNT(*) FROM financials";
+            Assert.Equal(9L, await verifyCommand.ExecuteScalarAsync());
+            verifyCommand.CommandText = "SELECT Current FROM financials WHERE Id=3";
+            Assert.Equal("9000", await verifyCommand.ExecuteScalarAsync());
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    private static (string SemanticKey, decimal? Value, string SourceRow) FactSnapshot(XbrlFact fact)
+        => (fact.SemanticKey(), fact.Value,
+            Assert.Single(fact.ContributingSources).DisplayName ?? "");
+
+    [Fact]
     public async Task LargeXmlRun_StreamsEquivalentFactsAndPublishesOnlyTheValidatedXmlArtifact()
     {
         var root = NewDirectory();
@@ -1116,6 +1182,43 @@ public sealed class LargeRunExecutionTests
         var path = Assert.Single(fact.SourceTransformationPaths,
             candidate => StringComparer.Ordinal.Equals(candidate.Source.Locator, locator));
         Assert.Equal(expectedIds, path.TransformationIds);
+    }
+
+    private static async Task<string> CreateWalSourceDatabase(string root, int rowCount)
+    {
+        var path = Path.Combine(root, "wal-source.db");
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using (var journalMode = database.CreateCommand())
+        {
+            journalMode.CommandText = "PRAGMA journal_mode=WAL;";
+            Assert.Equal("wal", (string?)await journalMode.ExecuteScalarAsync());
+        }
+
+        await using var transaction = database.BeginTransaction();
+        await using (var create = database.CreateCommand())
+        {
+            create.Transaction = transaction;
+            create.CommandText = "CREATE TABLE financials (Id INTEGER PRIMARY KEY, Line TEXT NOT NULL, "
+                + "Current TEXT NOT NULL, Prior TEXT NOT NULL);";
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = database.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = "INSERT INTO financials(Id, Line, Current, Prior) "
+                + "VALUES($id, 'Revenue', $current, '1100');";
+            var id = insert.Parameters.Add("$id", SqliteType.Integer);
+            var current = insert.Parameters.Add("$current", SqliteType.Text);
+            for (var row = 0; row < rowCount; row++)
+            {
+                id.Value = row + 1;
+                current.Value = (1_250 + row % 3).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                await insert.ExecuteNonQueryAsync();
+            }
+        }
+        await transaction.CommitAsync();
+        return path;
     }
 
     private static IReadOnlyDictionary<string, SourceConnection> Connections(MappingProject project, string database)
