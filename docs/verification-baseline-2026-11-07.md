@@ -116,3 +116,31 @@ Verification:
 This improves QName normalization for supported XML imports; it does not prove
 full OIM conformance, equivalence against a real filing profile, or regulator
 acceptance. Those remain open under XBR-05 and GAT-01/GAT-02.
+
+## Exact staged xBRL-XML publication
+
+The CLI accepts `--output-format xbrl-xml` for an explicit report-file output;
+the default remains xBRL-JSON, and the output format is not inferred from the
+filename. XML is generated from the successful run's facts, recorded as an
+`xbrl-xml` output identity, and staged through the same authorized publication
+service. Before replacement, the service verifies strict UTF-8, the artifact
+digest, and exact equality with a fresh serialization of the run facts. It
+passes a private copy of those exact bytes to the validation worker; the Arelle
+worker rehashes that copy and streams an offline schemaRef localization before
+loading the XML with network access disabled.
+
+Verification:
+
+- Release solution build succeeded with 0 warnings and 0 errors.
+- The full Release solution suite passed 750 tests; 6 Arelle-backed tests were
+  environment-gated locally, with 0 failures.
+- Focused CLI publication and staged-artifact mutation tests passed 2/2.
+- The Python worker suite passed 55 tests with 8 environment-gated skips.
+  The local Python environment has no pinned Arelle/lxml runtime, so the actual
+  Arelle staged-XML path remains to be verified by exact-head CI.
+- `git diff --check` passed.
+
+Current limits: the CLI XML output path requires an in-memory full run and is
+not available for the disk-backed large-run artifact or mixed file/SQLite
+publication. Real-profile qualification remains owner-gated and the real
+Arelle rule/plugin completion contract remains unavailable.

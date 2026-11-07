@@ -875,6 +875,79 @@ class ArelleWorkerTests(unittest.TestCase):
             shutil.rmtree(private, ignore_errors=True)
             shutil.rmtree(outside_directory, ignore_errors=True)
 
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Pinned Arelle runtime supplies lxml for staged XML path tests.")
+    def test_staged_xml_path_rehashes_localizes_taxonomy_and_loads_exact_instance(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory(prefix="xms-staged-xml-") as temporary:
+            directory = Path(temporary)
+            if sys.platform != "win32":
+                directory.chmod(0o700)
+            path = directory / "report.xml"
+            raw = (FIXTURES / "product-generated-pass.xbrl.xml").read_bytes()
+            path.write_bytes(raw)
+            request = {
+                "operation": "validate-report", "operationId": "staged-xml-op", "jobId": "staged-xml-job",
+                "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
+                "payload": {"xbrlXmlPath": str(path), "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+                "validationRequirements": {"profileId": "test-profile", "profileDigest": "test",
+                                           "requiredRules": [], "requiredPlugins": []},
+            }
+            observed = {}
+
+            def fake_arelle(entrypoint, args, temporary_path=None):
+                observed["path"] = Path(entrypoint)
+                observed["root"] = ElementTree.parse(entrypoint).getroot()
+                return True, [], 1
+
+            try:
+                with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                        mock.patch.object(arelle_worker, "run_arelle", side_effect=fake_arelle):
+                    result = arelle_worker.handle(request, self.args)
+            finally:
+                shutil.rmtree(directory, ignore_errors=True)
+
+        self.assertEqual("success", result["status"], result["error"])
+        self.assertNotEqual(path, observed["path"])
+        schema_ref = observed["root"].find("{http://www.xbrl.org/2003/linkbase}schemaRef")
+        expected_taxonomy = str(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd") \
+            if sys.platform == "win32" else (TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()
+        self.assertEqual(expected_taxonomy,
+                         schema_ref.get("{http://www.w3.org/1999/xlink}href"))
+
+    def test_staged_xml_path_rejects_outside_directory_and_bad_digest(self):
+        import shutil
+
+        outside_directory = Path(tempfile.mkdtemp(prefix="xms-unqualified-xml-"))
+        private = Path(tempfile.mkdtemp(prefix="xms-staged-xml-"))
+        if sys.platform != "win32":
+            private.chmod(0o700)
+        try:
+            raw = (FIXTURES / "product-generated-pass.xbrl.xml").read_bytes()
+            outside = outside_directory / "report.xml"
+            outside.write_bytes(raw)
+            valid = private / "report.xml"
+            valid.write_bytes(raw)
+            payloads = [
+                {"xbrlXmlPath": str(outside), "sha256": "sha256:" + hashlib.sha256(raw).hexdigest()},
+                {"xbrlXmlPath": str(valid), "sha256": "sha256:" + "0" * 64},
+            ]
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True):
+                for payload in payloads:
+                    request = {
+                        "operation": "validate-report", "operationId": "staged-xml-op", "jobId": "staged-xml-job",
+                        "profileDigest": "test", "deadlineUtc": "2999-01-01T00:00:00Z",
+                        "payload": payload,
+                        "validationRequirements": {"profileId": "test-profile", "profileDigest": "test",
+                                                   "requiredRules": [], "requiredPlugins": []},
+                    }
+                    result = arelle_worker.handle(request, self.args)
+                    self.assertEqual("domainFailure", result["status"])
+        finally:
+            shutil.rmtree(private, ignore_errors=True)
+            shutil.rmtree(outside_directory, ignore_errors=True)
+
     def test_large_path_rejects_duplicate_root_member_extra_member_and_trailing_data(self):
         valid = json.dumps(report(), separators=(",", ":"))
         document_info = json.dumps(report()["documentInfo"], separators=(",", ":"))

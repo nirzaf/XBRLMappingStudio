@@ -163,7 +163,7 @@ public sealed record OutputIdentity(
     string Path,
     string Digest,
     long Bytes,
-    string Kind)        // "xbrl-json", "xlsx", "db-receipt"
+    string Kind)        // "xbrl-json", "xbrl-xml", file artifact kind, or "db-receipt"
 {
     /// <summary>Rows affected by a durable database publication receipt.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -671,6 +671,54 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StagedXmlArtifactValidation_BindsExactXmlBytesAndValidatesPrivateCopy()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var validationRequests = new List<WorkerRequest>();
+        string? workerXml = null;
+        var worker = new FakeWorker(request =>
+        {
+            if (request.Operation == WorkerOperations.ValidateReport)
+            {
+                validationRequests.Add(request);
+                if (request.Payload is { } payload && payload.ValueKind == JsonValueKind.Object
+                    && payload.TryGetProperty("xbrlXmlPath", out var xmlPath))
+                    workerXml = File.ReadAllText(xmlPath.GetString()!);
+            }
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, Result: null,
+                Array.Empty<Diagnostic>(), null);
+        });
+        var service = new MappingJobService(SyntheticProfile.Build(), worker);
+        using var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+
+        var xml = XmlSerializer.Serialize(SyntheticProfile.Build(), result.Facts);
+        var bytes = new System.Text.UTF8Encoding(false, true).GetBytes(xml);
+        var digest = RunManifest.ComputeSha256(bytes);
+        result.Manifest.Outputs = result.Manifest.Outputs
+            .Append(new OutputIdentity("<memory>", digest, bytes.LongLength, "xbrl-xml"))
+            .ToArray();
+        var stagedPath = Path.Combine(_dir, "staged-report.xml");
+        await File.WriteAllTextAsync(stagedPath, xml + " ", new System.Text.UTF8Encoding(false));
+        var altered = await Assert.ThrowsAsync<PublicationException>(() => service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "published-report.xml"), result,
+            outputKind: "xbrl-xml"));
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, altered.Code);
+        Assert.Single(validationRequests); // only the original xBRL-JSON run validation occurred
+
+        await File.WriteAllBytesAsync(stagedPath, bytes);
+        var validatedDigest = await service.ValidateStagedArtifactAsync(
+            stagedPath, Path.Combine(_dir, "published-report.xml"), result,
+            outputKind: "xbrl-xml");
+
+        Assert.Equal(digest, validatedDigest);
+        Assert.Equal(2, validationRequests.Count);
+        Assert.Equal(xml, workerXml);
+        Assert.Equal(digest, result.Manifest.ValidatedArtifactDigest);
+    }
+
+    [Fact]
     public async Task StagedArtifactValidation_RejectsWorkerBlockingFinding()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);

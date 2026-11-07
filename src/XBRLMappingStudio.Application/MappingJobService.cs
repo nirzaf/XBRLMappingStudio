@@ -1281,13 +1281,18 @@ public sealed class MappingJobService
         string stagedPath,
         string destinationPath,
         JobResult result,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string outputKind = "xbrl-json")
     {
         var manifest = result.Manifest;
-        var output = manifest.Outputs.SingleOrDefault(identity => identity.Kind == "xbrl-json");
+        var output = manifest.Outputs.SingleOrDefault(identity => identity.Kind == outputKind);
         if (output is null)
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                "The completed run has no xBRL-JSON output identity to validate.",
+                $"The completed run has no '{outputKind}' output identity to validate.",
+                manifest.RunId, destinationPath);
+        if (result.LargeArtifact is not null && outputKind != "xbrl-json")
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                $"Large-run staged validation does not support output kind '{outputKind}'.",
                 manifest.RunId, destinationPath);
 
         string digest;
@@ -1402,34 +1407,95 @@ public sealed class MappingJobService
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                     "Staged report bytes do not match the artifact recorded by the completed run.",
                     manifest.RunId, destinationPath);
-            string reportJson;
+            string reportText;
             try
             {
-                reportJson = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                reportText = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
                     .GetString(bytes);
             }
             catch (DecoderFallbackException ex)
             {
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                    $"Staged xBRL-JSON is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
+                    $"Staged {outputKind} is not valid UTF-8: {ex.Message}", manifest.RunId, destinationPath);
             }
-            if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+            if (outputKind == "xbrl-json")
             {
+                if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+                {
+                    try
+                    {
+                        // Adjudicate exactly what the worker and publisher are validating. The
+                        // in-memory JobResult facts are useful for the run but are not the staged
+                        // artifact's trust boundary.
+                        localSyntheticStagedFacts = OimSerializer.ReadFacts(reportText, _profile);
+                    }
+                    catch (Exception ex) when (ex is JsonException or XbrlExportException)
+                    {
+                        throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
+                            $"Staged xBRL-JSON could not be evaluated by the local synthetic rules: {ex.Message}",
+                            manifest.RunId, destinationPath);
+                    }
+                }
+                workerPayload = JsonSerializer.SerializeToElement(reportText);
+            }
+            else if (outputKind == "xbrl-xml")
+            {
+                string expectedXml;
+                try { expectedXml = XmlSerializer.Serialize(_profile, result.Facts); }
+                catch (XbrlExportException ex)
+                {
+                    throw new PublicationException(ex.Code,
+                        $"Mapped facts cannot be serialized as xBRL-XML: {ex.Message}", manifest.RunId, destinationPath);
+                }
+                if (!StringComparer.Ordinal.Equals(expectedXml, reportText))
+                    throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                        "The staged xBRL-XML does not match the facts recorded by the completed run.",
+                        manifest.RunId, destinationPath);
+
+                if (StringComparer.Ordinal.Equals(_profile.ProfileId, SyntheticProfile.ProfileId))
+                {
+                    try { localSyntheticStagedFacts = XmlSerializer.ReadFacts(reportText, _profile); }
+                    catch (Exception ex) when (ex is System.Xml.XmlException or XbrlExportException
+                        or FormatException or InvalidOperationException or ArgumentException or OverflowException)
+                    {
+                        throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
+                            $"Staged xBRL-XML could not be evaluated by the local synthetic rules: {ex.Message}",
+                            manifest.RunId, destinationPath);
+                    }
+                }
+
+                workerScratch = Path.Combine(Path.GetTempPath(), "xms-staged-xml-" + Guid.NewGuid().ToString("N"));
                 try
                 {
-                    // Adjudicate exactly what the worker and publisher are validating. The
-                    // in-memory JobResult facts are useful for the run but are not the staged
-                    // artifact's trust boundary.
-                    localSyntheticStagedFacts = OimSerializer.ReadFacts(reportJson, _profile);
+                    CreatePrivateArtifactDirectory(workerScratch);
+                    var workerPath = Path.Combine(workerScratch, "report.xml");
+                    await using (var target = new FileStream(workerPath, FileMode.CreateNew, FileAccess.Write,
+                        FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    {
+                        await target.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                        await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    await using var copiedArtifact = new FileStream(workerPath, FileMode.Open, FileAccess.Read,
+                        FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    if (!StringComparer.Ordinal.Equals(digest, RunManifest.ComputeSha256(copiedArtifact)))
+                        throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                            "Staged xBRL-XML changed while it was copied for profile validation.",
+                            manifest.RunId, destinationPath);
+                    workerPayload = JsonSerializer.SerializeToElement(new { xbrlXmlPath = workerPath, sha256 = digest });
                 }
-                catch (Exception ex) when (ex is JsonException or XbrlExportException)
+                catch
                 {
-                    throw new PublicationException(DiagnosticCodes.XbrValidationIncomplete,
-                        $"Staged xBRL-JSON could not be evaluated by the local synthetic rules: {ex.Message}",
-                        manifest.RunId, destinationPath);
+                    TryDeleteDirectory(workerScratch);
+                    workerScratch = null;
+                    throw;
                 }
             }
-            workerPayload = JsonSerializer.SerializeToElement(reportJson);
+            else
+            {
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    $"Staged artifact kind '{outputKind}' is not supported for XBRL validation.",
+                    manifest.RunId, destinationPath);
+            }
         }
 
         if (!StringComparer.Ordinal.Equals(output.Digest, digest))

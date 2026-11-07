@@ -47,7 +47,8 @@ public sealed class PublicationService
         JobResult result,
         Func<string, CancellationToken, Task<string>> validateStagedArtifactAsync,
         CancellationToken cancellationToken = default,
-        bool refuseDifferentExisting = false)
+        bool refuseDifferentExisting = false,
+        string outputKind = "xbrl-json")
     {
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
@@ -70,8 +71,13 @@ public sealed class PublicationService
                 "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
                 manifest.RunId, destinationPath);
 
+        if (outputKind is not ("xbrl-json" or "xbrl-xml"))
+            throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
+                $"Publication does not support XBRL artifact kind '{outputKind}'.",
+                manifest.RunId, destinationPath);
+
         var expectedDigest = RunManifest.ComputeSha256(payload);
-        if (!manifest.Outputs.Any(output => output.Kind == "xbrl-json"
+        if (!manifest.Outputs.Any(output => output.Kind == outputKind
                 && output.Digest == expectedDigest && output.Bytes == payload.Length))
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
                 "Publication bytes do not match the report artifact recorded by the run.",
@@ -85,7 +91,7 @@ public sealed class PublicationService
             cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs
-            .Select(output => output.Kind == "xbrl-json"
+            .Select(output => output.Kind == outputKind
                 ? output with { Path = safeDestination }
                 : output)
             .ToArray();

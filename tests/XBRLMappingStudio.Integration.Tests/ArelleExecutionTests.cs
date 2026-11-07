@@ -93,6 +93,66 @@ public sealed class ArelleExecutionTests
     }
 
     [RequiresArelleRuntimeFact]
+    public async Task AuthorizedXmlPublicationRevalidatesExactStagedInstanceWithOfflineArelle()
+    {
+        var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
+        var workerScript = Path.Combine(AppContext.BaseDirectory, "worker", "arelle_worker.py");
+        var taxonomyRoot = Path.Combine(AppContext.BaseDirectory, "worker", "taxonomy");
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-arelle-xml-publish-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var workbook = IndependentAcceptanceFixtures.Materialize(workspace, "revenue.xlsx");
+            var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+            var binding = Assert.Single(project.Bindings);
+            var configuration = binding.Configuration.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
+            var connections = new Dictionary<string, SourceConnection>(StringComparer.Ordinal)
+            {
+                [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+            };
+
+            await using var worker = new ArelleWorker(python!, new[] { workerScript, "--taxonomy-root", taxonomyRoot });
+            var profile = SyntheticProfile.Build();
+            var service = new MappingJobService(profile, worker);
+            using var result = await service.RunAsync(project, connections, new Dictionary<string, string>(),
+                preview: false, CancellationToken.None);
+            Assert.True(result.IsPublishable,
+                $"Run outcome was {result.Manifest.Outcome}. Diagnostics: {string.Join(Environment.NewLine, result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}"))}");
+
+            var xmlBytes = new UTF8Encoding(false, true).GetBytes(XmlSerializer.Serialize(profile, result.Facts));
+            var xmlDigest = RunManifest.ComputeSha256(xmlBytes);
+            result.Manifest.Outputs = result.Manifest.Outputs
+                .Append(new OutputIdentity("<memory>", xmlDigest, xmlBytes.LongLength, "xbrl-xml"))
+                .ToArray();
+            var destination = Path.Combine(workspace, "published-report.xbrl.xml");
+            var prior = Encoding.UTF8.GetBytes("previous-accepted-instance");
+            await File.WriteAllBytesAsync(destination, prior);
+
+            var receipt = await new PublicationService(new RunJournal(Path.Combine(workspace, "journal")))
+                .PublishAuthorizedAsync(destination, xmlBytes, workspace, project, profile,
+                    allowSyntheticProfile: true, result: result,
+                    validateStagedArtifactAsync: (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                        stagedPath, destination, result, token, "xbrl-xml"),
+                    cancellationToken: CancellationToken.None, outputKind: "xbrl-xml");
+
+            var finalBytes = await File.ReadAllBytesAsync(destination);
+            Assert.False(prior.SequenceEqual(finalBytes));
+            Assert.Equal(xmlDigest, receipt.ValidatedDigest);
+            Assert.Equal(receipt.ValidatedDigest, receipt.FinalDigest);
+            Assert.Equal(xmlDigest, RunManifest.ComputeSha256(finalBytes));
+            Assert.Equal(xmlDigest, result.Manifest.ValidatedArtifactDigest);
+            Assert.Contains(result.Manifest.Outputs,
+                output => output.Kind == "xbrl-xml" && Path.GetFullPath(destination) == output.Path);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresArelleRuntimeFact]
     public async Task CliPreviewUsesArelleToValidateExcelMappingOutput()
     {
         var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");

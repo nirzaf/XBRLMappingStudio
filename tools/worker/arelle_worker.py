@@ -742,6 +742,67 @@ def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_f
     return report
 
 
+def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline_references,
+                                package_files, expected_digest):
+    """Verify an exact staged XML instance, then localize only its schemaRef URIs."""
+    digest = hashlib.sha256()
+    total = 0
+    with report_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            total += len(chunk)
+            if total > MAX_LARGE_REPORT_BYTES:
+                raise ValueError("Staged xBRL-XML exceeds the worker report size budget")
+            digest.update(chunk)
+    if total <= 0 or "sha256:" + digest.hexdigest() != expected_digest:
+        raise ValueError("Staged xBRL-XML digest did not match the requested digest")
+
+    try:
+        from lxml import etree
+    except ImportError as ex:
+        raise ValueError("The pinned Arelle runtime does not provide the required XML parser") from ex
+    try:
+        events = etree.iterparse(str(report_path), events=("start", "end"),
+                                 resolve_entities=False, no_network=True, load_dtd=False,
+                                 recover=False, huge_tree=False)
+        first_event, root = next(events)
+    except StopIteration as ex:
+        raise ValueError("Staged xBRL-XML is empty") from ex
+    except etree.XMLSyntaxError as ex:
+        raise ValueError("Staged xBRL-XML is malformed") from ex
+    if first_event != "start" or root.getroottree().docinfo.doctype:
+        raise ValueError("Staged xBRL-XML must have an instance root and no DTD")
+    if root.tag != "{http://www.xbrl.org/2003/instance}xbrl":
+        raise ValueError("Staged XML root is not an xBRL instance")
+
+    schema_ref_count = 0
+    depth = 1
+    with etree.xmlfile(str(output_path), encoding="utf-8") as writer:
+        writer.write_declaration()
+        with writer.element(root.tag, attrib=dict(root.attrib), nsmap=root.nsmap):
+            for event, element in events:
+                if event == "start":
+                    depth += 1
+                    continue
+                if depth == 2:
+                    if element.tag == "{http://www.xbrl.org/2003/linkbase}schemaRef":
+                        reference = element.get("{http://www.w3.org/1999/xlink}href")
+                        if not isinstance(reference, str) or not reference:
+                            raise ValueError("Staged xBRL-XML has a schemaRef without an xlink:href")
+                        local_reference = safe_taxonomy_urls(
+                            {"documentInfo": {"taxonomy": [reference]}}, taxonomy_root,
+                            offline_references, package_files)["documentInfo"]["taxonomy"][0]
+                        element.set("{http://www.w3.org/1999/xlink}href", local_reference)
+                        schema_ref_count += 1
+                    writer.write(element)
+                    parent = element.getparent()
+                    element.clear()
+                    while element.getprevious() is not None:
+                        del parent[0]
+                depth -= 1
+    if schema_ref_count == 0:
+        raise ValueError("Staged xBRL-XML has no schemaRef")
+
+
 def reject_duplicate_json_keys(pairs):
     result = {}
     for key, value in pairs:
@@ -1087,6 +1148,7 @@ def handle(req, args):
                 op_id, "XBR010", "warning", "arelle-release is not installed; report validation is incomplete.")])
         report_text = payload if isinstance(payload, str) else payload.get("xbrlJson") if isinstance(payload, dict) else None
         large_report_path = None
+        staged_xml_path = None
         if isinstance(payload, dict) and isinstance(payload.get("xbrlJsonPath"), str):
             expected_digest = payload.get("sha256")
             if not isinstance(expected_digest, str) or not expected_digest.startswith("sha256:"):
@@ -1119,7 +1181,41 @@ def handle(req, args):
                 large_report_path = resolved_path
             except (OSError, UnicodeError, ValueError) as ex:
                 return response(op_id, "domainFailure", error=str(ex)[:1000])
-        if large_report_path is None and (not isinstance(report_text, str) or not report_text):
+        if isinstance(payload, dict) and isinstance(payload.get("xbrlXmlPath"), str):
+            expected_digest = payload.get("sha256")
+            if large_report_path is not None or not isinstance(expected_digest, str) \
+                    or not expected_digest.startswith("sha256:"):
+                return response(op_id, "domainFailure", error="Missing or ambiguous staged xBRL-XML digest")
+            try:
+                report_path = Path(payload["xbrlXmlPath"])
+                if not report_path.is_absolute() or not report_path.is_file():
+                    raise ValueError("Staged xBRL-XML path is not an existing absolute file")
+                resolved_path = report_path.resolve(strict=True)
+                temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+                if (report_path.is_symlink() or report_path.parent.is_symlink()
+                        or resolved_path.parent.parent != temp_root
+                        or not resolved_path.parent.name.startswith("xms-staged-xml-")
+                        or resolved_path.name != "report.xml"
+                        or (os.name != "nt" and stat.S_IMODE(resolved_path.parent.stat().st_mode) != 0o700)):
+                    raise ValueError("Staged xBRL-XML path is outside the private artifact directory")
+                size = resolved_path.stat().st_size
+                if size <= 0 or size > MAX_LARGE_REPORT_BYTES:
+                    raise ValueError("Staged xBRL-XML exceeds the worker report size budget")
+                digest = hashlib.sha256()
+                hashed_bytes = 0
+                with report_path.open("rb") as report_file:
+                    for chunk in iter(lambda: report_file.read(1024 * 1024), b""):
+                        hashed_bytes += len(chunk)
+                        if hashed_bytes > MAX_LARGE_REPORT_BYTES:
+                            raise ValueError("Staged xBRL-XML exceeds the worker report size budget")
+                        digest.update(chunk)
+                if hashed_bytes != size or "sha256:" + digest.hexdigest() != expected_digest:
+                    raise ValueError("Staged xBRL-XML digest did not match the requested digest")
+                staged_xml_path = resolved_path
+            except (OSError, UnicodeError, ValueError) as ex:
+                return response(op_id, "domainFailure", error=str(ex)[:1000])
+        if large_report_path is None and staged_xml_path is None \
+                and (not isinstance(report_text, str) or not report_text):
             return response(op_id, "domainFailure", error="Missing xBRL-JSON report text")
         try:
             if getattr(args, "profile_error", None):
@@ -1179,8 +1275,13 @@ def handle(req, args):
                 }, diags, "A required Arelle plugin is unavailable")
             with tempfile.TemporaryDirectory(prefix="xms-arelle-") as workdir:
                 os.chmod(workdir, 0o700)
-                path = Path(workdir) / "report.json"
-                if large_report_path is not None:
+                path = Path(workdir) / ("report.xml" if staged_xml_path is not None else "report.json")
+                if staged_xml_path is not None:
+                    rewrite_staged_xml_taxonomy(staged_xml_path, path, args.taxonomy_root,
+                        profile.get("offlineReferences") if profile else None,
+                        profile.get("packageFiles") if profile else None,
+                        payload.get("sha256"))
+                elif large_report_path is not None:
                     rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None,

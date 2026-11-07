@@ -713,6 +713,38 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_ExecutePublishesExplicitXbrlXml_AfterValidatingExactStagedArtifact()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "publish-xml.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var outputPath = Path.Combine(_dir, "publish-xml-output.any-extension");
+        var manifestPath = Path.Combine(_dir, "publish-xml-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--manifest", manifestPath,
+            "--allow-synthetic-profile");
+
+        Assert.True(exit == 0, $"Expected exit 0, got {exit}.\nstderr:\n{stderr}");
+        var xmlBytes = await File.ReadAllBytesAsync(outputPath);
+        var xml = new System.Text.UTF8Encoding(false, true).GetString(xmlBytes);
+        var facts = XmlSerializer.ReadFacts(xml, SyntheticProfile.Build());
+        var fact = Assert.Single(facts);
+        Assert.Equal(SyntheticProfile.Qualified("Revenue"), fact.ConceptName);
+        Assert.Equal(1_250_000.0000m, fact.Value);
+
+        using var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath));
+        var xmlIdentity = Assert.Single(manifest.RootElement.GetProperty("Outputs").EnumerateArray(),
+            output => output.GetProperty("Kind").GetString() == "xbrl-xml");
+        var digest = RunManifest.ComputeSha256(xmlBytes);
+        Assert.Equal(digest, xmlIdentity.GetProperty("Digest").GetString());
+        Assert.Equal(xmlBytes.LongLength, xmlIdentity.GetProperty("Bytes").GetInt64());
+        Assert.Equal(Path.GetFullPath(outputPath), xmlIdentity.GetProperty("Path").GetString());
+        Assert.Equal(digest, manifest.RootElement.GetProperty("ValidatedArtifactDigest").GetString());
+        Assert.Equal(digest, manifest.RootElement.GetProperty("PublishedArtifactDigest").GetString());
+    }
+
+    [Fact]
     public async Task Cli_ExecuteInvalidMapping_PreservesPriorOutput_AndIssuesNoReceipt()
     {
         // OG01 core sentinel: seed a prior accepted destination. An invalid graph must

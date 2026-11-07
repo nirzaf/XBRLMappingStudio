@@ -61,6 +61,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
+    Console.Error.WriteLine("                       [--output-format xbrl-json|xbrl-xml] (default: xbrl-json)");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("                       Combined --output and --publish-destination requires a saved SQLite plan; reconcile partial results by mixed operation key.");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
@@ -692,6 +693,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     var bindings = new List<(string id, string path)>();
     var parameters = new Dictionary<string, string>(StringComparer.Ordinal);
     string? output = null;
+    string outputFormat = "xbrl-json";
     string? manifestPath = null;
     string? workspaceRootArg = null;
     int rows = 10;
@@ -718,6 +720,10 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             case "--output":
                 if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
                 output = args[++i];
+                break;
+            case "--output-format":
+                if (i + 1 >= args.Length) { Console.Error.WriteLine("--output-format requires xbrl-json or xbrl-xml."); return ExitCodesLocal.IncompleteProfile; }
+                outputFormat = args[++i];
                 break;
             case "--manifest":
                 if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
@@ -758,6 +764,17 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     {
         Console.Error.WriteLine("--python and --taxonomy-root require --arelle.");
         return ExitCodesLocal.IncompleteProfile;
+    }
+
+    if (outputFormat is not ("xbrl-json" or "xbrl-xml"))
+    {
+        Console.Error.WriteLine("--output-format must be xbrl-json or xbrl-xml.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    if (outputFormat == "xbrl-xml" && (preview || output is null || publishDestination))
+    {
+        Console.Error.WriteLine("xBRL-XML output requires execute --output and cannot be combined with preview or --publish-destination.");
+        return ExitCodesLocal.InvalidMapping;
     }
 
     if (preview && publishDestination)
@@ -910,6 +927,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
 
         using var result = await service.RunAsync(p, conns, parameters, preview, cts.Token);
         PrintDiagnostics(result.Diagnostics.Items);
+        var selectedOutputKind = outputFormat;
+        byte[]? selectedOutputPayload = null;
 
         void RecordDestinationFailure(Diagnostic diagnostic, RunOutcome outcome)
         {
@@ -918,6 +937,49 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             result.Manifest.Outcome = outcome;
             result.Manifest.CompletedUtc = DateTimeOffset.UtcNow;
             PrintDiagnostics(new[] { diagnostic });
+        }
+
+        if (!preview && output is not null && !publishDestination
+            && outputFormat == "xbrl-xml" && result.IsPublishable)
+        {
+            if (result.LargeArtifact is not null)
+            {
+                RecordDestinationFailure(new Diagnostic
+                {
+                    Code = DiagnosticCodes.IoUnsupportedOperation,
+                    Subsystem = DiagnosticSubsystem.XBRL,
+                    Severity = DiagnosticSeverity.Error,
+                    Stage = DiagnosticStage.Serialization,
+                    IsBlocking = true,
+                    Message = "xBRL-XML publication is currently limited to in-memory runs; this large run remains unpublished.",
+                    OperationId = result.Manifest.OperationId
+                }, RunOutcome.IncompleteConfiguration);
+            }
+            else
+            {
+                try
+                {
+                    var xml = XmlSerializer.Serialize(profile, result.Facts);
+                    selectedOutputPayload = new System.Text.UTF8Encoding(false, true).GetBytes(xml);
+                    var digest = RunManifest.ComputeSha256(selectedOutputPayload);
+                    result.Manifest.Outputs = result.Manifest.Outputs
+                        .Append(new OutputIdentity("<memory>", digest, selectedOutputPayload.LongLength, "xbrl-xml"))
+                        .ToArray();
+                }
+                catch (XbrlExportException ex)
+                {
+                    RecordDestinationFailure(new Diagnostic
+                    {
+                        Code = ex.Code,
+                        Subsystem = DiagnosticSubsystem.XBRL,
+                        Severity = DiagnosticSeverity.Error,
+                        Stage = DiagnosticStage.Serialization,
+                        IsBlocking = true,
+                        Message = ex.Message,
+                        OperationId = result.Manifest.OperationId
+                    }, RunOutcome.InvalidMapping);
+                }
+            }
         }
 
         static RunOutcome PublicationFailureOutcome(PublicationException ex) => ex.Code switch
@@ -1111,11 +1173,13 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                     }
                     else
                     {
-                        var payload = System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+                        var payload = selectedOutputPayload
+                            ?? System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
                         receipt = await publisher.PublishAuthorizedAsync(
                             output, payload, workspaceRoot, p, profile, allowSyntheticProfile, result,
                             (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token), cts.Token);
+                                stagedPath, output, result, token, selectedOutputKind), cts.Token,
+                            outputKind: selectedOutputKind);
                         payloadBytes = payload.Length;
                     }
                     Console.Error.WriteLine(

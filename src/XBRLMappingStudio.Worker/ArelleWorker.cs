@@ -72,11 +72,10 @@ public sealed class LocalSyntheticWorker : IWorkerClient
 
     private Task<WorkerResponse> ValidateReport(WorkerRequest request, CancellationToken cancellationToken)
     {
-        // Payload carries the xBRL-JSON text; we parse and validate each fact against the profile.
-        var payload = request.Payload is { } p
-            ? p.Deserialize<string>(WorkerJson.Options)
-            : null;
-        if (string.IsNullOrEmpty(payload))
+        // JSON remains the default worker request. XML staged publication supplies a
+        // private, digest-bound path so the full instance does not inflate the protocol line.
+        var payloadElement = request.Payload;
+        if (payloadElement is null)
         {
             return Task.FromResult(new WorkerResponse(
                 request.OperationId,
@@ -86,7 +85,49 @@ public sealed class LocalSyntheticWorker : IWorkerClient
                 "Missing report payload."));
         }
 
-        var factEntries = OimSerializer.ReadFactEntries(payload, _profile);
+        IReadOnlyList<OimFactEntry> factEntries;
+        if (payloadElement.Value.ValueKind == JsonValueKind.Object
+            && payloadElement.Value.TryGetProperty("xbrlXmlPath", out var xmlPathElement)
+            && xmlPathElement.ValueKind == JsonValueKind.String)
+        {
+            var xmlPath = xmlPathElement.GetString();
+            var expectedDigest = payloadElement.Value.TryGetProperty("sha256", out var digestElement)
+                && digestElement.ValueKind == JsonValueKind.String ? digestElement.GetString() : null;
+            if (string.IsNullOrWhiteSpace(xmlPath) || !Path.IsPathFullyQualified(xmlPath)
+                || !StringComparer.Ordinal.Equals(Path.GetFileName(xmlPath), "report.xml")
+                || !Path.GetFileName(Path.GetDirectoryName(xmlPath) ?? string.Empty)
+                    .StartsWith("xms-staged-xml-", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(expectedDigest))
+                return Task.FromResult(new WorkerResponse(request.OperationId, WorkerStatus.DomainFailure, null,
+                    Array.Empty<Diagnostic>(), "Staged xBRL-XML path or digest is invalid."));
+
+            var xmlBytes = File.ReadAllBytes(xmlPath);
+            var actualDigest = RunManifest.ComputeSha256(xmlBytes);
+            if (!StringComparer.Ordinal.Equals(actualDigest, expectedDigest))
+                return Task.FromResult(new WorkerResponse(request.OperationId, WorkerStatus.DomainFailure, null,
+                    Array.Empty<Diagnostic>(), "Staged xBRL-XML digest did not match the requested digest."));
+            var xml = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                .GetString(xmlBytes);
+            factEntries = XmlSerializer.ReadFacts(xml, _profile)
+                .Select((fact, index) => new OimFactEntry($"xml:fact[{index + 1}]", fact))
+                .ToArray();
+        }
+        else
+        {
+            // Payload carries the xBRL-JSON text; parse and validate each fact against the profile.
+            var reportJson = payloadElement.Value.Deserialize<string>(WorkerJson.Options);
+            if (string.IsNullOrEmpty(reportJson))
+            {
+                return Task.FromResult(new WorkerResponse(
+                    request.OperationId,
+                    WorkerStatus.DomainFailure,
+                    null,
+                    Array.Empty<Diagnostic>(),
+                    "Missing report payload."));
+            }
+            factEntries = OimSerializer.ReadFactEntries(reportJson, _profile);
+        }
+
         var facts = factEntries.Select(entry => entry.Fact).ToArray();
         var firstDuplicateKey = facts.GroupBy(fact => fact.SemanticKey(), StringComparer.Ordinal)
             .FirstOrDefault(group => group.Skip(1).Any())?.Key;
