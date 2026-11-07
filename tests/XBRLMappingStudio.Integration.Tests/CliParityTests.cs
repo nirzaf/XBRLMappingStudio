@@ -438,6 +438,72 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_UnindexedSqliteBusinessKeyReturnsDataErrorWithoutMutatingDatabase()
+    {
+        var targetPath = Path.Combine(_dir, "unindexed-key-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "unindexed-key-target.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "value" },
+            WriteMode = "upsert"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "unindexed-key-target.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var before = await File.ReadAllBytesAsync(targetPath);
+        var manifestPath = Path.Combine(_dir, "unindexed-key-target-manifest.json");
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--publish-destination", "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.Equal(3, exit);
+        Assert.Contains(DiagnosticCodes.IoSchemaMismatch, stderr, StringComparison.Ordinal);
+        Assert.Contains("unique index", stderr, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(targetPath));
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+        Assert.Contains(manifest.RootElement.GetProperty("Diagnostics").EnumerateArray(), diagnostic =>
+            diagnostic.GetProperty("Code").GetString() == DiagnosticCodes.IoSchemaMismatch);
+    }
+
+    [Fact]
+    public async Task Cli_PreviewWithSavedSqliteDestinationDoesNotMutateTarget()
+    {
+        var targetPath = Path.Combine(_dir, "preview-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "preview-target.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        var projectPath = Path.Combine(_dir, "preview-target.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var before = await File.ReadAllBytesAsync(targetPath);
+
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "preview", projectPath,
+            "--rows", "10", "--allow-synthetic-profile");
+
+        Assert.True(exit is 0 or 1, $"Expected preview to succeed, got {exit}.\nstderr:\n{stderr}");
+        Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("Published SQLite", stderr, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(targetPath));
+    }
+
+    [Fact]
     public async Task Cli_ValidateReturnsExitCode_Two_ForInvalidMapping()
     {
         // Introduce an unknown node type so validation blocks with a stable diagnostic.
