@@ -1,3 +1,8 @@
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Headless.XUnit;
+using System.ComponentModel;
+using XBRLMappingStudio.Desktop;
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -20,8 +25,130 @@ public sealed class FunctionLibraryEditorTests
         };
     }
 
+    [AvaloniaFact]
+    public async Task FunctionAuthoringWindowSupportsDraftUndoRedoPreviewSaveAndPin()
+    {
+        var viewModel = new MainWindowViewModel(Project(), new FunctionPackageDialog
+        {
+            CloseChoice = UnsavedProjectChoice.Discard
+        });
+        MainWindow? window = null;
+        try
+        {
+            window = new MainWindow { DataContext = viewModel };
+            window.Show();
+            var tabs = Assert.IsType<TabControl>(window.FindControl<TabControl>("WorkspaceTabs"));
+            tabs.SelectedIndex = 1;
+
+            var editor = viewModel.FunctionLibrary;
+            var addScale = Assert.IsType<Button>(window.FindControl<Button>("AddFunctionScaleButton"));
+            var undo = Assert.IsType<Button>(window.FindControl<Button>("UndoFunctionDraftButton"));
+            var redo = Assert.IsType<Button>(window.FindControl<Button>("RedoFunctionDraftButton"));
+            var scaleFactor = Assert.IsType<TextBox>(window.FindControl<TextBox>("FunctionScaleFactorTextBox"));
+            var applyParameters = Assert.IsType<Button>(window.FindControl<Button>("ApplyFunctionOperationParametersButton"));
+            var previewInput = Assert.IsType<TextBox>(window.FindControl<TextBox>("SyntheticFunctionPreviewInputTextBox"));
+            var testDraft = Assert.IsType<Button>(window.FindControl<Button>("TestFunctionDraftButton"));
+            var previewStatus = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("FunctionPreviewStatusText"));
+            var draftName = Assert.IsType<TextBox>(window.FindControl<TextBox>("FunctionDraftNameTextBox"));
+            var saveRevision = Assert.IsType<Button>(window.FindControl<Button>("SaveFunctionRevisionButton"));
+            var pinRevision = Assert.IsType<Button>(window.FindControl<Button>("PinFunctionRevisionButton"));
+
+            // Observe the loaded Functions tab before acting.
+            Assert.Equal("Function graph. Decimal input passes through to output.", editor.DraftGraphSummary);
+            Assert.Equal("Run a synthetic numeric preview to inspect the draft output.", previewStatus.Text);
+            Assert.Equal("Undo function draft edit", AutomationProperties.GetName(undo));
+            Assert.Equal("Redo function draft edit", AutomationProperties.GetName(redo));
+            Assert.False(undo.IsEnabled);
+            Assert.False(redo.IsEnabled);
+            Assert.True(addScale.IsEnabled);
+
+            // Add an operation, edit its parameter, then undo and redo that inspector edit.
+            addScale.Command!.Execute(addScale.CommandParameter);
+
+            var scaleNode = Assert.Single(editor.Session.Project.Nodes,
+                node => node.NodeType == NodeTypeConstants.Scale);
+            Assert.True(undo.IsEnabled);
+            Assert.False(redo.IsEnabled);
+            Assert.True(scaleFactor.IsEnabled);
+            Assert.Equal("1", scaleFactor.Text);
+
+            scaleFactor.Text = string.Empty;
+            scaleFactor.Text = "10";
+            Assert.Equal("10", editor.SelectedScaleFactor);
+            applyParameters.Command!.Execute(applyParameters.CommandParameter);
+            Assert.Equal("10", Parameter(scaleNode, "factor"));
+
+            undo.Command!.Execute(undo.CommandParameter);
+            Assert.Equal("1", Parameter(editor.Session.Project.Nodes.Single(node =>
+                node.NodeType == NodeTypeConstants.Scale), "factor"));
+            Assert.True(redo.IsEnabled);
+            redo.Command!.Execute(redo.CommandParameter);
+            Assert.Equal("10", Parameter(editor.Session.Project.Nodes.Single(node =>
+                node.NodeType == NodeTypeConstants.Scale), "factor"));
+            Assert.False(redo.IsEnabled);
+            Assert.Empty(viewModel.Session.Project.Functions);
+
+            // Verify a synthetic output, save the immutable revision, and pin that revision.
+            previewInput.Text = string.Empty;
+            previewInput.Text = "5";
+            Assert.Equal("5", editor.PreviewInput);
+            var previewCompleted = WaitForEditorPropertyAsync(editor,
+                nameof(FunctionLibraryEditorViewModel.PreviewStatus),
+                () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal)
+                    || editor.PreviewStatus.StartsWith("Preview blocked:", StringComparison.Ordinal));
+            testDraft.Command!.Execute(testDraft.CommandParameter);
+            await previewCompleted;
+            Assert.Contains("output: 50", previewStatus.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("No filing or publication occurred", previewStatus.Text, StringComparison.Ordinal);
+
+            draftName.Text = string.Empty;
+            draftName.Text = "Scale by ten";
+            Assert.Equal("Scale by ten", editor.DraftName);
+            var saveCompleted = WaitForEditorPropertyAsync(editor,
+                nameof(FunctionLibraryEditorViewModel.Status),
+                () => editor.Status.StartsWith("Saved immutable function revision", StringComparison.Ordinal)
+                    || editor.Status.StartsWith("Function revision was not saved", StringComparison.Ordinal));
+            saveRevision.Command!.Execute(saveRevision.CommandParameter);
+            await saveCompleted;
+            var saved = Assert.Single(viewModel.Session.Project.Functions);
+            Assert.Equal(1, saved.Revision);
+            Assert.Equal("Scale by ten", saved.Name);
+            Assert.Equal("10", Parameter(saved, "factor"));
+            Assert.Contains("Saved immutable function revision", editor.Status, StringComparison.Ordinal);
+            Assert.True(pinRevision.IsEnabled);
+
+            pinRevision.Command!.Execute(pinRevision.CommandParameter);
+            var pinnedCall = Assert.Single(viewModel.Session.Project.Nodes,
+                node => node.NodeType == NodeTypeConstants.FunctionCall);
+            Assert.Equal(saved.FunctionId, Parameter(pinnedCall, "functionId"));
+            Assert.Equal("1", Parameter(pinnedCall, "revision"));
+        }
+        finally
+        {
+            if (window is not null) window.DataContext = null;
+            window?.Close();
+            viewModel.Dispose();
+        }
+    }
+
+    private static async Task WaitForEditorPropertyAsync(FunctionLibraryEditorViewModel editor,
+        string propertyName, Func<bool> completed)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler handler = (_, args) =>
+        {
+            if (args.PropertyName == propertyName && completed()) completion.TrySetResult();
+        };
+        editor.PropertyChanged += handler;
+        try
+        {
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally { editor.PropertyChanged -= handler; }
+    }
+
     [Fact]
-    public void AuthoringPreviewAndRevisionSelection_PreservePinnedBodiesAndUndoPinning()
+    public async Task AuthoringPreviewAndRevisionSelection_PreservePinnedBodiesAndUndoPinning()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
@@ -31,10 +158,16 @@ public sealed class FunctionLibraryEditorTests
         editor.SelectedScaleFactor = "10";
         editor.ApplyNodeParametersCommand.Execute(null);
         editor.PreviewInput = "5";
+        var firstPreview = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await firstPreview;
         Assert.Contains("output: 50", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
 
+        var firstSave = WaitForEditorPropertyAsync(editor, nameof(editor.Status),
+            () => editor.Status.StartsWith("Saved immutable function revision", StringComparison.Ordinal));
         editor.SaveFunctionRevisionCommand.Execute(null);
+        await firstSave;
         var revision1 = Assert.Single(projectSession.Project.Functions);
         Assert.Equal(1, revision1.Revision);
 
@@ -44,9 +177,15 @@ public sealed class FunctionLibraryEditorTests
         editor.Session.Select(loadedScale.NodeId, additive: false);
         editor.SelectedScaleFactor = "100";
         editor.ApplyNodeParametersCommand.Execute(null);
+        var secondPreview = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await secondPreview;
         Assert.Contains("output: 500", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+        var secondSave = WaitForEditorPropertyAsync(editor, nameof(editor.Status),
+            () => editor.Status.StartsWith("Saved immutable function revision", StringComparison.Ordinal));
         editor.SaveFunctionRevisionCommand.Execute(null);
+        await secondSave;
 
         Assert.Equal(new[] { 1, 2 }, projectSession.Project.Functions
             .Where(function => function.FunctionId == revision1.FunctionId)
@@ -56,7 +195,10 @@ public sealed class FunctionLibraryEditorTests
 
         editor.SelectedFunction = editor.Functions.Single(row => row.FunctionId == revision1.FunctionId
             && row.Revision == 1);
+        var pinnedRevisionPreview = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await pinnedRevisionPreview;
         Assert.Contains("output: 50", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
         editor.PinSelectedFunctionCommand.Execute(null);
 
@@ -73,7 +215,7 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
-    public void SaveFunctionRevision_RejectsInvalidDraftWithoutChangingProject()
+    public async Task SaveFunctionRevision_RejectsInvalidDraftWithoutChangingProject()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
@@ -81,14 +223,17 @@ public sealed class FunctionLibraryEditorTests
         var scale = editor.Session.Project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
         editor.Session.SetNodeParameter(scale.NodeId, "factor", "not-a-decimal");
 
+        var saveRejected = WaitForEditorPropertyAsync(editor, nameof(editor.Status),
+            () => editor.Status.StartsWith("Function revision was not saved", StringComparison.Ordinal));
         editor.SaveFunctionRevisionCommand.Execute(null);
+        await saveRejected;
 
         Assert.Empty(projectSession.Project.Functions);
         Assert.Contains("synthetic validation failed", editor.Status, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void SyntheticPreview_ShowsOrderedPartialValuesForEachFunctionNode()
+    public async Task SyntheticPreview_ShowsOrderedPartialValuesForEachFunctionNode()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
@@ -107,7 +252,10 @@ public sealed class FunctionLibraryEditorTests
         editor.ApplyNodeParametersCommand.Execute(null);
 
         editor.PreviewInput = "1.26";
+        var previewCompleted = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await previewCompleted;
 
         Assert.Equal(3, editor.NodePreviews.Count);
         Assert.Equal(new[] { NodeTypeConstants.Scale, NodeTypeConstants.ChangeSign, NodeTypeConstants.Round },
@@ -122,14 +270,17 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
-    public void SyntheticPreview_BoundsDisplayedIntermediateNodes()
+    public async Task SyntheticPreview_BoundsDisplayedIntermediateNodes()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
         for (var index = 0; index < 66; index++)
             editor.AddChangeSignCommand.Execute(null);
 
+        var previewCompleted = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await previewCompleted;
 
         Assert.Equal(65, editor.NodePreviews.Count);
         Assert.Equal(64, editor.NodePreviews.Count(row => row.NodeId.Length > 0));
@@ -137,7 +288,7 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
-    public void RatioAuthoring_RequiresAndPreviewsExplicitDenominatorConstant()
+    public async Task RatioAuthoring_RequiresAndPreviewsExplicitDenominatorConstant()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
@@ -156,15 +307,24 @@ public sealed class FunctionLibraryEditorTests
         Assert.Equal(3, editor.Session.Project.Edges.Count);
 
         editor.PreviewInput = "10";
+        var missingDenominatorPreview = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Preview blocked:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await missingDenominatorPreview;
         Assert.Contains("Preview blocked", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+        var invalidSave = WaitForEditorPropertyAsync(editor, nameof(editor.Status),
+            () => editor.Status.StartsWith("Function revision was not saved", StringComparison.Ordinal));
         editor.SaveFunctionRevisionCommand.Execute(null);
+        await invalidSave;
         Assert.Empty(projectSession.Project.Functions);
         Assert.Contains("not saved", editor.Status, StringComparison.OrdinalIgnoreCase);
 
         editor.SelectedConstantValue = "2";
         editor.ApplyNodeParametersCommand.Execute(null);
+        var completedPreview = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await completedPreview;
 
         Assert.Equal("2", Parameter(denominator, "literal"));
         Assert.Equal(5m, Assert.Single(editor.NodePreviews, row => row.NodeId == ratio.NodeId).Value);
@@ -172,7 +332,7 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
-    public void CoalesceAuthoring_InsertsAndReviewsExplicitFallbackConstant()
+    public async Task CoalesceAuthoring_InsertsAndReviewsExplicitFallbackConstant()
     {
         var projectSession = new DesignerSession(Project());
         var editor = new FunctionLibraryEditorViewModel(() => projectSession);
@@ -183,7 +343,10 @@ public sealed class FunctionLibraryEditorTests
         editor.SelectedConstantValue = "0";
         editor.ApplyNodeParametersCommand.Execute(null);
         editor.PreviewInput = "12.5";
+        var previewCompleted = WaitForEditorPropertyAsync(editor, nameof(editor.PreviewStatus),
+            () => editor.PreviewStatus.StartsWith("Synthetic preview output:", StringComparison.Ordinal));
         editor.TestFunctionCommand.Execute(null);
+        await previewCompleted;
 
         Assert.Equal("0", Parameter(fallback, "literal"));
         Assert.Equal(12.5m, Assert.Single(editor.NodePreviews, row => row.NodeId == coalesce.NodeId).Value);
@@ -223,6 +386,7 @@ public sealed class FunctionLibraryEditorTests
             sourceEditor.SelectedScaleFactor = "1000";
             sourceEditor.ApplyNodeParametersCommand.Execute(null);
             sourceEditor.SaveFunctionRevisionCommand.Execute(null);
+            await WaitForStatusAsync(sourceEditor, "Saved immutable function revision");
             sourceEditor.ExportFunctionPackageCommand.Execute(null);
             await WaitForStatusAsync(sourceEditor, "Exported ");
             Assert.True(File.Exists(packagePath));
@@ -347,6 +511,7 @@ public sealed class FunctionLibraryEditorTests
     {
         public string? OpenPath { get; init; }
         public string? SavePath { get; init; }
+        public UnsavedProjectChoice CloseChoice { get; init; } = UnsavedProjectChoice.Cancel;
         public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
         public Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
@@ -363,7 +528,7 @@ public sealed class FunctionLibraryEditorTests
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath) => Task.FromResult(false);
         public Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath) => Task.FromResult(false);
         public Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
-            => Task.FromResult(UnsavedProjectChoice.Cancel);
+            => Task.FromResult(CloseChoice);
         public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult<string?>(null);

@@ -71,6 +71,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private int _expectedLatestRevision;
     private string _importFunctionId = "";
     private string _importFunctionName = "";
+    private bool _isPreviewRunning;
+    private bool _isSavingFunctionRevision;
 
     public ObservableCollection<FunctionRevisionRow> Functions { get; } = new();
     public ObservableCollection<FunctionNodePreviewRow> NodePreviews { get; } = new();
@@ -213,12 +215,16 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     public IReadOnlyList<string> RoundModes { get; } = new[] { "HalfEven", "HalfUp", "Truncate" };
 
     public bool CanAddTransform => FindOutputEdge() is not null;
-    public bool CanSaveFunctionRevision => !string.IsNullOrWhiteSpace(DraftName)
+    public bool CanSaveFunctionRevision => !_isSavingFunctionRevision
+        && !string.IsNullOrWhiteSpace(DraftName)
         && !string.IsNullOrWhiteSpace(DraftFunctionId)
         && _draftSession.Project.Nodes.Count >= 2;
+    public bool CanTestFunction => !_isPreviewRunning && CanParsePreviewInput();
     public bool CanPinSelectedFunction => SelectedFunction is not null;
     public bool CanExportFunctionPackage => SelectedFunction is not null && _fileDialog is not null;
     public bool CanImportFunctionPackage => !string.IsNullOrWhiteSpace(ImportFunctionId) && _fileDialog is not null;
+    public bool CanUndoDraft => _draftSession.CanUndo;
+    public bool CanRedoDraft => _draftSession.CanRedo;
 
     private MappingNode? SelectedDraftNode => _selectedDraftNodeId is null
         ? null
@@ -237,6 +243,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     public RelayCommand PinSelectedFunctionCommand { get; }
     public RelayCommand ExportFunctionPackageCommand { get; }
     public RelayCommand ImportFunctionPackageCommand { get; }
+    public RelayCommand UndoDraftCommand { get; }
+    public RelayCommand RedoDraftCommand { get; }
 
     public FunctionLibraryEditorViewModel(Func<DesignerSession> projectSession, IProjectFileDialog? fileDialog = null)
     {
@@ -253,13 +261,16 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         AddRatioCommand = new RelayCommand(_ => AddBinaryDecimalOperation(NodeTypeConstants.Ratio), _ => CanAddTransform);
         ApplyNodeParametersCommand = new RelayCommand(_ => ApplySelectedNodeParameters(),
             _ => CanEditScaleFactor || CanEditConstantValue || CanEditRound);
-        TestFunctionCommand = new RelayCommand(_ => TestFunction(), _ => CanParsePreviewInput());
-        SaveFunctionRevisionCommand = new RelayCommand(_ => SaveFunctionRevision(), _ => CanSaveFunctionRevision);
+        TestFunctionCommand = new RelayCommand(async _ => await TestFunctionAsync(), _ => CanTestFunction);
+        SaveFunctionRevisionCommand = new RelayCommand(async _ => await SaveFunctionRevisionAsync(),
+            _ => CanSaveFunctionRevision);
         PinSelectedFunctionCommand = new RelayCommand(_ => PinSelectedFunction(), _ => CanPinSelectedFunction);
         ExportFunctionPackageCommand = new RelayCommand(async _ => await ExportFunctionPackageAsync(),
             _ => CanExportFunctionPackage);
         ImportFunctionPackageCommand = new RelayCommand(async _ => await ImportFunctionPackageAsync(),
             _ => CanImportFunctionPackage);
+        UndoDraftCommand = new RelayCommand(_ => _draftSession.Undo(), _ => CanUndoDraft);
+        RedoDraftCommand = new RelayCommand(_ => _draftSession.Redo(), _ => CanRedoDraft);
 
         RefreshFromProject();
         BeginNewFunction();
@@ -363,12 +374,16 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         Raise(nameof(DraftGraphSummary));
         Raise(nameof(CanAddTransform));
         Raise(nameof(CanSaveFunctionRevision));
+        Raise(nameof(CanUndoDraft));
+        Raise(nameof(CanRedoDraft));
         AddScaleCommand?.NotifyCanExecuteChanged();
         AddChangeSignCommand?.NotifyCanExecuteChanged();
         AddRoundCommand?.NotifyCanExecuteChanged();
         AddCoalesceCommand?.NotifyCanExecuteChanged();
         AddRatioCommand?.NotifyCanExecuteChanged();
         SaveFunctionRevisionCommand?.NotifyCanExecuteChanged();
+        UndoDraftCommand?.NotifyCanExecuteChanged();
+        RedoDraftCommand?.NotifyCanExecuteChanged();
         OnDraftSelectionChanged();
     }
 
@@ -549,8 +564,9 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         }
     }
 
-    private void TestFunction()
+    private async Task TestFunctionAsync()
     {
+        if (_isPreviewRunning) return;
         if (!TryParsePreviewInput(out var input))
         {
             NodePreviews.Clear();
@@ -558,11 +574,14 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             return;
         }
 
+        _isPreviewRunning = true;
+        TestFunctionCommand.NotifyCanExecuteChanged();
+        PreviewStatus = "Running synthetic numeric preview…";
         try
         {
             var function = BuildDraftDefinition();
-            RefreshIntermediatePreviews(function, input);
-            var outcome = PreviewFunction(function, input);
+            await RefreshIntermediatePreviewsAsync(function, input);
+            var outcome = await PreviewFunctionAsync(function, input);
             PreviewStatus = outcome.Success
                 ? $"Synthetic preview output: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. No filing or publication occurred."
                 : $"Preview blocked: {outcome.Error}";
@@ -572,9 +591,14 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             NodePreviews.Clear();
             PreviewStatus = $"Preview blocked: {ex.Message}";
         }
+        finally
+        {
+            _isPreviewRunning = false;
+            TestFunctionCommand.NotifyCanExecuteChanged();
+        }
     }
 
-    private void RefreshIntermediatePreviews(FunctionDefinition function, decimal input)
+    private async Task RefreshIntermediatePreviewsAsync(FunctionDefinition function, decimal input)
     {
         NodePreviews.Clear();
         var orderedNodes = TopologicallyOrderNodes(function);
@@ -606,7 +630,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             try
             {
                 var prefix = BuildPrefixFunction(function, node, decimalOutput.Name);
-                var outcome = PreviewFunction(prefix, input);
+                var outcome = await PreviewFunctionAsync(prefix, input);
                 NodePreviews.Add(outcome.Success
                     ? new FunctionNodePreviewRow(node.NodeId, node.DisplayName, outcome.Value,
                         $"Partial synthetic value: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. Not a filing result.")
@@ -720,8 +744,9 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         return ordered.Count == function.Nodes.Count ? ordered : function.Nodes;
     }
 
-    private void SaveFunctionRevision()
+    private async Task SaveFunctionRevisionAsync()
     {
+        if (_isSavingFunctionRevision) return;
         if (!CanSaveFunctionRevision)
         {
             Status = "A non-empty function name and a valid input-to-output graph are required.";
@@ -737,10 +762,31 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 return;
             }
             var definition = BuildDraftDefinition();
-            var validation = PreviewFunction(definition, 1m);
+            var draftProjectSnapshot = ProjectSerializer.Serialize(_draftSession.Project);
+            var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
+            var editingFunctionId = _editingFunctionId;
+            var expectedLatestRevision = _expectedLatestRevision;
+            _isSavingFunctionRevision = true;
+            Raise(nameof(CanSaveFunctionRevision));
+            SaveFunctionRevisionCommand.NotifyCanExecuteChanged();
+            Status = "Validating the function draft with a synthetic preview…";
+
+            var validation = await PreviewFunctionAsync(definition, 1m);
             if (!validation.Success)
             {
                 Status = $"Function revision was not saved because synthetic validation failed: {validation.Error}";
+                return;
+            }
+
+            if (!ReferenceEquals(_projectSession(), projectSession)
+                || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(projectSession.Project), projectSnapshot)
+                || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(_draftSession.Project), draftProjectSnapshot)
+                || !StringComparer.Ordinal.Equals(DraftName.Trim(), definition.Name)
+                || !StringComparer.Ordinal.Equals(DraftFunctionId, definition.FunctionId)
+                || !StringComparer.Ordinal.Equals(_editingFunctionId, editingFunctionId)
+                || _expectedLatestRevision != expectedLatestRevision)
+            {
+                Status = "The active project or function draft changed during validation. Review it and save again.";
                 return;
             }
 
@@ -762,6 +808,12 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException)
         {
             Status = $"Function revision was not saved: {ex.Message}";
+        }
+        finally
+        {
+            _isSavingFunctionRevision = false;
+            Raise(nameof(CanSaveFunctionRevision));
+            SaveFunctionRevisionCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -816,7 +868,9 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             if (string.IsNullOrWhiteSpace(path)) return;
             var json = await ReadPackageTextAsync(path);
             var package = FunctionPackageSerializer.Deserialize(json);
-            var imported = FunctionLibraryService.ImportAs(_projectSession().Project, package.Functions,
+            var projectSession = _projectSession();
+            var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
+            var imported = FunctionLibraryService.ImportAs(projectSession.Project, package.Functions,
                 package.RootFunctionId, ImportFunctionId.Trim(),
                 string.IsNullOrWhiteSpace(ImportFunctionName) ? null : ImportFunctionName.Trim());
             var importedIds = package.Functions.Select(function => function.FunctionId == package.RootFunctionId
@@ -827,13 +881,17 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                          .OrderBy(function => function.FunctionId, StringComparer.Ordinal)
                          .ThenBy(function => function.Revision))
             {
-                var validation = PreviewFunction(function, 1m, imported);
+                var validation = await PreviewFunctionAsync(function, 1m, imported);
                 if (!validation.Success)
                     throw new InvalidOperationException($"Imported function '{function.FunctionId}@{function.Revision}' "
                         + $"failed synthetic compile and preview: {validation.Error}");
             }
 
-            _projectSession().ReplaceProject(imported);
+            if (!ReferenceEquals(_projectSession(), projectSession)
+                || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(projectSession.Project), projectSnapshot))
+                throw new InvalidOperationException("The active project changed during package validation; the import was not applied.");
+
+            projectSession.ReplaceProject(imported);
             RefreshFromProject();
             SelectedFunction = Functions.First(row => row.FunctionId == ImportFunctionId.Trim()
                 && row.Revision == package.RootRevision);
@@ -940,7 +998,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         };
     }
 
-    private FunctionPreviewOutcome PreviewFunction(FunctionDefinition function, decimal input,
+    private async Task<FunctionPreviewOutcome> PreviewFunctionAsync(FunctionDefinition function, decimal input,
         MappingProject? sourceProject = null)
     {
         var profile = SyntheticProfile.Build();
@@ -1066,7 +1124,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 }
             }
         };
-        var result = compile.Plan.ExecuteAsync(context).GetAwaiter().GetResult();
+        var result = await compile.Plan.ExecuteAsync(context);
         var values = result.Facts.Select(pendingFact => pendingFact.Value).ToArray();
         if (values.Length != 1 || values[0] is null)
             return FunctionPreviewOutcome.Blocked("the synthetic graph did not emit exactly one decimal fact.");

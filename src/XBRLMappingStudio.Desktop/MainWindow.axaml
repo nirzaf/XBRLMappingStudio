@@ -235,7 +235,7 @@
       </Border>
 
       <!-- Center: mapping workspace and evidence-focused PDF review -->
-      <TabControl Grid.Column="1">
+      <TabControl Name="WorkspaceTabs" Grid.Column="1">
         <TabItem Header="Mapping">
           <Grid RowDefinitions="*,260">
             <controls:GraphCanvas x:Name="Canvas"
@@ -315,8 +315,18 @@
               <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="7">
                   <TextBlock Text="Function library" FontWeight="Bold" />
-                  <Button Content="New function" Command="{Binding FunctionLibrary.NewFunctionCommand}"
+                  <Button Name="CreateFunctionDraftButton" Content="New function" Command="{Binding FunctionLibrary.NewFunctionCommand}"
                           AutomationProperties.Name="Create a new function draft" />
+                  <StackPanel Orientation="Horizontal" Spacing="4">
+                    <Button Name="UndoFunctionDraftButton" Content="Undo draft"
+                            Command="{Binding FunctionLibrary.UndoDraftCommand}"
+                            IsEnabled="{Binding FunctionLibrary.CanUndoDraft}"
+                            AutomationProperties.Name="Undo function draft edit" />
+                    <Button Name="RedoFunctionDraftButton" Content="Redo draft"
+                            Command="{Binding FunctionLibrary.RedoDraftCommand}"
+                            IsEnabled="{Binding FunctionLibrary.CanRedoDraft}"
+                            AutomationProperties.Name="Redo function draft edit" />
+                  </StackPanel>
                   <ListBox ItemsSource="{Binding FunctionLibrary.Functions}"
                            SelectedItem="{Binding FunctionLibrary.SelectedFunction, Mode=TwoWay}"
                            MinHeight="130" AutomationProperties.Name="Saved function revisions">
@@ -328,16 +338,16 @@
                     </ListBox.ItemTemplate>
                   </ListBox>
                   <TextBlock Text="Draft name" />
-                  <TextBox Text="{Binding FunctionLibrary.DraftName, Mode=TwoWay}"
+                  <TextBox Name="FunctionDraftNameTextBox" Text="{Binding FunctionLibrary.DraftName, Mode=TwoWay}"
                            AutomationProperties.Name="Function draft name" />
                   <TextBlock Text="Function ID" />
                   <TextBlock Text="{Binding FunctionLibrary.DraftFunctionId}"
                              AutomationProperties.Name="Stable function ID" TextWrapping="Wrap" />
                   <TextBlock Text="{Binding FunctionLibrary.DraftRevisionSummary}"
                              AutomationProperties.Name="Next immutable revision" TextWrapping="Wrap" />
-                  <Button Content="Save new revision" Command="{Binding FunctionLibrary.SaveFunctionRevisionCommand}"
+                  <Button Name="SaveFunctionRevisionButton" Content="Save new revision" Command="{Binding FunctionLibrary.SaveFunctionRevisionCommand}"
                           AutomationProperties.Name="Save an immutable function revision" />
-                  <Button Content="Pin selected revision in Mapping" Command="{Binding FunctionLibrary.PinSelectedFunctionCommand}"
+                  <Button Name="PinFunctionRevisionButton" Content="Pin selected revision in Mapping" Command="{Binding FunctionLibrary.PinSelectedFunctionCommand}"
                           IsEnabled="{Binding FunctionLibrary.CanPinSelectedFunction}"
                           AutomationProperties.Name="Add a mapping call pinned to the selected revision" />
                   <Separator />
@@ -359,7 +369,7 @@
             </Border>
             <Grid Grid.Row="1" Grid.Column="1" RowDefinitions="Auto,*">
               <StackPanel Orientation="Horizontal" Spacing="5" Margin="8,6">
-                <Button Content="Add Scale" Command="{Binding FunctionLibrary.AddScaleCommand}"
+                <Button Name="AddFunctionScaleButton" Content="Add Scale" Command="{Binding FunctionLibrary.AddScaleCommand}"
                         AutomationProperties.Name="Add a scale operation to function graph" />
                 <Button Content="Add Change Sign" Command="{Binding FunctionLibrary.AddChangeSignCommand}"
                         AutomationProperties.Name="Add a change sign operation to function graph" />
@@ -371,7 +381,7 @@
                         AutomationProperties.Name="Add a ratio operation with an explicit Decimal denominator" />
               </StackPanel>
               <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="1" Margin="6">
-                <controls:GraphCanvas Focusable="True" ClipToBounds="True"
+                <controls:GraphCanvas Name="FunctionGraphCanvas" Focusable="True" ClipToBounds="True"
                                       Session="{Binding FunctionLibrary.Session}"
                                       Nodes="{Binding FunctionLibrary.Nodes}"
                                       Edges="{Binding FunctionLibrary.Edges}"
@@ -387,7 +397,7 @@
                   <TextBlock Text="{Binding FunctionLibrary.SelectedDraftNodeDisplay}"
                              TextWrapping="Wrap" AutomationProperties.Name="Selected function operation" />
                   <TextBlock Text="Scale factor" />
-                  <TextBox Text="{Binding FunctionLibrary.SelectedScaleFactor, Mode=TwoWay}"
+                  <TextBox Name="FunctionScaleFactorTextBox" Text="{Binding FunctionLibrary.SelectedScaleFactor, Mode=TwoWay}"
                            IsEnabled="{Binding FunctionLibrary.CanEditScaleFactor}"
                            AutomationProperties.Name="Scale factor parameter" />
                   <TextBlock Text="Decimal side-input literal" />
@@ -403,17 +413,17 @@
                             SelectedItem="{Binding FunctionLibrary.SelectedRoundMode, Mode=TwoWay}"
                             IsEnabled="{Binding FunctionLibrary.CanEditRound}"
                             AutomationProperties.Name="Round mode" />
-                  <Button Content="Apply operation parameters"
+                  <Button Name="ApplyFunctionOperationParametersButton" Content="Apply operation parameters"
                           Command="{Binding FunctionLibrary.ApplyNodeParametersCommand}"
                           AutomationProperties.Name="Apply function operation parameters" />
                   <Separator />
                   <TextBlock Text="Synthetic decimal preview" FontWeight="Bold" />
-                  <TextBox Text="{Binding FunctionLibrary.PreviewInput, Mode=TwoWay}"
+                  <TextBox Name="SyntheticFunctionPreviewInputTextBox" Text="{Binding FunctionLibrary.PreviewInput, Mode=TwoWay}"
                            Watermark="Invariant decimal input"
                            AutomationProperties.Name="Synthetic function preview input" />
-                  <Button Content="Test draft" Command="{Binding FunctionLibrary.TestFunctionCommand}"
+                  <Button Name="TestFunctionDraftButton" Content="Test draft" Command="{Binding FunctionLibrary.TestFunctionCommand}"
                           AutomationProperties.Name="Run a synthetic decimal function preview" />
-                  <TextBlock Text="{Binding FunctionLibrary.PreviewStatus}"
+                  <TextBlock Name="FunctionPreviewStatusText" Text="{Binding FunctionLibrary.PreviewStatus}"
                              TextWrapping="Wrap" AutomationProperties.Name="Function preview result" />
                   <TextBlock Text="Intermediate node previews (partial synthetic values)" FontWeight="SemiBold" />
                   <ListBox ItemsSource="{Binding FunctionLibrary.NodePreviews}" MaxHeight="230"
