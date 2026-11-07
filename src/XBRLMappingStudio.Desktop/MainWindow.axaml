@@ -351,6 +351,10 @@
                         AutomationProperties.Name="Add a change sign operation to function graph" />
                 <Button Content="Add Round" Command="{Binding FunctionLibrary.AddRoundCommand}"
                         AutomationProperties.Name="Add a round operation to function graph" />
+                <Button Content="Add Coalesce" Command="{Binding FunctionLibrary.AddCoalesceCommand}"
+                        AutomationProperties.Name="Add a coalesce operation with an explicit Decimal fallback" />
+                <Button Content="Add Ratio" Command="{Binding FunctionLibrary.AddRatioCommand}"
+                        AutomationProperties.Name="Add a ratio operation with an explicit Decimal denominator" />
               </StackPanel>
               <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="1" Margin="6">
                 <controls:GraphCanvas Focusable="True" ClipToBounds="True"
@@ -372,6 +376,11 @@
                   <TextBox Text="{Binding FunctionLibrary.SelectedScaleFactor, Mode=TwoWay}"
                            IsEnabled="{Binding FunctionLibrary.CanEditScaleFactor}"
                            AutomationProperties.Name="Scale factor parameter" />
+                  <TextBlock Text="Decimal side-input literal" />
+                  <TextBox Text="{Binding FunctionLibrary.SelectedConstantValue, Mode=TwoWay}"
+                           IsEnabled="{Binding FunctionLibrary.CanEditConstantValue}"
+                           Watermark="Required invariant decimal"
+                           AutomationProperties.Name="Function side-input Decimal constant" />
                   <TextBlock Text="Round digits" />
                   <TextBox Text="{Binding FunctionLibrary.SelectedRoundDigits, Mode=TwoWay}"
                            IsEnabled="{Binding FunctionLibrary.CanEditRound}"

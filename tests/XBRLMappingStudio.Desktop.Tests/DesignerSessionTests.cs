@@ -167,6 +167,134 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void InsertNodeWithCompanions_IsValidatedAndUndoesAsOneGraphEdit()
+    {
+        var project = Project();
+        project.Nodes.Clear();
+        project.Edges.Clear();
+        var decimalPort = new PortDefinition("value", PortShape.Decimal, PortCardinality.Single);
+        var input = new MappingNode
+        {
+            NodeId = "function-input",
+            NodeType = "functionInput",
+            DisplayName = "Input",
+            OutputPorts = new() { decimalPort }
+        };
+        var output = new MappingNode
+        {
+            NodeId = "function-output",
+            NodeType = "functionOutput",
+            DisplayName = "Output",
+            InputPorts = new() { decimalPort }
+        };
+        project.Nodes.AddRange(new[] { input, output });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "e0",
+            SourceNodeId = input.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = output.NodeId,
+            TargetPortName = "value"
+        });
+        var session = new DesignerSession(project);
+        var before = ProjectSerializer.Serialize(session.Project);
+        var ratio = new MappingNode
+        {
+            NodeId = "ratio",
+            NodeType = NodeTypeConstants.Ratio,
+            DisplayName = "Ratio",
+            InputPorts = new()
+            {
+                new("numerator", PortShape.Decimal, PortCardinality.Single),
+                new("denominator", PortShape.Decimal, PortCardinality.Single)
+            },
+            OutputPorts = new() { decimalPort }
+        };
+        var denominator = new MappingNode
+        {
+            NodeId = "denominator",
+            NodeType = NodeTypeConstants.Constant,
+            DisplayName = "Denominator",
+            Parameters = new Dictionary<string, object?> { ["literal"] = "2", ["shape"] = "Decimal" },
+            OutputPorts = new() { decimalPort }
+        };
+        var sideInput = new MappingEdge
+        {
+            EdgeId = "pending",
+            SourceNodeId = denominator.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = ratio.NodeId,
+            TargetPortName = "denominator"
+        };
+
+        Assert.True(session.TryInsertNodeOnEdgeWithCompanions("e0", ratio, "numerator", "value",
+            new[] { denominator }, new[] { sideInput }, out var refusal));
+        Assert.Null(refusal);
+        Assert.Equal(4, session.Project.Nodes.Count);
+        Assert.Equal(3, session.Project.Edges.Count);
+        Assert.Contains(session.Project.Edges, edge => edge.SourceNodeId == denominator.NodeId
+            && edge.TargetNodeId == ratio.NodeId && edge.TargetPortName == "denominator");
+
+        session.Undo();
+        Assert.Equal(before, ProjectSerializer.Serialize(session.Project));
+        session.Redo();
+        Assert.Equal(3, session.Project.Edges.Count);
+    }
+
+    [Fact]
+    public void InsertNodeWithCompanions_RejectsUnconnectedRequiredInputWithoutMutation()
+    {
+        var project = Project();
+        project.Nodes.Clear();
+        project.Edges.Clear();
+        var decimalPort = new PortDefinition("value", PortShape.Decimal, PortCardinality.Single);
+        var input = new MappingNode
+        {
+            NodeId = "function-input",
+            NodeType = "functionInput",
+            DisplayName = "Input",
+            OutputPorts = new() { decimalPort }
+        };
+        var output = new MappingNode
+        {
+            NodeId = "function-output",
+            NodeType = "functionOutput",
+            DisplayName = "Output",
+            InputPorts = new() { decimalPort }
+        };
+        project.Nodes.AddRange(new[] { input, output });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "e0",
+            SourceNodeId = input.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = output.NodeId,
+            TargetPortName = "value"
+        });
+        var session = new DesignerSession(project);
+        var before = ProjectSerializer.Serialize(session.Project);
+        var ratio = new MappingNode
+        {
+            NodeId = "ratio",
+            NodeType = NodeTypeConstants.Ratio,
+            DisplayName = "Ratio",
+            InputPorts = new()
+            {
+                new("numerator", PortShape.Decimal, PortCardinality.Single),
+                new("denominator", PortShape.Decimal, PortCardinality.Single)
+            },
+            OutputPorts = new() { decimalPort }
+        };
+
+        Assert.False(session.TryInsertNodeOnEdgeWithCompanions("e0", ratio, "numerator", "value",
+            Array.Empty<MappingNode>(), Array.Empty<MappingEdge>(), out var refusal));
+
+        Assert.Contains("denominator", refusal, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before, ProjectSerializer.Serialize(session.Project));
+        Assert.False(session.CanUndo);
+    }
+
+    [Fact]
     public void MoveNode_SaveReopen_LayoutPersisted_DigestUnchanged()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-designer", Guid.NewGuid().ToString("n"));

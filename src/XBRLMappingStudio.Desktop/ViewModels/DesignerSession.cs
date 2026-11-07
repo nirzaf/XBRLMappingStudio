@@ -461,6 +461,157 @@ public sealed class DesignerSession
         return true;
     }
 
+    /// <summary>
+    /// Replaces one edge with a declared node plus companion nodes/connections as one
+    /// validated undoable edit. This is used for operators with explicit side inputs,
+    /// such as Ratio and Coalesce with a user-editable Decimal constant.
+    /// </summary>
+    public bool TryInsertNodeOnEdgeWithCompanions(
+        string edgeId,
+        MappingNode node,
+        string inputPortName,
+        string outputPortName,
+        IReadOnlyList<MappingNode> companionNodes,
+        IReadOnlyList<MappingEdge> companionEdges,
+        out string? refusalReason)
+    {
+        refusalReason = null;
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(companionNodes);
+        ArgumentNullException.ThrowIfNull(companionEdges);
+
+        var edgeIndex = _project.Edges.FindIndex(edge =>
+            StringComparer.Ordinal.Equals(edge.EdgeId, edgeId));
+        if (edgeIndex < 0)
+        {
+            refusalReason = "The edge no longer exists.";
+            return false;
+        }
+        var replacedEdge = _project.Edges[edgeIndex];
+        var addedNodes = new[] { node }.Concat(companionNodes).ToArray();
+        var newNodeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var addedNode in addedNodes)
+        {
+            if (string.IsNullOrWhiteSpace(addedNode.NodeId)
+                || _project.Nodes.Any(existing => StringComparer.Ordinal.Equals(existing.NodeId, addedNode.NodeId))
+                || !newNodeIds.Add(addedNode.NodeId))
+            {
+                refusalReason = "Inserted node IDs must be non-empty and unique in the graph.";
+                return false;
+            }
+        }
+
+        var source = _project.Nodes.FirstOrDefault(candidate => candidate.NodeId == replacedEdge.SourceNodeId);
+        var target = _project.Nodes.FirstOrDefault(candidate => candidate.NodeId == replacedEdge.TargetNodeId);
+        var sourcePort = source?.OutputPorts.FirstOrDefault(port => port.Name == replacedEdge.SourcePortName);
+        var inputPort = node.InputPorts.FirstOrDefault(port => port.Name == inputPortName);
+        var outputPort = node.OutputPorts.FirstOrDefault(port => port.Name == outputPortName);
+        var targetPort = target?.InputPorts.FirstOrDefault(port => port.Name == replacedEdge.TargetPortName);
+        if (source is null || target is null || sourcePort is null || inputPort is null
+            || outputPort is null || targetPort is null)
+        {
+            refusalReason = "The edge or inserted node references a missing port.";
+            return false;
+        }
+
+        var allNodes = _project.Nodes.Concat(addedNodes).ToDictionary(existing => existing.NodeId, StringComparer.Ordinal);
+        var replacementEdges = new List<MappingEdge>
+        {
+            new()
+            {
+                EdgeId = "e" + Id.New(),
+                SourceNodeId = replacedEdge.SourceNodeId,
+                SourcePortName = replacedEdge.SourcePortName,
+                TargetNodeId = node.NodeId,
+                TargetPortName = inputPortName
+            },
+            new()
+            {
+                EdgeId = "e" + Id.New(),
+                SourceNodeId = node.NodeId,
+                SourcePortName = outputPortName,
+                TargetNodeId = replacedEdge.TargetNodeId,
+                TargetPortName = replacedEdge.TargetPortName
+            }
+        };
+        replacementEdges.AddRange(companionEdges.Select(edge => edge with { EdgeId = "e" + Id.New() }));
+
+        var remainingEdges = _project.Edges.Where(edge => !StringComparer.Ordinal.Equals(edge.EdgeId, edgeId))
+            .ToArray();
+        var candidateEdges = remainingEdges.Concat(replacementEdges).ToArray();
+        var occupiedInputs = new HashSet<(string NodeId, string PortName)>();
+        foreach (var candidateEdge in candidateEdges)
+        {
+            if (!allNodes.TryGetValue(candidateEdge.SourceNodeId, out var candidateSource)
+                || !allNodes.TryGetValue(candidateEdge.TargetNodeId, out var candidateTarget))
+            {
+                refusalReason = "A proposed companion connection references a node outside the graph.";
+                return false;
+            }
+
+            var candidateSourcePort = candidateSource.OutputPorts.FirstOrDefault(port => port.Name == candidateEdge.SourcePortName);
+            var candidateTargetPort = candidateTarget.InputPorts.FirstOrDefault(port => port.Name == candidateEdge.TargetPortName);
+            if (candidateSourcePort is null || candidateTargetPort is null)
+            {
+                refusalReason = "A proposed companion connection references a missing port.";
+                return false;
+            }
+            if (!ShapeChecker.AreCompatible(candidateSourcePort, candidateTargetPort)
+                || (candidateSourcePort.Cardinality == PortCardinality.Collection
+                    && candidateTargetPort.Cardinality == PortCardinality.Single))
+            {
+                refusalReason = $"Proposed connection from {candidateSourcePort.Shape} to {candidateTargetPort.Shape} is incompatible.";
+                return false;
+            }
+            if (!occupiedInputs.Add((candidateEdge.TargetNodeId, candidateEdge.TargetPortName)))
+            {
+                refusalReason = $"Input port '{candidateEdge.TargetPortName}' already has a connection.";
+                return false;
+            }
+        }
+
+        foreach (var addedNode in addedNodes)
+        foreach (var requiredPort in addedNode.InputPorts.Where(port => port.IsRequired))
+        {
+            if (!occupiedInputs.Contains((addedNode.NodeId, requiredPort.Name)))
+            {
+                refusalReason = $"Required input port '{requiredPort.Name}' on '{addedNode.DisplayName}' is not connected.";
+                return false;
+            }
+        }
+
+        var indegree = allNodes.Keys.ToDictionary(nodeId => nodeId, _ => 0, StringComparer.Ordinal);
+        var outgoing = allNodes.Keys.ToDictionary(nodeId => nodeId, _ => new List<string>(), StringComparer.Ordinal);
+        foreach (var candidateEdge in candidateEdges)
+        {
+            indegree[candidateEdge.TargetNodeId]++;
+            outgoing[candidateEdge.SourceNodeId].Add(candidateEdge.TargetNodeId);
+        }
+        var ready = new Queue<string>(indegree.Where(pair => pair.Value == 0).Select(pair => pair.Key));
+        var visitedCount = 0;
+        while (ready.Count > 0)
+        {
+            var current = ready.Dequeue();
+            visitedCount++;
+            foreach (var next in outgoing[current])
+                if (--indegree[next] == 0) ready.Enqueue(next);
+        }
+        if (visitedCount != allNodes.Count)
+        {
+            refusalReason = "The inserted subgraph would create a cycle.";
+            return false;
+        }
+
+        PushUndo();
+        _project.Edges.RemoveAt(edgeIndex);
+        foreach (var addedNode in addedNodes) _project.Nodes.Add(addedNode.ShallowCopy());
+        _project.Edges.AddRange(replacementEdges);
+        _selected.Clear();
+        _selected.Add(node.NodeId);
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
     /// <summary>Replaces project content from an immutable service result in one undo step.</summary>
     public bool ReplaceProject(MappingProject project)
     {

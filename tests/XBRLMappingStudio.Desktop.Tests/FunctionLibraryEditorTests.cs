@@ -137,6 +137,60 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
+    public void RatioAuthoring_RequiresAndPreviewsExplicitDenominatorConstant()
+    {
+        var projectSession = new DesignerSession(Project());
+        var editor = new FunctionLibraryEditorViewModel(() => projectSession);
+
+        editor.AddRatioCommand.Execute(null);
+
+        var ratio = Assert.Single(editor.Session.Project.Nodes, node => node.NodeType == NodeTypeConstants.Ratio);
+        var denominator = Assert.Single(editor.Session.Project.Nodes,
+            node => node.NodeType == NodeTypeConstants.Constant);
+        Assert.Contains("Operations: Ratio", editor.DraftGraphSummary, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("1 explicit Decimal side-input constant", editor.DraftGraphSummary,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Ratio → Set", editor.DraftGraphSummary, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(denominator.NodeId, Assert.Single(editor.Session.SelectedNodeIds));
+        Assert.Equal("", Parameter(denominator, "literal"));
+        Assert.Equal(3, editor.Session.Project.Edges.Count);
+
+        editor.PreviewInput = "10";
+        editor.TestFunctionCommand.Execute(null);
+        Assert.Contains("Preview blocked", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+        editor.SaveFunctionRevisionCommand.Execute(null);
+        Assert.Empty(projectSession.Project.Functions);
+        Assert.Contains("not saved", editor.Status, StringComparison.OrdinalIgnoreCase);
+
+        editor.SelectedConstantValue = "2";
+        editor.ApplyNodeParametersCommand.Execute(null);
+        editor.TestFunctionCommand.Execute(null);
+
+        Assert.Equal("2", Parameter(denominator, "literal"));
+        Assert.Equal(5m, Assert.Single(editor.NodePreviews, row => row.NodeId == ratio.NodeId).Value);
+        Assert.Contains("output: 5", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CoalesceAuthoring_InsertsAndReviewsExplicitFallbackConstant()
+    {
+        var projectSession = new DesignerSession(Project());
+        var editor = new FunctionLibraryEditorViewModel(() => projectSession);
+
+        editor.AddCoalesceCommand.Execute(null);
+        var coalesce = Assert.Single(editor.Session.Project.Nodes, node => node.NodeType == NodeTypeConstants.Coalesce);
+        var fallback = Assert.Single(editor.Session.Project.Nodes, node => node.NodeType == NodeTypeConstants.Constant);
+        editor.SelectedConstantValue = "0";
+        editor.ApplyNodeParametersCommand.Execute(null);
+        editor.PreviewInput = "12.5";
+        editor.TestFunctionCommand.Execute(null);
+
+        Assert.Equal("0", Parameter(fallback, "literal"));
+        Assert.Equal(12.5m, Assert.Single(editor.NodePreviews, row => row.NodeId == coalesce.NodeId).Value);
+        Assert.Contains("output: 12.5", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void SaveFunctionRevision_RefusesDraftAfterActiveProjectChanges()
     {
         var activeSession = new DesignerSession(Project());

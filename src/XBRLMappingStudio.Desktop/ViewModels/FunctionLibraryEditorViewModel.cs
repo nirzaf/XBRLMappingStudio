@@ -62,6 +62,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private string _previewStatus = "Run a synthetic numeric preview to inspect the draft output.";
     private string _status = "";
     private string _selectedScaleFactor = "1";
+    private string _selectedConstantValue = "";
     private string _selectedRoundDigits = "0";
     private string _selectedRoundMode = "HalfEven";
     private string? _selectedDraftNodeId;
@@ -122,11 +123,19 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         get
         {
             var operations = _draftSession.Project.Nodes
-                .Where(node => node.NodeType is not (InputMarkerType or OutputMarkerType))
+                .Where(node => node.NodeType is not (InputMarkerType or OutputMarkerType or NodeTypeConstants.Constant))
                 .Select(node => node.DisplayName);
             var steps = operations.ToArray();
-            return steps.Length == 0 ? "Function graph: decimal input passes through to output."
-                : $"Function graph: decimal input → {string.Join(" → ", steps)} → decimal output.";
+            var decimalConstants = _draftSession.Project.Nodes.Count(node =>
+                node.NodeType == NodeTypeConstants.Constant
+                && StringComparer.OrdinalIgnoreCase.Equals(ReadParameter(node, "shape"), "Decimal"));
+            var operationsSummary = steps.Length == 0
+                ? "Decimal input passes through to output."
+                : $"Operations: {string.Join(", ", steps)}.";
+            var sideInputsSummary = decimalConstants == 0
+                ? ""
+                : $" {decimalConstants} explicit Decimal side-input constant(s) require review.";
+            return $"Function graph. {operationsSummary}{sideInputsSummary}";
         }
     }
 
@@ -173,12 +182,20 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         => SelectedDraftNode is { } node ? $"{node.DisplayName} ({node.NodeType})" : "Select a function node to inspect it.";
 
     public bool CanEditScaleFactor => SelectedDraftNode?.NodeType == NodeTypeConstants.Scale;
+    public bool CanEditConstantValue => SelectedDraftNode?.NodeType == NodeTypeConstants.Constant
+        && StringComparer.OrdinalIgnoreCase.Equals(ReadParameter(SelectedDraftNode, "shape"), "Decimal");
     public bool CanEditRound => SelectedDraftNode?.NodeType == NodeTypeConstants.Round;
 
     public string SelectedScaleFactor
     {
         get => _selectedScaleFactor;
         set => Set(ref _selectedScaleFactor, value);
+    }
+
+    public string SelectedConstantValue
+    {
+        get => _selectedConstantValue;
+        set => Set(ref _selectedConstantValue, value);
     }
 
     public string SelectedRoundDigits
@@ -212,6 +229,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     public RelayCommand AddScaleCommand { get; }
     public RelayCommand AddChangeSignCommand { get; }
     public RelayCommand AddRoundCommand { get; }
+    public RelayCommand AddCoalesceCommand { get; }
+    public RelayCommand AddRatioCommand { get; }
     public RelayCommand ApplyNodeParametersCommand { get; }
     public RelayCommand TestFunctionCommand { get; }
     public RelayCommand SaveFunctionRevisionCommand { get; }
@@ -230,8 +249,10 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         AddScaleCommand = new RelayCommand(_ => AddTransform(NodeTypeConstants.Scale), _ => CanAddTransform);
         AddChangeSignCommand = new RelayCommand(_ => AddTransform(NodeTypeConstants.ChangeSign), _ => CanAddTransform);
         AddRoundCommand = new RelayCommand(_ => AddTransform(NodeTypeConstants.Round), _ => CanAddTransform);
+        AddCoalesceCommand = new RelayCommand(_ => AddBinaryDecimalOperation(NodeTypeConstants.Coalesce), _ => CanAddTransform);
+        AddRatioCommand = new RelayCommand(_ => AddBinaryDecimalOperation(NodeTypeConstants.Ratio), _ => CanAddTransform);
         ApplyNodeParametersCommand = new RelayCommand(_ => ApplySelectedNodeParameters(),
-            _ => CanEditScaleFactor || CanEditRound);
+            _ => CanEditScaleFactor || CanEditConstantValue || CanEditRound);
         TestFunctionCommand = new RelayCommand(_ => TestFunction(), _ => CanParsePreviewInput());
         SaveFunctionRevisionCommand = new RelayCommand(_ => SaveFunctionRevision(), _ => CanSaveFunctionRevision);
         PinSelectedFunctionCommand = new RelayCommand(_ => PinSelectedFunction(), _ => CanPinSelectedFunction);
@@ -324,6 +345,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         Raise(nameof(Edges));
         Raise(nameof(SelectedDraftNodeDisplay));
         Raise(nameof(CanEditScaleFactor));
+        Raise(nameof(CanEditConstantValue));
         Raise(nameof(CanEditRound));
         OnDraftSessionChanged();
     }
@@ -344,6 +366,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         AddScaleCommand?.NotifyCanExecuteChanged();
         AddChangeSignCommand?.NotifyCanExecuteChanged();
         AddRoundCommand?.NotifyCanExecuteChanged();
+        AddCoalesceCommand?.NotifyCanExecuteChanged();
+        AddRatioCommand?.NotifyCanExecuteChanged();
         SaveFunctionRevisionCommand?.NotifyCanExecuteChanged();
         OnDraftSelectionChanged();
     }
@@ -355,10 +379,12 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             : null;
         var node = SelectedDraftNode;
         SelectedScaleFactor = ReadParameter(node, "factor") ?? "1";
+        SelectedConstantValue = ReadParameter(node, "literal") ?? "";
         SelectedRoundDigits = ReadParameter(node, "digits") ?? "0";
         SelectedRoundMode = ReadParameter(node, "mode") ?? "HalfEven";
         Raise(nameof(SelectedDraftNodeDisplay));
         Raise(nameof(CanEditScaleFactor));
+        Raise(nameof(CanEditConstantValue));
         Raise(nameof(CanEditRound));
         ApplyNodeParametersCommand?.NotifyCanExecuteChanged();
     }
@@ -407,6 +433,75 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         Status = $"Added {signature.DisplayName}. Select it to edit its parameters.";
     }
 
+    private void AddBinaryDecimalOperation(string nodeType)
+    {
+        var edge = FindOutputEdge();
+        if (edge is null)
+        {
+            Status = "Connect the function graph before adding an operation.";
+            return;
+        }
+
+        var signature = FunctionCatalog.Default.Find(nodeType);
+        if (signature is null || signature.Inputs.Count != 2 || signature.Outputs.Count != 1
+            || signature.Inputs.Any(port => port.Shape != PortShape.Decimal
+                || port.Cardinality != PortCardinality.Single)
+            || signature.Outputs[0].Shape != PortShape.Decimal
+            || signature.Outputs[0].Cardinality != PortCardinality.Single)
+        {
+            Status = "This operation does not match the editor's two-input Decimal contract.";
+            return;
+        }
+
+        var transformCount = _draftSession.Project.Nodes.Count(node =>
+            node.NodeType is not (InputMarkerType or OutputMarkerType));
+        var operation = new MappingNode
+        {
+            NodeId = "n" + Id.New(),
+            NodeType = signature.NodeType,
+            DisplayName = signature.DisplayName,
+            Parameters = signature.Parameters.Values
+                .Where(parameter => parameter.DefaultValue is not null)
+                .ToDictionary(parameter => parameter.Name, parameter => (object?)parameter.DefaultValue,
+                    StringComparer.Ordinal),
+            InputPorts = signature.Inputs.ToList(),
+            OutputPorts = signature.Outputs.ToList(),
+            Layout = new LayoutPosition(300 + transformCount * 220, 150)
+        };
+        var sideInput = signature.Inputs[1];
+        var constant = new MappingNode
+        {
+            NodeId = "n" + Id.New(),
+            NodeType = NodeTypeConstants.Constant,
+            DisplayName = $"Set {sideInput.Name} constant",
+            Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["literal"] = "",
+                ["shape"] = "Decimal"
+            },
+            OutputPorts = new List<PortDefinition> { DecimalPort("value") },
+            Layout = new LayoutPosition(300 + transformCount * 220, 330)
+        };
+        var sideConnection = new MappingEdge
+        {
+            EdgeId = "pending",
+            SourceNodeId = constant.NodeId,
+            SourcePortName = "value",
+            TargetNodeId = operation.NodeId,
+            TargetPortName = sideInput.Name
+        };
+        if (!_draftSession.TryInsertNodeOnEdgeWithCompanions(edge.EdgeId, operation,
+                signature.Inputs[0].Name, signature.Outputs[0].Name,
+                new[] { constant }, new[] { sideConnection }, out var refusal))
+        {
+            Status = refusal ?? "The operation could not be inserted into the function graph.";
+            return;
+        }
+
+        _draftSession.Select(constant.NodeId, additive: false);
+        Status = $"Added {signature.DisplayName} with an explicit Decimal {sideInput.Name} constant. Set its value before testing or saving.";
+    }
+
     private void ApplySelectedNodeParameters()
     {
         var node = SelectedDraftNode;
@@ -421,6 +516,19 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             }
             _draftSession.SetNodeParameter(node.NodeId, "factor", SelectedScaleFactor);
             Status = "Scale factor updated in the draft graph.";
+            return;
+        }
+        if (CanEditConstantValue)
+        {
+            if (!decimal.TryParse(SelectedConstantValue,
+                    NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture, out _))
+            {
+                Status = "Decimal constant must be an invariant decimal value without grouping separators.";
+                return;
+            }
+            _draftSession.SetNodeParameter(node.NodeId, "literal", SelectedConstantValue);
+            Status = "Decimal side-input constant updated in the draft graph.";
             return;
         }
         if (node.NodeType == NodeTypeConstants.Round)
@@ -1023,6 +1131,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         AddScaleCommand.NotifyCanExecuteChanged();
         AddChangeSignCommand.NotifyCanExecuteChanged();
         AddRoundCommand.NotifyCanExecuteChanged();
+        AddCoalesceCommand.NotifyCanExecuteChanged();
+        AddRatioCommand.NotifyCanExecuteChanged();
         TestFunctionCommand.NotifyCanExecuteChanged();
         SaveFunctionRevisionCommand.NotifyCanExecuteChanged();
         PinSelectedFunctionCommand.NotifyCanExecuteChanged();
