@@ -69,7 +69,7 @@
     "nested.xml": "sha256:9182f8c3ebbcd843b3e68bb9c0c764c58a5ae30b4741c1735088c16b3a73b8b8",
     "sqlite-source.sql": "sha256:c249fcdd770ef79bb08e7643ffe54ef5be5fddac5297c37548dd4c01180aa613",
     "revenue-report.json": "sha256:c54a44de602c05ad1829e6908c3d1fba35e625312effba1c78c4ec5c592c9e30",
-    "revenue-report.xml": "sha256:6ba8e09354ab5e3f208320977a3e8f31dae83c82084bdc99dcce58ad180d4ba3",
+    "revenue-report.xml": "sha256:5ea2ea1dec97d5b362285d09c31624a1fdbe05693d0246592f0e798ddd80b906",
     "revenue.xlsx": "sha256:cc7250e9397a6147f76a7d2e20a14f6ff869c59450266d728ba0cfca62dfacb7",
     "arelle-test-taxonomy.xsd": "sha256:e898d8ef578e9e7d7015265b289b7bb63f3df8b2dadc35c11776c32a243d14c9"
   }

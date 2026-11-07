@@ -152,7 +152,10 @@ public static class XmlSerializer
             ? new XElement(Xbrli + "period", new XElement(Xbrli + "instant", Iso(f.Period.Instant)))
             : new XElement(Xbrli + "period",
                 new XElement(Xbrli + "startDate", Iso(f.Period.Start)),
-                new XElement(Xbrli + "endDate", Iso(f.Period.End)));
+                // The model and xBRL-JSON use an exclusive end boundary. XBRL 2.1
+                // interprets a date-only endDate as the end of that named day, so
+                // emit the last included day to preserve the same instant.
+                new XElement(Xbrli + "endDate", Iso(f.Period.End?.AddDays(-1))));
 
         return new XElement(Xbrli + "context",
             new XAttribute("id", id), entity, period);
@@ -384,9 +387,12 @@ public static class XmlSerializer
             EnsureOnlyAttributes(end);
             if (start.Elements().Any() || end.Elements().Any())
                 throw Unsupported("Duration boundaries cannot contain nested elements.");
+            var inclusiveEnd = DateOnly.Parse(end.Value, CultureInfo.InvariantCulture);
+            if (inclusiveEnd == DateOnly.MaxValue)
+                throw Unsupported("Duration endDate cannot be converted to the supported exclusive date boundary.");
             period = XbrlPeriod.OfDuration(
                 DateOnly.Parse(start.Value, CultureInfo.InvariantCulture),
-                DateOnly.Parse(end.Value, CultureInfo.InvariantCulture));
+                inclusiveEnd.AddDays(1));
         }
         else throw Unsupported("Context period has an unsupported structure.");
 

@@ -13,7 +13,7 @@ namespace XBRLMappingStudio.Fixtures;
 /// </summary>
 public static class IndependentAcceptanceFixtures
 {
-    public const string ManifestSha256 = "sha256:1040bceb1bd12510c10c611e41c37d124a31eaaa5881a3953a5d964575a9da39";
+    public const string ManifestSha256 = "sha256:97a756407ce56605d71dd8b5dce7b0b643488f8c486b1132d8d93e4c6f3d2841";
     private const string ResourcePrefix = "XBRLMappingStudio.Fixtures.AcceptanceFixtures.";
 
     public static byte[] ReadBytes(string fileName)

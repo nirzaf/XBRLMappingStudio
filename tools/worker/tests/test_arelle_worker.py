@@ -1014,6 +1014,78 @@ class ArelleWorkerTests(unittest.TestCase):
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_product_json_and_xml_fixtures_have_identical_arelle_occurrences(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory(prefix="xms-arelle-cross-format-") as temporary:
+            workspace = Path(temporary)
+            json_value = json.loads((FIXTURES / "product-generated-pass.xbrl.json").read_text(encoding="utf-8"))
+            json_value = arelle_worker.safe_taxonomy_urls(json_value, str(TAXONOMY_ROOT))
+            json_path = workspace / "product-generated-pass.xbrl.json"
+            json_path.write_text(json.dumps(json_value, ensure_ascii=False), encoding="utf-8")
+
+            xml_path = workspace / "product-generated-pass.xbrl.xml"
+            shutil.copyfile(FIXTURES / "product-generated-pass.xbrl.xml", xml_path)
+            shutil.copyfile(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd",
+                            workspace / "arelle-test-taxonomy.xsd")
+
+            def occurrences(report_path):
+                options = arelle_worker.RuntimeOptions(
+                    entrypointFile=str(report_path), validate=True, workOffline=True,
+                    internetConnectivity="offline", keepOpen=True, disablePersistentConfig=True,
+                    logFile="logToStructuredMessage", logPropagate=False,
+                )
+                with arelle_worker.Session() as session:
+                    ok = session.run(options)
+                    logs = session.get_log_messages()
+                    self.assertTrue(ok, logs)
+                    facts = [fact for model in session.get_models() for fact in model.facts]
+                    self.assertEqual(2, len(facts), logs)
+
+                    def qname_key(qname):
+                        return qname.namespaceURI, qname.localName
+
+                    def fact_key(fact):
+                        context = fact.context
+                        if context.isInstantPeriod:
+                            period = ("instant", context.instantDatetime.isoformat())
+                        else:
+                            period = ("duration", context.startDatetime.isoformat(),
+                                      context.endDatetime.isoformat())
+                        unit = None if fact.unit is None else tuple(
+                            tuple(sorted(qname_key(measure) for measure in side))
+                            for side in fact.unit.measures
+                        )
+                        dimensions = tuple(sorted(
+                            (qname_key(name), qname_key(value.memberQname))
+                            for name, value in context.qnameDims.items()
+                        ))
+                        return (
+                            qname_key(fact.qname), context.entityIdentifier, period, unit,
+                            fact.value, None if fact.decimals is None else str(fact.decimals),
+                            bool(fact.isNil), fact.xmlLang, dimensions,
+                        )
+
+                    return sorted((fact_key(fact) for fact in facts), key=repr)
+
+            json_occurrences = occurrences(json_path)
+            xml_occurrences = occurrences(xml_path)
+
+        self.assertEqual(json_occurrences, xml_occurrences)
+        self.assertEqual([
+            (("urn:synthetic:finance:1.0", "EntityRegistrantName"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"), None,
+             "ABC INC", None, False, "en", ()),
+            (("urn:synthetic:finance:1.0", "Revenue"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
+             "123.45", "2", False, None, ()),
+        ], json_occurrences)
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
     def test_file_taxonomy_uri_passes_arelle(self):
         value = report()
         value["documentInfo"]["taxonomy"] = [(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()]

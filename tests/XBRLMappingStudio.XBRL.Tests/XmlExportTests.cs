@@ -63,11 +63,32 @@ public sealed class XmlExportTests
     public void Reopen_IsSemanticallyEquivalentToJson()
     {
         var facts = new[] { Revenue() };
-        var viaXml = XmlSerializer.ReadFacts(XmlSerializer.Serialize(Profile, facts));
+        var xml = XmlSerializer.Serialize(Profile, facts);
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var xmlEndDate = XDocument.Parse(xml).Root!
+            .Element(xbrli + "context")!
+            .Element(xbrli + "period")!
+            .Element(xbrli + "endDate")!
+            .Value;
+        Assert.Equal("2025-12-31", xmlEndDate);
+
+        var viaXml = XmlSerializer.ReadFacts(xml);
         var viaJson = OimSerializer.ReadFacts(OimSerializer.Serialize(Profile, facts));
         Assert.Equal(
             viaXml.Select(f => f.SemanticKey()).OrderBy(x => x, StringComparer.Ordinal),
             viaJson.Select(f => f.SemanticKey()).OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(new DateOnly(2026, 1, 1), Assert.Single(viaXml).Period.End);
+    }
+
+    [Fact]
+    public void Reader_RejectsEndDateThatCannotBecomeExclusiveBoundary()
+    {
+        var xml = XmlSerializer.Serialize(Profile, new[] { Revenue() })
+            .Replace("2025-12-31</xbrli:endDate>", "9999-12-31</xbrli:endDate>", StringComparison.Ordinal);
+
+        var error = Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(xml));
+
+        Assert.Equal(DiagnosticCodes.XbrUnsupportedConstruct, error.Code);
     }
 
     [Fact]

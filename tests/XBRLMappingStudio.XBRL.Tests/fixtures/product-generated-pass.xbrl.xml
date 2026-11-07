@@ -11,7 +11,7 @@
     </xbrli:entity>
     <xbrli:period>
       <xbrli:startDate>2025-01-01</xbrli:startDate>
-      <xbrli:endDate>2026-01-01</xbrli:endDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
     </xbrli:period>
   </xbrli:context>
   <xbrli:unit id="u1">
