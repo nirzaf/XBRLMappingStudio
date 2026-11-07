@@ -61,9 +61,18 @@ public static class ProjectSerializer
         }
         catch (JsonException ex)
         {
+            var missingIdentity = FindMissingProfileIdentityFields(json);
             throw new ProjectSchemaException(
                 DiagnosticCodes.PrjCorruptFile,
-                DeserializationErrorMessage(json), ex);
+                missingIdentity is null
+                    ? "Project file is malformed or does not satisfy the current schema."
+                    : "Project is missing required profile identity field(s): "
+                        + string.Join(", ", missingIdentity)
+                        + "; profile identity cannot be inferred.",
+                ex)
+            {
+                IsProfileIdentityMissing = missingIdentity is not null
+            };
         }
 
         if (project is null)
@@ -94,22 +103,34 @@ public static class ProjectSerializer
         return project;
     }
 
-    private static string DeserializationErrorMessage(string json)
+    private static IReadOnlyList<string>? FindMissingProfileIdentityFields(string json)
     {
         try
         {
             using var document = JsonDocument.Parse(json);
             if (document.RootElement.ValueKind == JsonValueKind.Object)
             {
-                var missingIdentity = new[] { "profileId", "profileDigest" }
-                    .Where(property => !document.RootElement.TryGetProperty(property, out var value)
-                        || value.ValueKind != JsonValueKind.String
-                        || string.IsNullOrWhiteSpace(value.GetString()))
-                    .ToArray();
-                if (missingIdentity.Length > 0)
-                    return "Project is missing required profile identity field(s): "
-                        + string.Join(", ", missingIdentity)
-                        + "; profile identity cannot be inferred.";
+                var missingIdentity = new List<string>(2);
+                foreach (var property in new[] { "profileId", "profileDigest" })
+                {
+                    var matches = document.RootElement.EnumerateObject()
+                        .Where(candidate => StringComparer.Ordinal.Equals(candidate.Name, property))
+                        .ToArray();
+                    if (matches.Length > 1) return null;
+                    if (matches.Length == 0)
+                    {
+                        missingIdentity.Add(property);
+                        continue;
+                    }
+
+                    var value = matches[0].Value;
+                    if (value.ValueKind == JsonValueKind.Null
+                        || value.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(value.GetString()))
+                        missingIdentity.Add(property);
+                    else if (value.ValueKind != JsonValueKind.String)
+                        return null;
+                }
+                if (missingIdentity.Count > 0) return missingIdentity.AsReadOnly();
             }
         }
         catch (JsonException)
@@ -117,7 +138,7 @@ public static class ProjectSerializer
             // Preserve the generic malformed/schema fallback when the source cannot be parsed.
         }
 
-        return "Project file is malformed or does not satisfy the current schema.";
+        return null;
     }
 
     /// <summary>
@@ -154,6 +175,7 @@ public sealed class ProjectSchemaException : Exception
 {
     public string Code { get; }
     public bool IsReadOnly { get; init; }
+    public bool IsProfileIdentityMissing { get; init; }
 
     public ProjectSchemaException(string code, string message, Exception? inner = null)
         : base(message, inner)

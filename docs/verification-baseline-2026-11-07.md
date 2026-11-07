@@ -211,6 +211,12 @@ Verification:
   migration hint.
 - The final Release solution suite passed 845 tests, skipped 6 environment-gated
   Arelle tests, and had no failures.
+- The follow-up typed-error regression passed 5/5 across Project and Desktop
+  tests: missing identity is typed, malformed JSON and wrongly typed identity
+  are not, and the recovery hint still appears for a legacy project.
+- Exact-head CI run [42397385532](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42397385532)
+  passed the Windows and Ubuntu Release matrices, Arelle worker integration, and
+  repository hygiene on commit `c306cb9`.
 - Test build output was isolated under a temporary directory because another
   Desktop process held the normal Release output files. That process was left
   untouched.

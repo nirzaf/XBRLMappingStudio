@@ -202,7 +202,31 @@ public sealed class ProjectManagerTests : IDisposable
 
         Assert.Contains(missingField, blocked.Message, StringComparison.Ordinal);
         Assert.Contains("profile identity cannot be inferred", blocked.Message, StringComparison.Ordinal);
+        Assert.True(blocked.IsProfileIdentityMissing);
         Assert.Equal(originalBytes, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void MalformedProjectDoesNotReportMissingProfileIdentity()
+    {
+        var error = Assert.Throws<ProjectSchemaException>(() => ProjectSerializer.Deserialize("{"));
+
+        Assert.False(error.IsProfileIdentityMissing);
+        Assert.DoesNotContain("profile identity cannot be inferred", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void InvalidProfileIdentityTypeDoesNotReportMissingProfileIdentity()
+    {
+        var legacy = JsonNode.Parse(ProjectSerializer.Serialize(TestFixtures.BuildRevenueMappingProject()))!.AsObject();
+        legacy["profileId"] = 42;
+        legacy.Remove("profileDigest");
+
+        var error = Assert.Throws<ProjectSchemaException>(() =>
+            ProjectSerializer.Deserialize(legacy.ToJsonString(ProjectSerializer.Options)));
+
+        Assert.False(error.IsProfileIdentityMissing);
+        Assert.DoesNotContain("profile identity cannot be inferred", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

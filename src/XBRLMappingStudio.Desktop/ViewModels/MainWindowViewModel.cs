@@ -2202,8 +2202,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (openedFromBackup)
                 StatusText += " Recovered from a validated backup; the original remains untouched. Use Save As to create an independent recovery copy.";
         }
-        catch (ProjectSchemaException ex) when (
-            ex.Message.Contains("profile identity cannot be inferred", StringComparison.OrdinalIgnoreCase))
+        catch (ProjectSchemaException ex) when (ex.IsProfileIdentityMissing)
         {
             StatusText = $"Open failed: {ex.Message} Use File > Adopt Legacy Profile to create a separately identified copy.";
         }
