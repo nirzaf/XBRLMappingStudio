@@ -640,6 +640,51 @@ public sealed class ArelleExecutionTests
     }
 
     [RequiresPythonFact]
+    public Task MalformedWorkerResponseIsCrashAndTerminatesProcess()
+        => AssertInvalidWorkerResponseIsCrashAndTerminatesProcess("malformed", "protocol failed");
+
+    [RequiresPythonFact]
+    public Task MismatchedWorkerOperationIdIsCrashAndTerminatesProcess()
+        => AssertInvalidWorkerResponseIsCrashAndTerminatesProcess("wrong-operation", "operation ID");
+
+    private async Task AssertInvalidWorkerResponseIsCrashAndTerminatesProcess(string mode, string expectedError)
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-invalid-response-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        var pidPath = Path.Combine(workspace, "worker.pid");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using (var worker = new ArelleWorker(python!,
+                new[] { scriptPath, pidPath, mode, "invalid-response-profile", "sha256:invalid-response" }))
+            {
+                await worker.HandshakeAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+                var response = await worker.RequestAsync(TestWorkerRequest("invalid-response"), CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+
+                Assert.Equal(WorkerStatus.Crash, response.Status);
+                Assert.Contains(expectedError, response.Error, StringComparison.OrdinalIgnoreCase);
+                Assert.True(await WaitForAsync(() => File.Exists(pidPath), TimeSpan.FromSeconds(2)),
+                    "The fixture did not record its worker process ID.");
+                var workerPid = int.Parse(await File.ReadAllTextAsync(pidPath), CultureInfo.InvariantCulture);
+                Assert.True(await WaitForAsync(() => !IsProcessAlive(workerPid), TimeSpan.FromSeconds(5)),
+                    $"Malformed worker process {workerPid} remained alive after protocol rejection.");
+            }
+
+            await using var next = new ArelleWorker(python!,
+                FakeWorkerArgs(scriptPath, "normal", "next-profile", "sha256:next"));
+            var handshake = await next.HandshakeAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal("next-profile", handshake.ProfileId);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresPythonFact]
     public async Task TimedOutArelleRequestIsDistinctFromCrash()
     {
         var python = PythonExecutable();
@@ -797,6 +842,16 @@ public sealed class ArelleExecutionTests
                 sys.stdout.write("x" * (4 * 1024 * 1024 + 16))
                 sys.stdout.flush()
                 time.sleep(60)
+            elif mode == "malformed":
+                with open(marker, "w", encoding="ascii") as output:
+                    output.write(str(os.getpid()))
+                sys.stdout.write("{malformed json}\n")
+                sys.stdout.flush()
+            elif mode == "wrong-operation":
+                with open(marker, "w", encoding="ascii") as output:
+                    output.write(str(os.getpid()))
+                print(json.dumps({"operationId": "unexpected-operation", "status": "success",
+                                  "result": None, "diagnostics": []}), flush=True)
             elif mode == "hang":
                 while True:
                     time.sleep(1)
