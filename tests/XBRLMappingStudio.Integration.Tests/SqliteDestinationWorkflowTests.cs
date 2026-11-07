@@ -89,6 +89,40 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task WorkerFailure_CannotReplaceExistingSqliteFactsOrReceipt()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var acceptedService = NewService();
+        var acceptedRun = await acceptedService.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, acceptedRun.Manifest.Outcome);
+        await acceptedService.PublishDestinationAsync(project, acceptedRun, _directory,
+            allowSyntheticProfile: true);
+
+        var beforeFacts = await ReadFactsAsync(_databasePath);
+        var beforeReceipts = await ReadReceiptCountAsync(_databasePath);
+        var beforeBytes = await File.ReadAllBytesAsync(_databasePath);
+        Assert.Single(beforeFacts);
+        Assert.Equal(1, beforeReceipts);
+
+        var failingService = new MappingJobService(_profile, new CrashOnValidationWorker(_profile));
+        var failedRun = await failingService.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.OperationalFailure, failedRun.Manifest.Outcome);
+        Assert.False(failedRun.IsPublishable);
+        var error = await Assert.ThrowsAsync<AdapterException>(() =>
+            failingService.PublishDestinationAsync(project, failedRun, _directory,
+                allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+        Assert.Equal(beforeFacts, await ReadFactsAsync(_databasePath));
+        Assert.Equal(beforeReceipts, await ReadReceiptCountAsync(_databasePath));
+        Assert.Equal(beforeBytes, await File.ReadAllBytesAsync(_databasePath));
+        Assert.DoesNotContain(failedRun.Manifest.Outputs, output => output.Kind == "db-receipt");
+    }
+
+    [Fact]
     public async Task MixedPublication_FileSuccessSqliteRollback_IsManifestedAndRetryDoesNotReplaceFile()
     {
         var project = ConfiguredProject(_workbookPath);
@@ -795,6 +829,25 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     private MappingJobService NewService() => new(_profile, new LocalSyntheticWorker(_profile));
+
+    private sealed class CrashOnValidationWorker : IWorkerClient
+    {
+        private readonly LocalSyntheticWorker _inner;
+
+        public CrashOnValidationWorker(FilingProfile profile)
+            => _inner = new LocalSyntheticWorker(profile);
+
+        public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
+            => _inner.HandshakeAsync(cancellationToken);
+
+        public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+            => request.Operation == WorkerOperations.ValidateReport
+                ? Task.FromResult(new WorkerResponse(request.OperationId, WorkerStatus.Crash,
+                    Result: null, Array.Empty<Diagnostic>(), Error: "Injected validation worker crash."))
+                : _inner.RequestAsync(request, cancellationToken);
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
+    }
 
     private static IReadOnlyDictionary<string, SourceConnection> Connections(MappingProject project, string workbookPath)
     {
