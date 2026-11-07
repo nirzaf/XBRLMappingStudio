@@ -33,3 +33,20 @@ Verification:
   after one refreshed retry; no controls were changed. The isolated process was
   closed. Native visual layout, screen-reader accessibility, broader function
   signatures/operations, and installed-profile acceptance remain open.
+
+## OPS-01 SQLite cancellation preservation
+
+`SqliteDestinationWorkflowTests.CancelledSqlitePublicationPreservesPriorFactsAndReceipt`
+publishes a successful run, captures the existing database bytes, fact rows and
+receipt count, then cancels a separate full-run publication before its write
+boundary. It verifies cancellation does not alter the database and does not add
+a receipt to the cancelled run. Existing tests cover SQLite transaction rollback
+on an injected row-write failure and cancellation after staging for all four
+file destination formats; exhaustive cancellation/process-crash timing across
+all targets remains open.
+
+Verification:
+
+- The focused cancellation test passed 1/1.
+- The Release Integration suite passed 241 tests and skipped 6 environment-gated
+  Arelle cases (247 total).

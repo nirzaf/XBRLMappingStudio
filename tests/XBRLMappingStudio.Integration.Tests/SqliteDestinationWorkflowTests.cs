@@ -123,6 +123,40 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CancelledSqlitePublicationPreservesPriorFactsAndReceipt()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        using var acceptedRun = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, acceptedRun.Manifest.Outcome);
+        await service.PublishDestinationAsync(project, acceptedRun, _directory,
+            allowSyntheticProfile: true);
+
+        var beforeFacts = await ReadFactsAsync(_databasePath);
+        var beforeReceipts = await ReadReceiptCountAsync(_databasePath);
+        var beforeBytes = await File.ReadAllBytesAsync(_databasePath);
+        Assert.Single(beforeFacts);
+        Assert.Equal(1, beforeReceipts);
+
+        using var cancelledRun = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, cancelledRun.Manifest.Outcome);
+        Assert.DoesNotContain(cancelledRun.Manifest.Outputs, output => output.Kind == "db-receipt");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.PublishDestinationAsync(project, cancelledRun, _directory,
+                allowSyntheticProfile: true, cancellationToken: cancellation.Token));
+
+        Assert.Equal(beforeFacts, await ReadFactsAsync(_databasePath));
+        Assert.Equal(beforeReceipts, await ReadReceiptCountAsync(_databasePath));
+        Assert.Equal(beforeBytes, await File.ReadAllBytesAsync(_databasePath));
+        Assert.DoesNotContain(cancelledRun.Manifest.Outputs, output => output.Kind == "db-receipt");
+    }
+
+    [Fact]
     public async Task MixedPublication_FileSuccessSqliteRollback_IsManifestedAndRetryDoesNotReplaceFile()
     {
         var project = ConfiguredProject(_workbookPath);
