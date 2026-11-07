@@ -100,6 +100,82 @@ public sealed class FunctionLibraryServiceTests
         };
 
     [Fact]
+    public void CreateFunction_AppendsFirstRevisionWithoutMutatingSourceProject()
+    {
+        var project = Project();
+        var function = Scale("scale", 1, "10");
+
+        var updated = FunctionLibraryService.CreateFunction(project, function);
+
+        Assert.Empty(project.Functions);
+        Assert.Single(updated.Functions);
+        Assert.Equal("scale", updated.Functions[0].FunctionId);
+        Assert.Equal(1, updated.Functions[0].Revision);
+        Assert.NotSame(function.Nodes[0], updated.Functions[0].Nodes[0]);
+    }
+
+    [Fact]
+    public void CreateFunction_RejectsDuplicateIdentityAndIncompatibleCatalog()
+    {
+        var existing = Scale("scale", 1, "10");
+        var duplicateError = Assert.Throws<InvalidOperationException>(() =>
+            FunctionLibraryService.CreateFunction(Project(existing), existing));
+        Assert.Contains("already exists", duplicateError.Message);
+
+        var incompatible = existing with { FunctionId = "other", CatalogVersion = "future" };
+        var catalogError = Assert.Throws<InvalidOperationException>(() =>
+            FunctionLibraryService.CreateFunction(Project(existing), incompatible));
+        Assert.Contains("catalog", catalogError.Message);
+    }
+
+    [Fact]
+    public void FunctionPackageSerializer_RoundTripsPinnedRootAndDependencies()
+    {
+        var package = new FunctionPackageDocument
+        {
+            RootFunctionId = "wrapper",
+            RootRevision = 1,
+            Functions = new List<FunctionDefinition>
+            {
+                Scale("scale", 1, "10"),
+                Call("wrapper", 1, "scale", 1)
+            }
+        };
+
+        var roundTrip = FunctionPackageSerializer.Deserialize(FunctionPackageSerializer.Serialize(package));
+
+        Assert.Equal("wrapper", roundTrip.RootFunctionId);
+        Assert.Equal(1, roundTrip.RootRevision);
+        Assert.Equal(new[] { "scale", "wrapper" }, roundTrip.Functions
+            .Select(function => function.FunctionId).OrderBy(id => id, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void FunctionPackageSerializer_RejectsMissingRootAndUnsupportedSchema()
+    {
+        var missingRoot = new FunctionPackageDocument
+        {
+            RootFunctionId = "missing",
+            RootRevision = 1,
+            Functions = new List<FunctionDefinition> { Scale("scale", 1, "10") }
+        };
+        Assert.Throws<InvalidOperationException>(() => FunctionPackageSerializer.Serialize(missingRoot));
+
+        var unsupported = missingRoot with { RootFunctionId = "scale", SchemaVersion = 2 };
+        Assert.Throws<InvalidOperationException>(() => FunctionPackageSerializer.Serialize(unsupported));
+
+        var invalidFunction = Scale("scale", 1, "10") with { Nodes = null! };
+        var malformedShape = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            rootFunctionId = "scale",
+            rootRevision = 1,
+            functions = new[] { invalidFunction }
+        });
+        Assert.Throws<InvalidOperationException>(() => FunctionPackageSerializer.Deserialize(malformedShape));
+    }
+
+    [Fact]
     public void CreateRevision_AppendsNewBodyWithoutChangingPinnedOldRevision()
     {
         var first = Scale("scale", 1, "10");

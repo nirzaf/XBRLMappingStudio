@@ -12,6 +12,35 @@ public static class FunctionLibraryService
 {
     private const string FunctionCallNodeType = "functionCall";
 
+    /// <summary>Appends the first immutable revision of a named function.</summary>
+    public static MappingProject CreateFunction(MappingProject project, FunctionDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(definition);
+        if (string.IsNullOrWhiteSpace(definition.FunctionId))
+            throw new ArgumentException("Function ID is required.", nameof(definition));
+        if (string.IsNullOrWhiteSpace(definition.Name))
+            throw new ArgumentException("Function name is required.", nameof(definition));
+        if (definition.Revision != 1)
+            throw new ArgumentException("A new function must start at revision 1.", nameof(definition));
+        if (project.Functions.Any(existing =>
+                StringComparer.Ordinal.Equals(existing.FunctionId, definition.FunctionId)))
+            throw new InvalidOperationException($"Function '{definition.FunctionId}' already exists.");
+        if (!FunctionCatalogVersions.IsCompatible(project.FunctionCatalogVersion, definition.CatalogVersion))
+            throw new InvalidOperationException($"Function '{definition.FunctionId}@1' uses catalog "
+                + $"'{definition.CatalogVersion}', which does not match project catalog "
+                + $"'{project.FunctionCatalogVersion}'.");
+
+        var firstRevision = definition with
+        {
+            Inputs = definition.Inputs.ToList(),
+            Outputs = definition.Outputs.ToList(),
+            Nodes = definition.Nodes.Select(node => node.ShallowCopy()).ToList(),
+            Edges = definition.Edges.Select(edge => edge with { }).ToList()
+        };
+        return CopyProject(project, project.Functions.Append(firstRevision).ToList());
+    }
+
     /// <summary>
     /// Creates the next immutable revision of a function. <paramref name="expectedRevision"/>
     /// must be the current latest revision so stale editors cannot overwrite a newer draft.

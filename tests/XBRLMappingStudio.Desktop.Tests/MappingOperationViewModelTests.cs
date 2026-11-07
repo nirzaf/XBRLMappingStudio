@@ -394,6 +394,8 @@ public sealed class MappingOperationViewModelTests
     {
         public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
+        public Task<string?> OpenFunctionPackageAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveFunctionPackageAsync() => Task.FromResult<string?>(null);
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)
             => Task.FromResult(false);
         public Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath)

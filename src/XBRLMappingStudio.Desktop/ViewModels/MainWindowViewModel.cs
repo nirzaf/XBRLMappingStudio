@@ -1122,6 +1122,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public DesignerSession Session => _session;
 
+    /// <summary>Revision-pinned declarative function authoring surface.</summary>
+    public FunctionLibraryEditorViewModel FunctionLibrary { get; }
+
     public IReadOnlyList<NodeViewModel> Nodes => _session.Nodes;
     public IReadOnlyList<EdgeViewModel> Edges => _session.Edges;
 
@@ -1442,6 +1445,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _session = new DesignerSession(project);
         _session.Changed += OnSessionChanged;
         _session.SelectionChanged += OnSessionSelectionChanged;
+        FunctionLibrary = new FunctionLibraryEditorViewModel(() => Session, _fileDialog);
         RefreshTaxonomyMigrationTargets(_profile);
         _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         RefreshTitle();
@@ -1508,6 +1512,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         InvalidateMappingOperationIfStale();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
         var currentProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
+        FunctionLibrary.RefreshFromProject();
         if (!_isApplyingTaxonomyMigration && _taxonomyMigrationProposal is { } migrationProposal
             && (!StringComparer.Ordinal.Equals(migrationProposal.SourceProjectSnapshotJson,
                     currentProjectSnapshot)

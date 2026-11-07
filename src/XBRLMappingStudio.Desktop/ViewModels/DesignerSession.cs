@@ -370,6 +370,112 @@ public sealed class DesignerSession
         return nodeId;
     }
 
+    /// <summary>Adds a fully declared node in one undoable graph edit.</summary>
+    public string AddNode(MappingNode node)
+    {
+        ArgumentNullException.ThrowIfNull(node);
+        if (string.IsNullOrWhiteSpace(node.NodeId)
+            || _project.Nodes.Any(existing => StringComparer.Ordinal.Equals(existing.NodeId, node.NodeId)))
+            throw new InvalidOperationException("A node ID must be non-empty and unique in the graph.");
+
+        PushUndo();
+        _project.Nodes.Add(node.ShallowCopy());
+        RebuildViewModels(captureSnapshot: false);
+        return node.NodeId;
+    }
+
+    /// <summary>Inserts a declared node into one edge as a single undoable edit.</summary>
+    public bool TryInsertNodeOnEdge(
+        string edgeId,
+        MappingNode node,
+        string inputPortName,
+        string outputPortName,
+        out string? refusalReason)
+    {
+        refusalReason = null;
+        ArgumentNullException.ThrowIfNull(node);
+        var edgeIndex = _project.Edges.FindIndex(edge =>
+            StringComparer.Ordinal.Equals(edge.EdgeId, edgeId));
+        if (edgeIndex < 0)
+        {
+            refusalReason = "The edge no longer exists.";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(node.NodeId)
+            || _project.Nodes.Any(existing => StringComparer.Ordinal.Equals(existing.NodeId, node.NodeId)))
+        {
+            refusalReason = "A node ID must be non-empty and unique in the graph.";
+            return false;
+        }
+
+        var edge = _project.Edges[edgeIndex];
+        var source = _project.Nodes.FirstOrDefault(candidate => candidate.NodeId == edge.SourceNodeId);
+        var target = _project.Nodes.FirstOrDefault(candidate => candidate.NodeId == edge.TargetNodeId);
+        var sourcePort = source?.OutputPorts.FirstOrDefault(port => port.Name == edge.SourcePortName);
+        var inputPort = node.InputPorts.FirstOrDefault(port => port.Name == inputPortName);
+        var outputPort = node.OutputPorts.FirstOrDefault(port => port.Name == outputPortName);
+        var targetPort = target?.InputPorts.FirstOrDefault(port => port.Name == edge.TargetPortName);
+        if (source is null || target is null || sourcePort is null || inputPort is null
+            || outputPort is null || targetPort is null)
+        {
+            refusalReason = "The edge or inserted node references a missing port.";
+            return false;
+        }
+        if (!ShapeChecker.AreCompatible(sourcePort, inputPort)
+            || !ShapeChecker.AreCompatible(outputPort, targetPort))
+        {
+            refusalReason = "The inserted node ports are incompatible with the existing edge.";
+            return false;
+        }
+        if ((sourcePort.Cardinality == PortCardinality.Collection
+                && inputPort.Cardinality == PortCardinality.Single)
+            || (outputPort.Cardinality == PortCardinality.Collection
+                && targetPort.Cardinality == PortCardinality.Single))
+        {
+            refusalReason = "A collection output cannot connect directly to a single-value input.";
+            return false;
+        }
+
+        PushUndo();
+        _project.Edges.RemoveAt(edgeIndex);
+        _project.Nodes.Add(node.ShallowCopy());
+        _project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "e" + Id.New(),
+            SourceNodeId = edge.SourceNodeId,
+            SourcePortName = edge.SourcePortName,
+            TargetNodeId = node.NodeId,
+            TargetPortName = inputPortName
+        });
+        _project.Edges.Add(new MappingEdge
+        {
+            EdgeId = "e" + Id.New(),
+            SourceNodeId = node.NodeId,
+            SourcePortName = outputPortName,
+            TargetNodeId = edge.TargetNodeId,
+            TargetPortName = edge.TargetPortName
+        });
+        _selected.Clear();
+        _selected.Add(node.NodeId);
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
+    /// <summary>Replaces project content from an immutable service result in one undo step.</summary>
+    public bool ReplaceProject(MappingProject project)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        if (!StringComparer.Ordinal.Equals(_project.ProjectId, project.ProjectId))
+            throw new InvalidOperationException("A designer session cannot replace its project identity.");
+
+        var serialized = ProjectSerializer.Serialize(project);
+        if (StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(_project), serialized)) return false;
+        PushUndo();
+        _project = ProjectSerializer.Deserialize(serialized);
+        RebuildViewModels(captureSnapshot: false);
+        return true;
+    }
+
     public bool SetNodeParameter(string nodeId, string name, object? value)
     {
         var node = _project.Nodes.FirstOrDefault(n => n.NodeId == nodeId);

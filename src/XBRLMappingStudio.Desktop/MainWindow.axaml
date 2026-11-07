@@ -291,6 +291,114 @@
             </Border>
           </Grid>
         </TabItem>
+        <TabItem Header="Functions">
+          <Grid ColumnDefinitions="230,*,280" RowDefinitions="Auto,*">
+            <Border Grid.Row="0" Grid.ColumnSpan="3" Background="#EEF3F8" Padding="8">
+              <TextBlock Text="Functions are immutable, revisioned decimal subgraphs. Previews use synthetic input; pin a saved revision to add a call node to the mapping graph."
+                         TextWrapping="Wrap" AutomationProperties.Name="Function authoring safety and revision summary" />
+            </Border>
+            <Border Grid.Row="1" Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="7">
+                  <TextBlock Text="Function library" FontWeight="Bold" />
+                  <Button Content="New function" Command="{Binding FunctionLibrary.NewFunctionCommand}"
+                          AutomationProperties.Name="Create a new function draft" />
+                  <ListBox ItemsSource="{Binding FunctionLibrary.Functions}"
+                           SelectedItem="{Binding FunctionLibrary.SelectedFunction, Mode=TwoWay}"
+                           MinHeight="130" AutomationProperties.Name="Saved function revisions">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:FunctionRevisionRow">
+                        <TextBlock Text="{Binding Display}" TextWrapping="Wrap"
+                                   AutomationProperties.Name="{Binding Display}" />
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                  <TextBlock Text="Draft name" />
+                  <TextBox Text="{Binding FunctionLibrary.DraftName, Mode=TwoWay}"
+                           AutomationProperties.Name="Function draft name" />
+                  <TextBlock Text="Function ID" />
+                  <TextBlock Text="{Binding FunctionLibrary.DraftFunctionId}"
+                             AutomationProperties.Name="Stable function ID" TextWrapping="Wrap" />
+                  <TextBlock Text="{Binding FunctionLibrary.DraftRevisionSummary}"
+                             AutomationProperties.Name="Next immutable revision" TextWrapping="Wrap" />
+                  <Button Content="Save new revision" Command="{Binding FunctionLibrary.SaveFunctionRevisionCommand}"
+                          AutomationProperties.Name="Save an immutable function revision" />
+                  <Button Content="Pin selected revision in Mapping" Command="{Binding FunctionLibrary.PinSelectedFunctionCommand}"
+                          IsEnabled="{Binding FunctionLibrary.CanPinSelectedFunction}"
+                          AutomationProperties.Name="Add a mapping call pinned to the selected revision" />
+                  <Separator />
+                  <TextBlock Text="Function package" FontWeight="Bold" />
+                  <Button Content="Export selected package" Command="{Binding FunctionLibrary.ExportFunctionPackageCommand}"
+                          IsEnabled="{Binding FunctionLibrary.CanExportFunctionPackage}"
+                          AutomationProperties.Name="Export selected function and pinned dependencies" />
+                  <TextBox Text="{Binding FunctionLibrary.ImportFunctionId, Mode=TwoWay}"
+                           Watermark="New imported function ID"
+                           AutomationProperties.Name="Imported function ID" />
+                  <TextBox Text="{Binding FunctionLibrary.ImportFunctionName, Mode=TwoWay}"
+                           Watermark="Optional display name"
+                           AutomationProperties.Name="Imported function name" />
+                  <Button Content="Import package as new function" Command="{Binding FunctionLibrary.ImportFunctionPackageCommand}"
+                          IsEnabled="{Binding FunctionLibrary.CanImportFunctionPackage}"
+                          AutomationProperties.Name="Import function package under a new ID" />
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+            <Grid Grid.Row="1" Grid.Column="1" RowDefinitions="Auto,*">
+              <StackPanel Orientation="Horizontal" Spacing="5" Margin="8,6">
+                <Button Content="Add Scale" Command="{Binding FunctionLibrary.AddScaleCommand}"
+                        AutomationProperties.Name="Add a scale operation to function graph" />
+                <Button Content="Add Change Sign" Command="{Binding FunctionLibrary.AddChangeSignCommand}"
+                        AutomationProperties.Name="Add a change sign operation to function graph" />
+                <Button Content="Add Round" Command="{Binding FunctionLibrary.AddRoundCommand}"
+                        AutomationProperties.Name="Add a round operation to function graph" />
+              </StackPanel>
+              <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="1" Margin="6">
+                <controls:GraphCanvas Focusable="True" ClipToBounds="True"
+                                      Session="{Binding FunctionLibrary.Session}"
+                                      Nodes="{Binding FunctionLibrary.Nodes}"
+                                      Edges="{Binding FunctionLibrary.Edges}"
+                                      AutomationProperties.Name="Function subgraph editor" />
+              </Border>
+            </Grid>
+            <Border Grid.Row="1" Grid.Column="2" BorderBrush="#33000000" BorderThickness="1,0,0,0" Padding="8">
+              <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="7">
+                  <TextBlock Text="Function inspector" FontWeight="Bold" />
+                  <TextBlock Text="{Binding FunctionLibrary.DraftGraphSummary}"
+                             TextWrapping="Wrap" AutomationProperties.Name="Function graph step summary" />
+                  <TextBlock Text="{Binding FunctionLibrary.SelectedDraftNodeDisplay}"
+                             TextWrapping="Wrap" AutomationProperties.Name="Selected function operation" />
+                  <TextBlock Text="Scale factor" />
+                  <TextBox Text="{Binding FunctionLibrary.SelectedScaleFactor, Mode=TwoWay}"
+                           IsEnabled="{Binding FunctionLibrary.CanEditScaleFactor}"
+                           AutomationProperties.Name="Scale factor parameter" />
+                  <TextBlock Text="Round digits" />
+                  <TextBox Text="{Binding FunctionLibrary.SelectedRoundDigits, Mode=TwoWay}"
+                           IsEnabled="{Binding FunctionLibrary.CanEditRound}"
+                           AutomationProperties.Name="Round decimal digits" />
+                  <ComboBox ItemsSource="{Binding FunctionLibrary.RoundModes}"
+                            SelectedItem="{Binding FunctionLibrary.SelectedRoundMode, Mode=TwoWay}"
+                            IsEnabled="{Binding FunctionLibrary.CanEditRound}"
+                            AutomationProperties.Name="Round mode" />
+                  <Button Content="Apply operation parameters"
+                          Command="{Binding FunctionLibrary.ApplyNodeParametersCommand}"
+                          AutomationProperties.Name="Apply function operation parameters" />
+                  <Separator />
+                  <TextBlock Text="Synthetic decimal preview" FontWeight="Bold" />
+                  <TextBox Text="{Binding FunctionLibrary.PreviewInput, Mode=TwoWay}"
+                           Watermark="Invariant decimal input"
+                           AutomationProperties.Name="Synthetic function preview input" />
+                  <Button Content="Test draft" Command="{Binding FunctionLibrary.TestFunctionCommand}"
+                          AutomationProperties.Name="Run a synthetic decimal function preview" />
+                  <TextBlock Text="{Binding FunctionLibrary.PreviewStatus}"
+                             TextWrapping="Wrap" AutomationProperties.Name="Function preview result" />
+                  <TextBlock Text="{Binding FunctionLibrary.Status}"
+                             TextWrapping="Wrap" AutomationProperties.Name="Function library status" />
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Grid>
+        </TabItem>
         <TabItem Header="PDF review" IsSelected="{Binding IsPdfReviewTabSelected, Mode=TwoWay}"
                  IsVisible="{Binding HasPdfDocument}"
                  IsEnabled="{Binding CanEditPdfReview}">

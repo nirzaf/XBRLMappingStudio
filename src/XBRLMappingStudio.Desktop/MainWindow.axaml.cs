@@ -72,6 +72,10 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
     {
         Patterns = new[] { "*.xmap" }
     };
+    private static readonly FilePickerFileType FunctionPackageType = new("XBRL Mapping function package")
+    {
+        Patterns = new[] { "*.xfunc.json", "*.json" }
+    };
     private static readonly FilePickerFileType JsonType = new("xBRL-JSON report")
     {
         Patterns = new[] { "*.xbrl.json", "*.json" }
@@ -112,6 +116,29 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
             SuggestedFileName = "mapping.xmap",
             DefaultExtension = "xmap",
             FileTypeChoices = new[] { ProjectType }
+        });
+        return LocalPath(file?.Path);
+    }
+
+    public async Task<string?> OpenFunctionPackageAsync()
+    {
+        var files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import function package",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { FunctionPackageType }
+        });
+        return LocalPath(files.FirstOrDefault()?.Path);
+    }
+
+    public async Task<string?> SaveFunctionPackageAsync()
+    {
+        var file = await owner.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export function package",
+            SuggestedFileName = "function-package.xfunc.json",
+            DefaultExtension = "json",
+            FileTypeChoices = new[] { FunctionPackageType }
         });
         return LocalPath(file?.Path);
     }

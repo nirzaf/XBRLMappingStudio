@@ -118,6 +118,55 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void InsertNodeOnEdge_IsOneValidatedUndoableEdit()
+    {
+        var session = new DesignerSession(Project());
+        var before = ProjectSerializer.Serialize(session.Project);
+        var inserted = new MappingNode
+        {
+            NodeId = "inserted-transform",
+            NodeType = "test-transform",
+            DisplayName = "Inserted transform",
+            InputPorts = new() { new PortDefinition("input", PortShape.String, PortCardinality.Single) },
+            OutputPorts = new() { new PortDefinition("value", PortShape.String, PortCardinality.Single) }
+        };
+
+        Assert.True(session.TryInsertNodeOnEdge("e0", inserted, "input", "value", out var refusal));
+        Assert.Null(refusal);
+        Assert.Equal(5, session.Project.Nodes.Count);
+        Assert.Equal(2, session.Project.Edges.Count);
+        Assert.Contains(session.Project.Edges, edge => edge.TargetNodeId == inserted.NodeId);
+        Assert.Contains(session.Project.Edges, edge => edge.SourceNodeId == inserted.NodeId);
+
+        session.Undo();
+        Assert.Equal(before, ProjectSerializer.Serialize(session.Project));
+        Assert.True(session.CanRedo);
+        session.Redo();
+        Assert.Equal(5, session.Project.Nodes.Count);
+        Assert.Equal(2, session.Project.Edges.Count);
+    }
+
+    [Fact]
+    public void InsertNodeOnEdge_RejectsIncompatiblePortsWithoutChangingGraph()
+    {
+        var session = new DesignerSession(Project());
+        var before = ProjectSerializer.Serialize(session.Project);
+        var incompatible = new MappingNode
+        {
+            NodeId = "incompatible-transform",
+            NodeType = "test-transform",
+            DisplayName = "Incompatible transform",
+            InputPorts = new() { new PortDefinition("input", PortShape.Decimal, PortCardinality.Single) },
+            OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+        };
+
+        Assert.False(session.TryInsertNodeOnEdge("e0", incompatible, "input", "value", out var refusal));
+        Assert.Contains("incompatible", refusal, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before, ProjectSerializer.Serialize(session.Project));
+        Assert.False(session.CanUndo);
+    }
+
+    [Fact]
     public void MoveNode_SaveReopen_LayoutPersisted_DigestUnchanged()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-designer", Guid.NewGuid().ToString("n"));
@@ -2492,6 +2541,8 @@ public sealed class DesignerSessionTests
 
         public Task<string?> OpenProjectAsync() => Task.FromResult(ProjectOpenPath);
         public Task<string?> SaveProjectAsync() => Task.FromResult(ProjectSavePath);
+        public Task<string?> OpenFunctionPackageAsync() => Task.FromResult<string?>(null);
+        public Task<string?> SaveFunctionPackageAsync() => Task.FromResult<string?>(null);
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)
             => Task.FromResult(ConfirmIndependentCopy);
         public Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath)
