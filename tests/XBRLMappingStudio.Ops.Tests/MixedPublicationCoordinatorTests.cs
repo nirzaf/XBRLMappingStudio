@@ -1,8 +1,12 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.PublicationCrashHarness;
 
 namespace XBRLMappingStudio.Ops.Tests;
 
@@ -168,6 +172,208 @@ public sealed class MixedPublicationCoordinatorTests
         Assert.Equal(DiagnosticCodes.PubPartialFailure, ((PublicationException)retry.Failure!).Code);
         Assert.Equal(0, fileAttempts);
         Assert.Equal(0, sqliteAttempts);
+    }
+
+    [Theory]
+    [InlineData("file-in-progress")]
+    [InlineData("file-landed")]
+    [InlineData("sqlite-in-progress")]
+    [InlineData("sqlite-prepared")]
+    [InlineData("sqlite-committed")]
+    public async Task AbruptProcessTermination_ReconcilesDurableMixedPublicationState(string stage)
+    {
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "local-state.db");
+        var targetPath = Path.Combine(workspace.Path, "destination.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var priorBytes = Encoding.UTF8.GetBytes("prior accepted report");
+        var reportBytes = CrashPublicationContract.ReportBytes;
+        await File.WriteAllBytesAsync(filePath, priorBytes);
+        await CreateCrashTargetAsync(targetPath);
+
+        var exitCode = await StartCrashHarnessAsync(stage, statePath, filePath, targetPath);
+
+        Assert.NotEqual(0, exitCode);
+        var coordinator = new MixedPublicationCoordinator(
+            new MixedPublicationStore(new LocalApplicationDatabase(statePath)));
+        var recovered = await coordinator.ReconcileAsync(CrashPublicationContract.OperationKey(stage));
+
+        Assert.NotNull(recovered);
+        if (stage == "file-in-progress")
+        {
+            Assert.Equal(DestinationPublicationState.Unknown, recovered!.FileState);
+            Assert.Equal(DestinationPublicationState.Pending, recovered.SqliteState);
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(filePath));
+
+            var fileAttempts = 0;
+            var sqliteAttempts = 0;
+            var blocked = await coordinator.PublishAsync(IntentForCrash(stage, filePath, reportBytes, targetPath),
+                _ =>
+                {
+                    fileAttempts++;
+                    throw new InvalidOperationException("Unknown file outcomes must block publication retry.");
+                },
+                (_, _) =>
+                {
+                    sqliteAttempts++;
+                    throw new InvalidOperationException("A blocked file outcome must prevent the SQLite leg.");
+                });
+
+            Assert.IsType<PublicationException>(blocked.Failure);
+            Assert.Equal(0, fileAttempts);
+            Assert.Equal(0, sqliteAttempts);
+            return;
+        }
+
+        Assert.Equal(DestinationPublicationState.Confirmed, recovered!.FileState);
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+        var expectedSqliteState = stage == "sqlite-committed"
+            ? DestinationPublicationState.Confirmed
+            : stage is "sqlite-in-progress" or "sqlite-prepared"
+                ? DestinationPublicationState.Rejected
+                : DestinationPublicationState.Pending;
+        Assert.Equal(expectedSqliteState, recovered.SqliteState);
+        Assert.Equal(stage == "sqlite-committed" ? 1 : 0, await CountRowsAsync(targetPath, "facts"));
+
+        var filePublishAttempts = 0;
+        var sqlitePublishAttempts = 0;
+        var retry = await coordinator.PublishAsync(IntentForCrash(stage, filePath, reportBytes, targetPath),
+            _ =>
+            {
+                filePublishAttempts++;
+                throw new InvalidOperationException("A digest-confirmed file must not be rewritten.");
+            },
+            async (prepared, token) =>
+            {
+                sqlitePublishAttempts++;
+                var operationKey = CrashPublicationContract.SqliteOperationKey(stage);
+                var dbIntent = CrashPublicationContract.SqliteIntentFingerprint(stage);
+                prepared(operationKey, dbIntent);
+                return await CommitCrashReceiptOnceAsync(targetPath, operationKey, dbIntent, token);
+            });
+
+        Assert.Null(retry.Failure);
+        Assert.Equal(0, filePublishAttempts);
+        Assert.Equal(stage == "sqlite-committed" ? 0 : 1, sqlitePublishAttempts);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.SqliteState);
+        Assert.Equal(1, await CountRowsAsync(targetPath, "facts"));
+        Assert.Equal(1, await CountRowsAsync(targetPath, "xms_idempotency_receipts"));
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+    }
+
+    private static MixedPublicationIntent IntentForCrash(
+        string stage, string filePath, byte[] reportBytes, string targetPath)
+        => new(CrashPublicationContract.OperationKey(stage), "sha256:mixed-intent-" + stage,
+            Path.GetFullPath(filePath), DestinationLock.DigestBytes(reportBytes), reportBytes.LongLength,
+            Path.GetFullPath(targetPath), "facts");
+
+    private static async Task<int> StartCrashHarnessAsync(
+        string stage, string statePath, string filePath, string targetPath)
+    {
+        var testAssembly = typeof(MixedPublicationCoordinatorTests).Assembly.Location;
+        var runtimeConfig = Path.ChangeExtension(testAssembly, ".runtimeconfig.json");
+        var dependencyFile = Path.ChangeExtension(testAssembly, ".deps.json");
+        var harnessAssembly = typeof(CrashPublicationContract).Assembly.Location;
+        Assert.True(File.Exists(runtimeConfig), $"Test runtime config was not found at {runtimeConfig}.");
+        Assert.True(File.Exists(dependencyFile), $"Test dependency file was not found at {dependencyFile}.");
+        Assert.True(File.Exists(harnessAssembly), $"Crash harness assembly was not found at {harnessAssembly}.");
+
+        var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+        {
+            WorkingDirectory = Path.GetDirectoryName(testAssembly)!,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        foreach (var argument in new[]
+        {
+            "exec", "--runtimeconfig", runtimeConfig, "--depsfile", dependencyFile,
+            harnessAssembly, stage, statePath, filePath, targetPath
+        })
+            start.ArgumentList.Add(argument);
+
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start the mixed-publication crash harness.");
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        _ = await stdout;
+        _ = await stderr;
+        return process.ExitCode;
+    }
+
+    private static async Task CreateCrashTargetAsync(string path)
+    {
+        await using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE facts(payload TEXT NOT NULL);
+            CREATE TABLE xms_idempotency_receipts(
+                operation_key TEXT PRIMARY KEY NOT NULL,
+                intent_fingerprint TEXT NOT NULL,
+                written_rows INTEGER NOT NULL,
+                completed_utc TEXT NOT NULL);
+            """;
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<SqlitePublishReceipt> CommitCrashReceiptOnceAsync(
+        string targetPath, string operationKey, string intentFingerprint, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection($"Data Source={targetPath};Pooling=False");
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using (var existing = connection.CreateCommand())
+        {
+            existing.Transaction = transaction;
+            existing.CommandText = "SELECT intent_fingerprint,written_rows,completed_utc "
+                + "FROM xms_idempotency_receipts WHERE operation_key=$key";
+            existing.Parameters.AddWithValue("$key", operationKey);
+            await using var reader = await existing.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                Assert.Equal(intentFingerprint, reader.GetString(0));
+                var prior = new SqlitePublishReceipt(operationKey, intentFingerprint,
+                    reader.GetInt32(1), DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture));
+                await reader.DisposeAsync();
+                await transaction.CommitAsync(cancellationToken);
+                return prior;
+            }
+        }
+
+        await using (var fact = connection.CreateCommand())
+        {
+            fact.Transaction = transaction;
+            fact.CommandText = "INSERT INTO facts(payload) VALUES('one committed fact batch')";
+            await fact.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var completed = DateTimeOffset.UtcNow;
+        await using (var receipt = connection.CreateCommand())
+        {
+            receipt.Transaction = transaction;
+            receipt.CommandText = "INSERT INTO xms_idempotency_receipts "
+                + "(operation_key,intent_fingerprint,written_rows,completed_utc) "
+                + "VALUES($key,$intent,1,$completed)";
+            receipt.Parameters.AddWithValue("$key", operationKey);
+            receipt.Parameters.AddWithValue("$intent", intentFingerprint);
+            receipt.Parameters.AddWithValue("$completed", completed.ToString("O"));
+            await receipt.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new SqlitePublishReceipt(operationKey, intentFingerprint, 1, completed);
+    }
+
+    private static async Task<int> CountRowsAsync(string path, string table)
+    {
+        await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {table}";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
     }
 
     private static MixedPublicationIntent Intent(string filePath, byte[] bytes, string sqlitePath, string? operationKey = null)

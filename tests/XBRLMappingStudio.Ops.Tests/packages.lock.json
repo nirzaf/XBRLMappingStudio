@@ -303,6 +303,13 @@
           "XBRLMappingStudio.Diagnostics": "[1.0.0, )"
         }
       },
+      "xbrlmappingstudio.publicationcrashharness": {
+        "type": "Project",
+        "dependencies": {
+          "XBRLMappingStudio.Adapters": "[1.0.0, )",
+          "XBRLMappingStudio.Application": "[1.0.0, )"
+        }
+      },
       "xbrlmappingstudio.worker": {
         "type": "Project",
         "dependencies": {

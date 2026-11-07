@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Project\XBRLMappingStudio.Project.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.Worker\XBRLMappingStudio.Worker.csproj" />
     <ProjectReference Include="..\..\src\XBRLMappingStudio.XBRL\XBRLMappingStudio.XBRL.csproj" />
+    <ProjectReference Include="..\XBRLMappingStudio.PublicationCrashHarness\XBRLMappingStudio.PublicationCrashHarness.csproj" />
   </ItemGroup>
 
   <ItemGroup>
