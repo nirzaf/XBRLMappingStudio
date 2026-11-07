@@ -647,6 +647,37 @@ public sealed class ArelleExecutionTests
     public Task MismatchedWorkerOperationIdIsCrashAndTerminatesProcess()
         => AssertInvalidWorkerResponseIsCrashAndTerminatesProcess("wrong-operation", "operation ID");
 
+    [RequiresPythonFact]
+    public async Task WorkerPreservesHostileScriptPathsAndArgumentsAsLiteralTokens()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-hostile-path-" + Guid.NewGuid().ToString("N"));
+        var hostileDirectoryName = OperatingSystem.IsWindows()
+            ? "worker path & echo XMS_PATH_INJECTION"
+            : "worker path; echo XMS_PATH_INJECTION;#";
+        var workerDirectory = Path.Combine(workspace, hostileDirectoryName);
+        Directory.CreateDirectory(workerDirectory);
+        var scriptPath = Path.Combine(workerDirectory, "fake worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        var hostileProfileId = OperatingSystem.IsWindows()
+            ? "profile; Write-Output XMS_ARGUMENT_INJECTION; #"
+            : "profile; echo XMS_ARGUMENT_INJECTION;#";
+
+        try
+        {
+            await using var worker = new ArelleWorker(python!,
+                FakeWorkerArgs(scriptPath, "normal", hostileProfileId, "sha256:hostile-path"));
+            var handshake = await worker.HandshakeAsync(CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(hostileProfileId, handshake.ProfileId);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
     private async Task AssertInvalidWorkerResponseIsCrashAndTerminatesProcess(string mode, string expectedError)
     {
         var python = PythonExecutable();
