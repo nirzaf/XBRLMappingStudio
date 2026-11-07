@@ -4,6 +4,7 @@
 import argparse
 from collections import deque
 from decimal import Decimal, InvalidOperation
+import gc
 import hashlib
 import json
 import math
@@ -49,7 +50,6 @@ MAX_TAXONOMY_ARCHIVES = 64
 MAX_TAXONOMY_ARCHIVE_FILES = 16384
 MAX_TAXONOMY_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_TAXONOMY_ARCHIVE_TOTAL_BYTES = 1024 * 1024 * 1024
-MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES = 1024 * 1024 * 1024
 
 _OFFLINE_NETWORK_AUDIT_EVENTS = frozenset({
     "socket.bind",
@@ -85,7 +85,7 @@ XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 OASIS_CATALOG_NAMESPACE = "urn:oasis:names:tc:entity:xmlns:xml:catalog"
-TAXONOMY_PACKAGE_NAMESPACE = "http://xbrl.org/REC/2016-04-19/taxonomy-package"
+TAXONOMY_PACKAGE_NAMESPACE = "http://xbrl.org/2016/taxonomy-package"
 
 try:
     from arelle.api.Session import Session
@@ -548,10 +548,11 @@ def _read_taxonomy_xml_edges(relative_path, path, expected_digest, remaining_bud
 class TaxonomyDependencyClosure(tuple):
     """Ordered verified dependency paths plus the exact offline URI mappings they use."""
 
-    def __new__(cls, paths, offline_references, package_archives=()):
+    def __new__(cls, paths, offline_references, package_archives=(), package_catalog_rewrites=()):
         result = super().__new__(cls, paths)
         result.offline_references = dict(offline_references)
         result.package_archives = tuple(package_archives)
+        result.package_catalog_rewrites = tuple(package_catalog_rewrites)
         return result
 
 
@@ -887,41 +888,6 @@ def validate_taxonomy_package_archives(taxonomy_root, package_files, entry_point
     return archives, tuple(rewrites)
 
 
-def _copy_verified_taxonomy_archives(archives, taxonomy_root, snapshot_root, package_files):
-    source_root = Path(taxonomy_root).resolve(strict=True)
-    target_root = Path(snapshot_root).resolve(strict=True)
-    total_bytes = 0
-    copied_paths = []
-    for archive in archives:
-        relative_path = archive["path"]
-        source_path = safe_package_path(relative_path, source_root)
-        target_path = target_root.joinpath(*relative_path.split("/"))
-        target_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        digest = hashlib.sha256()
-        file_bytes = 0
-        try:
-            with source_path.open("rb") as source, target_path.open("xb") as target:
-                while True:
-                    chunk = source.read(TAXONOMY_XML_READ_BYTES)
-                    if not chunk:
-                        break
-                    file_bytes += len(chunk)
-                    total_bytes += len(chunk)
-                    if file_bytes > MAX_TAXONOMY_ARCHIVE_BYTES \
-                            or total_bytes > MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES:
-                        raise ValueError("Taxonomy package archive snapshot exceeds its byte limit")
-                    digest.update(chunk)
-                    target.write(chunk)
-            if "sha256:" + digest.hexdigest() != package_files.get(relative_path):
-                raise ValueError("Taxonomy package archive hash changed while snapshotting: " + relative_path)
-            if os.name != "nt":
-                target_path.chmod(0o400)
-        except OSError as ex:
-            raise ValueError("Could not create private taxonomy package snapshot: " + relative_path) from ex
-        copied_paths.append(str(target_path))
-    return copied_paths
-
-
 def _resolve_taxonomy_package_reference(reference, package_catalog_rewrites, package_files):
     matches = _best_taxonomy_package_rewrites(reference, package_catalog_rewrites)
     if not matches:
@@ -1026,7 +992,8 @@ def _resolve_taxonomy_edge(current_path, reference, kind, package_files,
     return resolved
 
 
-def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_files, offline_references=None):
+def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_files, offline_references=None,
+                                         validated_package_catalog_rewrites=None):
     """Validate a bounded file and ZIP taxonomy dependency graph before Arelle loads it.
 
     External HTTP(S) references may resolve only through the profile's exact
@@ -1039,10 +1006,14 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
     root = Path(taxonomy_root).resolve(strict=True)
     package_archives, package_catalog_rewrites = validate_taxonomy_package_archives(
         root, package_files, entry_point, offline_references)
+    if validated_package_catalog_rewrites is not None \
+            and tuple(validated_package_catalog_rewrites) != package_catalog_rewrites:
+        raise ValueError("Validated taxonomy package catalog mappings changed before snapshotting")
     pending = deque([(entry_point, 0)])
     visited = set()
     scanned = []
     used_offline_references = {}
+    used_package_catalog_rewrites = set()
     used_package_archives = {archive["path"] for archive in package_archives
                              if entry_point in archive["members"]}
     remaining_budget = [0]
@@ -1072,9 +1043,10 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
             base_reference = urlunsplit((parsed_reference.scheme, parsed_reference.netloc,
                                          parsed_reference.path, "", ""))
             if target is not None and (offline_references or {}).get(base_reference) is None:
-                for _prefix, _target_directory, archive_path in _best_taxonomy_package_rewrites(
-                        base_reference, package_catalog_rewrites):
+                for rewrite in _best_taxonomy_package_rewrites(base_reference, package_catalog_rewrites):
+                    _prefix, _target_directory, archive_path = rewrite
                     used_package_archives.add(archive_path)
+                    used_package_catalog_rewrites.add(rewrite)
             if target is not None and target not in visited:
                 # Validate path/symlink/existence before it enters the work queue.
                 try:
@@ -1085,21 +1057,44 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
         for target in sorted(discovered):
             pending.append((target, depth + 1))
     return TaxonomyDependencyClosure(scanned, used_offline_references,
-                                     sorted(used_package_archives, key=str.casefold))
+                                     sorted(used_package_archives, key=str.casefold),
+                                     sorted(used_package_catalog_rewrites))
 
 
-def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
-    """Create a local-only Arelle catalog for the exact external references in the closure."""
+def _write_offline_taxonomy_mapping_plugin(snapshot_root, offline_references, package_files,
+                                           package_catalog_rewrites=()):
+    """Create a private Arelle hook that maps validated taxonomy URIs to local snapshots."""
     root = Path(snapshot_root).resolve(strict=True)
     alias_root = root / ".xms-offline-uri"
-    if alias_root.exists():
+    if offline_references and alias_root.exists():
         raise ValueError("Taxonomy package paths conflict with the private offline URI directory")
-    alias_root.mkdir(mode=0o700)
-    catalog_directory = root / ".xms-offline-catalog"
-    if catalog_directory.exists():
+    plugin_directory = root / ".xms-offline-catalog"
+    if plugin_directory.exists():
         raise ValueError("Taxonomy package paths conflict with the private offline catalog directory")
-    catalog_directory.mkdir(mode=0o700)
+    plugin_directory.mkdir(mode=0o700)
     remappings = {}
+    for prefix, target_directory, _archive_path in package_catalog_rewrites:
+        target_parts = target_directory.rstrip("/").split("/")
+        if (not target_directory or any(part in ("", ".", "..") for part in target_parts)
+                or any("\\" in part or ":" in part for part in target_parts)):
+            raise ValueError("Validated taxonomy package catalog target is unsafe")
+        local_directory = root.joinpath(*target_parts)
+        try:
+            resolved_directory = local_directory.resolve(strict=False)
+            resolved_directory.relative_to(root)
+            if resolved_directory.exists() and not resolved_directory.is_dir():
+                raise ValueError("Taxonomy package catalog target conflicts with a snapshot file")
+            resolved_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except (OSError, ValueError) as ex:
+            raise ValueError("Could not create private taxonomy package catalog target") from ex
+        replacement = str(resolved_directory) + os.sep
+        previous = remappings.get(prefix)
+        if previous is not None and previous != replacement:
+            raise ValueError("Offline taxonomy URI mappings conflict on their local prefix")
+        remappings[prefix] = replacement
+
+    if offline_references:
+        alias_root.mkdir(mode=0o700, exist_ok=True)
     copied_bytes = 0
     alias_targets = {}
     source_digests = {}
@@ -1123,6 +1118,13 @@ def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
             raise ValueError("Offline taxonomy URI must identify a file, not a directory: "
                              + reference[:256])
         prefix = urlunsplit((parsed.scheme, parsed.netloc, parent_path + "/", "", ""))
+        package_matches = _best_taxonomy_package_rewrites(reference, package_catalog_rewrites)
+        if package_matches:
+            catalog_target = _resolve_taxonomy_package_reference(
+                reference, package_catalog_rewrites, package_files)
+            if catalog_target != relative_path:
+                raise ValueError("Offline taxonomy URI mappings conflict on their target")
+            continue
         directory_key = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
         local_alias_directory = alias_root / directory_key
         local_alias_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1178,32 +1180,40 @@ def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
 
         remappings[prefix] = str(local_alias_directory) + os.sep
 
-    ElementTree.register_namespace("", OASIS_CATALOG_NAMESPACE)
-    catalog = ElementTree.Element("{" + OASIS_CATALOG_NAMESPACE + "}catalog")
-    for prefix, rewrite_prefix in sorted(remappings.items(), key=lambda pair: (-len(pair[0]), pair[0])):
-        ElementTree.SubElement(catalog, "{" + OASIS_CATALOG_NAMESPACE + "}rewriteURI", {
-            "uriStartString": prefix,
-            "rewritePrefix": rewrite_prefix,
-        })
-    catalog_bytes = ElementTree.tostring(catalog, encoding="utf-8", xml_declaration=True)
-    package_namespace = "http://xbrl.org/2016/taxonomy-package"
-    metadata = ElementTree.Element("{" + package_namespace + "}taxonomyPackage", {
-        "{" + XML_NAMESPACE + "}lang": "en",
-    })
-    ElementTree.SubElement(metadata, "{" + package_namespace + "}identifier").text = (
-        "urn:xbrlmappingstudio:worker:offline-taxonomy-catalog")
-    metadata_bytes = ElementTree.tostring(metadata, encoding="utf-8", xml_declaration=True)
-    catalog_path = catalog_directory / "offline-taxonomy-catalog.zip"
-    with zipfile.ZipFile(catalog_path, "w", compression=zipfile.ZIP_STORED) as archive:
-        archive.writestr("xms-offline/META-INF/taxonomyPackage.xml", metadata_bytes)
-        archive.writestr("xms-offline/META-INF/catalog.xml", catalog_bytes)
+    plugin_path = plugin_directory / "arelle_offline_taxonomy_catalog.py"
+    plugin_source = '''\
+MAPPINGS = {mappings!r}
+
+def apply_offline_taxonomy_mappings(cntlr, _options, _filesource, _entrypoints, **_kwargs):
+    package_manager = cntlr.packages._package_manager
+    package_config = package_manager.packagesConfig
+    if not isinstance(package_config, dict):
+        raise RuntimeError("Arelle taxonomy package manager is not initialized")
+    remappings = package_config.setdefault("remappings", {{}})
+    for prefix, target in MAPPINGS.items():
+        existing = remappings.get(prefix)
+        if existing is not None and existing != target:
+            raise ValueError("Arelle taxonomy URI mapping conflicts with a configured package")
+        remappings[prefix] = target
+
+__pluginInfo__ = {{
+    "name": "XBRL Mapping Studio Offline Taxonomy Mappings",
+    "version": "1.0",
+    "description": "Applies private hash-verified offline taxonomy mappings.",
+    "license": "Apache-2",
+    "author": "XBRL Mapping Studio",
+    "CntlrCmdLine.Filing.Start": apply_offline_taxonomy_mappings,
+}}
+'''.format(mappings=remappings)
+    plugin_path.write_text(plugin_source, encoding="utf-8")
     if os.name != "nt":
-        catalog_path.chmod(0o400)
-    return catalog_path
+        plugin_path.chmod(0o400)
+    return plugin_path
 
 
 def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root, snapshot_root,
-                                     package_files, offline_references=None, package_archives=()):
+                                     package_files, offline_references=None,
+                                     package_catalog_rewrites=()):
     """Copy verified closure bytes into a private tree so source edits cannot race Arelle."""
     source_root = Path(taxonomy_root).resolve(strict=True)
     target_root = Path(snapshot_root).resolve(strict=True)
@@ -1238,36 +1248,9 @@ def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root,
         except OSError as ex:
             raise ValueError("Could not create private taxonomy snapshot for: " + relative_path) from ex
 
-    archive_total_bytes = 0
-    for relative_path in sorted(set(package_archives), key=str.casefold):
-        expected_digest = package_files.get(relative_path)
-        source_path = safe_package_path(relative_path, source_root)
-        target_path = target_root.joinpath(*relative_path.split("/"))
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256()
-        file_bytes = 0
-        try:
-            with source_path.open("rb") as source, target_path.open("xb") as target:
-                while True:
-                    chunk = source.read(TAXONOMY_XML_READ_BYTES)
-                    if not chunk:
-                        break
-                    file_bytes += len(chunk)
-                    archive_total_bytes += len(chunk)
-                    if file_bytes > MAX_TAXONOMY_ARCHIVE_BYTES \
-                            or archive_total_bytes > MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES:
-                        raise ValueError("Taxonomy package archive snapshot exceeds its byte limit")
-                    digest.update(chunk)
-                    target.write(chunk)
-            if "sha256:" + digest.hexdigest() != expected_digest:
-                raise ValueError("Taxonomy package archive hash changed while snapshotting: " + relative_path)
-            if os.name != "nt":
-                target_path.chmod(0o400)
-        except OSError as ex:
-            raise ValueError("Could not create private taxonomy package snapshot: " + relative_path) from ex
-
-    if offline_references:
-        _write_offline_taxonomy_catalog(target_root, offline_references)
+    if offline_references or package_catalog_rewrites:
+        _write_offline_taxonomy_mapping_plugin(
+            target_root, offline_references or {}, package_files, package_catalog_rewrites)
     return safe_package_path(entry_point, target_root)
 
 
@@ -1278,20 +1261,14 @@ def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root
         snapshot_entry = _copy_verified_taxonomy_snapshot(
             entry_point, relative_paths, taxonomy_root, snapshot_directory, package_files,
             getattr(relative_paths, "offline_references", {}),
-            getattr(relative_paths, "package_archives", ()))
+            getattr(relative_paths, "package_catalog_rewrites", ()))
         run_args = args
-        package_paths = [str(Path(snapshot_directory).joinpath(*relative.split("/")))
-                         for relative in getattr(relative_paths, "package_archives", ())]
-        if getattr(relative_paths, "offline_references", {}) or package_paths:
+        mapping_plugin = Path(snapshot_directory) / ".xms-offline-catalog" / "arelle_offline_taxonomy_catalog.py"
+        if mapping_plugin.is_file():
             import copy
             run_args = copy.copy(args)
-            run_args.package = list(getattr(args, "package", []) or [])
-            for package_path in package_paths:
-                if package_path not in run_args.package:
-                    run_args.package.append(package_path)
-            if getattr(relative_paths, "offline_references", {}):
-                run_args.package.append(str(Path(snapshot_directory) / ".xms-offline-catalog"
-                                            / "offline-taxonomy-catalog.zip"))
+            run_args.plugin = list(getattr(args, "plugin", []) or [])
+            run_args.plugin.append(str(mapping_plugin))
         return run_arelle(snapshot_entry, run_args)
 
 
@@ -1365,8 +1342,49 @@ def _staged_taxonomy_relative_path(reference, taxonomy_root, offline_references,
     return relative
 
 
+def _snapshot_report_taxonomy(taxonomy_references, taxonomy_root, snapshot_root,
+                              offline_references, package_files,
+                              package_catalog_rewrites=()):
+    """Localize report taxonomy references into a hash-verified private closure snapshot."""
+    if not isinstance(taxonomy_references, list):
+        raise ValueError("Report documentInfo.taxonomy must be an array")
+    if any(not isinstance(reference, str) for reference in taxonomy_references):
+        raise ValueError("Taxonomy references must be strings")
+    if not taxonomy_references:
+        return [], None
+    root = Path(taxonomy_root).resolve(strict=True)
+    target_root = Path(snapshot_root).resolve(strict=True)
+    relative_by_reference = {
+        reference: _staged_taxonomy_relative_path(
+            reference, root, offline_references, package_files, package_catalog_rewrites)
+        for reference in dict.fromkeys(taxonomy_references)
+    }
+    closure_paths = set()
+    used_offline_references = {}
+    used_package_catalog_rewrites = set()
+    for relative in dict.fromkeys(relative_by_reference.values()):
+        closure = validate_taxonomy_dependency_closure(
+            relative, root, package_files, offline_references,
+            package_catalog_rewrites)
+        closure_paths.update(closure)
+        used_offline_references.update(closure.offline_references)
+        used_package_catalog_rewrites.update(closure.package_catalog_rewrites)
+    entry_point = next(iter(relative_by_reference.values()))
+    _copy_verified_taxonomy_snapshot(
+        entry_point, sorted(closure_paths), root, target_root, package_files,
+        used_offline_references, sorted(used_package_catalog_rewrites))
+    localized = []
+    for reference in taxonomy_references:
+        relative = relative_by_reference[reference]
+        local_path = safe_package_path(relative, target_root)
+        localized.append(str(local_path) if os.name == "nt" else local_path.as_uri())
+    mapping_plugin = target_root / ".xms-offline-catalog" / "arelle_offline_taxonomy_catalog.py"
+    return localized, mapping_plugin if mapping_plugin.is_file() else None
+
+
 def _copy_staged_taxonomy_snapshot(relative_paths, taxonomy_root, snapshot_root,
-                                   package_files, offline_references):
+                                   package_files, offline_references,
+                                   package_catalog_rewrites=()):
     """Copy only referenced taxonomy closure bytes beside the private staged instance."""
     root = Path(taxonomy_root).resolve(strict=True)
     target_root = Path(snapshot_root).resolve(strict=True)
@@ -1377,20 +1395,20 @@ def _copy_staged_taxonomy_snapshot(relative_paths, taxonomy_root, snapshot_root,
     if package_files is not None:
         closure_paths = set()
         used_offline_references = {}
-        used_package_archives = set()
+        used_package_catalog_rewrites = set()
         for relative in relative_paths:
             closure = validate_taxonomy_dependency_closure(
-                relative, root, package_files, offline_references)
+                relative, root, package_files, offline_references,
+                package_catalog_rewrites)
             closure_paths.update(closure)
             used_offline_references.update(closure.offline_references)
-            used_package_archives.update(closure.package_archives)
+            used_package_catalog_rewrites.update(closure.package_catalog_rewrites)
         _copy_verified_taxonomy_snapshot(
             relative_paths[0], sorted(closure_paths), root, target_root,
-            package_files, used_offline_references, used_package_archives)
-        catalog_path = target_root / ".xms-offline-catalog" / "offline-taxonomy-catalog.zip"
-        archive_paths = [target_root.joinpath(*relative.split("/"))
-                         for relative in sorted(used_package_archives, key=str.casefold)]
-        return (catalog_path if used_offline_references else None), archive_paths
+            package_files, used_offline_references,
+            sorted(used_package_catalog_rewrites))
+        mapping_plugin = target_root / ".xms-offline-catalog" / "arelle_offline_taxonomy_catalog.py"
+        return (mapping_plugin if mapping_plugin.is_file() else None), []
 
     total_bytes = 0
     for relative in relative_paths:
@@ -1477,20 +1495,20 @@ def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline
             package_catalog_rewrites)
         for reference in dict.fromkeys(schema_references)
     }
-    catalog_path, package_paths = _copy_staged_taxonomy_snapshot(
+    mapping_plugin, package_paths = _copy_staged_taxonomy_snapshot(
         relative_by_reference.values(), taxonomy_root, output_path.parent,
         package_files, offline_references, package_catalog_rewrites)
     arelle_args = worker_args
-    if (catalog_path is not None or package_paths) and worker_args is not None:
+    if (mapping_plugin is not None or package_paths) and worker_args is not None:
         import copy
         arelle_args = copy.copy(worker_args)
-        arelle_args.package = list(getattr(worker_args, "package", []) or [])
+        arelle_args.plugin = list(getattr(worker_args, "plugin", []) or [])
         for package_path in package_paths:
             package_text = str(package_path)
-            if package_text not in arelle_args.package:
-                arelle_args.package.append(package_text)
-        if catalog_path is not None:
-            arelle_args.package.append(str(catalog_path))
+            if package_text not in arelle_args.plugin:
+                arelle_args.plugin.append(package_text)
+        if mapping_plugin is not None:
+            arelle_args.plugin.append(str(mapping_plugin))
 
     try:
         events = etree.iterparse(str(report_path), events=("start", "end"),
@@ -1582,10 +1600,17 @@ def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offli
         header_bytes = len(prefix[:position].encode("utf-8"))
         if header_bytes > MAX_DOCUMENT_INFO_BYTES:
             raise ValueError("Report documentInfo exceeds its size limit")
-        safe_report = safe_taxonomy_urls({"documentInfo": document_info}, taxonomy_root,
-                                         offline_references, package_files,
-                                         package_catalog_rewrites)
-        document_info = safe_report["documentInfo"]
+        mapping_plugin = None
+        if package_files is not None:
+            localized, mapping_plugin = _snapshot_report_taxonomy(
+                document_info.get("taxonomy"), taxonomy_root, output_path.parent,
+                offline_references or {}, package_files, package_catalog_rewrites)
+            document_info["taxonomy"] = localized
+        else:
+            safe_report = safe_taxonomy_urls({"documentInfo": document_info}, taxonomy_root,
+                                             offline_references, package_files,
+                                             package_catalog_rewrites)
+            document_info = safe_report["documentInfo"]
 
         while position < len(prefix) and prefix[position].isspace():
             position += 1
@@ -1676,6 +1701,7 @@ def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offli
                 raise ValueError("Report is truncated or has a malformed top-level object")
         if "sha256:" + digest.hexdigest() != expected_digest:
             raise ValueError("Staged xBRL-JSON changed while it was streamed to the validator")
+    return mapping_plugin
 
 
 def run_arelle(entrypoint, args, temporary_path=None):
@@ -1699,6 +1725,9 @@ def run_arelle(entrypoint, args, temporary_path=None):
         logs = session.get_log_messages()
         models = session.get_models()
         concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
+        for model in models:
+            session._cntlr.modelManager.close(model)
+    gc.collect()
     return ok, logs, concept_count
 
 
@@ -2008,21 +2037,12 @@ def handle(req, args):
                 os.chmod(workdir, 0o700)
                 path = Path(workdir) / ("report.xml" if staged_xml_path is not None else "report.json")
                 run_args = args
+                mapping_plugin = None
                 package_catalog_rewrites = ()
                 if profile is not None:
-                    package_archives, package_catalog_rewrites = validate_taxonomy_package_archives(
+                    _package_archives, package_catalog_rewrites = validate_taxonomy_package_archives(
                         args.taxonomy_root, profile.get("packageFiles", {}),
                         profile.get("entryPoint"), profile.get("offlineReferences", {}))
-                    if package_archives and staged_xml_path is None:
-                        package_paths = _copy_verified_taxonomy_archives(
-                            package_archives, args.taxonomy_root, workdir,
-                            profile.get("packageFiles", {}))
-                        import copy
-                        run_args = copy.copy(args)
-                        run_args.package = list(getattr(args, "package", []) or [])
-                        for package_path in package_paths:
-                            if package_path not in run_args.package:
-                                run_args.package.append(package_path)
                 if staged_xml_path is not None:
                     run_args = rewrite_staged_xml_taxonomy(staged_xml_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
@@ -2030,17 +2050,30 @@ def handle(req, args):
                         payload.get("sha256"), worker_args=args,
                         package_catalog_rewrites=package_catalog_rewrites)
                 elif large_report_path is not None:
-                    rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
+                    mapping_plugin = rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None,
                         payload.get("sha256"), package_catalog_rewrites)
                 else:
                     report = json.loads(report_text, object_pairs_hook=reject_duplicate_json_keys)
-                    report = safe_taxonomy_urls(report, args.taxonomy_root,
-                        profile.get("offlineReferences") if profile else None,
-                        profile.get("packageFiles") if profile else None,
-                        package_catalog_rewrites)
+                    if profile is not None and isinstance(profile.get("packageFiles"), dict):
+                        localized, mapping_plugin = _snapshot_report_taxonomy(
+                            report.get("documentInfo", {}).get("taxonomy"),
+                            args.taxonomy_root, workdir,
+                            profile.get("offlineReferences", {}),
+                            profile["packageFiles"], package_catalog_rewrites)
+                        report["documentInfo"]["taxonomy"] = localized
+                    else:
+                        report = safe_taxonomy_urls(report, args.taxonomy_root,
+                            profile.get("offlineReferences") if profile else None,
+                            profile.get("packageFiles") if profile else None,
+                            package_catalog_rewrites)
                     path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+                if mapping_plugin is not None:
+                    import copy
+                    run_args = copy.copy(args)
+                    run_args.plugin = list(getattr(args, "plugin", []) or [])
+                    run_args.plugin.append(str(mapping_plugin))
                 ok, logs, concept_count = run_arelle(path, run_args, workdir)
                 plugin_failures = required_plugin_load_failures(logs, required_plugins)
                 if plugin_failures:

@@ -2,6 +2,7 @@ import hashlib
 import http.server
 import io
 import json
+import runpy
 import socket
 import subprocess
 import sys
@@ -39,7 +40,7 @@ def write_taxonomy_package(root, archive_name="taxonomy.zip",
                            rewrite_prefix="../schemas/"):
     files = {
         "SyntheticPackage/META-INF/taxonomyPackage.xml": (
-            '<tp:taxonomyPackage xmlns:tp="http://xbrl.org/REC/2016-04-19/taxonomy-package" '
+            '<tp:taxonomyPackage xmlns:tp="http://xbrl.org/2016/taxonomy-package" '
             'xmlns:xml="http://www.w3.org/XML/1998/namespace">'
             '<tp:identifier>urn:xms:test:taxonomy-package</tp:identifier>'
             '<tp:entryPoints><tp:entryPoint><tp:name xml:lang="en">Synthetic</tp:name>'
@@ -612,17 +613,10 @@ class ArelleWorkerTests(unittest.TestCase):
 
             def capture_arelle(snapshot_entry, run_args):
                 observed["entry"] = Path(snapshot_entry)
-                catalog_path = Path(run_args.package[-1])
-                with zipfile.ZipFile(catalog_path) as archive:
-                    observed["members"] = set(archive.namelist())
-                    observed["catalog"] = ElementTree.fromstring(
-                        archive.read("xms-offline/META-INF/catalog.xml"))
-                    observed["metadata"] = ElementTree.fromstring(
-                        archive.read("xms-offline/META-INF/taxonomyPackage.xml"))
-                rewrite = observed["catalog"].find(
-                    "{" + arelle_worker.OASIS_CATALOG_NAMESPACE + "}rewriteURI")
+                observed["mappings"] = runpy.run_path(run_args.plugin[-1])["MAPPINGS"]
                 observed["mapped_content"] = (
-                    Path(rewrite.get("rewritePrefix")) / "remote.xsd").read_text(encoding="utf-8")
+                    Path(observed["mappings"]["https://example.invalid/"]) /
+                    "remote.xsd").read_text(encoding="utf-8")
                 return True, [], 1
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -634,12 +628,8 @@ class ArelleWorkerTests(unittest.TestCase):
 
         self.assertEqual("success", result["status"], result["error"])
         self.assertEqual(("entry.xsd", "mapped.xsd"), dependency_closure)
-        self.assertEqual("taxonomyPackage", observed["metadata"].tag.rsplit("}", 1)[-1])
-        self.assertIn("xms-offline/META-INF/catalog.xml", observed["members"])
-        self.assertIn("xms-offline/META-INF/taxonomyPackage.xml", observed["members"])
-        mappings = observed["catalog"].findall("{" + arelle_worker.OASIS_CATALOG_NAMESPACE + "}rewriteURI")
-        self.assertEqual(1, len(mappings))
-        self.assertEqual("https://example.invalid/", mappings[0].get("uriStartString"))
+        self.assertEqual(1, len(observed["mappings"]))
+        self.assertIn("https://example.invalid/", observed["mappings"])
         self.assertEqual('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
                          observed["mapped_content"])
         self.assertFalse(observed["entry"].is_relative_to(root))
@@ -752,11 +742,14 @@ class ArelleWorkerTests(unittest.TestCase):
 
             def load_snapshot(entry_point, args):
                 observed["entry_point"] = Path(entry_point)
-                observed["packages"] = list(args.package)
-                package_path = Path(args.package[0])
-                with zipfile.ZipFile(package_path) as archive:
-                    observed["archive_entry"] = archive.read(
-                        "SyntheticPackage/schemas/entry.xsd").decode("utf-8")
+                observed["plugins"] = list(args.plugin)
+                observed["mappings"] = runpy.run_path(args.plugin[-1])["MAPPINGS"]
+                observed["mapped_entry"] = (
+                    Path(observed["mappings"]["https://taxonomy.example/test/"]) /
+                    "entry.xsd").read_text(encoding="utf-8")
+                observed["mapped_dependency"] = (
+                    Path(observed["mappings"]["https://taxonomy.example/test/"]) /
+                    "dependency.xsd").read_text(encoding="utf-8")
                 return True, [], 2
 
             with mock.patch.object(arelle_worker, "run_arelle", side_effect=load_snapshot):
@@ -764,8 +757,9 @@ class ArelleWorkerTests(unittest.TestCase):
                     "SyntheticPackage/schemas/entry.xsd", closure, root, package_files, self.args)
 
             self.assertEqual((True, [], 2), result)
-            self.assertIn("taxonomy.zip", observed["packages"][0])
-            self.assertIn("dependency.xsd", observed["archive_entry"])
+            self.assertTrue(observed["plugins"][-1].endswith("arelle_offline_taxonomy_catalog.py"))
+            self.assertIn("dependency.xsd", observed["mapped_entry"])
+            self.assertIn("DependencyType", observed["mapped_dependency"])
             self.assertNotEqual(root, observed["entry_point"].parent.parent.parent)
 
     def test_taxonomy_package_archive_rejects_traversal_and_unpinned_members(self):
@@ -829,10 +823,11 @@ class ArelleWorkerTests(unittest.TestCase):
 
             def fake_arelle(entrypoint, args, temporary_path=None):
                 observed["report"] = json.loads(Path(entrypoint).read_text(encoding="utf-8"))
-                observed["packages"] = list(args.package)
-                with zipfile.ZipFile(args.package[0]) as archive:
-                    observed["package_metadata"] = archive.read(
-                        "SyntheticPackage/META-INF/taxonomyPackage.xml")
+                observed["plugins"] = list(args.plugin)
+                observed["mappings"] = runpy.run_path(args.plugin[-1])["MAPPINGS"]
+                observed["mapped_dependency"] = (
+                    Path(observed["mappings"]["https://taxonomy.example/test/"]) /
+                    "dependency.xsd").read_text(encoding="utf-8")
                 return True, [], 2
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -842,9 +837,9 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("success", result["status"], result["error"])
         localized_entry = observed["report"]["documentInfo"]["taxonomy"][0].replace("\\", "/")
         self.assertTrue(localized_entry.endswith("SyntheticPackage/schemas/entry.xsd"))
-        self.assertEqual(1, len(observed["packages"]))
-        self.assertTrue(observed["packages"][0].endswith("taxonomy.zip"))
-        self.assertIn(b"taxonomyPackage", observed["package_metadata"])
+        self.assertTrue(observed["plugins"][-1].endswith("arelle_offline_taxonomy_catalog.py"))
+        self.assertEqual(1, len(observed["mappings"]))
+        self.assertIn("DependencyType", observed["mapped_dependency"])
 
     def test_schema_location_rejects_query_or_fragment_but_xlink_fragment_only_is_local(self):
         invalid_schema_locations = ("dependency.xsd?version=1", "dependency.xsd#schema")
@@ -1136,8 +1131,8 @@ print("offline-network-denied")
             canary.server_close()
             canary_thread.join(timeout=2)
 
-        self.assertEqual("success", result["status"], result["error"])
-        self.assertEqual(2, result["result"]["conceptCount"])
+        self.assertEqual("success", result["status"], (result["error"], result["diagnostics"]))
+        self.assertEqual(3, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
         self.assertEqual([], requests,
                          "Arelle attempted an HTTP request instead of using the taxonomy package catalog.")
