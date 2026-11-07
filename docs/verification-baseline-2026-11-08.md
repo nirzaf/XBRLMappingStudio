@@ -58,3 +58,6 @@ Verification:
   Arelle cases (247 total).
 - The focused mid-transaction cancellation regression passed 1/1, and the full
   Release Adapters suite passed 95/95.
+- Exact-head GitHub Actions run [42420628157](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42420628157)
+  passed repository hygiene, Windows and Ubuntu Release build/tests, and the
+  pinned Arelle integration on source `df53aa671eafa92eb4c4d6280082ac66699e44d5`.
