@@ -86,19 +86,28 @@ public sealed class ExecutionPlan
     }
 
     public int DetermineRowCount(ExecutionContext context)
-        => context.LoadedSources.Values.Select(r => r.Count).DefaultIfEmpty(0).Max();
+    {
+        var rowCount = 0;
+        foreach (var rows in context.LoadedSources.Values)
+        {
+            context.CancellationToken.ThrowIfCancellationRequested();
+            rowCount = Math.Max(rowCount, rows.Count);
+        }
+        return rowCount;
+    }
 
     public async Task<ExecutionResult> ExecuteAsync(ExecutionContext context)
     {
         var facts = new List<PendingFact>();
         var frames = new List<EvaluationFrame>();
 
-        int rowCount = DetermineRowCount(context);
-        if (context.IsPreview && rowCount > context.PreviewRowLimit)
-            rowCount = context.PreviewRowLimit;
-
         try
         {
+            context.CancellationToken.ThrowIfCancellationRequested();
+            int rowCount = DetermineRowCount(context);
+            if (context.IsPreview && rowCount > context.PreviewRowLimit)
+                rowCount = context.PreviewRowLimit;
+
             for (int row = 0; row < rowCount; row++)
             {
                 context.CancellationToken.ThrowIfCancellationRequested();

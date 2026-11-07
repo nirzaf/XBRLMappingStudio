@@ -600,6 +600,27 @@ public class ExecutionPlanTests
         }
     }
 
+    [Fact]
+    public async Task Cancellation_IsReportedForAnEmptyInput()
+    {
+        var (project, profile) = Prepare();
+        var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var context = GraphHarness.Ctx(
+            Array.Empty<(string Binding, IReadOnlyList<DataRecord> Rows)>(),
+            cancellationToken: cancellation.Token);
+
+        var result = await compile.Plan!.ExecuteAsync(context);
+
+        Assert.Equal(Diagnostics.RunOutcome.Cancelled, result.Outcome);
+        Assert.Empty(result.Facts);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == Diagnostics.DiagnosticCodes.MapExecutionCancelled);
+    }
+
     private static ExecutionContext MakeContext(MappingProject project, string workbookPath,
         CancellationToken? ct = null)
     {

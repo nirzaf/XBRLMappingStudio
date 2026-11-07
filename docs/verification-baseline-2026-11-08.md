@@ -75,7 +75,8 @@ fixture read all 8 records (24 indexed field reads) before observing cancellatio
 Verification:
 
 - The focused cancellation regression passed 1/1.
-- The Release Engine suite passed 122/122.
+- `Cancellation_IsReportedForAnEmptyInput` verifies a pre-cancelled run with no loaded rows returns `Cancelled` instead of `Success`.
+- The Release Engine suite passed 123/123.
 - `LargeRunExecutionTests.GroupByBudgetOverflow_BlocksPublicationAndPreservesPriorFile`
   passed 1/1, confirming an over-budget aggregate still cannot replace the prior
   output.
