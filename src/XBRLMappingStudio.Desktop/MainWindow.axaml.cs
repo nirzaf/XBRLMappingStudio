@@ -152,6 +152,43 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
         return await dialog.ShowDialog<bool>(owner);
     }
 
+    public async Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath)
+    {
+        var dialog = new Window
+        {
+            Title = "Open project backup?",
+            Width = 520,
+            Height = 260,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var open = new Button { Content = "Open backup", IsDefault = true, MinWidth = 110 };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 100 };
+        open.Click += (_, _) => dialog.Close(true);
+        cancel.Click += (_, _) => dialog.Close(false);
+
+        var content = new StackPanel { Spacing = 14, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = $"'{Path.GetFileName(projectPath)}' could not be opened. Its backup "
+                + $"'{Path.GetFileName(backupPath)}' is readable. Opening the backup leaves the original "
+                + "untouched. Use Save As to create an independent recovery copy; saving over the original "
+                + "or backup is disabled.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(open);
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<bool>(owner);
+    }
+
     public async Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
     {
         var dialog = new Window

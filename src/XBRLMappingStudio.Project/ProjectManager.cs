@@ -68,6 +68,58 @@ public sealed class ProjectManager
     }
 
     /// <summary>
+    /// Load the last saved backup for this project. The file is read twice with writer-lock
+    /// checks around the reads so a backup being copied by a concurrent save is not accepted.
+    /// </summary>
+    public MappingProject LoadBackup()
+    {
+        var deadline = Environment.TickCount64 + 2000;
+        while (true)
+        {
+            if (File.Exists(LockPath))
+            {
+                if (Environment.TickCount64 >= deadline)
+                    throw new ProjectSaveException(
+                        DiagnosticCodes.PrjLockHeld,
+                        $"Project is locked for writing: {LockPath}");
+                Thread.Sleep(20);
+                continue;
+            }
+
+            if (!File.Exists(BackupPath))
+            {
+                if (Environment.TickCount64 >= deadline)
+                    throw new FileNotFoundException($"Project backup not found: {BackupPath}", BackupPath);
+                Thread.Sleep(20);
+                continue;
+            }
+
+            try
+            {
+                var json = File.ReadAllText(BackupPath);
+                if (File.Exists(LockPath)) continue;
+
+                var verificationJson = File.ReadAllText(BackupPath);
+                if (File.Exists(LockPath) || !StringComparer.Ordinal.Equals(json, verificationJson))
+                {
+                    if (Environment.TickCount64 >= deadline)
+                        throw new ProjectSaveException(
+                            DiagnosticCodes.PrjLockHeld,
+                            $"Project backup changed while it was being read: {BackupPath}");
+                    Thread.Sleep(20);
+                    continue;
+                }
+
+                return ProjectSerializer.Deserialize(json);
+            }
+            catch (IOException) when (Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(20);
+            }
+        }
+    }
+
+    /// <summary>
     /// Save the project. If <paramref name="expectedLayoutGeneration"/> is supplied and
     /// does not match the current on-disk generation, the save is rejected with a revision
     /// conflict (BASE03 acceptance).

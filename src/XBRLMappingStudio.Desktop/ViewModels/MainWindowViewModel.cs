@@ -439,6 +439,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private int _mappingOperationGeneration;
     private bool _allowSyntheticProfile;
     private string? _projectPath;
+    private bool _openedFromBackup;
     private string? _selectedSourceBindingId;
     private int? _expectedLayoutGeneration;
     private string _savedProjectSnapshot = "";
@@ -2007,6 +2008,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = null;
+        _openedFromBackup = false;
         _expectedLayoutGeneration = null;
         _savedProjectSnapshot = ProjectSerializer.Serialize(project);
         ClearSourceAndRunResults();
@@ -2024,15 +2026,54 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (path is null) return;
 
             var manager = new ProjectManager(Path.GetFullPath(path));
-            var project = manager.Load(); // Validate the requested file before prompting to replace the current workspace.
+            MappingProject project;
+            var openedFromBackup = false;
+            try
+            {
+                project = manager.Load(); // Validate the requested file before prompting to replace the current workspace.
+            }
+            catch (Exception projectError)
+            {
+                if (projectError is ProjectSaveException { Code: DiagnosticCodes.PrjLockHeld })
+                    throw;
+                if (!File.Exists(manager.BackupPath)) throw;
+
+                try
+                {
+                    project = manager.LoadBackup(); // Validate the backup before asking to replace the active workspace.
+                }
+                catch (Exception backupError)
+                {
+                    throw new InvalidOperationException(
+                        $"The project could not be opened ({projectError.Message}), and its backup could not be recovered ({backupError.Message}).",
+                        projectError);
+                }
+
+                if (!await _fileDialog.ConfirmOpenProjectBackupAsync(manager.FullPath, manager.BackupPath))
+                {
+                    StatusText = "Canceled backup recovery; the active project is unchanged.";
+                    return;
+                }
+                openedFromBackup = true;
+            }
+
             var reopeningCurrentProject = PathsEqual(ProjectPath, manager.FullPath);
-            if (reopeningCurrentProject && !IsProjectDirty) return;
+            if (reopeningCurrentProject && !IsProjectDirty)
+            {
+                if (openedFromBackup)
+                    StatusText = "The active project is already open; keeping it unchanged instead of opening the older backup.";
+                return;
+            }
             if (!await ConfirmUnsavedChangesAsync(reopeningCurrentProject
                     ? "reopen the current project"
                     : "open another project")) return;
-            if (reopeningCurrentProject) project = manager.Load();
+            if (reopeningCurrentProject)
+                project = openedFromBackup ? manager.LoadBackup() : manager.Load();
             var profileAvailable = ActivateProject(manager, project);
+            _openedFromBackup = openedFromBackup;
             await LoadWorkspaceBindingsAsync(profileAvailable);
+            if (openedFromBackup)
+                StatusText += " Recovered from a validated backup; the original remains untouched. Use Save As to create an independent recovery copy.";
         }
         catch (Exception ex) { StatusText = $"Open failed: {ex.Message}"; }
     }
@@ -4803,6 +4844,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         SelectedNode = null;
         SelectedDestinationKind = SqliteDestinationKind;
         ProjectPath = manager.FullPath;
+        _openedFromBackup = false;
         _expectedLayoutGeneration = project.LayoutGeneration;
         ClearSourceAndRunResults();
         _savedProjectSnapshot = ProjectSerializer.Serialize(project);
@@ -4945,6 +4987,15 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         try
         {
+            if (_openedFromBackup)
+            {
+                var originalPath = ProjectPath;
+                await SaveProjectAsAsync();
+                return !_openedFromBackup
+                    && !PathsEqual(originalPath, ProjectPath)
+                    && !IsProjectDirty;
+            }
+
             var path = ProjectPath;
             var requireNewPath = path is null;
             if (path is null)
@@ -4967,6 +5018,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             var path = await _fileDialog.SaveProjectAsync();
             if (path is null) return;
             var fullPath = Path.GetFullPath(path);
+            if (_openedFromBackup && PathsEqual(ProjectPath, fullPath))
+            {
+                StatusText = "Save As cannot overwrite the original project while it is open from backup. Choose a new path for the recovery copy.";
+                return;
+            }
             if (File.Exists(fullPath) && !PathsEqual(ProjectPath, fullPath))
             {
                 StatusText = "Save As stopped because that path already contains another project. Choose a new path to avoid replacing it.";
@@ -5001,6 +5057,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         var hadProjectPath = ProjectPath is not null;
         var fullPath = Path.GetFullPath(path);
+        if (_openedFromBackup && hadProjectPath && PathsEqual(ProjectPath, fullPath))
+            throw new InvalidOperationException(
+                "A project opened from backup cannot overwrite the unreadable original. Use Save As to create an independent recovery copy.");
         if (!hadProjectPath && _migrationSourcePath is not null
             && PathsEqual(_migrationSourcePath, fullPath))
             throw new InvalidOperationException(
@@ -5014,6 +5073,7 @@ public sealed class MainWindowViewModel : ViewModelBase
                 ? manager.SaveNew(Session.Project)
                 : manager.Save(Session.Project);
         ProjectPath = manager.FullPath;
+        if (requireNewPath) _openedFromBackup = false;
         _expectedLayoutGeneration = saved.NewLayoutGeneration;
         _savedProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
         Raise(nameof(IsProjectDirty));

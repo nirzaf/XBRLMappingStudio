@@ -13,6 +13,7 @@ public interface IProjectFileDialog
     Task<string?> OpenProjectAsync();
     Task<string?> SaveProjectAsync();
     Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath);
+    Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath);
     Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action);
     Task<string?> SaveReportAsync();
     Task<string?> OpenSourceAsync();

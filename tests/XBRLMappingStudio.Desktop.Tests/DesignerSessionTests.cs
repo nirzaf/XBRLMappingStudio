@@ -384,6 +384,162 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task OpeningCorruptedProject_OffersValidatedBackupAndSaveAsPreservesOriginals()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-backup-recovery", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var projectPath = Path.Combine(dir, "mapping.xmap");
+        var recoveryCopyPath = Path.Combine(dir, "recovered", "mapping-recovered.xmap");
+        Directory.CreateDirectory(Path.GetDirectoryName(recoveryCopyPath)!);
+        try
+        {
+            var project = Project();
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = project.ProfileDigest
+            });
+            var manager = new ProjectManager(projectPath);
+            var firstSave = manager.Save(project);
+            var originalPosition = project.Nodes[0].Layout!;
+            var originalX = originalPosition.X;
+            project.Nodes[0].Layout = new LayoutPosition(originalX + 250, originalPosition.Y);
+            manager.Save(project, firstSave.NewLayoutGeneration);
+            var expectedProjectId = manager.LoadBackup().ProjectId;
+            var backupBytes = await File.ReadAllBytesAsync(manager.BackupPath);
+            await File.WriteAllTextAsync(projectPath, "{ corrupt main project }");
+            var corruptedProjectBytes = await File.ReadAllBytesAsync(projectPath);
+
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = projectPath,
+                ConfirmBackupRecovery = true,
+                ProjectSavePath = recoveryCopyPath,
+                ConfirmIndependentCopy = true
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+
+            await viewModel.OpenProjectAsync();
+
+            Assert.Equal(expectedProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Equal(originalX, viewModel.Session.Project.Nodes[0].Layout!.X);
+            Assert.Equal(projectPath, viewModel.ProjectPath);
+            Assert.False(viewModel.IsProjectDirty);
+            Assert.Equal(1, dialog.BackupRecoveryConfirmationCount);
+            Assert.Contains("validated backup", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Use Save As", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Equal(corruptedProjectBytes, await File.ReadAllBytesAsync(projectPath));
+            Assert.Equal(backupBytes, await File.ReadAllBytesAsync(manager.BackupPath));
+
+            Assert.Throws<InvalidOperationException>(() => viewModel.SaveProjectTo(projectPath));
+            Assert.Equal(corruptedProjectBytes, await File.ReadAllBytesAsync(projectPath));
+            Assert.Equal(backupBytes, await File.ReadAllBytesAsync(manager.BackupPath));
+
+            await viewModel.SaveProjectAsAsync();
+
+            var recoveredCopy = new ProjectManager(recoveryCopyPath).Load();
+            Assert.NotEqual(expectedProjectId, recoveredCopy.ProjectId);
+            Assert.Empty(recoveredCopy.Approvals);
+            Assert.Equal(recoveryCopyPath, viewModel.ProjectPath);
+            Assert.Equal(corruptedProjectBytes, await File.ReadAllBytesAsync(projectPath));
+            Assert.Equal(backupBytes, await File.ReadAllBytesAsync(manager.BackupPath));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CancelBackupRecovery_PreservesDirtyActiveProjectAndBothFiles()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-backup-recovery-cancel", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var damagedPath = Path.Combine(dir, "damaged.xmap");
+        var activePath = Path.Combine(dir, "active.xmap");
+        try
+        {
+            var damagedManager = new ProjectManager(damagedPath);
+            var damagedProject = Project();
+            var firstSave = damagedManager.Save(damagedProject);
+            damagedProject.Nodes[0].Layout = new LayoutPosition(900, 901);
+            damagedManager.Save(damagedProject, firstSave.NewLayoutGeneration);
+            await File.WriteAllTextAsync(damagedPath, "{ corrupt main project }");
+            var damagedBytes = await File.ReadAllBytesAsync(damagedPath);
+            var backupBytes = await File.ReadAllBytesAsync(damagedManager.BackupPath);
+
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = damagedPath,
+                ConfirmBackupRecovery = false
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            viewModel.SaveProjectTo(activePath);
+            var activeProjectId = viewModel.Session.Project.ProjectId;
+            viewModel.Session.MoveNode("n0", 777, 888);
+
+            await viewModel.OpenProjectAsync();
+
+            Assert.Equal(activeProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Equal(activePath, viewModel.ProjectPath);
+            Assert.Equal(777, viewModel.Session.Project.Nodes.Single(node => node.NodeId == "n0").Layout!.X);
+            Assert.True(viewModel.IsProjectDirty);
+            Assert.Equal(1, dialog.BackupRecoveryConfirmationCount);
+            Assert.Equal("Canceled backup recovery; the active project is unchanged.", viewModel.StatusText);
+            Assert.Equal(damagedBytes, await File.ReadAllBytesAsync(damagedPath));
+            Assert.Equal(backupBytes, await File.ReadAllBytesAsync(damagedManager.BackupPath));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InvalidBackupDoesNotPromptForRecoveryOrReplaceTheActiveProject()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-backup-invalid", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var projectPath = Path.Combine(dir, "damaged.xmap");
+        try
+        {
+            var manager = new ProjectManager(projectPath);
+            var project = Project();
+            var firstSave = manager.Save(project);
+            project.Nodes[0].Layout = new LayoutPosition(901, 902);
+            manager.Save(project, firstSave.NewLayoutGeneration);
+            await File.WriteAllTextAsync(projectPath, "{ corrupt main project }");
+            await File.WriteAllTextAsync(manager.BackupPath, "{ corrupt backup project }");
+            var projectBytes = await File.ReadAllBytesAsync(projectPath);
+            var backupBytes = await File.ReadAllBytesAsync(manager.BackupPath);
+
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = projectPath,
+                ConfirmBackupRecovery = true
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            var activeProjectId = viewModel.Session.Project.ProjectId;
+
+            await viewModel.OpenProjectAsync();
+
+            Assert.Equal(0, dialog.BackupRecoveryConfirmationCount);
+            Assert.Equal(activeProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Null(viewModel.ProjectPath);
+            Assert.Contains("backup could not be recovered", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(projectBytes, await File.ReadAllBytesAsync(projectPath));
+            Assert.Equal(backupBytes, await File.ReadAllBytesAsync(manager.BackupPath));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RubberBandSelect_SelectsIntersectingNodes()
     {
         var session = new DesignerSession(Project());
@@ -2325,6 +2481,8 @@ public sealed class DesignerSessionTests
         public string? FileDestinationPath { get; set; }
         public bool ConfirmationResult { get; set; }
         public bool ConfirmIndependentCopy { get; set; }
+        public bool ConfirmBackupRecovery { get; set; }
+        public int BackupRecoveryConfirmationCount { get; private set; }
         public int ConfirmationCount { get; private set; }
         public string? ConfirmedTable { get; private set; }
         public IReadOnlyList<string> ConfirmedBusinessKey { get; private set; } = Array.Empty<string>();
@@ -2336,6 +2494,11 @@ public sealed class DesignerSessionTests
         public Task<string?> SaveProjectAsync() => Task.FromResult(ProjectSavePath);
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)
             => Task.FromResult(ConfirmIndependentCopy);
+        public Task<bool> ConfirmOpenProjectBackupAsync(string projectPath, string backupPath)
+        {
+            BackupRecoveryConfirmationCount++;
+            return Task.FromResult(ConfirmBackupRecovery);
+        }
         public Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
             => Task.FromResult(UnsavedChoice);
         public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);

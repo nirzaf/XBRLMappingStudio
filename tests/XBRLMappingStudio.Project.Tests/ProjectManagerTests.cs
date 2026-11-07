@@ -48,6 +48,33 @@ public sealed class ProjectManagerTests : IDisposable
     }
 
     [Fact]
+    public void LoadBackupAfterMainProjectIsCorrupted_ValidatesBackupWithoutChangingFiles()
+    {
+        var path = ProjectPath();
+        var manager = new ProjectManager(path);
+        var project = TestFixtures.BuildRevenueMappingProject(
+            idSeed: Guid.Parse("33333333-1111-2222-3333-444444444453"));
+        var firstSave = manager.Save(project);
+        var originalPosition = project.Nodes[0].Layout!;
+        var originalX = originalPosition.X;
+        project.Nodes[0].Layout = new LayoutPosition(originalX + 250, originalPosition.Y);
+        manager.Save(project, firstSave.NewLayoutGeneration);
+
+        var expectedBackupBytes = File.ReadAllBytes(manager.BackupPath);
+        var expectedProjectId = manager.LoadBackup().ProjectId;
+        File.WriteAllText(path, "{ this is not a project }");
+        var corruptedProjectBytes = File.ReadAllBytes(path);
+
+        var recovered = manager.LoadBackup();
+
+        Assert.Equal(expectedProjectId, recovered.ProjectId);
+        Assert.Equal(originalX, recovered.Nodes[0].Layout!.X);
+        Assert.Equal(corruptedProjectBytes, File.ReadAllBytes(path));
+        Assert.Equal(expectedBackupBytes, File.ReadAllBytes(manager.BackupPath));
+        Assert.False(File.Exists(manager.LockPath));
+    }
+
+    [Fact]
     public void SaveNew_RefusesToReplaceExistingProject()
     {
         var path = ProjectPath();
