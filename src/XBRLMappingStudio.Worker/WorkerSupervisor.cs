@@ -296,6 +296,12 @@ internal sealed class WorkerProcessTree : IDisposable
 {
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectExtendedLimitInformationClass = 9;
+    private const uint Th32csSnapProcess = 0x00000002;
+    private const uint ProcessTerminate = 0x0001;
+    private const uint ProcessSetQuota = 0x0100;
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const int ErrorInvalidParameter = 87;
+    private const int ErrorNoMoreFiles = 18;
     private const int SigKill = 9;
     private const string WindowsJobNamePrefix = "XBRLMappingStudio.Worker.";
     private readonly bool _linuxProcessGroup;
@@ -438,8 +444,91 @@ internal sealed class WorkerProcessTree : IDisposable
             throw new InvalidOperationException("Could not assign the worker process to its Windows Job Object.", new Win32Exception(error));
         }
 
+        try
+        {
+            AssignExistingWindowsDescendants(job, process.Id);
+        }
+        catch (Exception ex)
+        {
+            // A launcher can create the actual worker before Process.Start returns.
+            // Closing the configured job kills every descendant already attached;
+            // Kill(entireProcessTree: true) is the fallback for anything missed if
+            // the snapshot raced with process startup.
+            job.Dispose();
+            TryKill(process);
+            throw new InvalidOperationException(
+                "Could not attach existing worker descendants to the Windows Job Object.", ex);
+        }
+
         _job = job;
         _windowsJobAssigned = true;
+    }
+
+    private static void AssignExistingWindowsDescendants(SafeFileHandle job, int rootProcessId)
+    {
+        using var snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
+        if (snapshot.IsInvalid)
+            throw new InvalidOperationException("Could not enumerate worker descendants.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+
+        var childrenByParent = new Dictionary<int, List<int>>();
+        var entry = new ProcessEntry32 { Size = (uint)Marshal.SizeOf<ProcessEntry32>() };
+        if (!Process32FirstW(snapshot, ref entry))
+            throw new InvalidOperationException("Could not read the Windows process snapshot.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+
+        do
+        {
+            var processId = checked((int)entry.ProcessId);
+            var parentProcessId = checked((int)entry.ParentProcessId);
+            if (processId <= 0 || parentProcessId <= 0) continue;
+            if (!childrenByParent.TryGetValue(parentProcessId, out var children))
+            {
+                children = new List<int>();
+                childrenByParent[parentProcessId] = children;
+            }
+            children.Add(processId);
+        }
+        while (Process32NextW(snapshot, ref entry));
+        var enumerationError = Marshal.GetLastWin32Error();
+        if (enumerationError != ErrorNoMoreFiles)
+            throw new InvalidOperationException("Could not finish reading the Windows process snapshot.",
+                new Win32Exception(enumerationError));
+
+        var pending = new Queue<int>();
+        var seen = new HashSet<int> { rootProcessId };
+        pending.Enqueue(rootProcessId);
+        while (pending.TryDequeue(out var parentProcessId))
+        {
+            if (!childrenByParent.TryGetValue(parentProcessId, out var children)) continue;
+            foreach (var processId in children)
+            {
+                if (!seen.Add(processId)) continue;
+                // Include descendants of a process that exited between the snapshot
+                // and OpenProcess; its children can still be alive and escaped the job.
+                pending.Enqueue(processId);
+                using var process = OpenProcess(
+                    ProcessTerminate | ProcessSetQuota | ProcessQueryLimitedInformation,
+                    inheritHandle: false, (uint)processId);
+                if (process.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == ErrorInvalidParameter) continue;
+                    throw new InvalidOperationException(
+                        $"Could not open worker descendant process {processId}.", new Win32Exception(error));
+                }
+
+                if (!IsProcessInJob(process, job, out var alreadyAssigned))
+                    throw new InvalidOperationException(
+                        $"Could not inspect worker descendant process {processId}.",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+                if (alreadyAssigned) continue;
+                if (!AssignProcessToJobObject(job, process))
+                    throw new InvalidOperationException(
+                        $"Could not assign worker descendant process {processId} to its Job Object.",
+                        new Win32Exception(Marshal.GetLastWin32Error()));
+            }
+        }
     }
 
     public void Kill(Process process)
@@ -519,6 +608,44 @@ internal sealed class WorkerProcessTree : IDisposable
         public UIntPtr PeakProcessMemoryUsed;
         public UIntPtr PeakJobMemoryUsed;
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry32
+    {
+        public uint Size;
+        public uint Usage;
+        public uint ProcessId;
+        public UIntPtr DefaultHeapId;
+        public uint ModuleId;
+        public uint ThreadCount;
+        public uint ParentProcessId;
+        public int BasePriority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string? ExecutableFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", ExactSpelling = true,
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32FirstW(SafeFileHandle snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", EntryPoint = "Process32NextW", ExactSpelling = true,
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32NextW(SafeFileHandle snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(SafeProcessHandle process, SafeFileHandle job,
+        [MarshalAs(UnmanagedType.Bool)] out bool result);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateJobObjectW(IntPtr jobAttributes, string? name);

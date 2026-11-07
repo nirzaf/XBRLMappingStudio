@@ -752,23 +752,27 @@ public sealed class ArelleExecutionTests
             kernel32.IsProcessInJob.restype = ctypes.c_int
             kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
             kernel32.CloseHandle.restype = ctypes.c_int
-            job = kernel32.OpenJobObjectW(0x0004, 0, f"XBRLMappingStudio.Worker.{os.getpid()}")
             result = ctypes.c_int()
+            if not handle:
+                return f"error:OpenProcess:{ctypes.get_last_error()}"
             try:
-                if not handle:
-                    return f"error:OpenProcess:{ctypes.get_last_error()}"
-                if not job:
-                    error = ctypes.get_last_error()
-                    kernel32.IsProcessInJob(handle, None, ctypes.byref(result))
-                    return f"error:OpenJobObjectW:{error}:any={bool(result.value)}:pid={process_id}:self={os.getpid()}"
-                if not kernel32.IsProcessInJob(handle, job, ctypes.byref(result)):
-                    return f"error:IsProcessInJob:{ctypes.get_last_error()}"
-                return str(bool(result.value))
+                # The configured executable may be a Python venv launcher. In that
+                # case Process.Start owns the shim PID while this script is its child.
+                for owner_process_id in dict.fromkeys((os.getpid(), os.getppid())):
+                    job = kernel32.OpenJobObjectW(
+                        0x0004, 0, f"XBRLMappingStudio.Worker.{owner_process_id}")
+                    if not job:
+                        continue
+                    try:
+                        if not kernel32.IsProcessInJob(handle, job, ctypes.byref(result)):
+                            return f"error:IsProcessInJob:{ctypes.get_last_error()}"
+                        if result.value:
+                            return "True"
+                    finally:
+                        kernel32.CloseHandle(job)
+                return "False"
             finally:
-                if handle:
-                    kernel32.CloseHandle(handle)
-                if job:
-                    kernel32.CloseHandle(job)
+                kernel32.CloseHandle(handle)
 
         marker, mode, profile_id, profile_digest = sys.argv[1:5]
         if mode == "stderr-flood":
