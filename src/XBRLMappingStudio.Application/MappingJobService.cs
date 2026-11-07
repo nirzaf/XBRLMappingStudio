@@ -34,6 +34,7 @@ public sealed class MappingJobService
     private readonly Func<LocalApplicationDatabase> _applicationDatabaseFactory;
     private readonly ExecutionBudget _executionBudget;
     private readonly Action? _afterFileDestinationPublish;
+    private readonly Action? _afterFileDestinationStage;
 
     public MappingJobService(
         FilingProfile profile,
@@ -46,14 +47,15 @@ public sealed class MappingJobService
     }
 
     // Deterministic fault injection for publication compensation tests. Production
-    // callers use the public constructor, which leaves this hook unset.
+    // callers use the public constructor, which leaves these hooks unset.
     internal MappingJobService(
         FilingProfile profile,
         IWorkerClient worker,
         FunctionCatalog? catalog,
         Func<LocalApplicationDatabase>? applicationDatabaseFactory,
         ExecutionBudget? executionBudget,
-        Action? afterFileDestinationPublish)
+        Action? afterFileDestinationPublish,
+        Action? afterFileDestinationStage = null)
     {
         _profile = profile;
         _worker = worker;
@@ -61,6 +63,7 @@ public sealed class MappingJobService
         _applicationDatabaseFactory = applicationDatabaseFactory ?? (() => new LocalApplicationDatabase());
         _executionBudget = executionBudget ?? ExecutionBudget.Default;
         _afterFileDestinationPublish = afterFileDestinationPublish;
+        _afterFileDestinationStage = afterFileDestinationStage;
         _executionBudget.Validate();
     }
 
@@ -1919,6 +1922,7 @@ public sealed class MappingJobService
             stagedPath = await adapter.StageArtifactAsync(connection, payload,
                 Path.GetExtension(destinationPath), cancellationToken);
             stagedDigest = DestinationLock.DigestFile(stagedPath);
+            _afterFileDestinationStage?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
 
             if (!StringComparer.Ordinal.Equals(originalDigest, CurrentFileDigest(destinationPath)))

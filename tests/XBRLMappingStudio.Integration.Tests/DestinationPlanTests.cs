@@ -265,6 +265,71 @@ public sealed class DestinationPlanTests
     }
 
     [Theory]
+    [InlineData("csv", "csv-records-v1", "cancelled-report.csv")]
+    [InlineData("excel", "xlsx-records-v1", "cancelled-report.xlsx")]
+    [InlineData("json", "json-records-v1", "cancelled-report.json")]
+    [InlineData("xml", "xml-records-v1", "cancelled-report.xml")]
+    public async Task PublishFileDestination_CancellationAfterStagingPreservesPreviousOutput(
+        string kind, string format, string fileName)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-file-cancelled-destination-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = kind,
+                Locator = fileName,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = format,
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            using var cancellation = new CancellationTokenSource();
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic),
+                null, null, null, null, () => cancellation.Cancel());
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var destinationPath = Path.Combine(directory, fileName);
+            var acceptedBytes = Encoding.UTF8.GetBytes("previous accepted destination bytes");
+            await File.WriteAllBytesAsync(destinationPath, acceptedBytes);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                service.PublishFileDestinationAsync(project, result, directory,
+                    allowSyntheticProfile: true, cancellation.Token));
+
+            Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(destinationPath));
+            Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == destinationPath);
+            Assert.False(File.Exists(destinationPath + ".staged"));
+            Assert.False(File.Exists(destinationPath + ".xms-rollback-" + result.Manifest.RunId));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData("csv", "csv-records-v1", "nil-facts.csv")]
     [InlineData("excel", "xlsx-records-v1", "nil-facts.xlsx")]
     [InlineData("json", "json-records-v1", "nil-facts.json")]
