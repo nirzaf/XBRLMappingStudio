@@ -665,7 +665,9 @@ public sealed class CliParityTests : IAsyncLifetime
             var stateDatabase = new LocalApplicationDatabase();
             var mixedStore = new MixedPublicationStore(stateDatabase);
             MixedPublicationRecord? inProgress = null;
-            var stateDeadline = DateTimeOffset.UtcNow.AddSeconds(4);
+            // The CLI starts a separate .NET process and may be delayed by shared
+            // Windows runner load before it reaches the durable journal boundary.
+            var stateDeadline = DateTimeOffset.UtcNow.AddSeconds(15);
             while (DateTimeOffset.UtcNow < stateDeadline)
             {
                 if (File.Exists(outputPath))
@@ -688,8 +690,21 @@ public sealed class CliParityTests : IAsyncLifetime
                 await Task.Delay(25);
             }
 
-            Assert.NotNull(operationKey);
-            Assert.NotNull(inProgress);
+            if (operationKey is null || inProgress is null)
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                var stdout = await stdoutTask;
+                var stderr = await stderrTask;
+                Assert.True(operationKey is not null && inProgress is not null,
+                    $"CLI did not reach the durable XML-confirmed/SQLite-in-progress state within 15 seconds. "
+                    + $"Exit code: {process.ExitCode}. stdout: {stdout}{Environment.NewLine}stderr: {stderr}");
+            }
+            operationKey = Assert.IsType<string>(operationKey);
+            inProgress = Assert.IsType<MixedPublicationRecord>(inProgress);
             Assert.Equal(DestinationPublicationState.Confirmed, inProgress!.FileState);
             Assert.Equal(DestinationPublicationState.InProgress, inProgress.SqliteState);
             Assert.True(File.Exists(outputPath), "The XML file leg should be durable before the SQLite leg starts.");
@@ -814,7 +829,9 @@ public sealed class CliParityTests : IAsyncLifetime
         try
         {
             MixedPublicationRecord? inProgress = null;
-            var stateDeadline = DateTimeOffset.UtcNow.AddSeconds(4);
+            // Both the report and the durable SQLite intent are produced by a
+            // child process; allow shared Windows runners more than cold-start time.
+            var stateDeadline = DateTimeOffset.UtcNow.AddSeconds(15);
             while (DateTimeOffset.UtcNow < stateDeadline)
             {
                 if (File.Exists(outputPath))
@@ -838,8 +855,21 @@ public sealed class CliParityTests : IAsyncLifetime
                 await Task.Delay(25);
             }
 
-            Assert.NotNull(operationKey);
-            Assert.NotNull(inProgress);
+            if (operationKey is null || inProgress is null)
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                var stdout = await stdoutTask;
+                var stderr = await stderrTask;
+                Assert.True(operationKey is not null && inProgress is not null,
+                    $"CLI did not reach the durable XML-confirmed/SQLite-in-progress state within 15 seconds. "
+                    + $"Exit code: {process.ExitCode}. stdout: {stdout}{Environment.NewLine}stderr: {stderr}");
+            }
+            operationKey = Assert.IsType<string>(operationKey);
+            inProgress = Assert.IsType<MixedPublicationRecord>(inProgress);
             Assert.Equal(DestinationPublicationState.Confirmed, inProgress!.FileState);
             Assert.Equal(DestinationPublicationState.InProgress, inProgress.SqliteState);
             var sqliteOperationKey = Assert.IsType<string>(inProgress.SqliteOperationKey);
@@ -858,7 +888,7 @@ public sealed class CliParityTests : IAsyncLifetime
             targetWriteLock.Rollback();
 
             var committed = false;
-            var commitDeadline = DateTimeOffset.UtcNow.AddSeconds(4);
+            var commitDeadline = DateTimeOffset.UtcNow.AddSeconds(15);
             while (DateTimeOffset.UtcNow < commitDeadline)
             {
                 await using var targetReaderConnection = new SqliteConnection(new SqliteConnectionStringBuilder
