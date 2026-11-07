@@ -117,6 +117,42 @@ public class FunctionTests
         }
     }
 
+    [Fact]
+    public void RunParameterIntegerParsing_IsInvariantAcrossCurrentCultures()
+    {
+        var priorCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            var customCulture = (System.Globalization.CultureInfo)
+                System.Globalization.CultureInfo.InvariantCulture.Clone();
+            customCulture.NumberFormat.NegativeSign = "~";
+            System.Globalization.CultureInfo.CurrentCulture = customCulture;
+
+            var source = GraphHarness.Node(NodeTypeConstants.ExcelField, "Iteration source",
+                new() { ["bindingId"] = Binding, ["column"] = "amount" },
+                outputs: new[] { GraphHarness.P("value", PortShape.Decimal) });
+            var parameter = GraphHarness.Node(NodeTypeConstants.RunParameter, "Integer parameter",
+                new() { ["name"] = "amount", ["shape"] = "Integer" },
+                outputs: new[] { GraphHarness.P("value", PortShape.Integer) });
+            var sink = GraphHarness.FactSink(out var edges, parameter, "value", PortCardinality.Single);
+            var project = GraphHarness.Project(
+                new[] { source, parameter }.Concat(sink), edges,
+                bindings: new[] { GraphHarness.Binding(Binding) });
+            var context = GraphHarness.Ctx(
+                new[] { (Binding, new[] { GraphHarness.Row(("amount", D(0m))) } as IReadOnlyList<DataRecord>) },
+                parameters: new Dictionary<string, string> { ["amount"] = "-1234" });
+
+            var result = GraphHarness.Run(project, context, out var compile);
+
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+            Assert.Equal(-1234m, Assert.Single(result!.Facts).Value);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = priorCulture;
+        }
+    }
+
     [Theory]
     [InlineData("-1.234,50", -1234.50)]
     [InlineData("1.234.567,89", 1234567.89)]

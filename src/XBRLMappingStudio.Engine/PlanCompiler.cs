@@ -1346,7 +1346,8 @@ public sealed class PlanCompiler
                 {
                     PortShape.Decimal => TryParseDecimalInvariant(raw, ctx, diag, node, out var d)
                         ? DataValue.DecimalValue(d) : DataValue.Missing(shape),
-                    PortShape.Integer => long.TryParse(raw, out var l) ? DataValue.IntegerValue(l) : DataValue.Missing(shape),
+                    PortShape.Integer => long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var l)
+                        ? DataValue.IntegerValue(l) : DataValue.Missing(shape),
                     _ => DataValue.StringValue(raw)
                 };
                 break;

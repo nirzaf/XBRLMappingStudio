@@ -293,6 +293,16 @@ provenance and worker-adjudication integration tests passed 2/2; the run used
 Release output files. Profile-specific precision and default division scale
 remain open.
 
+RunParameter integer values use `NumberStyles.Integer` with
+`CultureInfo.InvariantCulture`. `RunParameterIntegerParsing_IsInvariantAcrossCurrentCultures`
+sets a custom current-culture negative sign and confirms the invariant `-1234`
+parameter still emits the expected fact. Before the fix, the same test failed
+because the parameter was silently treated as missing.
+
+Verification: the focused regression passed 1/1 after reproducing the failure
+before the fix; the Engine Release suite passed 124/124. `git diff --check`
+passed. Other profile-specific precision and rounding policies remain open.
+
 ## DST-07 preview cancellation and target drift
 
 The SQLite destination preview observes cancellation while checking the saved
