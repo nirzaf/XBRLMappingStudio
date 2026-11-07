@@ -285,6 +285,8 @@ The compound-unit slice run [42308787441](https://github.com/nirzaf/XBRLMappingS
 
 The profile-aware XML QName round-trip run [42311840089](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42311840089) verified exact source commit `70ca4c1f8f491ab29fd1a8caccb4dea0f45217be`: repository hygiene, Windows and Ubuntu Release build/test, pinned worker integration, dependency inventory, and SPDX generation all passed. Each .NET OS matrix passed **748 tests** and skipped **5** environment-gated Arelle subprocess cases; the pinned worker job passed all **11** gated .NET Arelle execution tests. The local Release build completed with 0 warnings and errors, and all eight .NET projects passed **748 tests** with the same 5 Arelle-gated skips.
 
+The latest OPS-02 worker-boundary change is commit `8f8bd03c523acb4bf1666c4f595431739b6d39ce`. Its exact-head CI run [42367694537](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42367694537) passed repository hygiene, Windows and Ubuntu build/test, and pinned Arelle worker integration. Focused local QA suites passed supervision 14/14, CLI/factory parity 33/33, desktop operations 7/7, and PDF worker 5/5. The shared two-process limit is application-process local; the broader implementation status and remaining qualification gates are recorded in [`docs/implementation-status.md`](docs/implementation-status.md).
+
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 118 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
