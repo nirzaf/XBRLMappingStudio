@@ -759,7 +759,7 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertIs(options["workOffline"], True)
         self.assertEqual("offline", options["internetConnectivity"])
 
-    def test_worker_process_denies_dns_and_loopback_socket_connections(self):
+    def test_worker_process_denies_dns_and_loopback_socket_operations(self):
         class ConnectionCanaryServer(http.server.ThreadingHTTPServer):
             def __init__(self, server_address, request_handler):
                 self.accepted_connections = []
@@ -795,6 +795,18 @@ def expect_blocked(action, description):
         raise SystemExit(description + " was allowed")
 
 expect_blocked(lambda: socket.getaddrinfo("localhost", 80), "DNS resolution")
+
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    expect_blocked(lambda: listener.bind(("127.0.0.1", 0)), "The loopback TCP bind")
+finally:
+    listener.close()
+
+datagram_listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    expect_blocked(lambda: datagram_listener.bind(("127.0.0.1", 0)), "The loopback UDP bind")
+finally:
+    datagram_listener.close()
 
 connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:

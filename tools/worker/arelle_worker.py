@@ -46,6 +46,7 @@ TAXONOMY_XML_READ_BYTES = 64 * 1024
 MAX_TAXONOMY_OFFLINE_ALIAS_BYTES = 256 * 1024 * 1024
 
 _OFFLINE_NETWORK_AUDIT_EVENTS = frozenset({
+    "socket.bind",
     "socket.connect",
     "socket.connect_ex",
     "socket.sendto",
