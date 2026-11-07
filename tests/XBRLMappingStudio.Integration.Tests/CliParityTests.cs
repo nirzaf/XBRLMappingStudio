@@ -524,6 +524,155 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_MixedProcessLossAfterXmlConfirmationReconcilesAndRetriesWithoutDuplicateRows()
+    {
+        var targetPath = Path.Combine(_dir, "xml-mixed-crash-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = "xml-mixed-crash-target.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "xml-mixed-crash.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var outputPath = Path.Combine(_dir, "xml-mixed-crash-report.xml");
+        var manifestPath = Path.Combine(_dir, "xml-mixed-crash-manifest.json");
+
+        await using var targetGate = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = targetPath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+            DefaultTimeout = 5
+        }.ToString());
+        await targetGate.OpenAsync();
+        using var writeLock = targetGate.BeginTransaction(deferred: false);
+
+        var psi = BuildStartInfo(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", manifestPath, "--allow-synthetic-profile");
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("CLI process failed to start.");
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        string? operationKey = null;
+        try
+        {
+            var stateDatabase = new LocalApplicationDatabase();
+            var mixedStore = new MixedPublicationStore(stateDatabase);
+            MixedPublicationRecord? inProgress = null;
+            var stateDeadline = DateTimeOffset.UtcNow.AddSeconds(4);
+            while (DateTimeOffset.UtcNow < stateDeadline)
+            {
+                if (File.Exists(outputPath))
+                {
+                    using var stateConnection = stateDatabase.OpenConnection();
+                    using var find = stateConnection.CreateCommand();
+                    find.CommandText = "SELECT operation_key FROM mixed_publication_reconciliation WHERE file_path=$path AND file_kind='xbrl-xml' ORDER BY updated_utc DESC LIMIT 1";
+                    find.Parameters.AddWithValue("$path", Path.GetFullPath(outputPath));
+                    operationKey = find.ExecuteScalar() as string;
+                    if (operationKey is not null)
+                    {
+                        inProgress = mixedStore.Find(operationKey);
+                        if (inProgress is { SqliteState: DestinationPublicationState.InProgress,
+                            SqliteOperationKey: not null })
+                            break;
+                    }
+                }
+
+                if (process.HasExited) break;
+                await Task.Delay(25);
+            }
+
+            Assert.NotNull(operationKey);
+            Assert.NotNull(inProgress);
+            Assert.Equal(DestinationPublicationState.Confirmed, inProgress!.FileState);
+            Assert.Equal(DestinationPublicationState.InProgress, inProgress.SqliteState);
+            Assert.True(File.Exists(outputPath), "The XML file leg should be durable before the SQLite leg starts.");
+
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            _ = await stdoutTask;
+            _ = await stderrTask;
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        writeLock.Rollback();
+        var xmlBytes = await File.ReadAllBytesAsync(outputPath);
+        var xmlDigest = RunManifest.ComputeSha256(xmlBytes);
+        await using (var unchangedTarget = new SqliteConnection(
+            $"Data Source={targetPath};Pooling=False;Mode=ReadOnly"))
+        {
+            await unchangedTarget.OpenAsync();
+            await using var command = unchangedTarget.CreateCommand();
+            command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts')";
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(0, reader.GetInt32(0));
+            Assert.Equal(0, reader.GetInt32(1));
+        }
+
+        var (reconcileExit, reconcileJson, reconcileError) = await RunCliAsync(LocateCli(),
+            "reconcile-publication", operationKey!);
+        Assert.True(reconcileExit == 3,
+            $"Expected the uncommitted SQLite leg to reconcile as rejected ({reconcileExit}).\n{reconcileJson}\n{reconcileError}");
+        Assert.Contains("PUB_NOT_COMMITTED", reconcileJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("could not complete", reconcileError, StringComparison.OrdinalIgnoreCase);
+        using (var reconciled = JsonDocument.Parse(reconcileJson))
+        {
+            var outcomes = reconciled.RootElement.GetProperty("outcomes").EnumerateArray().ToArray();
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+                && outcome.GetProperty("State").GetString() == "Confirmed"
+                && outcome.GetProperty("Digest").GetString() == xmlDigest);
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "sqlite"
+                && outcome.GetProperty("State").GetString() == "Rejected");
+        }
+
+        var retryManifestPath = Path.Combine(_dir, "xml-mixed-crash-retry-manifest.json");
+        var (retryExit, _, retryError) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", retryManifestPath, "--allow-synthetic-profile");
+        Assert.True(retryExit == 0, $"Retry after process loss failed.\n{retryError}");
+        Assert.Equal(xmlDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
+        using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
+        {
+            var root = retryManifest.RootElement;
+            Assert.Equal(operationKey, root.GetProperty("PublicationReconciliationId").GetString());
+            Assert.All(root.GetProperty("PublicationOutcomes").EnumerateArray(), outcome =>
+                Assert.Equal("Confirmed", outcome.GetProperty("State").GetString()));
+        }
+
+        await using var finalTarget = new SqliteConnection(
+            $"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+        await finalTarget.OpenAsync();
+        await using var finalCommand = finalTarget.CreateCommand();
+        finalCommand.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
+        await using var finalReader = await finalCommand.ExecuteReaderAsync();
+        Assert.True(await finalReader.ReadAsync());
+        Assert.Equal(1, finalReader.GetInt32(0));
+        Assert.Equal(1, finalReader.GetInt32(1));
+    }
+
+    [Fact]
     public async Task Cli_ConfigureAndExecutePublishesExplicitJsonDestination()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);

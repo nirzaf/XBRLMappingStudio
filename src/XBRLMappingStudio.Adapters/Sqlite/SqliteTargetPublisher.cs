@@ -9,7 +9,15 @@ using XBRLMappingStudio.Project;
 namespace XBRLMappingStudio.Adapters.Sqlite;
 
 public sealed record SqlitePublishReceipt(string OperationKey, string IntentFingerprint, int WrittenRows, DateTimeOffset CompletedUtc);
-public enum SqliteReceiptReconciliation { Found, NotFound, TargetUnavailable, IntentConflict }
+public enum SqliteReceiptReconciliation
+{
+    Found,
+    /// <summary>The target exists, but the requested transaction's receipt does not.</summary>
+    NotFound,
+    /// <summary>The target database is missing or cannot be opened.</summary>
+    TargetUnavailable,
+    IntentConflict
+}
 public sealed record SqliteTargetChangeSample(int CandidateRow, string Outcome);
 public sealed record SqliteTargetChangePreview(
     int CandidateRows,
@@ -169,7 +177,9 @@ public sealed class SqliteTargetPublisher
         await using var table = connection.CreateCommand();
         table.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts'";
         if (await table.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
-            return (SqliteReceiptReconciliation.TargetUnavailable, null);
+            // Receipt table creation and all published rows commit in one transaction.
+            // Its absence on an available target proves no publication receipt committed.
+            return (SqliteReceiptReconciliation.NotFound, null);
 
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT intent_fingerprint,written_rows,completed_utc FROM xms_idempotency_receipts WHERE operation_key=$key";
