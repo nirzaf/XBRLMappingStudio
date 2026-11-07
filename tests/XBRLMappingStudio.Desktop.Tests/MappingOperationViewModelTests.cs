@@ -2,6 +2,7 @@ using System.ComponentModel;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Desktop.ViewModels;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
@@ -22,6 +23,18 @@ public sealed class MappingOperationViewModelTests
             var workbookPath = IndependentAcceptanceFixtures.Materialize(directory, "revenue.xlsx");
             var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
             var project = TestFixtures.BuildRevenueMappingProject(workbookPath);
+            var originalFactNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var duplicateFactNode = originalFactNode.ShallowCopy() with
+            {
+                NodeId = Id.New(),
+                DisplayName = "Second Revenue fact"
+            };
+            var duplicateEdges = project.Edges
+                .Where(edge => StringComparer.Ordinal.Equals(edge.TargetNodeId, originalFactNode.NodeId))
+                .Select(edge => edge with { EdgeId = Id.New(), TargetNodeId = duplicateFactNode.NodeId })
+                .ToArray();
+            project.Nodes.Add(duplicateFactNode);
+            project.Edges.AddRange(duplicateEdges);
             var viewModel = new MainWindowViewModel(project, null,
                 (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
             viewModel.AllowSyntheticProfile = true;
@@ -43,13 +56,28 @@ public sealed class MappingOperationViewModelTests
             Assert.Contains("partial", viewModel.PreviewResultSummary, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("Provenance incomplete", viewModel.PreviewResultSummary, StringComparison.Ordinal);
             Assert.Contains("worker finding-to-fact links", viewModel.PreviewResultSummary, StringComparison.Ordinal);
-            var fact = Assert.Single(viewModel.PreviewFacts);
+            Assert.Equal(2, viewModel.PreviewFacts.Count);
+            foreach (var previewFact in viewModel.PreviewFacts)
+            {
+                Assert.NotNull(previewFact.SemanticFact);
+                Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, previewFact.SemanticFact!));
+                var producingNode = Assert.Single(project.Nodes, node =>
+                    node.NodeType == NodeTypeConstants.FactConstruct
+                    && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("concept")?.ToString(),
+                        previewFact.SemanticFact!.ConceptName)
+                    && previewFact.SemanticFact.SourceTransformationPaths.Any(path =>
+                        path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)));
+                Assert.Contains($"{producingNode.DisplayName} ({producingNode.NodeId})",
+                    previewFact.StageSummary, StringComparison.Ordinal);
+                Assert.DoesNotContain("ambiguous", previewFact.StageSummary, StringComparison.OrdinalIgnoreCase);
+            }
+
+            var fact = viewModel.PreviewFacts[0];
             Assert.Contains($"{mappingOracle.Concept} = {mappingOracle.ValueLexical}", fact.Display, StringComparison.Ordinal);
             Assert.Contains(mappingOracle.Unit, fact.Display, StringComparison.Ordinal);
             Assert.Contains($"{mappingOracle.PeriodStart:yyyy-MM-dd}/{mappingOracle.PeriodEnd:yyyy-MM-dd}",
                 fact.Display, StringComparison.Ordinal);
             Assert.NotNull(fact.SemanticFact);
-            Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, fact.SemanticFact!));
             var evidence = Assert.Single(fact.Evidence);
             Assert.Equal(mappingOracle.SourceLocator, evidence.Source.Locator);
             var sourcePath = Assert.Single(fact.SemanticFact!.SourceTransformationPaths);

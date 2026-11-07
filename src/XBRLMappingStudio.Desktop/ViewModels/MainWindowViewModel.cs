@@ -5825,13 +5825,21 @@ public sealed class MainWindowViewModel : ViewModelBase
                     && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("concept")?.ToString(), fact.ConceptName))
                 .OrderBy(node => node.NodeId, StringComparer.Ordinal)
                 .ToArray();
-            var stage = sourceNodes.Length switch
+            var provenanceMatchedNodes = sourceNodes
+                .Where(node => fact.SourceTransformationPaths.Any(path =>
+                    path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)))
+                .ToArray();
+            // Multiple FactConstruct nodes may legitimately emit the same concept.
+            // Prefer the exact producer recorded in this fact's provenance paths;
+            // retain the old fallback for imported/legacy facts without that link.
+            var stageNodes = provenanceMatchedNodes.Length > 0 ? provenanceMatchedNodes : sourceNodes;
+            var stage = stageNodes.Length switch
             {
                 0 => "Fact construction stage could not be matched to a saved mapping node.",
-                1 => $"Fact construction · {sourceNodes[0].DisplayName} ({sourceNodes[0].NodeId}). "
-                    + DescribeFactInputSources(sourceNodes[0], "value"),
+                1 => $"Fact construction · {stageNodes[0].DisplayName} ({stageNodes[0].NodeId}). "
+                    + DescribeFactInputSources(stageNodes[0], "value"),
                 _ => "Fact construction node is ambiguous for this concept; candidate paths: "
-                    + string.Join(" | ", sourceNodes.Select(node =>
+                    + string.Join(" | ", stageNodes.Select(node =>
                         $"{node.DisplayName} ({node.NodeId}): {DescribeFactInputSources(node, "value")}"))
             };
             var transformationPathsBySource = new Dictionary<SourceReference, PreviewTransformationPathSummary>();
