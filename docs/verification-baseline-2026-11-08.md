@@ -84,3 +84,21 @@ Verification:
   passed repository hygiene, Windows and Ubuntu Release build/tests, and the
   pinned Arelle integration on source `4b0c5503d33171917630c72c078cadeb99c3600c`.
 - Large-run set-phase streaming and aggregation spill/recovery remain open.
+
+## ENG-03 invariant RunParameter integer parsing
+
+RunParameter integer values use `NumberStyles.Integer` with
+`CultureInfo.InvariantCulture`. `RunParameterIntegerParsing_IsInvariantAcrossCurrentCultures`
+sets a custom current-culture negative sign and confirms the invariant `-1234`
+parameter still emits the expected fact. Before the fix, the same test failed
+because the parameter was silently treated as missing.
+
+Verification:
+
+- The focused regression passed 1/1 after reproducing the failure before the fix.
+- The Release Engine suite passed 124/124.
+- Exact-head CI [42425497947](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42425497947)
+  passed on Windows and Ubuntu. Each OS ran 867 tests with 6 Arelle-gated skips;
+  the pinned job passed 72 Python, 15 .NET Arelle, and 15 dependency-inventory tests.
+- `git diff --check` passed. Profile-specific precision and rounding policies
+  remain open.
