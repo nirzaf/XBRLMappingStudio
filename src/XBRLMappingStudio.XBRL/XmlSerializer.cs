@@ -110,7 +110,8 @@ public static class XmlSerializer
 
         var doc = new XDocument(new XDeclaration("1.0", "utf-8", null), root);
         var sb = new StringBuilder();
-        using (var w = XmlWriter.Create(sb, new XmlWriterSettings { Indent = true, OmitXmlDeclaration = false }))
+        using (var w = XmlWriter.Create(new Utf8StringWriter(sb),
+                   new XmlWriterSettings { Indent = true, OmitXmlDeclaration = false }))
             doc.Save(w);
         return sb.ToString();
 
@@ -675,6 +676,12 @@ public static class XmlSerializer
     }
 
     private static string? Iso(DateOnly? d) => d?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+    private sealed class Utf8StringWriter(StringBuilder builder)
+        : StringWriter(builder, CultureInfo.InvariantCulture)
+    {
+        public override Encoding Encoding => new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+    }
 }
 
 /// <summary>Carries a stable product code for XBRL export failures (XBR05).</summary>

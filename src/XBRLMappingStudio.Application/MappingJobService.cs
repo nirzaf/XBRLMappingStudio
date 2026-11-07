@@ -1592,8 +1592,10 @@ public sealed class MappingJobService
             if (response.Status == WorkerStatus.Success || code == DiagnosticCodes.XbrValidationIncomplete)
                 code = completionDiagnostic.Code;
         }
-        var detail = blocking?.Message ?? completion.Detail ?? response.Error ??
-            $"Validation worker ended with status '{response.Status}'.";
+        var detail = response.Status is WorkerStatus.DomainFailure or WorkerStatus.Crash or WorkerStatus.TimedOut
+            ? response.Error ?? blocking?.Message ?? completion.Detail
+            : blocking?.Message ?? completion.Detail ?? response.Error;
+        detail ??= $"Validation worker ended with status '{response.Status}'.";
         throw new PublicationException(code,
             $"The staged report failed profile validation: {detail}", manifest.RunId, destinationPath);
     }

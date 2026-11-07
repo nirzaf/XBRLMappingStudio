@@ -899,6 +899,9 @@ class ArelleWorkerTests(unittest.TestCase):
             def fake_arelle(entrypoint, args, temporary_path=None):
                 observed["path"] = Path(entrypoint)
                 observed["root"] = ElementTree.parse(entrypoint).getroot()
+                schema_ref = observed["root"].find("{http://www.xbrl.org/2003/linkbase}schemaRef")
+                observed["taxonomy_exists"] = (Path(entrypoint).parent /
+                    schema_ref.get("{http://www.w3.org/1999/xlink}href")).is_file()
                 return True, [], 1
 
             try:
@@ -910,10 +913,9 @@ class ArelleWorkerTests(unittest.TestCase):
 
         self.assertEqual("success", result["status"], result["error"])
         self.assertNotEqual(path, observed["path"])
+        self.assertTrue(observed["taxonomy_exists"])
         schema_ref = observed["root"].find("{http://www.xbrl.org/2003/linkbase}schemaRef")
-        expected_taxonomy = str(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd") \
-            if sys.platform == "win32" else (TAXONOMY_ROOT / "arelle-test-taxonomy.xsd").as_uri()
-        self.assertEqual(expected_taxonomy,
+        self.assertEqual("arelle-test-taxonomy.xsd",
                          schema_ref.get("{http://www.w3.org/1999/xlink}href"))
 
     def test_staged_xml_path_rejects_outside_directory_and_bad_digest(self):

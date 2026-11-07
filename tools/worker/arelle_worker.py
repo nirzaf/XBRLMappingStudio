@@ -18,7 +18,7 @@ import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from urllib.request import url2pathname
 from xml.parsers import expat
 from xml.etree import ElementTree
@@ -742,9 +742,71 @@ def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_f
     return report
 
 
+def _staged_taxonomy_relative_path(reference, taxonomy_root, offline_references, package_files):
+    localized = safe_taxonomy_urls(
+        {"documentInfo": {"taxonomy": [reference]}}, taxonomy_root,
+        offline_references, package_files)["documentInfo"]["taxonomy"][0]
+    if os.name == "nt":
+        local_path = Path(localized)
+    else:
+        parsed = urlsplit(localized)
+        local_path = Path(url2pathname(unquote(parsed.path))) if parsed.scheme == "file" else Path(localized)
+    root = Path(taxonomy_root).resolve(strict=True)
+    try:
+        relative = local_path.resolve(strict=True).relative_to(root).as_posix()
+    except ValueError as ex:
+        raise ValueError("Localized schemaRef is outside the configured taxonomy root") from ex
+    safe_package_path(relative, root)
+    return relative
+
+
+def _copy_staged_taxonomy_snapshot(relative_paths, taxonomy_root, snapshot_root,
+                                   package_files, offline_references):
+    """Copy only referenced taxonomy closure bytes beside the private staged instance."""
+    root = Path(taxonomy_root).resolve(strict=True)
+    target_root = Path(snapshot_root).resolve(strict=True)
+    relative_paths = sorted(set(relative_paths))
+    if not relative_paths:
+        raise ValueError("Staged xBRL-XML has no localized taxonomy entry point")
+
+    if package_files is not None:
+        closure_paths = set()
+        used_offline_references = {}
+        for relative in relative_paths:
+            closure = validate_taxonomy_dependency_closure(
+                relative, root, package_files, offline_references)
+            closure_paths.update(closure)
+            used_offline_references.update(closure.offline_references)
+        _copy_verified_taxonomy_snapshot(
+            relative_paths[0], sorted(closure_paths), root, target_root,
+            package_files, used_offline_references)
+        catalog_path = target_root / "offline-taxonomy-catalog.zip"
+        return catalog_path if used_offline_references else None
+
+    total_bytes = 0
+    for relative in relative_paths:
+        source = safe_package_path(relative, root)
+        target = target_root.joinpath(*relative.split("/"))
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        file_bytes = 0
+        try:
+            with source.open("rb") as source_file, target.open("xb") as target_file:
+                for chunk in iter(lambda: source_file.read(TAXONOMY_XML_READ_BYTES), b""):
+                    file_bytes += len(chunk)
+                    total_bytes += len(chunk)
+                    if file_bytes > MAX_TAXONOMY_XML_FILE_BYTES or total_bytes > MAX_TAXONOMY_GRAPH_XML_BYTES:
+                        raise ValueError("Staged XML taxonomy exceeds the bounded offline snapshot budget")
+                    target_file.write(chunk)
+            if os.name != "nt":
+                target.chmod(0o400)
+        except OSError as ex:
+            raise ValueError("Could not create private staged XML taxonomy snapshot") from ex
+    return None
+
+
 def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline_references,
-                                package_files, expected_digest):
-    """Verify an exact staged XML instance, then localize only its schemaRef URIs."""
+                                package_files, expected_digest, worker_args=None):
+    """Verify an exact staged XML instance, then localize schemaRefs to a private snapshot."""
     digest = hashlib.sha256()
     total = 0
     with report_path.open("rb") as source:
@@ -768,17 +830,70 @@ def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline
     except StopIteration as ex:
         raise ValueError("Staged xBRL-XML is empty") from ex
     except etree.XMLSyntaxError as ex:
-        raise ValueError("Staged xBRL-XML is malformed") from ex
+        raise ValueError(f"Staged xBRL-XML is malformed: {ex}") from ex
     if first_event != "start" or root.getroottree().docinfo.doctype:
         raise ValueError("Staged xBRL-XML must have an instance root and no DTD")
     if root.tag != "{http://www.xbrl.org/2003/instance}xbrl":
         raise ValueError("Staged XML root is not an xBRL instance")
 
+    schema_references = []
+    depth = 1
+    try:
+        for event, element in events:
+            if event == "start":
+                depth += 1
+                continue
+            if depth == 2 and element.tag == "{http://www.xbrl.org/2003/linkbase}schemaRef":
+                reference = element.get("{http://www.w3.org/1999/xlink}href")
+                if not isinstance(reference, str) or not reference:
+                    raise ValueError("Staged xBRL-XML has a schemaRef without an xlink:href")
+                if len(schema_references) >= MAX_TAXONOMY_GRAPH_FILES:
+                    raise ValueError("Staged xBRL-XML has too many schemaRef elements")
+                schema_references.append(reference)
+            if depth > 1:
+                parent = element.getparent()
+                element.clear()
+                while element.getprevious() is not None:
+                    del parent[0]
+            depth -= 1
+    except etree.XMLSyntaxError as ex:
+        raise ValueError(f"Staged xBRL-XML is malformed: {ex}") from ex
+    if not schema_references:
+        raise ValueError("Staged xBRL-XML has no schemaRef")
+
+    relative_by_reference = {
+        reference: _staged_taxonomy_relative_path(
+            reference, taxonomy_root, offline_references, package_files)
+        for reference in dict.fromkeys(schema_references)
+    }
+    catalog_path = _copy_staged_taxonomy_snapshot(
+        relative_by_reference.values(), taxonomy_root, output_path.parent,
+        package_files, offline_references)
+    arelle_args = worker_args
+    if catalog_path is not None and worker_args is not None:
+        import copy
+        arelle_args = copy.copy(worker_args)
+        arelle_args.package = list(getattr(worker_args, "package", []) or [])
+        arelle_args.package.append(str(catalog_path))
+
+    try:
+        events = etree.iterparse(str(report_path), events=("start", "end"),
+                                 resolve_entities=False, no_network=True, load_dtd=False,
+                                 recover=False, huge_tree=False)
+        second_event, second_root = next(events)
+    except StopIteration as ex:
+        raise ValueError("Staged xBRL-XML is empty") from ex
+    except etree.XMLSyntaxError as ex:
+        raise ValueError(f"Staged xBRL-XML is malformed: {ex}") from ex
+    if second_event != "start" or second_root.tag != "{http://www.xbrl.org/2003/instance}xbrl" \
+            or second_root.getroottree().docinfo.doctype:
+        raise ValueError("Staged xBRL-XML changed or is not a DTD-free xBRL instance")
+
     schema_ref_count = 0
     depth = 1
     with etree.xmlfile(str(output_path), encoding="utf-8") as writer:
         writer.write_declaration()
-        with writer.element(root.tag, attrib=dict(root.attrib), nsmap=root.nsmap):
+        with writer.element(second_root.tag, attrib=dict(second_root.attrib), nsmap=second_root.nsmap):
             for event, element in events:
                 if event == "start":
                     depth += 1
@@ -786,12 +901,10 @@ def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline
                 if depth == 2:
                     if element.tag == "{http://www.xbrl.org/2003/linkbase}schemaRef":
                         reference = element.get("{http://www.w3.org/1999/xlink}href")
-                        if not isinstance(reference, str) or not reference:
-                            raise ValueError("Staged xBRL-XML has a schemaRef without an xlink:href")
-                        local_reference = safe_taxonomy_urls(
-                            {"documentInfo": {"taxonomy": [reference]}}, taxonomy_root,
-                            offline_references, package_files)["documentInfo"]["taxonomy"][0]
-                        element.set("{http://www.w3.org/1999/xlink}href", local_reference)
+                        if reference not in relative_by_reference:
+                            raise ValueError("Staged xBRL-XML schemaRef changed while being localized")
+                        element.set("{http://www.w3.org/1999/xlink}href",
+                                    quote(relative_by_reference[reference], safe="/-._~"))
                         schema_ref_count += 1
                     writer.write(element)
                     parent = element.getparent()
@@ -799,8 +912,9 @@ def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline
                     while element.getprevious() is not None:
                         del parent[0]
                 depth -= 1
-    if schema_ref_count == 0:
-        raise ValueError("Staged xBRL-XML has no schemaRef")
+    if schema_ref_count != len(schema_references):
+        raise ValueError("Staged xBRL-XML changed while its schemaRefs were localized")
+    return arelle_args
 
 
 def reject_duplicate_json_keys(pairs):
@@ -1276,11 +1390,12 @@ def handle(req, args):
             with tempfile.TemporaryDirectory(prefix="xms-arelle-") as workdir:
                 os.chmod(workdir, 0o700)
                 path = Path(workdir) / ("report.xml" if staged_xml_path is not None else "report.json")
+                run_args = args
                 if staged_xml_path is not None:
-                    rewrite_staged_xml_taxonomy(staged_xml_path, path, args.taxonomy_root,
+                    run_args = rewrite_staged_xml_taxonomy(staged_xml_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None,
-                        payload.get("sha256"))
+                        payload.get("sha256"), worker_args=args)
                 elif large_report_path is not None:
                     rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
@@ -1292,7 +1407,7 @@ def handle(req, args):
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None)
                     path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
-                ok, logs, concept_count = run_arelle(path, args, workdir)
+                ok, logs, concept_count = run_arelle(path, run_args, workdir)
                 plugin_failures = required_plugin_load_failures(logs, required_plugins)
                 if plugin_failures:
                     diags = [diagnostic(op_id, "XBR010", "error",

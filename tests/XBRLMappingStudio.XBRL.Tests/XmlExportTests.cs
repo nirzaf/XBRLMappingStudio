@@ -29,6 +29,7 @@ public sealed class XmlExportTests
     public void Serialize_ProducesXbrl21Roots()
     {
         var xml = XmlSerializer.Serialize(Profile, new[] { Revenue() });
+        Assert.Contains("encoding=\"utf-8\"", xml, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("<xbrli:xbrl", xml);
         Assert.Contains("<xbrli:context", xml);
         Assert.Contains("<xbrli:unit", xml);
