@@ -600,6 +600,31 @@
                             SelectedItem="{Binding SelectedRoundMode, Mode=TwoWay}"
                             AutomationProperties.Name="Selected rounding mode" />
                 </StackPanel>
+                <StackPanel IsVisible="{Binding CanEditSelectedJoin}" Spacing="3">
+                  <TextBlock Text="Join keys" FontWeight="SemiBold" />
+                  <TextBlock Text="Left input field" />
+                  <TextBox Text="{Binding SelectedJoinLeftKey, Mode=TwoWay}"
+                           AutomationProperties.Name="Join left key field" />
+                  <TextBlock Text="Right input field" />
+                  <TextBox Text="{Binding SelectedJoinRightKey, Mode=TwoWay}"
+                           AutomationProperties.Name="Join right key field" />
+                  <TextBlock Text="Unmatched rows" />
+                  <ComboBox ItemsSource="{Binding JoinCardinalities}"
+                            SelectedItem="{Binding SelectedJoinCardinality, Mode=TwoWay}"
+                            AutomationProperties.Name="Join unmatched row cardinality" />
+                  <TextBlock Text="Duplicate right keys" />
+                  <ComboBox ItemsSource="{Binding JoinDuplicateKeyPolicies}"
+                            SelectedItem="{Binding SelectedJoinDuplicateKeyPolicy, Mode=TwoWay}"
+                            AutomationProperties.Name="Join duplicate key policy" />
+                  <TextBlock Text="Many-to-many matches" />
+                  <ComboBox ItemsSource="{Binding JoinManyToManyPolicies}"
+                            SelectedItem="{Binding SelectedJoinManyToManyPolicy, Mode=TwoWay}"
+                            AutomationProperties.Name="Join many-to-many policy" />
+                  <TextBlock Text="Overlapping fields" />
+                  <ComboBox ItemsSource="{Binding JoinFieldConflictPolicies}"
+                            SelectedItem="{Binding SelectedJoinFieldConflictPolicy, Mode=TwoWay}"
+                            AutomationProperties.Name="Join overlapping field policy" />
+                </StackPanel>
                 <TextBlock Text="{Binding SelectedNodeParameterError}" TextWrapping="Wrap"
                            Foreground="#B42318" IsVisible="{Binding HasSelectedNodeParameterError}"
                            AutomationProperties.Name="Selected node parameter error" />

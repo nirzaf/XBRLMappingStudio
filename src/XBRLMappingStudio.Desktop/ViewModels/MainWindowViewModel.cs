@@ -515,9 +515,16 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedScaleFactor = "1";
     private string _selectedRoundDigits = "0";
     private string _selectedRoundMode = "HalfEven";
+    private string _selectedJoinLeftKey = "";
+    private string _selectedJoinRightKey = "";
+    private string _selectedJoinCardinality = "Inner";
+    private string _selectedJoinDuplicateKeyPolicy = "All";
+    private string _selectedJoinManyToManyPolicy = "Allow";
+    private string _selectedJoinFieldConflictPolicy = "Right";
     private bool _canEditSelectedStringConstant;
     private bool _canEditSelectedScaleFactor;
     private bool _canEditSelectedRound;
+    private bool _canEditSelectedJoin;
     private string _selectedNodeParameterSummary = "";
     private string _selectedNodeParameterError = "";
     private string _selectedFactConceptIdentity = "Select a fact to inspect its taxonomy identity.";
@@ -900,6 +907,40 @@ public sealed class MainWindowViewModel : ViewModelBase
         set { if (Set(ref _selectedRoundMode, value)) ValidateSelectedNodeParameterDraft(); }
     }
     public IReadOnlyList<string> RoundingModes { get; } = new[] { "HalfUp", "HalfEven", "Truncate" };
+    public string SelectedJoinLeftKey
+    {
+        get => _selectedJoinLeftKey;
+        set { if (Set(ref _selectedJoinLeftKey, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedJoinRightKey
+    {
+        get => _selectedJoinRightKey;
+        set { if (Set(ref _selectedJoinRightKey, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedJoinCardinality
+    {
+        get => _selectedJoinCardinality;
+        set { if (Set(ref _selectedJoinCardinality, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedJoinDuplicateKeyPolicy
+    {
+        get => _selectedJoinDuplicateKeyPolicy;
+        set { if (Set(ref _selectedJoinDuplicateKeyPolicy, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedJoinManyToManyPolicy
+    {
+        get => _selectedJoinManyToManyPolicy;
+        set { if (Set(ref _selectedJoinManyToManyPolicy, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public string SelectedJoinFieldConflictPolicy
+    {
+        get => _selectedJoinFieldConflictPolicy;
+        set { if (Set(ref _selectedJoinFieldConflictPolicy, value)) ValidateSelectedNodeParameterDraft(); }
+    }
+    public IReadOnlyList<string> JoinCardinalities { get; } = new[] { "Inner", "Left", "Right", "Full" };
+    public IReadOnlyList<string> JoinDuplicateKeyPolicies { get; } = new[] { "All", "First", "Fail" };
+    public IReadOnlyList<string> JoinManyToManyPolicies { get; } = new[] { "Allow", "Fail" };
+    public IReadOnlyList<string> JoinFieldConflictPolicies { get; } = new[] { "Right", "Left", "Fail" };
     public bool CanEditSelectedStringConstant
     {
         get => _canEditSelectedStringConstant;
@@ -924,8 +965,16 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (Set(ref _canEditSelectedRound, value)) Raise(nameof(CanEditSelectedNodeParameters));
         }
     }
+    public bool CanEditSelectedJoin
+    {
+        get => _canEditSelectedJoin;
+        private set
+        {
+            if (Set(ref _canEditSelectedJoin, value)) Raise(nameof(CanEditSelectedNodeParameters));
+        }
+    }
     public bool CanEditSelectedNodeParameters => CanEditSelectedStringConstant
-        || CanEditSelectedScaleFactor || CanEditSelectedRound;
+        || CanEditSelectedScaleFactor || CanEditSelectedRound || CanEditSelectedJoin;
     public string SelectedNodeParameterSummary
     {
         get => _selectedNodeParameterSummary;
@@ -1825,6 +1874,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             && string.Equals(node.Parameters.GetValueOrDefault("shape")?.ToString(), "String", StringComparison.OrdinalIgnoreCase);
         CanEditSelectedScaleFactor = node?.NodeType == NodeTypeConstants.Scale;
         CanEditSelectedRound = node?.NodeType == NodeTypeConstants.Round;
+        CanEditSelectedJoin = node?.NodeType == NodeTypeConstants.Join;
         SelectedNodeParameterError = "";
         SelectedNodeParameterSummary = "";
 
@@ -1852,6 +1902,16 @@ public sealed class MainWindowViewModel : ViewModelBase
             SelectedRoundDigits = node.Parameters.GetValueOrDefault("digits")?.ToString() ?? "0";
             SelectedRoundMode = node.Parameters.GetValueOrDefault("mode")?.ToString() ?? "HalfEven";
             SelectedNodeParameterSummary = "Rounding applies to the connected value. Choose 0–28 decimal places and a declared mode.";
+        }
+        else if (CanEditSelectedJoin && node is not null)
+        {
+            SelectedJoinLeftKey = node.Parameters.GetValueOrDefault("leftKey")?.ToString() ?? "";
+            SelectedJoinRightKey = node.Parameters.GetValueOrDefault("rightKey")?.ToString() ?? "";
+            SelectedJoinCardinality = node.Parameters.GetValueOrDefault("cardinality")?.ToString() ?? "Inner";
+            SelectedJoinDuplicateKeyPolicy = node.Parameters.GetValueOrDefault("duplicateKey")?.ToString() ?? "All";
+            SelectedJoinManyToManyPolicy = node.Parameters.GetValueOrDefault("manyToMany")?.ToString() ?? "Allow";
+            SelectedJoinFieldConflictPolicy = node.Parameters.GetValueOrDefault("fieldConflict")?.ToString() ?? "Right";
+            SelectedNodeParameterSummary = "Join keys must name input record fields. Choose how unmatched rows, duplicate keys, many-to-many matches, and overlapping fields are handled.";
         }
 
         if (CanEditSelectedNodeParameters) ValidateSelectedNodeParameterDraft();
@@ -1884,6 +1944,15 @@ public sealed class MainWindowViewModel : ViewModelBase
             int.TryParse(SelectedRoundDigits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var digits);
             parameters["digits"] = digits.ToString(CultureInfo.InvariantCulture);
             parameters["mode"] = SelectedRoundMode;
+        }
+        else if (CanEditSelectedJoin)
+        {
+            AddJoinParameterIfChanged(parameters, node, "leftKey", SelectedJoinLeftKey.Trim(), defaultValue: null);
+            AddJoinParameterIfChanged(parameters, node, "rightKey", SelectedJoinRightKey.Trim(), defaultValue: null);
+            AddJoinParameterIfChanged(parameters, node, "cardinality", SelectedJoinCardinality, "Inner");
+            AddJoinParameterIfChanged(parameters, node, "duplicateKey", SelectedJoinDuplicateKeyPolicy, "All");
+            AddJoinParameterIfChanged(parameters, node, "manyToMany", SelectedJoinManyToManyPolicy, "Allow");
+            AddJoinParameterIfChanged(parameters, node, "fieldConflict", SelectedJoinFieldConflictPolicy, "Right");
         }
 
         var changed = Session.SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
@@ -1953,8 +2022,51 @@ public sealed class MainWindowViewModel : ViewModelBase
             SelectedNodeParameterError = "MAP018: choose HalfUp, HalfEven, or Truncate as the rounding mode.";
             return;
         }
+        else if (CanEditSelectedJoin)
+        {
+            if (string.IsNullOrWhiteSpace(SelectedJoinLeftKey)
+                || SelectedJoinLeftKey.Any(char.IsControl)
+                || string.IsNullOrWhiteSpace(SelectedJoinRightKey)
+                || SelectedJoinRightKey.Any(char.IsControl))
+            {
+                SelectedNodeParameterError = "MAP006: enter a non-empty left and right record field name without control characters.";
+                return;
+            }
+            if (!JoinCardinalities.Contains(SelectedJoinCardinality, StringComparer.Ordinal))
+            {
+                SelectedNodeParameterError = "MAP005: choose Inner, Left, Right, or Full join cardinality.";
+                return;
+            }
+            if (!JoinDuplicateKeyPolicies.Contains(SelectedJoinDuplicateKeyPolicy, StringComparer.Ordinal))
+            {
+                SelectedNodeParameterError = "MAP028: choose All, First, or Fail for duplicate right keys.";
+                return;
+            }
+            if (!JoinManyToManyPolicies.Contains(SelectedJoinManyToManyPolicy, StringComparer.Ordinal))
+            {
+                SelectedNodeParameterError = "MAP030: choose Allow or Fail for many-to-many matches.";
+                return;
+            }
+            if (!JoinFieldConflictPolicies.Contains(SelectedJoinFieldConflictPolicy, StringComparer.Ordinal))
+            {
+                SelectedNodeParameterError = "MAP027: choose Left, Right, or Fail for overlapping fields.";
+                return;
+            }
+        }
 
         SelectedNodeParameterError = "";
+    }
+
+    private static void AddJoinParameterIfChanged(
+        IDictionary<string, object?> parameters,
+        MappingNode node,
+        string name,
+        string value,
+        string? defaultValue)
+    {
+        var current = node.Parameters.GetValueOrDefault(name)?.ToString();
+        if (current is null && StringComparer.Ordinal.Equals(value, defaultValue)) return;
+        if (!StringComparer.Ordinal.Equals(current, value)) parameters[name] = value;
     }
 
     private static bool TryParseExactInvariantDecimal(string text, out decimal value)

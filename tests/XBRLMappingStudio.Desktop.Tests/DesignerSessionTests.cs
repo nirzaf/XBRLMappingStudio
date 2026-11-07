@@ -1411,6 +1411,70 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void JoinParametersExposeExplicitPoliciesAndApplyAsOneUndoableChange()
+    {
+        var project = new MainWindowViewModel().Session.Project;
+        project.Nodes.Add(new MappingNode
+        {
+            NodeId = "test-join",
+            NodeType = NodeTypeConstants.Join,
+            DisplayName = "Join accounts",
+            Parameters = new()
+            {
+                ["leftKey"] = "account_id",
+                ["rightKey"] = "account_id"
+            },
+            InputPorts = new()
+            {
+                new PortDefinition("left", PortShape.Record, PortCardinality.Collection, true),
+                new PortDefinition("right", PortShape.Record, PortCardinality.Collection, true)
+            },
+            OutputPorts = new()
+            {
+                new PortDefinition("rows", PortShape.Record, PortCardinality.Collection, true)
+            }
+        });
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "test-join");
+
+        Assert.True(viewModel.CanEditSelectedJoin);
+        Assert.Equal("Inner", viewModel.SelectedJoinCardinality);
+        Assert.Equal("All", viewModel.SelectedJoinDuplicateKeyPolicy);
+        Assert.Equal("Allow", viewModel.SelectedJoinManyToManyPolicy);
+        Assert.Equal("Right", viewModel.SelectedJoinFieldConflictPolicy);
+        var initialDigest = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+        Assert.Equal(initialDigest, viewModel.Session.Project.ComputeSemanticDigest());
+
+        viewModel.SelectedJoinCardinality = "Full";
+        viewModel.SelectedJoinDuplicateKeyPolicy = "First";
+        viewModel.SelectedJoinManyToManyPolicy = "Fail";
+        viewModel.SelectedJoinFieldConflictPolicy = "Left";
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+
+        var join = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "test-join");
+        Assert.Equal("Full", join.Parameters["cardinality"]?.ToString());
+        Assert.Equal("First", join.Parameters["duplicateKey"]?.ToString());
+        Assert.Equal("Fail", join.Parameters["manyToMany"]?.ToString());
+        Assert.Equal("Left", join.Parameters["fieldConflict"]?.ToString());
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+
+        viewModel.Session.Undo();
+        join = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "test-join");
+        Assert.False(join.Parameters.ContainsKey("cardinality"));
+        Assert.False(join.Parameters.ContainsKey("duplicateKey"));
+        Assert.False(join.Parameters.ContainsKey("manyToMany"));
+        Assert.False(join.Parameters.ContainsKey("fieldConflict"));
+
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "test-join");
+        viewModel.SelectedJoinManyToManyPolicy = "Reject";
+        Assert.Contains("MAP030", viewModel.SelectedNodeParameterError, StringComparison.Ordinal);
+        var beforeInvalidEdit = viewModel.Session.Project.ComputeSemanticDigest();
+        viewModel.ApplySelectedNodeParametersCommand.Execute(null);
+        Assert.Equal(beforeInvalidEdit, viewModel.Session.Project.ComputeSemanticDigest());
+    }
+
+    [Fact]
     public void ConceptSelectionRejectsIncompatibleConnectedPeriodBeforeMutation()
     {
         var viewModel = new MainWindowViewModel();
