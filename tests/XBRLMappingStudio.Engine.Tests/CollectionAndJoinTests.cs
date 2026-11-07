@@ -488,20 +488,27 @@ public class CollectionAndJoinTests
     // ---- MAP05: group aggregation buckets independently ----------------------------
 
     [Fact]
-    public void GroupBy_AggregatesEachEntityIndependently()
+    public void GroupBy_AggregatesEachEntityAndYearIndependentlyAgainstOracle()
     {
         var rows = new[]
         {
-            GraphHarness.Row(("entity", S("X")), ("amount", D(10m))),
-            GraphHarness.Row(("entity", S("X")), ("amount", D(5m))),
-            GraphHarness.Row(("entity", S("Y")), ("amount", D(20m))),
+            GraphHarness.Row(("entity", S("X")), ("year", S("2025")), ("amount", D(10m))),
+            GraphHarness.Row(("entity", S("X")), ("year", S("2025")), ("amount", D(5m))),
+            GraphHarness.Row(("entity", S("X")), ("year", S("2026")), ("amount", D(7m))),
+            GraphHarness.Row(("entity", S("Y")), ("year", S("2025")), ("amount", D(20m))),
+            GraphHarness.Row(("entity", S("Y")), ("year", S("2026")), ("amount", D(30m))),
+            GraphHarness.Row(("entity", S("Y")), ("year", S("2026")), ("amount", D(2m))),
         };
+
+        var expectedSums = rows
+            .GroupBy(row => $"{row["entity"].AsString()}|{row["year"].AsString()}", StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Sum(row => row["amount"].AsDecimal()), StringComparer.Ordinal);
 
         var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
             new() { ["binding"] = Binding },
             outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
         var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By entity",
-            new() { ["keys"] = "entity", ["sumField"] = "amount" },
+            new() { ["keys"] = "entity,year", ["sumField"] = "amount" },
             inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
             outputs: new[]
             {
@@ -520,13 +527,17 @@ public class CollectionAndJoinTests
             new List<MappingNode> { collectRows, group }.Concat(sink), edges,
             bindings: new[] { GraphHarness.Binding(Binding) });
 
-        var ctx = GraphHarness.Ctx(new[] { (Binding, rows as IReadOnlyList<DataRecord>) });
+        var ctx = GraphHarness.Ctx(new[] { (Binding, rows as IReadOnlyList<DataRecord>) }, preview: true);
         var result = GraphHarness.Run(project, ctx, out var compile);
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
         Assert.NotNull(result);
 
-        var values = result!.Facts.Select(f => f.Value!.Value).OrderBy(v => v).ToList();
-        Assert.Equal(new[] { 15m, 20m }, values);
+        Assert.Equal(new[] { 15m, 7m, 20m, 32m }, result!.Facts.Select(fact => fact.Value!.Value));
+        var actualSums = ctx.SampledTotals.ToDictionary(
+            total => total.Label["group:".Length..], total => total.Value, StringComparer.Ordinal);
+        Assert.Equal(
+            expectedSums.OrderBy(entry => entry.Key, StringComparer.Ordinal).ToArray(),
+            actualSums.OrderBy(entry => entry.Key, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
