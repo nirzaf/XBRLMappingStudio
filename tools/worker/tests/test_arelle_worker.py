@@ -781,11 +781,16 @@ class ArelleWorkerTests(unittest.TestCase):
         datagram_canary.bind(("127.0.0.1", 0))
         datagram_canary.settimeout(0.2)
         probe = """
+import runpy
 import socket
 import sys
-import arelle_worker
 
-arelle_worker.install_offline_network_denial()
+worker_path = sys.argv[1]
+tcp_port = int(sys.argv[2])
+udp_port = int(sys.argv[3])
+sys.argv = [worker_path]
+runpy.run_path(worker_path, run_name="__main__")
+
 def expect_blocked(action, description):
     try:
         action()
@@ -810,7 +815,7 @@ finally:
 
 connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
-    address = ("127.0.0.1", int(sys.argv[1]))
+    address = ("127.0.0.1", tcp_port)
     expect_blocked(lambda: connection.connect(address), "The loopback connection")
     expect_blocked(lambda: connection.connect_ex(address), "The loopback connect_ex call")
 finally:
@@ -818,19 +823,21 @@ finally:
 
 datagram = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
-    expect_blocked(lambda: datagram.sendto(b"offline probe", ("127.0.0.1", int(sys.argv[2]))),
+    expect_blocked(lambda: datagram.sendto(b"offline probe", ("127.0.0.1", udp_port)),
                    "The loopback UDP send")
 finally:
     datagram.close()
 
 print("offline-network-denied")
-"""
+        """
         datagram_received = False
         try:
             completed = subprocess.run(
-                [sys.executable, "-c", probe, str(canary.server_address[1]),
+                [sys.executable, "-c", probe, arelle_worker.__file__,
+                 str(canary.server_address[1]),
                  str(datagram_canary.getsockname()[1])],
                 cwd=WORKER_DIR,
+                input="",
                 capture_output=True,
                 text=True,
                 timeout=10,
