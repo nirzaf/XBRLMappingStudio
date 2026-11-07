@@ -33,6 +33,7 @@ return command switch
     "validate" => await ValidateAsync(rest),
     "configure-destination" => ConfigureDestination(rest),
     "taxonomy-search" => TaxonomySearch(rest),
+    "install-profile" => await InstallProfileAsync(rest),
     "validate-artifact" => await ValidateArtifactAsync(rest),
     "inspect-run-result" => InspectRunResult(rest),
     "reconcile-publication" => await ReconcilePublicationAsync(rest),
@@ -66,6 +67,7 @@ static int PrintUsage()
     Console.Error.WriteLine("                       Combined --output and --publish-destination requires a saved SQLite plan; reconcile partial results by mixed operation key.");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
+    Console.Error.WriteLine("  xbrl-studio install-profile <profile-id/version-directory> [--catalog <directory>] (offline; installs disabled)");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
@@ -75,6 +77,69 @@ static int PrintUsage()
     Console.Error.WriteLine("Exit codes: 0=success 1=success-with-warnings 2=invalid-mapping 3=data-error");
     Console.Error.WriteLine("            4=incomplete-profile 5=authorization-failure 6=cancelled 7=operational-failure");
     return ExitCodesLocal.Success;
+}
+
+static async Task<int> InstallProfileAsync(string[] args)
+{
+    if (args.Length == 0)
+    {
+        Console.Error.WriteLine("install-profile requires a local <profile-id>/<version> directory.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    if (args[0].StartsWith("-", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine("install-profile requires the source directory before any options.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    string? catalogDirectory = null;
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i] == "--catalog" && i + 1 < args.Length && catalogDirectory is null)
+        {
+            catalogDirectory = args[++i];
+            if (string.IsNullOrWhiteSpace(catalogDirectory))
+            {
+                Console.Error.WriteLine("--catalog requires a directory.");
+                return ExitCodesLocal.IncompleteProfile;
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine($"Unrecognized or incomplete install-profile option: {args[i]}");
+            return ExitCodesLocal.IncompleteProfile;
+        }
+    }
+
+    try
+    {
+        var installed = await InstalledFilingProfileCatalog.InstallAsync(
+            args[0], catalogDirectory ?? InstalledFilingProfileCatalog.DefaultDirectory);
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            installed.Profile.ProfileId,
+            installed.Version,
+            installed.SchemaVersion,
+            installed.Profile.Digest,
+            installed.IsEnabled,
+            installed.InstallationDirectory
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        return ExitCodesLocal.Success;
+    }
+    catch (Exception ex) when (ex is InvalidDataException or JsonException or ArgumentException or InvalidOperationException)
+    {
+        Console.Error.WriteLine($"Profile install rejected: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+    catch (OperationCanceledException)
+    {
+        return ExitCodesLocal.Cancelled;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+    {
+        Console.Error.WriteLine($"Profile install failed: {ex.Message}");
+        return ExitCodesLocal.OperationalFailure;
+    }
 }
 
 static int TaxonomySearch(string[] args)

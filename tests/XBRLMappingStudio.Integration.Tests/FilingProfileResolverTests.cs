@@ -109,6 +109,90 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public async Task OfflineInstallerCopiesPinnedFilesAtomicallyAndLeavesProfileDisabled()
+    {
+        var sourceRoot = NewCatalogDirectory();
+        var catalogRoot = NewCatalogDirectory();
+        try
+        {
+            var source = WriteInstalledProfile(sourceRoot, "fixture-offline-profile", "1.2.0", "Revenue");
+
+            var installed = await InstalledFilingProfileCatalog.InstallAsync(source.InstallationDirectory, catalogRoot);
+
+            Assert.Equal("fixture-offline-profile", installed.Profile.ProfileId);
+            Assert.Equal("1.2.0", installed.Version);
+            Assert.False(installed.IsEnabled);
+            Assert.Equal(Path.Combine(catalogRoot, installed.Profile.ProfileId, installed.Version),
+                installed.InstallationDirectory);
+            Assert.True(File.Exists(Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName)));
+            Assert.Equal(File.ReadAllText(source.EntryPointPath), File.ReadAllText(installed.EntryPointPath));
+
+            var profileDirectory = Path.GetDirectoryName(installed.InstallationDirectory)!;
+            Directory.CreateDirectory(Path.Combine(profileDirectory, ".installing-abandoned"));
+            var catalog = InstalledFilingProfileCatalog.Load(catalogRoot);
+            Assert.Single(catalog.Profiles);
+            Assert.Empty(catalog.Issues);
+            Assert.False(Assert.Single(catalog.Profiles).IsEnabled);
+        }
+        finally
+        {
+            Directory.Delete(sourceRoot, recursive: true);
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OfflineInstallerRejectsTamperedSourceBeforeCreatingProfileDirectory()
+    {
+        var sourceRoot = NewCatalogDirectory();
+        var catalogRoot = NewCatalogDirectory();
+        try
+        {
+            var source = WriteInstalledProfile(sourceRoot, "fixture-tampered-profile", "1.0.0", "Revenue");
+            File.WriteAllText(source.EntryPointPath, "<schema changed='true'/>");
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                InstalledFilingProfileCatalog.InstallAsync(source.InstallationDirectory, catalogRoot));
+
+            Assert.False(Directory.Exists(Path.Combine(catalogRoot, "fixture-tampered-profile")));
+            Assert.Empty(InstalledFilingProfileCatalog.Load(catalogRoot).Profiles);
+        }
+        finally
+        {
+            Directory.Delete(sourceRoot, recursive: true);
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OfflineInstallerRefusesToReplaceAnExistingVersion()
+    {
+        var sourceRoot = NewCatalogDirectory();
+        var catalogRoot = NewCatalogDirectory();
+        try
+        {
+            var source = WriteInstalledProfile(sourceRoot, "fixture-immutable-profile", "1.0.0", "Revenue");
+            var first = await InstalledFilingProfileCatalog.InstallAsync(source.InstallationDirectory, catalogRoot);
+            var markerPath = Path.Combine(first.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName);
+            const string markerContent = "keep existing version";
+            File.WriteAllText(markerPath, markerContent);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                InstalledFilingProfileCatalog.InstallAsync(source.InstallationDirectory, catalogRoot));
+
+            Assert.Equal(markerContent, File.ReadAllText(markerPath));
+            Assert.Single(InstalledFilingProfileCatalog.Load(catalogRoot).Profiles);
+        }
+        finally
+        {
+            Directory.Delete(sourceRoot, recursive: true);
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CatalogIndexesDimensionDomainsAndKeepsLegacyManifestDigestCompatible()
     {
         var root = NewCatalogDirectory();

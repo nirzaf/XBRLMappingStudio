@@ -491,6 +491,48 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_InstallProfileInstallsLocalPackageDisabledByDefault()
+    {
+        var sourceRoot = FilingProfileResolverTests.NewCatalogDirectory();
+        var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();
+        try
+        {
+            var source = FilingProfileResolverTests.WriteInstalledProfile(
+                sourceRoot, "fixture-cli-offline-profile", "1.0.0", "Revenue");
+
+            var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "install-profile",
+                source.InstallationDirectory, "--catalog", catalogRoot);
+
+            Assert.Equal(0, exit);
+            Assert.Empty(stderr);
+            using var result = JsonDocument.Parse(stdout);
+            Assert.Equal("fixture-cli-offline-profile", result.RootElement.GetProperty("ProfileId").GetString());
+            Assert.Equal("1.0.0", result.RootElement.GetProperty("Version").GetString());
+            Assert.False(result.RootElement.GetProperty("IsEnabled").GetBoolean());
+            var installed = Assert.Single(InstalledFilingProfileCatalog.Load(catalogRoot).Profiles);
+            Assert.False(installed.IsEnabled);
+            Assert.True(File.Exists(Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName)));
+
+            var markerPath = Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.DisabledMarkerFileName);
+            const string markerContent = "preserve existing disabled profile";
+            await File.WriteAllTextAsync(markerPath, markerContent);
+            var (duplicateExit, duplicateStdout, duplicateStderr) = await RunCliAsync(LocateCli(),
+                "install-profile", source.InstallationDirectory, "--catalog", catalogRoot);
+            Assert.Equal(3, duplicateExit);
+            Assert.Empty(duplicateStdout);
+            Assert.Contains("already present", duplicateStderr, StringComparison.Ordinal);
+            Assert.Equal(markerContent, await File.ReadAllTextAsync(markerPath));
+        }
+        finally
+        {
+            Directory.Delete(sourceRoot, recursive: true);
+            Directory.Delete(catalogRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Cli_LocalArtifactValidationRequiresSyntheticProfileOptIn()
     {
         var artifactPath = Path.Combine(_dir, "local-validation.xbrl.json");

@@ -91,6 +91,7 @@ public static class InstalledFilingProfileCatalog
     public const string ManifestFileName = "profile.json";
     /// <summary>Presence of this regular file disables one installed profile version without changing its pinned taxonomy digest.</summary>
     public const string DisabledMarkerFileName = ".disabled";
+    private const string StagingDirectoryPrefix = ".installing-";
     private const int MaxManifestBytes = 16 * 1024 * 1024;
     private const int MaxConcepts = 250_000;
     private const int MaxPackageFiles = 16_384;
@@ -123,6 +124,151 @@ public static class InstalledFilingProfileCatalog
     public static FilingProfileCatalogLoadResult LoadDefault()
         => Load(DefaultDirectory);
 
+    /// <summary>
+    /// Installs one already-downloaded, offline profile package from a local version
+    /// directory. The package is validated before and after copying, committed with an
+    /// atomic same-volume directory move, and always left disabled pending authorization.
+    /// An existing profile version is never replaced.
+    /// </summary>
+    public static async Task<InstalledFilingProfile> InstallAsync(
+        string sourceVersionDirectory,
+        string catalogDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceVersionDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogDirectory);
+
+        var sourceVersionPath = Path.GetFullPath(sourceVersionDirectory);
+        var sourceVersionInfo = new DirectoryInfo(sourceVersionPath);
+        var sourceProfileInfo = sourceVersionInfo.Parent
+            ?? throw new InvalidDataException("The profile source must use <profile-id>/<version> directories.");
+        var sourceRootInfo = sourceProfileInfo.Parent
+            ?? throw new InvalidDataException("The profile source must use <profile-id>/<version> directories.");
+        var profileId = sourceProfileInfo.Name;
+        var version = sourceVersionInfo.Name;
+        var sourceRoot = sourceRootInfo.FullName;
+
+        EnsureSafeIdentifier(profileId, "profile source directory name");
+        EnsureSafeIdentifier(version, "profile version directory name");
+        if (!Directory.Exists(sourceRoot) || !Directory.Exists(sourceProfileInfo.FullName)
+            || !Directory.Exists(sourceVersionPath))
+            throw new DirectoryNotFoundException("The profile source must use an existing <profile-id>/<version> directory.");
+        EnsureNotReparsePoint(sourceRoot, "Profile source root");
+        EnsureNotReparsePoint(sourceProfileInfo.FullName, "Profile source directory");
+        EnsureNotReparsePoint(sourceVersionPath, "Profile source version directory");
+
+        // Refuse malformed or modified sources before making any catalog changes.
+        _ = LoadVersion(sourceRoot, sourceVersionPath, profileId, version);
+
+        var manifestPath = Path.Combine(sourceVersionPath, ManifestFileName);
+        EnsureNotReparsePoint(manifestPath, "Profile manifest");
+        var manifestInfo = new FileInfo(manifestPath);
+        if (!manifestInfo.Exists || manifestInfo.Length is <= 0 or > MaxManifestBytes)
+            throw new InvalidDataException($"Profile manifest size must be between 1 byte and {MaxManifestBytes} bytes.");
+        var manifestBytes = await File.ReadAllBytesAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        if (manifestBytes.Length is <= 0 or > MaxManifestBytes)
+            throw new InvalidDataException($"Profile manifest size must be between 1 byte and {MaxManifestBytes} bytes.");
+        using var manifestDocument = JsonDocument.Parse(manifestBytes, new JsonDocumentOptions { MaxDepth = 64 });
+        EnsureUniqueJsonProperties(manifestDocument.RootElement, "$manifest");
+        var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(manifestBytes, SerializerOptions)
+            ?? throw new InvalidDataException("Profile manifest is empty.");
+        ValidateManifestShape(manifest, profileId, version);
+        if (!StringComparer.Ordinal.Equals(manifest.ProfileDigest, manifest.ComputeDigest()))
+            throw new InvalidDataException("Profile digest does not match the versioned manifest contents.");
+        foreach (var relativePath in manifest.PackageFiles.Keys)
+        {
+            if (PathComparer.Equals(relativePath, ManifestFileName)
+                || PathComparer.Equals(relativePath, DisabledMarkerFileName))
+                throw new InvalidDataException($"Package file '{relativePath}' conflicts with catalog metadata.");
+        }
+
+        var catalogRoot = Path.GetFullPath(catalogDirectory);
+        Directory.CreateDirectory(catalogRoot);
+        EnsureNotReparsePoint(catalogRoot, "Profile catalog root");
+        var profileDirectory = Path.Combine(catalogRoot, profileId);
+        if (Directory.Exists(profileDirectory))
+            EnsureNotReparsePoint(profileDirectory, "Profile catalog directory");
+        else
+            Directory.CreateDirectory(profileDirectory);
+        EnsureNotReparsePoint(profileDirectory, "Profile catalog directory");
+        EnsureWithin(catalogRoot, profileDirectory, "Profile catalog directory");
+
+        var destinationVersionPath = Path.Combine(profileDirectory, version);
+        if (Directory.Exists(destinationVersionPath) || File.Exists(destinationVersionPath))
+            throw new InvalidOperationException($"Profile '{profileId}' version '{version}' is already present and will not be overwritten.");
+
+        var stagingDirectory = Path.Combine(profileDirectory, StagingDirectoryPrefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stagingDirectory);
+        EnsureNotReparsePoint(stagingDirectory, "Profile staging directory");
+        EnsureWithin(catalogRoot, stagingDirectory, "Profile staging directory");
+
+        try
+        {
+            var stagedManifestPath = Path.Combine(stagingDirectory, ManifestFileName);
+            await using (var output = new FileStream(stagedManifestPath, FileMode.CreateNew, FileAccess.Write,
+                             FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await output.WriteAsync(manifestBytes, cancellationToken).ConfigureAwait(false);
+            }
+
+            long totalBytes = 0;
+            foreach (var relativePath in manifest.PackageFiles.Keys.Order(StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var sourcePath = ResolvePackageFile(sourceVersionPath, relativePath);
+                var sourceInfo = new FileInfo(sourcePath);
+                if (!sourceInfo.Exists)
+                    throw new InvalidDataException($"Required package file '{relativePath}' is missing.");
+                if (sourceInfo.Length > MaxPackageFileBytes)
+                    throw new InvalidDataException($"Package file '{relativePath}' exceeds the {MaxPackageFileBytes}-byte limit.");
+                totalBytes = checked(totalBytes + sourceInfo.Length);
+                if (totalBytes > MaxProfileBytes)
+                    throw new InvalidDataException($"Profile package files exceed the {MaxProfileBytes}-byte total limit.");
+
+                var stagedPath = Path.GetFullPath(Path.Combine(stagingDirectory,
+                    relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                EnsureWithin(stagingDirectory, stagedPath, "Staged package file");
+                var stagedParent = Path.GetDirectoryName(stagedPath)
+                    ?? throw new InvalidDataException($"Package file '{relativePath}' has no parent directory.");
+                Directory.CreateDirectory(stagedParent);
+                EnsureNotReparsePoint(stagedParent, "Staged package directory");
+
+                await using var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                await using var output = new FileStream(stagedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
+            }
+
+            var disabledMarkerPath = Path.Combine(stagingDirectory, DisabledMarkerFileName);
+            await using (var marker = new FileStream(disabledMarkerPath, FileMode.CreateNew, FileAccess.Write,
+                             FileShare.None, 4096, FileOptions.Asynchronous))
+            {
+                var markerBytes = Encoding.UTF8.GetBytes("Installed disabled pending owner authorization.\n");
+                await marker.WriteAsync(markerBytes, cancellationToken).ConfigureAwait(false);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = LoadVersion(catalogRoot, stagingDirectory, profileId, version);
+            cancellationToken.ThrowIfCancellationRequested();
+            Directory.Move(stagingDirectory, destinationVersionPath);
+            stagingDirectory = destinationVersionPath;
+            return LoadVersion(catalogRoot, destinationVersionPath, profileId, version);
+        }
+        catch
+        {
+            try
+            {
+                if (Directory.Exists(stagingDirectory)) Directory.Delete(stagingDirectory, recursive: true);
+            }
+            catch
+            {
+                // Preserve the installation error; a later catalog scan ignores abandoned staging folders.
+            }
+            throw;
+        }
+    }
+
     public static FilingProfileCatalogLoadResult Load(string directory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
@@ -153,6 +299,7 @@ public static class InstalledFilingProfileCatalog
                     EnsureSafeIdentifier(profileId, "profile directory name");
                     EnsureNotReparsePoint(profileDirectory, "Profile directory");
                     foreach (var versionDirectory in Directory.EnumerateDirectories(profileDirectory)
+                                 .Where(path => !Path.GetFileName(path).StartsWith(StagingDirectoryPrefix, StringComparison.Ordinal))
                                  .OrderBy(Path.GetFileName, StringComparer.Ordinal))
                     {
                         var version = Path.GetFileName(versionDirectory);
