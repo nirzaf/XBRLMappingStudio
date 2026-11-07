@@ -370,6 +370,38 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SqliteDestinationCannotAliasSourceDatabaseThroughSymbolicLink()
+    {
+        if (OperatingSystem.IsWindows()) return; // Symlink creation requires privileges on some Windows hosts.
+
+        var sourcePath = await CreateSqliteSourceAsync("same-source-symlink-target.db", hasPrimaryKey: true);
+        await CreateDestinationDatabase(sourcePath);
+        var destinationAlias = Path.Combine(_directory, "same-source-destination-link.db");
+        File.CreateSymbolicLink(destinationAlias, sourcePath);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: false,
+            destinationPath: destinationAlias);
+        var service = NewService();
+        var binding = Assert.Single(project.Bindings);
+        var connection = new SourceConnection(binding.BindingId, "sqlite", sourcePath,
+            binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "",
+                StringComparer.Ordinal));
+        var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection>(StringComparer.Ordinal) { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+        var before = await File.ReadAllBytesAsync(sourcePath);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(() =>
+            service.PublishDestinationAsync(project, result, _directory, allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+        Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(sourcePath));
+    }
+
+    [Fact]
     public async Task SqliteSourceChange_BlocksFilePublicationAndPreservesPriorOutput()
     {
         var sourcePath = await CreateSqliteSourceAsync("mutable-file-source.db", hasPrimaryKey: true);
