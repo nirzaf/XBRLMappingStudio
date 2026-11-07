@@ -1748,6 +1748,16 @@ public sealed class MappingJobService
         var root = Path.GetFullPath(workspaceRoot);
         var destinationPath = PathGuard.EnsureWithin(root,
             Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
+        var sourceIdAtDestination = DestinationPathGuard.FindSourceIdAtPath(
+            destinationPath,
+            result.Manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+                .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
+            root);
+        if (sourceIdAtDestination is not null)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"SQLite destination cannot modify source input '{sourceIdAtDestination}'. Choose a different database path.",
+                DiagnosticStage.Publication);
+
         if (!File.Exists(destinationPath))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "SQLite destination database must already exist; create or select an existing database file.",

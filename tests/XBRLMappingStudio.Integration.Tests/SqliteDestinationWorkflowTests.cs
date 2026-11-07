@@ -342,6 +342,34 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SqliteDestinationCannotAliasSourceDatabase()
+    {
+        var sourcePath = await CreateSqliteSourceAsync("same-source-target.db", hasPrimaryKey: true);
+        await CreateDestinationDatabase(sourcePath);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: false,
+            destinationPath: sourcePath);
+        var service = NewService();
+        var binding = Assert.Single(project.Bindings);
+        var connection = new SourceConnection(binding.BindingId, "sqlite", sourcePath,
+            binding.Configuration.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "",
+                StringComparer.Ordinal));
+        var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection>(StringComparer.Ordinal) { [binding.BindingId] = connection },
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.IsPublishable);
+        var before = await File.ReadAllBytesAsync(sourcePath);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(() =>
+            service.PublishDestinationAsync(project, result, _directory, allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+        Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(sourcePath));
+    }
+
+    [Fact]
     public async Task SqliteSourceChange_BlocksFilePublicationAndPreservesPriorOutput()
     {
         var sourcePath = await CreateSqliteSourceAsync("mutable-file-source.db", hasPrimaryKey: true);
@@ -664,7 +692,10 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         return project;
     }
 
-    private MappingProject ConfiguredSqliteSourceProject(string sourcePath, bool fileDestination)
+    private MappingProject ConfiguredSqliteSourceProject(
+        string sourcePath,
+        bool fileDestination,
+        string? destinationPath = null)
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
         var binding = Assert.Single(project.Bindings);
@@ -691,7 +722,7 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
             : new DestinationPlan
             {
                 Kind = DestinationPlanValidator.SupportedKind,
-                Locator = "destination.db",
+                Locator = destinationPath ?? "destination.db",
                 Table = "facts",
                 BusinessKey = new List<string> { "fact_key" }
             };
