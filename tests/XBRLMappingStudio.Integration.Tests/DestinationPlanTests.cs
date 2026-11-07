@@ -34,7 +34,9 @@ public sealed class DestinationPlanTests
 
     [Theory]
     [InlineData("csv", "csv-records-v1")]
+    [InlineData("csv", "csv-records-v2")]
     [InlineData("excel", "xlsx-records-v1")]
+    [InlineData("excel", "xlsx-records-v2")]
     [InlineData("json", "json-records-v1")]
     [InlineData("xml", "xml-records-v1")]
     public void ValidateProject_AcceptsExplicitVersionedFileContracts(string kind, string format)
@@ -53,6 +55,46 @@ public sealed class DestinationPlanTests
         var outcome = MappingJobService.ValidateProject(project, Synthetic);
 
         Assert.True(outcome.Success, string.Join(Environment.NewLine, outcome.Diagnostics.Items.Select(item => item.Message)));
+    }
+
+    [Theory]
+    [InlineData("csv", "csv-records-v2")]
+    [InlineData("excel", "xlsx-records-v2")]
+    [InlineData("json", "json-records-v1")]
+    [InlineData("xml", "xml-records-v1")]
+    public void NewFileDestinationsDefaultToTheCurrentContract(string kind, string format)
+        => Assert.Equal(format, DestinationPlanValidator.FileFormatFor(kind));
+
+    [Fact]
+    public void V2PresenceMetadataDistinguishesMissingNilBlankAndPresentInStableColumnOrder()
+    {
+        var headers = new[] { "missing", "nil", "blank", "present" };
+        var record = new DataRecord
+        {
+            RowId = "row-1",
+            Fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
+            {
+                ["nil"] = DataValue.ExplicitNil(XBRLMappingStudio.Project.PortShape.String),
+                ["blank"] = DataValue.Blank(),
+                ["present"] = DataValue.StringValue("ready")
+            }
+        };
+
+        var encoded = FileOutputPresenceMetadata.Serialize(record, headers);
+        using var document = JsonDocument.Parse(encoded);
+        var root = document.RootElement;
+        Assert.Equal(FileOutputPresenceMetadata.SchemaId, root.GetProperty("schema").GetString());
+        var fields = root.GetProperty("fields").EnumerateArray().ToArray();
+        Assert.Equal(headers, fields.Select(field => field.GetProperty("name").GetString()));
+        Assert.Equal(new[] { "missing", "nil", "blank", "present" },
+            fields.Select(field => field.GetProperty("state").GetString()));
+
+        var withMetadata = Assert.Single(FileOutputPresenceMetadata.Append(new[] { record }, headers));
+        Assert.Equal("row-1", withMetadata.RowId);
+        Assert.Equal(encoded, withMetadata[FileOutputPresenceMetadata.ColumnName].AsString());
+        Assert.Equal("ready", withMetadata["present"].AsString());
+        Assert.Equal(headers.Append(FileOutputPresenceMetadata.ColumnName),
+            FileOutputPresenceMetadata.AppendHeader(headers));
     }
 
     [Theory]
@@ -92,7 +134,9 @@ public sealed class DestinationPlanTests
 
     [Theory]
     [InlineData("csv", "csv-records-v1", "report.csv", "csv")]
+    [InlineData("csv", "csv-records-v2", "report-v2.csv", "csv")]
     [InlineData("excel", "xlsx-records-v1", "report.xlsx", "xlsx")]
+    [InlineData("excel", "xlsx-records-v2", "report-v2.xlsx", "xlsx")]
     [InlineData("json", "json-records-v1", "report.json", "json")]
     [InlineData("xml", "xml-records-v1", "report.xml", "xml")]
     public async Task PublishFileDestination_UsesExplicitAdapterAndRecordsReconciledOutput(
@@ -164,6 +208,8 @@ public sealed class DestinationPlanTests
                 await foreach (var row in reader.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
                 Assert.Single(rows);
                 Assert.Equal("1250000", rows[0]["value"].AsString());
+                if (DestinationPlanValidator.UsesFieldPresenceMetadata(project.Destination!))
+                    AssertFactPresenceMetadata(rows[0][FileOutputPresenceMetadata.ColumnName].AsString());
             }
             else
             {
@@ -174,6 +220,8 @@ public sealed class DestinationPlanTests
                 await foreach (var row in reader.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
                 Assert.Single(rows);
                 Assert.Equal("1250000", rows[0]["value"].AsString());
+                if (DestinationPlanValidator.UsesFieldPresenceMetadata(project.Destination!))
+                    AssertFactPresenceMetadata(rows[0][FileOutputPresenceMetadata.ColumnName].AsString());
             }
         }
         finally
@@ -865,6 +913,22 @@ public sealed class DestinationPlanTests
         Table = "facts",
         BusinessKey = new List<string> { "fact_key" }
     };
+
+    private static void AssertFactPresenceMetadata(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(FileOutputPresenceMetadata.SchemaId,
+            document.RootElement.GetProperty("schema").GetString());
+        var states = document.RootElement.GetProperty("fields").EnumerateArray()
+            .ToDictionary(
+                field => field.GetProperty("name").GetString()!,
+                field => field.GetProperty("state").GetString()!,
+                StringComparer.Ordinal);
+        Assert.Equal("nil", states["instant_date"]);
+        Assert.Equal("present", states["period_start"]);
+        Assert.Equal("present", states["value"]);
+        Assert.Equal("nil", states["text_value"]);
+    }
 
     private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
     {

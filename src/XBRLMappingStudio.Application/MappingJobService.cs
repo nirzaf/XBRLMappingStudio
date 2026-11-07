@@ -1934,6 +1934,11 @@ public sealed class MappingJobService
 
         var records = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
         var headers = XbrlFactRecordMapper.OutputColumns;
+        if (DestinationPlanValidator.UsesFieldPresenceMetadata(plan))
+        {
+            records = FileOutputPresenceMetadata.Append(records, headers);
+            headers = FileOutputPresenceMetadata.AppendHeader(headers);
+        }
         var connection = new SourceConnection("destination", plan.Kind, destinationPath,
             new Dictionary<string, string>(StringComparer.Ordinal));
         var adapter = BuildTargetAdapter(connection);

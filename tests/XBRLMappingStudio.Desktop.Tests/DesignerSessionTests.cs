@@ -2644,6 +2644,54 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task CsvAndExcelDestinationFormatsUseV2DefaultsAndKeepSavedV1Visible()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-destination-contract-version-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(directory);
+            var projectPath = Path.Combine(directory, "mapping.xmap");
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            var defaultViewModel = new MainWindowViewModel(project);
+
+            defaultViewModel.SelectedDestinationKind = defaultViewModel.DestinationKindOptions
+                .Single(option => option.Kind == "csv");
+            Assert.Contains("csv-records-v2", defaultViewModel.DestinationFormatDisplay, StringComparison.Ordinal);
+            defaultViewModel.SelectedDestinationKind = defaultViewModel.DestinationKindOptions
+                .Single(option => option.Kind == "excel");
+            Assert.Contains("xlsx-records-v2", defaultViewModel.DestinationFormatDisplay, StringComparison.Ordinal);
+
+            project.Destination = new DestinationPlan
+            {
+                Kind = "csv",
+                Locator = "legacy.csv",
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "csv-records-v1",
+                WriteMode = "replace"
+            };
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = projectPath };
+            var writer = new MainWindowViewModel(project, dialog);
+            writer.AllowSyntheticProfile = true;
+            writer.SaveProjectTo(projectPath);
+
+            var reopened = new MainWindowViewModel(TestFixtures.BuildRevenueMappingProject(workbook), dialog);
+            reopened.AllowSyntheticProfile = true;
+            await reopened.OpenProjectAsync();
+
+            Assert.Contains("csv-records-v1", reopened.DestinationFormatDisplay, StringComparison.Ordinal);
+            reopened.SelectedDestinationKind = reopened.DestinationKindOptions
+                .Single(option => option.Kind == "excel");
+            Assert.Contains("xlsx-records-v2", reopened.DestinationFormatDisplay, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void AdapterCapabilities_AreVisibleBeforeSourceAndTargetSelection()
     {
         var viewModel = new MainWindowViewModel(Project());

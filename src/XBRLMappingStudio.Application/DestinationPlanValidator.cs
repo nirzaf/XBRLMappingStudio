@@ -17,11 +17,22 @@ public static class DestinationPlanValidator
     public const string JsonKind = "json";
     public const string XmlKind = "xml";
 
-    private static readonly IReadOnlyDictionary<string, string> FileFormats =
+    private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> FileFormats =
+        new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal)
+        {
+            [CsvKind] = new HashSet<string>(StringComparer.Ordinal)
+                { "csv-records-v1", "csv-records-v2" },
+            [ExcelKind] = new HashSet<string>(StringComparer.Ordinal)
+                { "xlsx-records-v1", "xlsx-records-v2" },
+            [JsonKind] = new HashSet<string>(StringComparer.Ordinal) { "json-records-v1" },
+            [XmlKind] = new HashSet<string>(StringComparer.Ordinal) { "xml-records-v1" }
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> DefaultFileFormats =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [CsvKind] = "csv-records-v1",
-            [ExcelKind] = "xlsx-records-v1",
+            [CsvKind] = "csv-records-v2",
+            [ExcelKind] = "xlsx-records-v2",
             [JsonKind] = "json-records-v1",
             [XmlKind] = "xml-records-v1"
         };
@@ -31,8 +42,21 @@ public static class DestinationPlanValidator
 
     public static bool IsFileKind(string? kind) => kind is not null && FileFormats.ContainsKey(kind);
 
+    /// <summary>Default contract for newly configured destinations. Existing v1 plans remain supported.</summary>
     public static string? FileFormatFor(string kind)
-        => FileFormats.TryGetValue(kind, out var format) ? format : null;
+        => DefaultFileFormats.TryGetValue(kind, out var format) ? format : null;
+
+    public static bool UsesFieldPresenceMetadata(DestinationPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return UsesFieldPresenceMetadata(plan.Kind, plan.Format);
+    }
+
+    public static bool UsesFieldPresenceMetadata(string kind, string format)
+        => (StringComparer.Ordinal.Equals(kind, CsvKind)
+                && StringComparer.Ordinal.Equals(format, "csv-records-v2"))
+            || (StringComparer.Ordinal.Equals(kind, ExcelKind)
+                && StringComparer.Ordinal.Equals(format, "xlsx-records-v2"));
 
     public static DiagnosticBag ValidateFileDestinationPath(string? path)
     {
@@ -93,14 +117,15 @@ public static class DestinationPlanValidator
             if (!StringComparer.Ordinal.Equals(plan.WriteMode, "upsert"))
                 Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for SQLite; use 'upsert'.");
         }
-        else if (FileFormats.TryGetValue(plan.Kind, out var expectedFileFormat))
+        else if (FileFormats.TryGetValue(plan.Kind, out var supportedFileFormats))
         {
             if (!string.IsNullOrWhiteSpace(plan.Table))
                 Invalid("File destinations do not use a table name.");
             if (plan.BusinessKey is { Count: > 0 })
                 Invalid("File destinations do not use a SQLite business key.");
-            if (!StringComparer.Ordinal.Equals(plan.Format, expectedFileFormat))
-                Unsupported($"Destination format '{plan.Format}' does not match the explicit '{plan.Kind}' contract '{expectedFileFormat}'.");
+            if (!supportedFileFormats.Contains(plan.Format))
+                Unsupported($"Destination format '{plan.Format}' is unsupported for '{plan.Kind}'. Supported contracts: "
+                    + string.Join(", ", supportedFileFormats.Order(StringComparer.Ordinal).Select(format => $"'{format}'")) + ".");
             if (!StringComparer.Ordinal.Equals(plan.WriteMode, "replace"))
                 Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for file targets; use 'replace'.");
         }

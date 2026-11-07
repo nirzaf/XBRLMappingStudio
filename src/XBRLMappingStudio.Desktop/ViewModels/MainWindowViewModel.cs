@@ -717,9 +717,14 @@ public sealed class MainWindowViewModel : ViewModelBase
     }
     public bool IsSqliteDestination => StringComparer.Ordinal.Equals(SelectedDestinationKind.Kind, "sqlite");
     public bool IsFileDestination => DestinationPlanValidator.IsFileKind(SelectedDestinationKind.Kind);
+    private string SelectedFileDestinationFormat
+        => SavedDestinationMatchesSelectedPath()
+            ? Session.Project.Destination!.Format
+            : DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind) ?? string.Empty;
+
     public string DestinationFormatDisplay => IsSqliteDestination
         ? "Contract: xbrl-facts-v1 · upsert"
-        : $"Contract: {DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)} · replace";
+        : $"Contract: {SelectedFileDestinationFormat} · replace";
     public string DestinationPickerButtonText => IsSqliteDestination
         ? "Choose SQLite database…"
         : "Choose output file…";
@@ -731,7 +736,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         : "Publish file…";
     public string DestinationGuidance => IsSqliteDestination
         ? "The dry run checks the full mapping and target schema. Publication rechecks approval and schema, then asks for final confirmation."
-        : "The dry run checks the full mapping and output contract. Publication rechecks approval, stages and validates the file, then asks for final confirmation.";
+        : DestinationPlanValidator.UsesFieldPresenceMetadata(
+            SelectedDestinationKind.Kind, SelectedFileDestinationFormat)
+            ? "The dry run checks the full mapping and output contract. CSV/XLSX v2 adds a per-field presence map for missing, nil, blank and populated values. Publication rechecks approval, stages and validates the file, then asks for final confirmation."
+            : "The dry run checks the full mapping and output contract. Publication rechecks approval, stages and validates the file, then asks for final confirmation.";
     public string? SelectedSourceColumn
     {
         get => _selectedSourceColumn;
@@ -2220,6 +2228,27 @@ public sealed class MainWindowViewModel : ViewModelBase
         => left is not null && right is not null
            && StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
+    private bool SavedDestinationMatchesSelectedPath()
+    {
+        var plan = Session.Project.Destination;
+        if (plan is null || _destinationPath is null || ProjectPath is null
+            || !StringComparer.Ordinal.Equals(plan.Kind, SelectedDestinationKind.Kind))
+            return false;
+
+        try
+        {
+            var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(ProjectPath))!;
+            var savedPath = Path.IsPathRooted(plan.Locator)
+                ? Path.GetFullPath(plan.Locator)
+                : Path.GetFullPath(Path.Combine(projectDirectory, plan.Locator));
+            return PathsEqual(savedPath, _destinationPath);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private async Task ChooseSourceAsync()
     {
         if (_fileDialog is null) { StatusText = "Source file picker is unavailable."; return; }
@@ -2295,6 +2324,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             DestinationKeys.Clear();
             Raise(nameof(DestinationPath));
             Raise(nameof(DestinationPathDisplay));
+            Raise(nameof(DestinationFormatDisplay));
             Raise(nameof(DestinationTable));
             Raise(nameof(DestinationTables));
             Raise(nameof(HasDestinationTables));
@@ -2447,7 +2477,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             DestinationSchemaIsValid = false;
             DestinationSchemaStatus = _destinationPath is null
                 ? "Choose an output file in the workspace."
-                : $"Review the output path and {DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)} contract.";
+                : $"Review the output path and {SelectedFileDestinationFormat} contract.";
             return;
         }
 
@@ -2506,7 +2536,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             Locator = _destinationPath,
             Table = string.Empty,
             BusinessKey = new List<string>(),
-            Format = DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind)!,
+            Format = SelectedFileDestinationFormat,
             WriteMode = "replace"
         };
     }
