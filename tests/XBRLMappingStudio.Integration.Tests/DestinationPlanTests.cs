@@ -635,26 +635,31 @@ public sealed class DestinationPlanTests
         }
     }
 
-    [Fact]
-    public async Task PublishFileDestination_RestoresPriorBytesWhenAdapterFailsAfterReplacement()
+    [Theory]
+    [InlineData("csv", "csv-records-v1", "report.csv")]
+    [InlineData("excel", "xlsx-records-v1", "report.xlsx")]
+    [InlineData("json", "json-records-v1", "report.json")]
+    [InlineData("xml", "xml-records-v1", "report.xml")]
+    public async Task PublishFileDestination_RestoresPriorBytesWhenAdapterFailsAfterReplacement(
+        string kind, string format, string fileName)
     {
         var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-rollback-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {
             var workbook = TestFixtures.MaterializeWorkbook(dir);
-            var destinationPath = Path.Combine(dir, "report.csv");
+            var destinationPath = Path.Combine(dir, fileName);
             var priorBytes = Encoding.UTF8.GetBytes("previous accepted artifact\r\n");
             await File.WriteAllBytesAsync(destinationPath, priorBytes);
 
             var project = TestFixtures.BuildRevenueMappingProject(workbook);
             project.Destination = new DestinationPlan
             {
-                Kind = "csv",
-                Locator = "report.csv",
+                Kind = kind,
+                Locator = fileName,
                 Table = string.Empty,
                 BusinessKey = new List<string>(),
-                Format = "csv-records-v1",
+                Format = format,
                 WriteMode = "replace"
             };
             project.Approvals.Add(new ApprovalRecord
