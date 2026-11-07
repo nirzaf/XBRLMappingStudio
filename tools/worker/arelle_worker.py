@@ -45,6 +45,11 @@ MAX_TAXONOMY_XML_FILE_BYTES = 16 * 1024 * 1024
 MAX_TAXONOMY_GRAPH_EDGES = 16384
 TAXONOMY_XML_READ_BYTES = 64 * 1024
 MAX_TAXONOMY_OFFLINE_ALIAS_BYTES = 256 * 1024 * 1024
+MAX_TAXONOMY_ARCHIVES = 64
+MAX_TAXONOMY_ARCHIVE_FILES = 16384
+MAX_TAXONOMY_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_TAXONOMY_ARCHIVE_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES = 1024 * 1024 * 1024
 
 _OFFLINE_NETWORK_AUDIT_EVENTS = frozenset({
     "socket.bind",
@@ -80,6 +85,7 @@ XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 OASIS_CATALOG_NAMESPACE = "urn:oasis:names:tc:entity:xmlns:xml:catalog"
+TAXONOMY_PACKAGE_NAMESPACE = "http://xbrl.org/REC/2016-04-19/taxonomy-package"
 
 try:
     from arelle.api.Session import Session
@@ -542,14 +548,411 @@ def _read_taxonomy_xml_edges(relative_path, path, expected_digest, remaining_bud
 class TaxonomyDependencyClosure(tuple):
     """Ordered verified dependency paths plus the exact offline URI mappings they use."""
 
-    def __new__(cls, paths, offline_references):
+    def __new__(cls, paths, offline_references, package_archives=()):
         result = super().__new__(cls, paths)
         result.offline_references = dict(offline_references)
+        result.package_archives = tuple(package_archives)
         return result
 
 
+def _safe_taxonomy_archive_member(member_name, is_directory=False):
+    if not isinstance(member_name, str) or not member_name or "\\" in member_name or "\x00" in member_name:
+        raise ValueError("Taxonomy package archive contains an unsafe member path")
+    if member_name.startswith("/") or any(ord(character) < 0x20 or 0x7f <= ord(character) <= 0x9f
+                                           for character in member_name):
+        raise ValueError("Taxonomy package archive contains an unsafe member path")
+    normalized = member_name[:-1] if is_directory and member_name.endswith("/") else member_name
+    parts = normalized.split("/")
+    if (not normalized or any(part in ("", ".", "..") for part in parts)
+            or any(any(character in ":*?\"<>|" for character in part)
+                   or part.endswith((" ", "."))
+                   or part.split(".", 1)[0].upper() in {
+                       "CON", "PRN", "AUX", "NUL",
+                       *("COM" + str(index) for index in range(1, 10)),
+                       *("LPT" + str(index) for index in range(1, 10)),
+                   }
+                   for part in parts)):
+        raise ValueError("Taxonomy package archive member escapes its package root")
+    return normalized
+
+
+def _hash_package_file(path, expected_digest, description):
+    if not isinstance(expected_digest, str) or len(expected_digest) != 71 \
+            or not expected_digest.startswith("sha256:") \
+            or any(character not in "0123456789abcdef" for character in expected_digest[7:]):
+        raise ValueError(description + " does not have a valid pinned SHA-256 digest")
+    digest = hashlib.sha256()
+    byte_count = 0
+    with path.open("rb") as source:
+        while True:
+            chunk = source.read(TAXONOMY_XML_READ_BYTES)
+            if not chunk:
+                break
+            byte_count += len(chunk)
+            if byte_count > MAX_PROFILE_FILE_BYTES:
+                raise ValueError(description + " exceeds the profile file limit")
+            digest.update(chunk)
+    if "sha256:" + digest.hexdigest() != expected_digest:
+        raise ValueError(description + " hash does not match packageFiles")
+    return byte_count
+
+
+def _parse_taxonomy_package_xml(raw_xml, description):
+    lowered = raw_xml.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise ValueError(description + " must not contain a DTD or entity declaration")
+    try:
+        root = ElementTree.fromstring(raw_xml)
+    except ElementTree.ParseError as ex:
+        raise ValueError(description + " is malformed XML") from ex
+    if root.tag != "{" + TAXONOMY_PACKAGE_NAMESPACE + "}taxonomyPackage":
+        raise ValueError(description + " must have a taxonomyPackage root element")
+    identifiers = [element for element in root if element.tag == "{" + TAXONOMY_PACKAGE_NAMESPACE + "}identifier"]
+    if len(identifiers) != 1 or not (identifiers[0].text or "").strip():
+        raise ValueError(description + " must contain exactly one non-empty taxonomy-package identifier")
+    return root
+
+
+def _decode_safe_package_uri_path(raw_path, description):
+    if (re.search(r"%(?![0-9a-fA-F]{2})", raw_path)
+            or re.search(r"%(?:2f|5c)", raw_path, re.IGNORECASE)):
+        raise ValueError(description + " has invalid or encoded path separators")
+    try:
+        decoded = unquote(raw_path, errors="strict")
+    except UnicodeDecodeError as ex:
+        raise ValueError(description + " is not valid UTF-8") from ex
+    if ("\\" in decoded or "\x00" in decoded
+            or any(ord(character) < 0x20 or 0x7f <= ord(character) <= 0x9f
+                   for character in decoded)):
+        raise ValueError(description + " contains an unsafe path")
+    return decoded
+
+
+def _validate_taxonomy_package_archive(relative_archive, taxonomy_root, package_files):
+    archive_path = safe_package_path(relative_archive, taxonomy_root)
+    archive_digest = package_files.get(relative_archive)
+    archive_size = _hash_package_file(archive_path, archive_digest,
+                                      "Taxonomy package archive " + relative_archive)
+    if archive_size > MAX_TAXONOMY_ARCHIVE_BYTES:
+        raise ValueError("Taxonomy package archive exceeds the compressed size limit: " + relative_archive)
+
+    member_names = set()
+    folded_member_names = set()
+    package_roots = set()
+    archive_members = set()
+    rewrite_rules = []
+    metadata_xml = None
+    catalog_xml = None
+    total_uncompressed = 0
+    file_count = 0
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_TAXONOMY_ARCHIVE_FILES:
+                raise ValueError("Taxonomy package archive exceeds the member-count limit")
+            for info in infos:
+                raw_name = getattr(info, "orig_filename", info.filename)
+                is_directory = info.is_dir()
+                member_name = _safe_taxonomy_archive_member(raw_name, is_directory)
+                mode = info.external_attr >> 16
+                file_type = stat.S_IFMT(mode)
+                if (info.flag_bits & 0x1) or file_type == stat.S_IFLNK \
+                        or file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise ValueError("Taxonomy package archive contains an encrypted or non-regular member")
+                if (is_directory and file_type == stat.S_IFREG) \
+                        or (not is_directory and file_type == stat.S_IFDIR):
+                    raise ValueError("Taxonomy package archive member has conflicting file type metadata")
+                if raw_name != info.filename:
+                    raise ValueError("Taxonomy package archive contains a truncated member name")
+                if member_name in member_names or member_name.casefold() in folded_member_names:
+                    raise ValueError("Taxonomy package archive contains duplicate or case-colliding member paths")
+                member_names.add(member_name)
+                folded_member_names.add(member_name.casefold())
+                package_roots.add(member_name.split("/", 1)[0])
+                if is_directory:
+                    continue
+                file_count += 1
+                if file_count > MAX_TAXONOMY_ARCHIVE_FILES:
+                    raise ValueError("Taxonomy package archive exceeds the member-count limit")
+                if info.file_size < 0 or info.file_size > MAX_TAXONOMY_ARCHIVE_BYTES:
+                    raise ValueError("Taxonomy package archive member exceeds the size limit")
+                total_uncompressed += info.file_size
+                if total_uncompressed > MAX_TAXONOMY_ARCHIVE_BYTES:
+                    raise ValueError("Taxonomy package archive exceeds the uncompressed byte limit")
+
+                expected_digest = package_files.get(member_name)
+                if not isinstance(expected_digest, str):
+                    raise ValueError("Taxonomy package archive member is not hash-pinned by packageFiles: "
+                                     + member_name)
+                extracted_path = safe_package_path(member_name, taxonomy_root)
+                extracted_size = _hash_package_file(
+                    extracted_path, expected_digest,
+                    "Extracted taxonomy package member " + member_name)
+                if extracted_size != info.file_size:
+                    raise ValueError("Extracted taxonomy package member size differs from its archive: "
+                                     + member_name)
+
+                digest = hashlib.sha256()
+                read_size = 0
+                small_xml = bytearray() if member_name.endswith(("/META-INF/taxonomyPackage.xml",
+                                                                  "/META-INF/catalog.xml")) else None
+                with archive.open(info, "r") as member:
+                    while True:
+                        chunk = member.read(TAXONOMY_XML_READ_BYTES)
+                        if not chunk:
+                            break
+                        read_size += len(chunk)
+                        if read_size > info.file_size or read_size > MAX_TAXONOMY_ARCHIVE_BYTES:
+                            raise ValueError("Taxonomy package archive member exceeds its declared size")
+                        digest.update(chunk)
+                        if small_xml is not None:
+                            if len(small_xml) + len(chunk) > MAX_TAXONOMY_XML_FILE_BYTES:
+                                raise ValueError("Taxonomy package metadata exceeds the XML size limit")
+                            small_xml.extend(chunk)
+                if read_size != info.file_size or "sha256:" + digest.hexdigest() != expected_digest:
+                    raise ValueError("Taxonomy package archive member hash differs from packageFiles: "
+                                     + member_name)
+                archive_members.add(member_name)
+                if member_name.endswith("/META-INF/taxonomyPackage.xml"):
+                    metadata_xml = bytes(small_xml or b"")
+                    metadata_path = member_name
+                elif member_name.endswith("/META-INF/catalog.xml"):
+                    catalog_xml = bytes(small_xml or b"")
+                    catalog_path = member_name
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as ex:
+        raise ValueError("Taxonomy package archive is malformed or unreadable: " + relative_archive) from ex
+
+    if len(package_roots) != 1:
+        raise ValueError("Taxonomy package archive must contain one top-level directory")
+    package_root = next(iter(package_roots))
+    expected_metadata_path = package_root + "/META-INF/taxonomyPackage.xml"
+    if metadata_xml is None or metadata_path != expected_metadata_path:
+        raise ValueError("Taxonomy package archive is missing META-INF/taxonomyPackage.xml")
+    metadata_root = _parse_taxonomy_package_xml(metadata_xml, "Taxonomy package metadata")
+    entry_point_documents = []
+    for element in metadata_root.iter():
+        if "{" + XML_NAMESPACE + "}base" in element.attrib:
+            raise ValueError("Taxonomy package metadata xml:base is unsupported")
+        if element.tag == "{" + TAXONOMY_PACKAGE_NAMESPACE + "}entryPointDocument":
+            href = element.get("href")
+            if (not isinstance(href, str) or not href or len(href) > 2048
+                    or any(character.isspace() or ord(character) < 0x20 for character in href)):
+                raise ValueError("Taxonomy package entry point document has an invalid href")
+            entry_point_documents.append(href)
+    entry_points = [element for element in metadata_root.iter()
+                    if element.tag == "{" + TAXONOMY_PACKAGE_NAMESPACE + "}entryPoint"]
+    if any(not any(document.tag == "{" + TAXONOMY_PACKAGE_NAMESPACE + "}entryPointDocument"
+                   for document in entry_point.iter()) for entry_point in entry_points):
+        raise ValueError("Taxonomy package entry points must declare at least one document")
+
+    if catalog_xml is not None:
+        lowered = catalog_xml.lower()
+        if b"<!doctype" in lowered or b"<!entity" in lowered:
+            raise ValueError("Taxonomy package catalog must not contain a DTD or entity declaration")
+        try:
+            catalog = ElementTree.fromstring(catalog_xml)
+        except ElementTree.ParseError as ex:
+            raise ValueError("Taxonomy package catalog is malformed XML") from ex
+        if catalog.tag != "{" + OASIS_CATALOG_NAMESPACE + "}catalog":
+            raise ValueError("Taxonomy package catalog must use the OASIS XML Catalog namespace")
+        catalog_directory = posixpath.dirname(catalog_path)
+        xml_base = catalog.get("{" + XML_NAMESPACE + "}base")
+        if xml_base is not None:
+            parsed_base = urlsplit(xml_base)
+            if (parsed_base.scheme or parsed_base.netloc or parsed_base.query or parsed_base.fragment
+                    or parsed_base.path.startswith("/") or "\\" in xml_base
+                    or any(character.isspace() for character in xml_base)):
+                raise ValueError("Taxonomy package catalog has an unsupported xml:base")
+            decoded_base = _decode_safe_package_uri_path(parsed_base.path,
+                                                         "Taxonomy package catalog xml:base")
+            catalog_directory = posixpath.normpath(posixpath.join(catalog_directory, decoded_base))
+            if catalog_directory != package_root and not catalog_directory.startswith(package_root + "/"):
+                raise ValueError("Taxonomy package catalog xml:base escapes its package root")
+
+        seen_prefixes = set()
+        for child in catalog:
+            if child.tag != "{" + OASIS_CATALOG_NAMESPACE + "}rewriteURI":
+                raise ValueError("Taxonomy package catalog uses an unsupported XML Catalog entry")
+            prefix = child.get("uriStartString")
+            rewrite_prefix = child.get("rewritePrefix")
+            if not isinstance(prefix, str) or not isinstance(rewrite_prefix, str):
+                raise ValueError("Taxonomy package catalog rewriteURI is incomplete")
+            parsed_prefix = urlsplit(prefix)
+            if (parsed_prefix.scheme not in ("http", "https") or not parsed_prefix.hostname
+                    or parsed_prefix.username is not None or parsed_prefix.password is not None
+                    or parsed_prefix.query or parsed_prefix.fragment or not parsed_prefix.path.endswith("/")
+                    or "\\" in prefix or any(character.isspace() or ord(character) < 0x20
+                                              for character in prefix)):
+                raise ValueError("Taxonomy package catalog URI prefix is not a canonical HTTP(S) directory")
+            if (re.search(r"%(?![0-9a-fA-F]{2})", parsed_prefix.path)
+                    or re.search(r"%(?:2f|5c)", parsed_prefix.path, re.IGNORECASE)):
+                raise ValueError("Taxonomy package catalog URI prefix has invalid percent encoding")
+            if prefix in seen_prefixes:
+                raise ValueError("Taxonomy package catalog contains duplicate rewriteURI prefixes")
+            seen_prefixes.add(prefix)
+
+            parsed_target = urlsplit(rewrite_prefix)
+            if (parsed_target.scheme or parsed_target.netloc or parsed_target.query or parsed_target.fragment
+                    or parsed_target.path.startswith("/") or "\\" in rewrite_prefix
+                    or any(character.isspace() for character in rewrite_prefix)
+                    or not parsed_target.path.endswith("/")):
+                raise ValueError("Taxonomy package catalog rewritePrefix must be a relative directory")
+            decoded_target = _decode_safe_package_uri_path(
+                parsed_target.path, "Taxonomy package catalog rewritePrefix")
+            target_directory = posixpath.normpath(
+                posixpath.join(catalog_directory, decoded_target)).rstrip("/")
+            if target_directory != package_root and not target_directory.startswith(package_root + "/"):
+                raise ValueError("Taxonomy package catalog rewritePrefix escapes its package root")
+            rewrite_rules.append((prefix, target_directory + "/", relative_archive))
+
+    return {
+        "path": relative_archive,
+        "members": frozenset(archive_members),
+        "rewrites": tuple(rewrite_rules),
+        "uncompressed_bytes": total_uncompressed,
+        "compressed_bytes": archive_size,
+        "entry_point_documents": tuple(entry_point_documents),
+        "metadata_directory": posixpath.dirname(metadata_path),
+    }
+
+
+def validate_taxonomy_package_archives(taxonomy_root, package_files, entry_point=None,
+                                       offline_references=None):
+    """Validate pinned XBRL Taxonomy Packages and return their restricted offline catalogs."""
+    if not isinstance(package_files, dict):
+        raise ValueError("Taxonomy packageFiles must be an object")
+    archive_paths = sorted(path for path in package_files
+                           if isinstance(path, str) and path.lower().endswith(".zip"))
+    if len(archive_paths) > MAX_TAXONOMY_ARCHIVES:
+        raise ValueError("Profile contains too many taxonomy package archives")
+    archives = [_validate_taxonomy_package_archive(path, taxonomy_root, package_files)
+                for path in archive_paths]
+    total_members = sum(len(archive["members"]) for archive in archives)
+    total_uncompressed = sum(archive["uncompressed_bytes"] for archive in archives)
+    total_compressed = sum(archive["compressed_bytes"] for archive in archives)
+    if total_members > MAX_TAXONOMY_ARCHIVE_FILES:
+        raise ValueError("Taxonomy packages exceed the combined member-count limit")
+    if total_uncompressed > MAX_TAXONOMY_ARCHIVE_TOTAL_BYTES \
+            or total_compressed > MAX_TAXONOMY_ARCHIVE_TOTAL_BYTES:
+        raise ValueError("Taxonomy packages exceed the combined archive byte limit")
+    rewrites = []
+    by_prefix = {}
+    for archive in archives:
+        for prefix, target_directory, archive_path in archive["rewrites"]:
+            previous = by_prefix.get(prefix)
+            if previous is not None and previous[0] != target_directory:
+                raise ValueError("Taxonomy packages contain conflicting offline URI mappings: " + prefix)
+            by_prefix[prefix] = (target_directory, archive_path)
+            rewrites.append((prefix, target_directory, archive_path))
+    if entry_point is not None:
+        for archive in archives:
+            if entry_point not in archive["members"] or not archive["entry_point_documents"]:
+                continue
+            resolved_documents = set()
+            for href in archive["entry_point_documents"]:
+                parsed = urlsplit(href)
+                if parsed.scheme or parsed.netloc:
+                    if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                            or parsed.username is not None or parsed.password is not None
+                            or parsed.query or parsed.fragment or "\\" in href):
+                        raise ValueError("Taxonomy package entry point document URI is unsupported")
+                    _decode_safe_package_uri_path(parsed.path,
+                                                  "Taxonomy package entry point document URI")
+                    base_reference = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+                    explicit_target = (offline_references or {}).get(base_reference)
+                    catalog_target = _resolve_taxonomy_package_reference(
+                        base_reference, rewrites, package_files)
+                    if explicit_target is not None and catalog_target is not None \
+                            and explicit_target != catalog_target:
+                        raise ValueError("Taxonomy package entry point has conflicting offline mappings")
+                    target = explicit_target or catalog_target
+                    if target is not None:
+                        resolved_documents.add(target)
+                    continue
+                if parsed.query or parsed.fragment or parsed.path.startswith("/") or "\\" in parsed.path:
+                    raise ValueError("Taxonomy package relative entry point document URI is unsafe")
+                try:
+                    decoded = _decode_safe_package_uri_path(
+                        parsed.path, "Taxonomy package entry point document URI")
+                except ValueError as ex:
+                    raise ValueError("Taxonomy package entry point document URI is unsafe") from ex
+                target = posixpath.normpath(posixpath.join(archive["metadata_directory"], decoded))
+                package_root = next(iter(archive["members"])).split("/", 1)[0]
+                if target != package_root and not target.startswith(package_root + "/"):
+                    raise ValueError("Taxonomy package entry point document escapes its package root")
+                if target in package_files:
+                    resolved_documents.add(target)
+            if entry_point not in resolved_documents:
+                raise ValueError("Selected profile entry point is not declared by its pinned taxonomyPackage.xml")
+    return archives, tuple(rewrites)
+
+
+def _copy_verified_taxonomy_archives(archives, taxonomy_root, snapshot_root, package_files):
+    source_root = Path(taxonomy_root).resolve(strict=True)
+    target_root = Path(snapshot_root).resolve(strict=True)
+    total_bytes = 0
+    copied_paths = []
+    for archive in archives:
+        relative_path = archive["path"]
+        source_path = safe_package_path(relative_path, source_root)
+        target_path = target_root.joinpath(*relative_path.split("/"))
+        target_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        file_bytes = 0
+        try:
+            with source_path.open("rb") as source, target_path.open("xb") as target:
+                while True:
+                    chunk = source.read(TAXONOMY_XML_READ_BYTES)
+                    if not chunk:
+                        break
+                    file_bytes += len(chunk)
+                    total_bytes += len(chunk)
+                    if file_bytes > MAX_TAXONOMY_ARCHIVE_BYTES \
+                            or total_bytes > MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES:
+                        raise ValueError("Taxonomy package archive snapshot exceeds its byte limit")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if "sha256:" + digest.hexdigest() != package_files.get(relative_path):
+                raise ValueError("Taxonomy package archive hash changed while snapshotting: " + relative_path)
+            if os.name != "nt":
+                target_path.chmod(0o400)
+        except OSError as ex:
+            raise ValueError("Could not create private taxonomy package snapshot: " + relative_path) from ex
+        copied_paths.append(str(target_path))
+    return copied_paths
+
+
+def _resolve_taxonomy_package_reference(reference, package_catalog_rewrites, package_files):
+    matches = _best_taxonomy_package_rewrites(reference, package_catalog_rewrites)
+    if not matches:
+        return None
+    targets = set()
+    for prefix, target_directory, _archive_path in matches:
+        raw_suffix = reference[len(prefix):]
+        suffix = _decode_safe_package_uri_path(raw_suffix, "Taxonomy package URI mapping")
+        parts = suffix.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            raise ValueError("Taxonomy package URI mapping escapes its package root")
+        target = posixpath.normpath(posixpath.join(target_directory, suffix))
+        if target not in package_files:
+            raise ValueError("Taxonomy package URI mapping targets an unpinned package file: " + target)
+        targets.add(target)
+    if len(targets) != 1:
+        raise ValueError("Taxonomy packages contain ambiguous offline URI mappings: " + reference[:256])
+    return next(iter(targets))
+
+
+def _best_taxonomy_package_rewrites(reference, package_catalog_rewrites):
+    matches = [rule for rule in package_catalog_rewrites if reference.startswith(rule[0])]
+    if not matches:
+        return []
+    longest = max(len(rule[0]) for rule in matches)
+    return [rule for rule in matches if len(rule[0]) == longest]
+
+
 def _resolve_taxonomy_edge(current_path, reference, kind, package_files,
-                           offline_references=None, used_offline_references=None):
+                           offline_references=None, used_offline_references=None,
+                           package_catalog_rewrites=()):
     try:
         parsed = urlsplit(reference)
     except ValueError as ex:
@@ -565,16 +968,29 @@ def _resolve_taxonomy_edge(current_path, reference, kind, package_files,
                              + reference[:256])
         if parsed.query or "?" in reference.split("#", 1)[0]:
             raise ValueError("External taxonomy dependency queries are unsupported: " + current_path)
+        if re.search(r"%(?![0-9a-fA-F]{2})", parsed.path):
+            raise ValueError("External taxonomy dependency has invalid percent encoding: " + current_path)
+        if re.search(r"%(?:2f|5c)", parsed.path, re.IGNORECASE):
+            raise ValueError("External taxonomy dependency has an encoded path separator: " + current_path)
         if kind == "schemaLocation" and (parsed.fragment or "#" in reference):
             raise ValueError("External taxonomy schemaLocation fragments are unsupported: " + current_path)
         base_reference = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-        target = (offline_references or {}).get(base_reference)
+        explicit_target = (offline_references or {}).get(base_reference)
+        catalog_target = _resolve_taxonomy_package_reference(
+            base_reference, package_catalog_rewrites, package_files)
+        if explicit_target is not None and catalog_target is not None \
+                and explicit_target != catalog_target:
+            raise ValueError("Taxonomy dependency has conflicting exact and package-catalog mappings: "
+                             + base_reference[:256])
+        target = explicit_target or catalog_target
         if not isinstance(target, str) or target not in package_files:
-            raise ValueError("External taxonomy dependency has no exact hash-pinned offlineReferences mapping: "
+            raise ValueError("External taxonomy dependency has no exact hash-pinned offlineReferences mapping "
+                             "or taxonomy-package catalog rule: "
                              + base_reference[:256])
         if target.lower().endswith(".zip"):
-            raise ValueError("Arelle ZIP package catalog dependency is unsupported: " + target)
-        if used_offline_references is not None:
+            raise ValueError("External taxonomy dependency must map to an extracted, hash-pinned package file: "
+                             + target)
+        if used_offline_references is not None and explicit_target is not None:
             used_offline_references[base_reference] = target
         return target
     if parsed.query:
@@ -606,29 +1022,29 @@ def _resolve_taxonomy_edge(current_path, reference, kind, package_files,
     if resolved not in package_files:
         raise ValueError("Taxonomy dependency is not hash-pinned by packageFiles: " + resolved)
     if resolved.lower().endswith(".zip"):
-        raise ValueError("Arelle ZIP package catalog dependency is unsupported: " + resolved)
+        raise ValueError("Taxonomy dependency must resolve to an extracted, hash-pinned package file: " + resolved)
     return resolved
 
 
 def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_files, offline_references=None):
-    """Validate the bounded, file-based taxonomy dependency graph before Arelle loads it.
+    """Validate a bounded file and ZIP taxonomy dependency graph before Arelle loads it.
 
-    Exact external HTTP(S) references may resolve only through the profile's
-    hash-pinned offlineReferences map. Their closure targets are copied into a
-    private snapshot and an ephemeral local Arelle catalog maps only those URI
-    directories to the copied files.
+    External HTTP(S) references may resolve only through the profile's exact
+    hash-pinned offlineReferences map or a validated ZIP Taxonomy Package catalog.
+    The closure and each used archive are copied into a private snapshot before load.
     """
     if not isinstance(package_files, dict) or entry_point not in package_files:
         raise ValueError("Taxonomy entry point is not hash-pinned by packageFiles")
-    zip_paths = sorted(path for path in package_files if isinstance(path, str) and path.lower().endswith(".zip"))
-    if zip_paths:
-        raise ValueError("Arelle ZIP package catalogs are unsupported for bounded taxonomy loading: " + zip_paths[0])
 
     root = Path(taxonomy_root).resolve(strict=True)
+    package_archives, package_catalog_rewrites = validate_taxonomy_package_archives(
+        root, package_files, entry_point, offline_references)
     pending = deque([(entry_point, 0)])
     visited = set()
     scanned = []
     used_offline_references = {}
+    used_package_archives = {archive["path"] for archive in package_archives
+                             if entry_point in archive["members"]}
     remaining_budget = [0]
     remaining_edges = [0]
     while pending:
@@ -650,7 +1066,15 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
         discovered = set()
         for reference, kind in edges:
             target = _resolve_taxonomy_edge(relative_path, reference, kind, package_files,
-                                            offline_references, used_offline_references)
+                                            offline_references, used_offline_references,
+                                            package_catalog_rewrites)
+            parsed_reference = urlsplit(reference)
+            base_reference = urlunsplit((parsed_reference.scheme, parsed_reference.netloc,
+                                         parsed_reference.path, "", ""))
+            if target is not None and (offline_references or {}).get(base_reference) is None:
+                for _prefix, _target_directory, archive_path in _best_taxonomy_package_rewrites(
+                        base_reference, package_catalog_rewrites):
+                    used_package_archives.add(archive_path)
             if target is not None and target not in visited:
                 # Validate path/symlink/existence before it enters the work queue.
                 try:
@@ -660,14 +1084,21 @@ def validate_taxonomy_dependency_closure(entry_point, taxonomy_root, package_fil
                 discovered.add(target)
         for target in sorted(discovered):
             pending.append((target, depth + 1))
-    return TaxonomyDependencyClosure(scanned, used_offline_references)
+    return TaxonomyDependencyClosure(scanned, used_offline_references,
+                                     sorted(used_package_archives, key=str.casefold))
 
 
 def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
     """Create a local-only Arelle catalog for the exact external references in the closure."""
     root = Path(snapshot_root).resolve(strict=True)
     alias_root = root / ".xms-offline-uri"
-    alias_root.mkdir(mode=0o700, exist_ok=True)
+    if alias_root.exists():
+        raise ValueError("Taxonomy package paths conflict with the private offline URI directory")
+    alias_root.mkdir(mode=0o700)
+    catalog_directory = root / ".xms-offline-catalog"
+    if catalog_directory.exists():
+        raise ValueError("Taxonomy package paths conflict with the private offline catalog directory")
+    catalog_directory.mkdir(mode=0o700)
     remappings = {}
     copied_bytes = 0
     alias_targets = {}
@@ -762,7 +1193,7 @@ def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
     ElementTree.SubElement(metadata, "{" + package_namespace + "}identifier").text = (
         "urn:xbrlmappingstudio:worker:offline-taxonomy-catalog")
     metadata_bytes = ElementTree.tostring(metadata, encoding="utf-8", xml_declaration=True)
-    catalog_path = root / "offline-taxonomy-catalog.zip"
+    catalog_path = catalog_directory / "offline-taxonomy-catalog.zip"
     with zipfile.ZipFile(catalog_path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("xms-offline/META-INF/taxonomyPackage.xml", metadata_bytes)
         archive.writestr("xms-offline/META-INF/catalog.xml", catalog_bytes)
@@ -772,7 +1203,7 @@ def _write_offline_taxonomy_catalog(snapshot_root, offline_references):
 
 
 def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root, snapshot_root,
-                                     package_files, offline_references=None):
+                                     package_files, offline_references=None, package_archives=()):
     """Copy verified closure bytes into a private tree so source edits cannot race Arelle."""
     source_root = Path(taxonomy_root).resolve(strict=True)
     target_root = Path(snapshot_root).resolve(strict=True)
@@ -807,6 +1238,34 @@ def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root,
         except OSError as ex:
             raise ValueError("Could not create private taxonomy snapshot for: " + relative_path) from ex
 
+    archive_total_bytes = 0
+    for relative_path in sorted(set(package_archives), key=str.casefold):
+        expected_digest = package_files.get(relative_path)
+        source_path = safe_package_path(relative_path, source_root)
+        target_path = target_root.joinpath(*relative_path.split("/"))
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        file_bytes = 0
+        try:
+            with source_path.open("rb") as source, target_path.open("xb") as target:
+                while True:
+                    chunk = source.read(TAXONOMY_XML_READ_BYTES)
+                    if not chunk:
+                        break
+                    file_bytes += len(chunk)
+                    archive_total_bytes += len(chunk)
+                    if file_bytes > MAX_TAXONOMY_ARCHIVE_BYTES \
+                            or archive_total_bytes > MAX_TAXONOMY_ARCHIVE_SNAPSHOT_BYTES:
+                        raise ValueError("Taxonomy package archive snapshot exceeds its byte limit")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if "sha256:" + digest.hexdigest() != expected_digest:
+                raise ValueError("Taxonomy package archive hash changed while snapshotting: " + relative_path)
+            if os.name != "nt":
+                target_path.chmod(0o400)
+        except OSError as ex:
+            raise ValueError("Could not create private taxonomy package snapshot: " + relative_path) from ex
+
     if offline_references:
         _write_offline_taxonomy_catalog(target_root, offline_references)
     return safe_package_path(entry_point, target_root)
@@ -818,17 +1277,26 @@ def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root
         os.chmod(snapshot_directory, 0o700)
         snapshot_entry = _copy_verified_taxonomy_snapshot(
             entry_point, relative_paths, taxonomy_root, snapshot_directory, package_files,
-            getattr(relative_paths, "offline_references", {}))
+            getattr(relative_paths, "offline_references", {}),
+            getattr(relative_paths, "package_archives", ()))
         run_args = args
-        if getattr(relative_paths, "offline_references", {}):
+        package_paths = [str(Path(snapshot_directory).joinpath(*relative.split("/")))
+                         for relative in getattr(relative_paths, "package_archives", ())]
+        if getattr(relative_paths, "offline_references", {}) or package_paths:
             import copy
             run_args = copy.copy(args)
             run_args.package = list(getattr(args, "package", []) or [])
-            run_args.package.append(str(Path(snapshot_directory) / "offline-taxonomy-catalog.zip"))
+            for package_path in package_paths:
+                if package_path not in run_args.package:
+                    run_args.package.append(package_path)
+            if getattr(relative_paths, "offline_references", {}):
+                run_args.package.append(str(Path(snapshot_directory) / ".xms-offline-catalog"
+                                            / "offline-taxonomy-catalog.zip"))
         return run_arelle(snapshot_entry, run_args)
 
 
-def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None):
+def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None,
+                       package_catalog_rewrites=()):
     info = report.get("documentInfo")
     if not isinstance(info, dict) or not isinstance(info.get("taxonomy"), list):
         raise ValueError("Report has no documentInfo.taxonomy array")
@@ -838,9 +1306,23 @@ def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_f
             raise ValueError("Taxonomy references must be strings")
         parsed = urlsplit(reference)
         if parsed.scheme in ("http", "https"):
-            if not isinstance(offline_references, dict) or reference not in offline_references:
+            if parsed.query or parsed.fragment or "?" in reference or "#" in reference:
+                raise ValueError("Taxonomy URI cannot include a query or fragment")
+            if "\\" in reference or any(character.isspace() for character in reference):
+                raise ValueError("Taxonomy URI is not a canonical offline file URI")
+            _decode_safe_package_uri_path(parsed.path, "Taxonomy URI")
+            explicit_target = (offline_references or {}).get(reference)
+            catalog_target = None
+            if package_files is not None:
+                base_reference = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+                catalog_target = _resolve_taxonomy_package_reference(
+                    base_reference, package_catalog_rewrites, package_files)
+            if explicit_target is not None and catalog_target is not None \
+                    and explicit_target != catalog_target:
+                raise ValueError("Taxonomy URI has conflicting exact and package-catalog mappings")
+            relative = explicit_target or catalog_target
+            if relative is None:
                 raise ValueError("Taxonomy URI has no approved offline package mapping")
-            relative = offline_references[reference]
         elif parsed.scheme == "file":
             if taxonomy_root is None:
                 raise ValueError("A taxonomy root is required for file taxonomy references")
@@ -864,10 +1346,11 @@ def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_f
     return report
 
 
-def _staged_taxonomy_relative_path(reference, taxonomy_root, offline_references, package_files):
+def _staged_taxonomy_relative_path(reference, taxonomy_root, offline_references, package_files,
+                                   package_catalog_rewrites=()):
     localized = safe_taxonomy_urls(
         {"documentInfo": {"taxonomy": [reference]}}, taxonomy_root,
-        offline_references, package_files)["documentInfo"]["taxonomy"][0]
+        offline_references, package_files, package_catalog_rewrites)["documentInfo"]["taxonomy"][0]
     if os.name == "nt":
         local_path = Path(localized)
     else:
@@ -894,16 +1377,20 @@ def _copy_staged_taxonomy_snapshot(relative_paths, taxonomy_root, snapshot_root,
     if package_files is not None:
         closure_paths = set()
         used_offline_references = {}
+        used_package_archives = set()
         for relative in relative_paths:
             closure = validate_taxonomy_dependency_closure(
                 relative, root, package_files, offline_references)
             closure_paths.update(closure)
             used_offline_references.update(closure.offline_references)
+            used_package_archives.update(closure.package_archives)
         _copy_verified_taxonomy_snapshot(
             relative_paths[0], sorted(closure_paths), root, target_root,
-            package_files, used_offline_references)
-        catalog_path = target_root / "offline-taxonomy-catalog.zip"
-        return catalog_path if used_offline_references else None
+            package_files, used_offline_references, used_package_archives)
+        catalog_path = target_root / ".xms-offline-catalog" / "offline-taxonomy-catalog.zip"
+        archive_paths = [target_root.joinpath(*relative.split("/"))
+                         for relative in sorted(used_package_archives, key=str.casefold)]
+        return (catalog_path if used_offline_references else None), archive_paths
 
     total_bytes = 0
     for relative in relative_paths:
@@ -923,11 +1410,12 @@ def _copy_staged_taxonomy_snapshot(relative_paths, taxonomy_root, snapshot_root,
                 target.chmod(0o400)
         except OSError as ex:
             raise ValueError("Could not create private staged XML taxonomy snapshot") from ex
-    return None
+    return None, []
 
 
 def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline_references,
-                                package_files, expected_digest, worker_args=None):
+                                package_files, expected_digest, worker_args=None,
+                                package_catalog_rewrites=()):
     """Verify an exact staged XML instance, then localize schemaRefs to a private snapshot."""
     digest = hashlib.sha256()
     total = 0
@@ -985,18 +1473,24 @@ def rewrite_staged_xml_taxonomy(report_path, output_path, taxonomy_root, offline
 
     relative_by_reference = {
         reference: _staged_taxonomy_relative_path(
-            reference, taxonomy_root, offline_references, package_files)
+            reference, taxonomy_root, offline_references, package_files,
+            package_catalog_rewrites)
         for reference in dict.fromkeys(schema_references)
     }
-    catalog_path = _copy_staged_taxonomy_snapshot(
+    catalog_path, package_paths = _copy_staged_taxonomy_snapshot(
         relative_by_reference.values(), taxonomy_root, output_path.parent,
-        package_files, offline_references)
+        package_files, offline_references, package_catalog_rewrites)
     arelle_args = worker_args
-    if catalog_path is not None and worker_args is not None:
+    if (catalog_path is not None or package_paths) and worker_args is not None:
         import copy
         arelle_args = copy.copy(worker_args)
         arelle_args.package = list(getattr(worker_args, "package", []) or [])
-        arelle_args.package.append(str(catalog_path))
+        for package_path in package_paths:
+            package_text = str(package_path)
+            if package_text not in arelle_args.package:
+                arelle_args.package.append(package_text)
+        if catalog_path is not None:
+            arelle_args.package.append(str(catalog_path))
 
     try:
         events = etree.iterparse(str(report_path), events=("start", "end"),
@@ -1049,7 +1543,7 @@ def reject_duplicate_json_keys(pairs):
 
 
 def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offline_references, package_files,
-                                 expected_digest):
+                                 expected_digest, package_catalog_rewrites=()):
     """Validate the bounded documentInfo header and stream-copy the large facts object."""
     with report_path.open("rb") as source:
         raw_prefix = source.read(MAX_DOCUMENT_INFO_BYTES + 64 * 1024)
@@ -1089,7 +1583,8 @@ def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offli
         if header_bytes > MAX_DOCUMENT_INFO_BYTES:
             raise ValueError("Report documentInfo exceeds its size limit")
         safe_report = safe_taxonomy_urls({"documentInfo": document_info}, taxonomy_root,
-                                         offline_references, package_files)
+                                         offline_references, package_files,
+                                         package_catalog_rewrites)
         document_info = safe_report["documentInfo"]
 
         while position < len(prefix) and prefix[position].isspace():
@@ -1513,21 +2008,38 @@ def handle(req, args):
                 os.chmod(workdir, 0o700)
                 path = Path(workdir) / ("report.xml" if staged_xml_path is not None else "report.json")
                 run_args = args
+                package_catalog_rewrites = ()
+                if profile is not None:
+                    package_archives, package_catalog_rewrites = validate_taxonomy_package_archives(
+                        args.taxonomy_root, profile.get("packageFiles", {}),
+                        profile.get("entryPoint"), profile.get("offlineReferences", {}))
+                    if package_archives and staged_xml_path is None:
+                        package_paths = _copy_verified_taxonomy_archives(
+                            package_archives, args.taxonomy_root, workdir,
+                            profile.get("packageFiles", {}))
+                        import copy
+                        run_args = copy.copy(args)
+                        run_args.package = list(getattr(args, "package", []) or [])
+                        for package_path in package_paths:
+                            if package_path not in run_args.package:
+                                run_args.package.append(package_path)
                 if staged_xml_path is not None:
                     run_args = rewrite_staged_xml_taxonomy(staged_xml_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None,
-                        payload.get("sha256"), worker_args=args)
+                        payload.get("sha256"), worker_args=args,
+                        package_catalog_rewrites=package_catalog_rewrites)
                 elif large_report_path is not None:
                     rewrite_large_report_taxonomy(large_report_path, path, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
                         profile.get("packageFiles") if profile else None,
-                        payload.get("sha256"))
+                        payload.get("sha256"), package_catalog_rewrites)
                 else:
                     report = json.loads(report_text, object_pairs_hook=reject_duplicate_json_keys)
                     report = safe_taxonomy_urls(report, args.taxonomy_root,
                         profile.get("offlineReferences") if profile else None,
-                        profile.get("packageFiles") if profile else None)
+                        profile.get("packageFiles") if profile else None,
+                        package_catalog_rewrites)
                     path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
                 ok, logs, concept_count = run_arelle(path, run_args, workdir)
                 plugin_failures = required_plugin_load_failures(logs, required_plugins)

@@ -34,6 +34,48 @@ def write_taxonomy_files(root, files):
     return package_files
 
 
+def write_taxonomy_package(root, archive_name="taxonomy.zip",
+                           base_uri="https://taxonomy.example/test/",
+                           rewrite_prefix="../schemas/"):
+    files = {
+        "SyntheticPackage/META-INF/taxonomyPackage.xml": (
+            '<tp:taxonomyPackage xmlns:tp="http://xbrl.org/REC/2016-04-19/taxonomy-package" '
+            'xmlns:xml="http://www.w3.org/XML/1998/namespace">'
+            '<tp:identifier>urn:xms:test:taxonomy-package</tp:identifier>'
+            '<tp:entryPoints><tp:entryPoint><tp:name xml:lang="en">Synthetic</tp:name>'
+            f'<tp:entryPointDocument href="{base_uri}entry.xsd"/>'
+            '</tp:entryPoint></tp:entryPoints></tp:taxonomyPackage>'
+        ),
+        "SyntheticPackage/META-INF/catalog.xml": (
+            '<catalog xmlns="urn:oasis:names:tc:entity:xmlns:xml:catalog">'
+            f'<rewriteURI uriStartString="{base_uri}" '
+            f'rewritePrefix="{rewrite_prefix}"/></catalog>'
+        ),
+        "SyntheticPackage/schemas/entry.xsd": (
+            '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:import namespace="urn:xms:dependency" '
+            f'schemaLocation="{base_uri}dependency.xsd"/>'
+            '<xs:element name="Entry" type="dep:DependencyType" '
+            'xmlns:dep="urn:xms:dependency"/>'
+            '</xs:schema>'
+        ),
+        "SyntheticPackage/schemas/dependency.xsd": (
+            '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+            'targetNamespace="urn:xms:dependency"><xs:simpleType name="DependencyType">'
+            '<xs:restriction base="xs:string"/></xs:simpleType>'
+            '<xs:element name="Dependency" type="xs:string"/></xs:schema>'
+        ),
+    }
+    archive_path = root / archive_name
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for relative_path, content in files.items():
+            archive.writestr(relative_path, content.encode("utf-8"))
+    package_files = write_taxonomy_files(root, files)
+    archive_bytes = archive_path.read_bytes()
+    package_files[archive_name] = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+    return package_files
+
+
 def report(concept="synthetic:Assets"):
     return {
         "documentInfo": {
@@ -690,15 +732,119 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertIn("hash mismatch while snapshotting dependency: dependency.xsd", result["error"])
         run_arelle.assert_not_called()
 
-    def test_taxonomy_dependency_rejects_zip_catalogs_before_arelle(self):
+    def test_taxonomy_dependency_resolves_hash_pinned_zip_catalog_offline(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            package_files = write_taxonomy_files(root, {
-                "entry.xsd": '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>',
-            })
-            package_files["catalog.zip"] = "sha256:" + "0" * 64
-            with self.assertRaisesRegex(ValueError, "ZIP package catalogs are unsupported"):
-                arelle_worker.validate_taxonomy_dependency_closure("entry.xsd", root, package_files)
+            package_files = write_taxonomy_package(root)
+
+            closure = arelle_worker.validate_taxonomy_dependency_closure(
+                "SyntheticPackage/schemas/entry.xsd", root, package_files)
+
+            self.assertEqual(("SyntheticPackage/schemas/dependency.xsd",
+                              "SyntheticPackage/schemas/entry.xsd"), tuple(sorted(closure)))
+            self.assertEqual(("taxonomy.zip",), closure.package_archives)
+            self.assertEqual({}, closure.offline_references)
+            with self.assertRaisesRegex(ValueError, "not declared by its pinned taxonomyPackage.xml"):
+                arelle_worker.validate_taxonomy_dependency_closure(
+                    "SyntheticPackage/schemas/dependency.xsd", root, package_files)
+
+            observed = {}
+
+            def load_snapshot(entry_point, args):
+                observed["entry_point"] = Path(entry_point)
+                observed["packages"] = list(args.package)
+                package_path = Path(args.package[0])
+                with zipfile.ZipFile(package_path) as archive:
+                    observed["archive_entry"] = archive.read(
+                        "SyntheticPackage/schemas/entry.xsd").decode("utf-8")
+                return True, [], 2
+
+            with mock.patch.object(arelle_worker, "run_arelle", side_effect=load_snapshot):
+                result = arelle_worker.run_arelle_with_verified_taxonomy(
+                    "SyntheticPackage/schemas/entry.xsd", closure, root, package_files, self.args)
+
+            self.assertEqual((True, [], 2), result)
+            self.assertIn("taxonomy.zip", observed["packages"][0])
+            self.assertIn("dependency.xsd", observed["archive_entry"])
+            self.assertNotEqual(root, observed["entry_point"].parent.parent.parent)
+
+    def test_taxonomy_package_archive_rejects_traversal_and_unpinned_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "unsafe.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../escape.xsd", "unsafe")
+            package_files = {
+                "unsafe.zip": "sha256:" + hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            }
+            with self.assertRaisesRegex(ValueError, "escapes its package root"):
+                arelle_worker.validate_taxonomy_package_archives(root, package_files)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_package(root)
+            package_files.pop("SyntheticPackage/schemas/dependency.xsd")
+            with self.assertRaisesRegex(ValueError, "not hash-pinned by packageFiles"):
+                arelle_worker.validate_taxonomy_package_archives(root, package_files)
+
+    def test_taxonomy_package_archive_rejects_escaping_catalog_and_case_colliding_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_package(root, rewrite_prefix="../../outside/")
+            with self.assertRaisesRegex(ValueError, "rewritePrefix escapes its package root"):
+                arelle_worker.validate_taxonomy_package_archives(root, package_files)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "taxonomy.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("SyntheticPackage/", b"")
+                archive.writestr("syntheticpackage/", b"")
+            package_files = {
+                "taxonomy.zip": "sha256:" + hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            }
+            with self.assertRaisesRegex(ValueError, "duplicate or case-colliding"):
+                arelle_worker.validate_taxonomy_package_archives(root, package_files)
+
+    def test_profile_zip_taxonomy_package_is_used_for_json_report_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_package(root)
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = {
+                "schemaVersion": 5,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "SyntheticPackage/schemas/entry.xsd",
+                "requiredPlugins": [],
+                "requiredChecks": [],
+                "packageFiles": package_files,
+                "offlineReferences": {},
+            }
+            report_value = report()
+            report_value["documentInfo"]["taxonomy"] = [
+                "https://taxonomy.example/test/entry.xsd"]
+            observed = {}
+
+            def fake_arelle(entrypoint, args, temporary_path=None):
+                observed["report"] = json.loads(Path(entrypoint).read_text(encoding="utf-8"))
+                observed["packages"] = list(args.package)
+                with zipfile.ZipFile(args.package[0]) as archive:
+                    observed["package_metadata"] = archive.read(
+                        "SyntheticPackage/META-INF/taxonomyPackage.xml")
+                return True, [], 2
+
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "run_arelle", side_effect=fake_arelle):
+                result = arelle_worker.handle(self.request(report_value), self.args)
+
+        self.assertEqual("success", result["status"], result["error"])
+        localized_entry = observed["report"]["documentInfo"]["taxonomy"][0].replace("\\", "/")
+        self.assertTrue(localized_entry.endswith("SyntheticPackage/schemas/entry.xsd"))
+        self.assertEqual(1, len(observed["packages"]))
+        self.assertTrue(observed["packages"][0].endswith("taxonomy.zip"))
+        self.assertIn(b"taxonomyPackage", observed["package_metadata"])
 
     def test_schema_location_rejects_query_or_fragment_but_xlink_fragment_only_is_local(self):
         invalid_schema_locations = ("dependency.xsd?version=1", "dependency.xsd#schema")
@@ -938,6 +1084,63 @@ print("offline-network-denied")
         self.assertEqual(2, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
         self.assertEqual([], requests, "Arelle attempted an HTTP request instead of using its pinned local file.")
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_profile_zip_taxonomy_package_catalog_resolves_pinned_schema_without_network_request(self):
+        requests = []
+
+        class RequestCanaryHandler(http.server.BaseHTTPRequestHandler):
+            observed_requests = requests
+
+            def parse_request(self):
+                parsed = super().parse_request()
+                if parsed:
+                    self.observed_requests.append((self.command, self.path))
+                return parsed
+
+            def do_GET(self):
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        canary = http.server.HTTPServer(("127.0.0.1", 0), RequestCanaryHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+        try:
+            base_uri = f"http://127.0.0.1:{canary.server_port}/taxonomy/"
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                package_files = write_taxonomy_package(root, base_uri=base_uri)
+                self.args.taxonomy_root = str(root)
+                self.args.profile_manifest_data = {
+                    "schemaVersion": 5,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "SyntheticPackage/schemas/entry.xsd",
+                    "requiredPlugins": [],
+                    "packageFiles": package_files,
+                    "offlineReferences": {},
+                }
+                request = self.handshake_request()
+                request["operation"] = "load-taxonomy"
+                request["profileDigest"] = "sha256:fixture"
+                request["payload"] = {"taxonomyPath": "SyntheticPackage/schemas/entry.xsd"}
+
+                result = arelle_worker.handle(request, self.args)
+        finally:
+            canary.shutdown()
+            canary.server_close()
+            canary_thread.join(timeout=2)
+
+        self.assertEqual("success", result["status"], result["error"])
+        self.assertEqual(2, result["result"]["conceptCount"])
+        self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+        self.assertEqual([], requests,
+                         "Arelle attempted an HTTP request instead of using the taxonomy package catalog.")
 
     def test_large_path_payload_rehashes_and_streams_report_to_arelle_file_loader(self):
         temporary = tempfile.mkdtemp(prefix="xms-large-")
@@ -1246,6 +1449,23 @@ print("offline-network-denied")
         value = {"documentInfo": {"taxonomy": ["https://example.invalid/taxonomy.xsd"]}}
         with self.assertRaisesRegex(ValueError, "no approved offline package mapping"):
             arelle_worker.safe_taxonomy_urls(value, str(TAXONOMY_ROOT))
+
+    def test_external_taxonomy_uri_rejects_query_and_fragment_even_with_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            references = {
+                "https://example.invalid/taxonomy.xsd?version=1",
+                "https://example.invalid/taxonomy.xsd#schema",
+            }
+            for reference in references:
+                with self.subTest(reference=reference), self.assertRaisesRegex(
+                        ValueError, "cannot include a query or fragment"):
+                    arelle_worker.safe_taxonomy_urls(
+                        {"documentInfo": {"taxonomy": [reference]}}, str(root),
+                        {"https://example.invalid/taxonomy.xsd": "entry.xsd"},
+                        {"entry.xsd": "sha256:fixture"})
 
     def test_external_taxonomy_uri_maps_only_to_local_package_file(self):
         with tempfile.TemporaryDirectory() as temporary:
