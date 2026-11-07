@@ -960,13 +960,14 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     [Fact]
     public async Task WorkerCrash_IsOperationalFailure_WithWkrCrashDiagnostic_AndNotPublishable()
     {
-        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
         var worker = new FakeWorker(req => new WorkerResponse(
             req.OperationId, WorkerStatus.Crash, Result: null,
             Array.Empty<Diagnostic>(),
             Error: "Worker terminated without a response."));
 
-        var svc = new MappingJobService(SyntheticProfile.Build(), worker);
+        var profile = SyntheticProfile.Build();
+        var svc = new MappingJobService(profile, worker);
         var result = await svc.RunAsync(project, Connections(project, _workbookPath),
             new Dictionary<string, string>(), preview: false, CancellationToken.None);
 
@@ -974,6 +975,27 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.False(result.IsPublishable);
         Assert.Contains(result.Manifest.Diagnostics,
             d => d.Code == DiagnosticCodes.WkrCrash && d.IsBlocking);
+
+        var destination = Path.Combine(_dir, "worker-crash-report.json");
+        var priorBytes = System.Text.Encoding.UTF8.GetBytes("prior-accepted-report");
+        await File.WriteAllBytesAsync(destination, priorBytes);
+        var journal = new RunJournal(Path.Combine(_dir, "worker-crash-journal"));
+        var publisher = new PublicationService(journal);
+        var exception = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
+            destination,
+            System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
+            _dir,
+            project,
+            profile,
+            allowSyntheticProfile: true,
+            result: result,
+            validateStagedArtifactAsync: (_, _) => Task.FromResult("unused"),
+            cancellationToken: CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.XbrApprovalRequired, exception.Code);
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+        Assert.Null(journal.Load(result.Manifest.RunId));
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
     }
 
     [Fact]
