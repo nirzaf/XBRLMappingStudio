@@ -182,6 +182,89 @@ public sealed class DestinationPlanTests
     }
 
     [Theory]
+    [InlineData("csv", "csv-records-v1", "tampered-report.csv")]
+    [InlineData("excel", "xlsx-records-v1", "tampered-report.xlsx")]
+    [InlineData("json", "json-records-v1", "tampered-report.json")]
+    [InlineData("xml", "xml-records-v1", "tampered-report.xml")]
+    public async Task PublishFileDestination_RejectsTamperedRunManifestDigestWithoutChangingDestination(
+        string kind, string format, string fileName)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-file-manifest-tamper-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = kind,
+                Locator = fileName,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = format,
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var originalOutputs = result.Manifest.Outputs;
+            var reportArtifact = Assert.Single(originalOutputs, output => output.Kind == "xbrl-json");
+            var tamperedArtifact = reportArtifact with { Digest = "sha256:" + new string('0', 64) };
+            result.Manifest.Outputs = originalOutputs
+                .Select(output => output == reportArtifact
+                    ? tamperedArtifact
+                    : output)
+                .ToArray();
+
+            var destinationPath = Path.Combine(directory, fileName);
+            var acceptedBytes = Encoding.UTF8.GetBytes("previous accepted destination bytes");
+            await File.WriteAllBytesAsync(destinationPath, acceptedBytes);
+
+            var error = await Assert.ThrowsAsync<PublicationException>(() =>
+                service.PublishFileDestinationAsync(project, result, directory,
+                    allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+            Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(destinationPath));
+            Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == destinationPath);
+            Assert.False(File.Exists(destinationPath + ".staged"));
+
+            // A matching report entry cannot legitimize a contradictory duplicate.
+            result.Manifest.Outputs = originalOutputs.Append(tamperedArtifact).ToArray();
+            var duplicateError = await Assert.ThrowsAsync<PublicationException>(() =>
+                service.PublishFileDestinationAsync(project, result, directory,
+                    allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal(DiagnosticCodes.PubDigestMismatch, duplicateError.Code);
+            Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(destinationPath));
+            Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == destinationPath);
+            Assert.False(File.Exists(destinationPath + ".staged"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData("csv", "csv-records-v1", "nil-facts.csv")]
     [InlineData("excel", "xlsx-records-v1", "nil-facts.xlsx")]
     [InlineData("json", "json-records-v1", "nil-facts.json")]

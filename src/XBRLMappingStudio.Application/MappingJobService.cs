@@ -1740,27 +1740,7 @@ public sealed class MappingJobService
                 manifest.RunId, plan.Locator);
         }
 
-        string expectedJson;
-        try
-        {
-            expectedJson = OimSerializer.Serialize(_profile, result.Facts);
-        }
-        catch (XbrlExportException ex)
-        {
-            throw new PublicationException(ex.Code, ex.Message, manifest.RunId, plan.Locator);
-        }
-
-        var jsonBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
-        var jsonDigest = RunManifest.ComputeSha256(jsonBytes);
-        if (!StringComparer.Ordinal.Equals(expectedJson, result.XbrlJson)
-            || !manifest.Outputs.Any(output => output.Kind == "xbrl-json"
-                && output.Digest == jsonDigest
-                && output.Bytes == jsonBytes.Length))
-        {
-            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                "The mapped facts do not match the report artifact recorded by the run.",
-                manifest.RunId, plan.Locator);
-        }
+        var jsonDigest = ValidateRunReportArtifact(result, plan.Locator);
 
         var root = Path.GetFullPath(workspaceRoot);
         var destinationPath = PathGuard.EnsureWithin(root,
@@ -1784,6 +1764,37 @@ public sealed class MappingJobService
         string Path,
         IReadOnlyList<DataRecord> Records,
         string ReportDigest);
+
+    private string ValidateRunReportArtifact(JobResult result, string destinationPath)
+    {
+        var manifest = result.Manifest;
+        string expectedJson;
+        try
+        {
+            expectedJson = OimSerializer.Serialize(_profile, result.Facts);
+        }
+        catch (XbrlExportException ex)
+        {
+            throw new PublicationException(ex.Code, ex.Message, manifest.RunId, destinationPath);
+        }
+
+        var jsonBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
+        var jsonDigest = RunManifest.ComputeSha256(jsonBytes);
+        var reportArtifacts = manifest.Outputs
+            .Where(output => output.Kind == "xbrl-json")
+            .ToArray();
+        if (!StringComparer.Ordinal.Equals(expectedJson, result.XbrlJson)
+            || reportArtifacts.Length != 1
+            || !StringComparer.Ordinal.Equals(reportArtifacts[0].Digest, jsonDigest)
+            || reportArtifacts[0].Bytes != jsonBytes.LongLength)
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "The mapped facts do not match one unique xBRL-JSON report artifact recorded by the run.",
+                manifest.RunId, destinationPath);
+        }
+
+        return jsonDigest;
+    }
 
     /// <summary>
     /// Publish mapped XBRL fact rows through an explicitly selected staged file adapter.
@@ -1837,26 +1848,7 @@ public sealed class MappingJobService
                 manifest.RunId, plan.Locator);
         }
 
-        string expectedJson;
-        try
-        {
-            expectedJson = OimSerializer.Serialize(_profile, result.Facts);
-        }
-        catch (XbrlExportException ex)
-        {
-            throw new PublicationException(ex.Code, ex.Message, manifest.RunId, plan.Locator);
-        }
-        var jsonBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
-        var jsonDigest = RunManifest.ComputeSha256(jsonBytes);
-        if (!StringComparer.Ordinal.Equals(expectedJson, result.XbrlJson)
-            || !manifest.Outputs.Any(output => output.Kind == "xbrl-json"
-                && output.Digest == jsonDigest
-                && output.Bytes == jsonBytes.Length))
-        {
-            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
-                "The mapped facts do not match the report artifact recorded by the run.",
-                manifest.RunId, plan.Locator);
-        }
+        var jsonDigest = ValidateRunReportArtifact(result, plan.Locator);
 
         var root = Path.GetFullPath(workspaceRoot);
         var destinationPath = PathGuard.EnsureWithin(root,
