@@ -109,6 +109,58 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public void SchemaV5CatalogRoundTripsCalculationAndDefinitionLinksIntoProfileDigest()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-linkbase-profile", "1.0.0", "Revenue");
+            var manifestPath = Path.Combine(installed.InstallationDirectory,
+                InstalledFilingProfileCatalog.ManifestFileName);
+            var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(File.ReadAllText(manifestPath),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var costs = new ConceptMetadata("ex:Costs", "urn:example", "Costs", "Costs",
+                "monetary", "duration", IsAbstract: false);
+            var calculation = new CalculationLink("https://example.invalid/roles/calculation",
+                "ex:Revenue", "ex:Costs", -1m, 2m);
+            var definition = new DefinitionLink("https://example.invalid/roles/dimensions",
+                "https://xbrl.org/int/dim/arcrole/domain-member", "ex:Revenue", "ex:Costs",
+                1m, Usable: false, ContextElement: "segment");
+            manifest = manifest with
+            {
+                Concepts = manifest.Concepts.Append(costs).ToList(),
+                CalculationLinks = new List<CalculationLink> { calculation },
+                DefinitionLinks = new List<DefinitionLink> { definition },
+                ProfileDigest = ""
+            };
+            manifest = manifest with { ProfileDigest = manifest.ComputeDigest() };
+            var digestWithRelationships = manifest.ProfileDigest;
+            var changedRelationshipDigest = (manifest with
+            {
+                CalculationLinks = new List<CalculationLink> { calculation with { Weight = 1m } },
+                ProfileDigest = ""
+            }).ComputeDigest();
+            Assert.NotEqual(digestWithRelationships, changedRelationshipDigest);
+            File.WriteAllText(manifestPath, manifest.ToJson());
+
+            var profile = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles).Profile;
+            var index = new TaxonomyIndex(profile);
+            var calculationLink = Assert.Single(index.CalculationNetwork(calculation.RoleUri).Links);
+            var definitionLink = Assert.Single(index.DefinitionNetwork(definition.RoleUri, definition.ArcRoleUri).Links);
+
+            Assert.Equal(manifest.ProfileDigest, profile.Digest);
+            Assert.Equal(-1m, calculationLink.Weight);
+            Assert.Equal("ex:Costs", calculationLink.ChildQName);
+            Assert.Equal(false, definitionLink.Usable);
+            Assert.Equal("segment", definitionLink.ContextElement);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task OfflineInstallerCopiesPinnedFilesAtomicallyAndLeavesProfileDisabled()
     {
         var sourceRoot = NewCatalogDirectory();
@@ -342,6 +394,34 @@ public sealed class FilingProfileResolverTests
             Assert.Contains(result.Issues, issue =>
                 issue.ProfileId == "fixture-duplicate-relationship"
                 && issue.Message.Contains("duplicate arcs", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CatalogRejectsCalculationRelationshipsBeforeSchemaV5()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            WriteInvalidManifest(root, "fixture-old-linkbase-schema", "1.0.0", manifest => manifest with
+            {
+                SchemaVersion = 4,
+                CalculationLinks = new List<CalculationLink>
+                {
+                    new("https://example.invalid/roles/calculation", "ex:Revenue", "ex:Revenue", 1m)
+                }
+            });
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue =>
+                issue.ProfileId == "fixture-old-linkbase-schema"
+                && issue.Message.Contains("schema version 5", StringComparison.Ordinal));
         }
         finally
         {

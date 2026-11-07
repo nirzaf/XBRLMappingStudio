@@ -16,7 +16,7 @@ public sealed record TaxonomyIndexLoadResult(TaxonomyIndex Index, bool ReusedCac
 /// </summary>
 public sealed class TaxonomyConceptIndexStore
 {
-    private const int CacheSchema = 2;
+    private const int CacheSchema = 3;
     private const int MaximumConceptCount = 250_000;
     private const int MaximumSnapshotBytes = 64 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -52,6 +52,8 @@ public sealed class TaxonomyConceptIndexStore
         string[] RequiredChecks,
         DimensionSnapshot[] DimensionDomains,
         PresentationLink[] PresentationLinks,
+        CalculationLink[] CalculationLinks,
+        DefinitionLink[] DefinitionLinks,
         ConceptSnapshot[] Concepts);
 
     public TaxonomyConceptIndexStore(LocalApplicationDatabase database)
@@ -161,6 +163,8 @@ public sealed class TaxonomyConceptIndexStore
                 pair.Value.Order(StringComparer.Ordinal).ToArray()))
             .ToArray(),
         FilingProfileManifestDigest.SortedPresentationLinks(profile.PresentationLinks).ToArray(),
+        FilingProfileManifestDigest.SortedCalculationLinks(profile.CalculationLinks).ToArray(),
+        FilingProfileManifestDigest.SortedDefinitionLinks(profile.DefinitionLinks).ToArray(),
         profile.Concepts.OrderBy(concept => concept.Namespace, StringComparer.Ordinal)
             .ThenBy(concept => concept.LocalName, StringComparer.Ordinal)
             .Select(concept => new ConceptSnapshot(
@@ -199,6 +203,8 @@ public sealed class TaxonomyConceptIndexStore
             domain => (IReadOnlyList<string>)domain.MemberQNames,
             StringComparer.Ordinal),
         PresentationLinks = snapshot.PresentationLinks,
+        CalculationLinks = snapshot.CalculationLinks,
+        DefinitionLinks = snapshot.DefinitionLinks,
         OutputFormat = snapshot.OutputFormat,
         NamespaceUris = snapshot.NamespaceUris,
         TaxonomyUrls = snapshot.TaxonomyUrls,

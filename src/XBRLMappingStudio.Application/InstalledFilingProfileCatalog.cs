@@ -12,8 +12,9 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 4;
-    public const int MaximumPresentationRelationships = TaxonomyIndex.MaximumRelationships;
+    public const int CurrentSchemaVersion = 5;
+    public const int MaximumRelationships = TaxonomyIndex.MaximumRelationships;
+    public const int MaximumPresentationRelationships = MaximumRelationships;
 
     public required int SchemaVersion { get; init; }
     public required string ProfileId { get; init; }
@@ -28,6 +29,10 @@ public sealed record FilingProfileManifest
     public Dictionary<string, List<string>> DimensionDomains { get; init; } = new(StringComparer.Ordinal);
     /// <summary>Ordered presentation arcs; concept identity remains separate from its role-specific occurrences.</summary>
     public List<PresentationLink> PresentationLinks { get; init; } = new();
+    /// <summary>Ordered summation-item arcs in the calculation linkbase.</summary>
+    public List<CalculationLink> CalculationLinks { get; init; } = new();
+    /// <summary>Ordered, arcrole-specific relationships in the definition linkbase.</summary>
+    public List<DefinitionLink> DefinitionLinks { get; init; } = new();
     public required List<string> PackageNames { get; init; }
     /// <summary>Relative package path to sha256 digest. Every file is verified before install.</summary>
     public required Dictionary<string, string> PackageFiles { get; init; }
@@ -53,6 +58,8 @@ public sealed record FilingProfileManifest
             pair => (IReadOnlyList<string>)pair.Value.ToArray(),
             StringComparer.Ordinal),
         PresentationLinks = PresentationLinks.ToArray(),
+        CalculationLinks = CalculationLinks.ToArray(),
+        DefinitionLinks = DefinitionLinks.ToArray(),
         OutputFormat = OutputFormat,
         NamespaceUris = new Dictionary<string, string>(NamespaceUris, StringComparer.Ordinal),
         TaxonomyUrls = OfflineReferences.Keys.Order(StringComparer.Ordinal).ToArray(),
@@ -432,6 +439,7 @@ public static class InstalledFilingProfileCatalog
         if (manifest.SupportedUnits is null || manifest.PackageNames is null
             || manifest.PackageFiles is null || manifest.NamespaceUris is null
             || manifest.DimensionDomains is null || manifest.PresentationLinks is null
+            || manifest.CalculationLinks is null || manifest.DefinitionLinks is null
             || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
             || manifest.RequiredChecks is null)
             throw new InvalidDataException("Profile collections cannot be null.");
@@ -439,8 +447,12 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException("Dimension domains require profile manifest schema version 3.");
         if (manifest.SchemaVersion < 4 && manifest.PresentationLinks.Count > 0)
             throw new InvalidDataException("Presentation relationships require profile manifest schema version 4.");
-        if (manifest.PresentationLinks.Count > FilingProfileManifest.MaximumPresentationRelationships)
-            throw new InvalidDataException($"Presentation relationships exceed the {FilingProfileManifest.MaximumPresentationRelationships}-relationship limit.");
+        if (manifest.SchemaVersion < 5 && (manifest.CalculationLinks.Count > 0 || manifest.DefinitionLinks.Count > 0))
+            throw new InvalidDataException("Calculation and definition relationships require profile manifest schema version 5.");
+        var totalRelationships = (long)manifest.PresentationLinks.Count
+            + manifest.CalculationLinks.Count + manifest.DefinitionLinks.Count;
+        if (totalRelationships > FilingProfileManifest.MaximumRelationships)
+            throw new InvalidDataException($"Taxonomy relationships exceed the {FilingProfileManifest.MaximumRelationships}-relationship limit.");
         if (manifest.PackageNames.Count is 0 or > MaxPackageNames)
             throw new InvalidDataException($"A profile must declare between 1 and {MaxPackageNames} taxonomy package names.");
         if (manifest.PackageFiles.Count is 0 or > MaxPackageFiles)
@@ -509,6 +521,32 @@ public static class InstalledFilingProfileCatalog
                     relationship.ChildQName, relationship.Order)))
                 throw new InvalidDataException("Profile presentation relationships cannot contain duplicate arcs.");
         }
+        var calculationKeys = new HashSet<CalculationLink>();
+        foreach (var relationship in manifest.CalculationLinks)
+        {
+            if (relationship is null || !IsValidRelationshipUri(relationship.RoleUri)
+                || (relationship.TargetRoleUri is not null && !IsValidRelationshipUri(relationship.TargetRoleUri))
+                || relationship.Weight is not (-1m or 1m)
+                || !qualifiedNames.Contains(relationship.ParentQName)
+                || !qualifiedNames.Contains(relationship.ChildQName))
+                throw new InvalidDataException("Calculation relationships must have valid role URIs and indexed endpoints.");
+            if (!calculationKeys.Add(relationship))
+                throw new InvalidDataException("Profile calculation relationships cannot contain duplicate arcs.");
+        }
+        var definitionKeys = new HashSet<DefinitionLink>();
+        foreach (var relationship in manifest.DefinitionLinks)
+        {
+            if (relationship is null || !IsValidRelationshipUri(relationship.RoleUri)
+                || !IsValidRelationshipUri(relationship.ArcRoleUri)
+                || (relationship.TargetRoleUri is not null && !IsValidRelationshipUri(relationship.TargetRoleUri))
+                || !qualifiedNames.Contains(relationship.ParentQName)
+                || !qualifiedNames.Contains(relationship.ChildQName)
+                || (relationship.ContextElement is not null
+                    && relationship.ContextElement is not ("segment" or "scenario")))
+                throw new InvalidDataException("Definition relationships must have valid role URIs, supported attributes, and indexed endpoints.");
+            if (!definitionKeys.Add(relationship))
+                throw new InvalidDataException("Profile definition relationships cannot contain duplicate arcs.");
+        }
         foreach (var (dimensionQName, memberQNames) in manifest.DimensionDomains)
         {
             if (!manifest.Concepts.Any(concept => StringComparer.Ordinal.Equals(concept.QualifiedName, dimensionQName))
@@ -543,6 +581,16 @@ public static class InstalledFilingProfileCatalog
             if (!manifest.PackageFiles.ContainsKey(localPath))
                 throw new InvalidDataException($"Offline reference '{uriText}' targets unpinned file '{localPath}'.");
         }
+    }
+
+    private static bool IsValidRelationshipUri(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 2048
+            || value.Any(char.IsWhiteSpace) || value.Any(char.IsControl)
+            || !Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            return false;
+        return uri.Scheme is not ("http" or "https")
+            || (!string.IsNullOrEmpty(uri.Host) && uri.UserInfo.Length == 0);
     }
 
     private static string ResolvePackageFile(string versionDirectory, string relativePath)
@@ -718,6 +766,25 @@ internal static class FilingProfileManifestDigest
         IReadOnlyList<string> RequiredPlugins,
         IReadOnlyList<string> RequiredChecks);
 
+    private sealed record DigestPayloadV5(
+        int SchemaVersion,
+        string ProfileId,
+        string Version,
+        string EntryPoint,
+        string OutputFormat,
+        IReadOnlyList<CanonicalConcept> Concepts,
+        IReadOnlyList<string> SupportedUnits,
+        IReadOnlyDictionary<string, string> NamespaceUris,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains,
+        IReadOnlyList<PresentationLink> PresentationLinks,
+        IReadOnlyList<CalculationLink> CalculationLinks,
+        IReadOnlyList<DefinitionLink> DefinitionLinks,
+        IReadOnlyList<string> PackageNames,
+        IReadOnlyDictionary<string, string> PackageFiles,
+        IReadOnlyDictionary<string, string> OfflineReferences,
+        IReadOnlyList<string> RequiredPlugins,
+        IReadOnlyList<string> RequiredChecks);
+
     private sealed record CanonicalConcept(
         string QualifiedName,
         string Namespace,
@@ -774,7 +841,7 @@ internal static class FilingProfileManifestDigest
                 Sorted(manifest.OfflineReferences),
                 manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
                 manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
-            _ => new DigestPayloadV4(
+            4 => new DigestPayloadV4(
                 manifest.SchemaVersion,
                 manifest.ProfileId,
                 manifest.Version,
@@ -785,6 +852,24 @@ internal static class FilingProfileManifestDigest
                 Sorted(manifest.NamespaceUris),
                 SortedDomains(manifest.DimensionDomains),
                 SortedPresentationLinks(manifest.PresentationLinks),
+                manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.PackageFiles),
+                Sorted(manifest.OfflineReferences),
+                manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
+            _ => new DigestPayloadV5(
+                manifest.SchemaVersion,
+                manifest.ProfileId,
+                manifest.Version,
+                manifest.EntryPoint,
+                manifest.OutputFormat,
+                concepts,
+                manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.NamespaceUris),
+                SortedDomains(manifest.DimensionDomains),
+                SortedPresentationLinks(manifest.PresentationLinks),
+                SortedCalculationLinks(manifest.CalculationLinks),
+                SortedDefinitionLinks(manifest.DefinitionLinks),
                 manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
                 Sorted(manifest.PackageFiles),
                 Sorted(manifest.OfflineReferences),
@@ -818,5 +903,26 @@ internal static class FilingProfileManifestDigest
             .ThenBy(link => link.ParentQName, StringComparer.Ordinal)
             .ThenBy(link => link.Order)
             .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+            .ToArray();
+
+    internal static IReadOnlyList<CalculationLink> SortedCalculationLinks(IEnumerable<CalculationLink> links)
+        => links.OrderBy(link => link.RoleUri, StringComparer.Ordinal)
+            .ThenBy(link => link.ParentQName, StringComparer.Ordinal)
+            .ThenBy(link => link.Order)
+            .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+            .ThenBy(link => link.Weight)
+            .ThenBy(link => link.TargetRoleUri, StringComparer.Ordinal)
+            .ToArray();
+
+    internal static IReadOnlyList<DefinitionLink> SortedDefinitionLinks(IEnumerable<DefinitionLink> links)
+        => links.OrderBy(link => link.RoleUri, StringComparer.Ordinal)
+            .ThenBy(link => link.ArcRoleUri, StringComparer.Ordinal)
+            .ThenBy(link => link.ParentQName, StringComparer.Ordinal)
+            .ThenBy(link => link.Order)
+            .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+            .ThenBy(link => link.TargetRoleUri, StringComparer.Ordinal)
+            .ThenBy(link => link.Usable)
+            .ThenBy(link => link.Closed)
+            .ThenBy(link => link.ContextElement, StringComparer.Ordinal)
             .ToArray();
 }

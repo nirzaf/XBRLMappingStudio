@@ -24,7 +24,7 @@ from xml.parsers import expat
 from xml.etree import ElementTree
 
 PROTOCOL_VERSION = 2
-SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4)
+SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_DIAGNOSTICS = 128
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000
@@ -35,6 +35,7 @@ MAX_PROFILE_FILE_BYTES = 512 * 1024 * 1024
 MAX_PROFILE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PROFILE_FILES = 16384
 MAX_PROFILE_PRESENTATION_RELATIONSHIPS = 1_000_000
+MAX_PROFILE_RELATIONSHIPS = 1_000_000
 MAX_DOCUMENT_INFO_BYTES = 4 * 1024 * 1024
 MAX_LARGE_REPORT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TAXONOMY_GRAPH_FILES = 4096
@@ -285,6 +286,99 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
             if relationship_key in relationship_keys:
                 raise ValueError("Profile presentation relationships cannot contain duplicate arcs")
             relationship_keys.add(relationship_key)
+    calculation_links = manifest.get("calculationLinks", [])
+    definition_links = manifest.get("definitionLinks", [])
+    if not isinstance(calculation_links, list):
+        raise ValueError("Profile calculationLinks must be an array")
+    if not isinstance(definition_links, list):
+        raise ValueError("Profile definitionLinks must be an array")
+    if schema_version < 5 and (calculation_links or definition_links):
+        raise ValueError("Calculation and definition relationships require manifest schema version 5")
+    if len(presentation_links) + len(calculation_links) + len(definition_links) > MAX_PROFILE_RELATIONSHIPS:
+        raise ValueError("Profile relationships exceed the relationship limit")
+    if calculation_links or definition_links:
+        concepts = manifest.get("concepts")
+        if not isinstance(concepts, list) or len(concepts) > 250_000:
+            raise ValueError("Profile concepts must be an array within the 250000-concept limit")
+        qualified_names = {
+            concept.get("qualifiedName")
+            for concept in concepts
+            if isinstance(concept, dict) and isinstance(concept.get("qualifiedName"), str)
+        }
+
+        def valid_relationship_uri(value):
+            try:
+                parsed = urlsplit(value) if isinstance(value, str) else None
+            except ValueError:
+                return False
+            if (parsed is None or not parsed.scheme or not value or len(value) > 2048
+                    or value != value.strip()
+                    or any(ch.isspace() or ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in value)):
+                return False
+            return (parsed.scheme.lower() not in ("http", "https")
+                    or (bool(parsed.hostname) and parsed.username is None and parsed.password is None))
+
+        def numeric_order(value):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return None
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+            try:
+                result = Decimal(str(value))
+            except (InvalidOperation, ValueError):
+                return None
+            if not result.is_finite() or abs(result) > Decimal("79228162514264337593543950335"):
+                return None
+            return result
+
+        calculation_keys = set()
+        for relationship in calculation_links:
+            if not isinstance(relationship, dict):
+                raise ValueError("Profile calculation relationships must be objects")
+            role_uri = relationship.get("roleUri")
+            parent_qname = relationship.get("parentQName")
+            child_qname = relationship.get("childQName")
+            target_role_uri = relationship.get("targetRoleUri")
+            order = numeric_order(relationship.get("order", 0))
+            weight = numeric_order(relationship.get("weight"))
+            if (not valid_relationship_uri(role_uri)
+                    or (target_role_uri is not None and not valid_relationship_uri(target_role_uri))
+                    or not isinstance(parent_qname, str) or parent_qname not in qualified_names
+                    or not isinstance(child_qname, str) or child_qname not in qualified_names
+                    or order is None or weight not in (Decimal("-1"), Decimal("1"))):
+                raise ValueError("Profile calculation relationships must have valid role URIs, +/-1 weight, numeric order, and indexed endpoints")
+            key = (role_uri, parent_qname, child_qname, order, weight, target_role_uri)
+            if key in calculation_keys:
+                raise ValueError("Profile calculation relationships cannot contain duplicate arcs")
+            calculation_keys.add(key)
+
+        definition_keys = set()
+        for relationship in definition_links:
+            if not isinstance(relationship, dict):
+                raise ValueError("Profile definition relationships must be objects")
+            role_uri = relationship.get("roleUri")
+            arc_role_uri = relationship.get("arcRoleUri")
+            parent_qname = relationship.get("parentQName")
+            child_qname = relationship.get("childQName")
+            target_role_uri = relationship.get("targetRoleUri")
+            context_element = relationship.get("contextElement")
+            order = numeric_order(relationship.get("order", 0))
+            usable = relationship.get("usable")
+            closed = relationship.get("closed")
+            if (not valid_relationship_uri(role_uri) or not valid_relationship_uri(arc_role_uri)
+                    or (target_role_uri is not None and not valid_relationship_uri(target_role_uri))
+                    or not isinstance(parent_qname, str) or parent_qname not in qualified_names
+                    or not isinstance(child_qname, str) or child_qname not in qualified_names
+                    or order is None or (context_element is not None
+                        and context_element not in ("segment", "scenario"))
+                    or (usable is not None and type(usable) is not bool)
+                    or (closed is not None and type(closed) is not bool)):
+                raise ValueError("Profile definition relationships must have valid role and arcrole URIs, supported attributes, numeric order, and indexed endpoints")
+            key = (role_uri, arc_role_uri, parent_qname, child_qname, order,
+                   target_role_uri, usable, closed, context_element)
+            if key in definition_keys:
+                raise ValueError("Profile definition relationships cannot contain duplicate arcs")
+            definition_keys.add(key)
     for field in ("profileId", "version", "profileDigest", "entryPoint"):
         if not isinstance(manifest.get(field), str) or not manifest[field] or len(manifest[field]) > 1024:
             raise ValueError("Profile manifest has invalid " + field)

@@ -37,6 +37,11 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
         Assert.Contains("ext:Domestic", first.Index.DimensionDomains["ext:RegionAxis"]);
         Assert.Contains("Revenue", first.Index.Get("synthetic:Revenue")!.Label);
         Assert.Equal(2, first.Index.PresentationOccurrencesFor("synthetic:Revenue").Count);
+        Assert.Equal("synthetic:Revenue", Assert.Single(first.Index.CalculationNetwork(
+            "https://example.invalid/roles/calculation").ChildrenOf("synthetic:NetIncome")).ChildQName);
+        Assert.Equal("segment", Assert.Single(first.Index.DefinitionNetwork(
+            "https://example.invalid/roles/dimensions",
+            "https://xbrl.org/int/dim/arcrole/domain-member").Links).ContextElement);
 
         var reused = new TaxonomyConceptIndexStore(new LocalApplicationDatabase(_databasePath))
             .LoadOrBuild(firstProfile);
@@ -45,6 +50,11 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
             reused.Index.GetByExpandedName(SyntheticProfile.Namespace, "Revenue")!, "ar"));
         Assert.True(reused.Index.Get("synthetic:FinancialStatements")!.IsAbstract);
         Assert.Equal(2, reused.Index.PresentationOccurrencesFor("synthetic:Revenue").Count);
+        Assert.Equal(-1m, Assert.Single(reused.Index.CalculationNetwork(
+            "https://example.invalid/roles/calculation").Links).Weight);
+        Assert.Equal(false, Assert.Single(reused.Index.DefinitionNetwork(
+            "https://example.invalid/roles/dimensions",
+            "https://xbrl.org/int/dim/arcrole/domain-member").Links).Usable);
         Assert.Contains("https://example.invalid/roles/statement", reused.Index.Roles);
 
         using (var connection = database.OpenConnection())
@@ -127,6 +137,18 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
                     "synthetic:FinancialStatements", "synthetic:Revenue", 2.5m),
                 new PresentationLink("https://example.invalid/roles/income",
                     "synthetic:NetIncome", "synthetic:Revenue", 1m)
+            },
+            CalculationLinks = new[]
+            {
+                new CalculationLink("https://example.invalid/roles/calculation",
+                    "synthetic:NetIncome", "synthetic:Revenue", -1m, 1m)
+            },
+            DefinitionLinks = new[]
+            {
+                new DefinitionLink("https://example.invalid/roles/dimensions",
+                    "https://xbrl.org/int/dim/arcrole/domain-member",
+                    "synthetic:FinancialStatements", "synthetic:Revenue", 1m,
+                    Usable: false, ContextElement: "segment")
             },
             NamespaceUris = namespaceUris,
             TaxonomyUrls = new[] { "extension.xsd" },

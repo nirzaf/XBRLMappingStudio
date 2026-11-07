@@ -448,6 +448,10 @@ public sealed class FilingProfile
         = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
     /// <summary>Ordered, role-specific presentation arcs for this exact taxonomy version.</summary>
     public IReadOnlyList<PresentationLink> PresentationLinks { get; init; } = Array.Empty<PresentationLink>();
+    /// <summary>Ordered summation-item arcs for this exact taxonomy version.</summary>
+    public IReadOnlyList<CalculationLink> CalculationLinks { get; init; } = Array.Empty<CalculationLink>();
+    /// <summary>Ordered, arcrole-specific definition arcs for this exact taxonomy version.</summary>
+    public IReadOnlyList<DefinitionLink> DefinitionLinks { get; init; } = Array.Empty<DefinitionLink>();
     public string OutputFormat { get; init; } = "xbrl-json";
     public IReadOnlyDictionary<string, string> NamespaceUris { get; init; }
         = new Dictionary<string, string>();

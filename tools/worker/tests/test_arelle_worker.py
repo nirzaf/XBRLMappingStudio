@@ -1443,6 +1443,100 @@ print("offline-network-denied")
         self.assertEqual(4, loaded["schemaVersion"])
         self.assertEqual(manifest["presentationLinks"], loaded["presentationLinks"])
 
+    def test_profile_manifest_accepts_schema_v5_calculation_and_definition_relationships(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+            manifest = {
+                "schemaVersion": 5,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "packageFiles": {"entry.xsd": "sha256:" + digest},
+                "offlineReferences": {},
+                "concepts": [
+                    {"qualifiedName": "tax:Total"},
+                    {"qualifiedName": "tax:Member"},
+                ],
+                "calculationLinks": [
+                    {
+                        "roleUri": "https://example.invalid/roles/calculation",
+                        "parentQName": "tax:Total",
+                        "childQName": "tax:Member",
+                        "weight": -1,
+                        "order": 1.25,
+                    }
+                ],
+                "definitionLinks": [
+                    {
+                        "roleUri": "https://example.invalid/roles/dimensions",
+                        "arcRoleUri": "https://xbrl.org/int/dim/arcrole/domain-member",
+                        "parentQName": "tax:Total",
+                        "childQName": "tax:Member",
+                        "usable": False,
+                        "contextElement": "segment",
+                    }
+                ],
+            }
+            path = root / "profile.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            loaded = arelle_worker.load_profile_manifest(path, root)
+
+        self.assertEqual(5, loaded["schemaVersion"])
+        self.assertEqual(manifest["calculationLinks"], loaded["calculationLinks"])
+        self.assertEqual(manifest["definitionLinks"], loaded["definitionLinks"])
+
+    def test_profile_manifest_rejects_unsupported_calculation_and_definition_links(self):
+        calculation = {
+            "roleUri": "https://example.invalid/roles/calculation",
+            "parentQName": "tax:Total",
+            "childQName": "tax:Member",
+            "weight": 1,
+        }
+        definition = {
+            "roleUri": "https://example.invalid/roles/dimensions",
+            "arcRoleUri": "https://xbrl.org/int/dim/arcrole/domain-member",
+            "parentQName": "tax:Total",
+            "childQName": "tax:Member",
+        }
+        cases = [
+            (4, [calculation], [], "require manifest schema version 5"),
+            (5, [{**calculation, "weight": 0.5}], [], "weight"),
+            (5, [calculation], [{**definition, "contextElement": "body"}], "supported attributes"),
+            (5, [calculation, calculation], [], "duplicate arcs"),
+        ]
+        for schema_version, calculation_links, definition_links, expected_error in cases:
+            with self.subTest(schema_version=schema_version, expected_error=expected_error), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                entry = root / "entry.xsd"
+                entry.write_text("<schema/>", encoding="utf-8")
+                digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+                manifest = {
+                    "schemaVersion": schema_version,
+                    "profileId": "fixture-profile",
+                    "version": "1.0.0",
+                    "profileDigest": "sha256:fixture",
+                    "entryPoint": "entry.xsd",
+                    "packageFiles": {"entry.xsd": "sha256:" + digest},
+                    "offlineReferences": {},
+                    "concepts": [
+                        {"qualifiedName": "tax:Total"},
+                        {"qualifiedName": "tax:Member"},
+                    ],
+                    "calculationLinks": calculation_links,
+                    "definitionLinks": definition_links,
+                }
+                path = root / "profile.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    arelle_worker.load_profile_manifest(path, root)
+
     def test_profile_manifest_rejects_malformed_presentation_relationships(self):
         valid = {
             "roleUri": "https://example.invalid/roles/statement",

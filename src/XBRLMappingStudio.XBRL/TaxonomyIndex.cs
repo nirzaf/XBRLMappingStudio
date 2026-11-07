@@ -76,6 +76,67 @@ public sealed class PresentationNetwork
     }
 }
 
+/// <summary>A bounded, lazily expandable parent-to-child relationship network.</summary>
+public sealed class TaxonomyLinkNetwork<TLink>
+{
+    private readonly IReadOnlyList<TLink> _links;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<TLink>> _childrenByParent;
+    private readonly Func<TLink, string> _parent;
+    private readonly Func<TLink, string> _child;
+
+    internal TaxonomyLinkNetwork(
+        IEnumerable<TLink> links,
+        Func<TLink, string> parent,
+        Func<TLink, string> child)
+    {
+        _parent = parent;
+        _child = child;
+        _links = Array.AsReadOnly(links.ToArray());
+        _childrenByParent = _links.GroupBy(parent, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<TLink>)Array.AsReadOnly(group.ToArray()),
+                StringComparer.Ordinal);
+    }
+
+    public IReadOnlyList<TLink> Links => _links;
+
+    public IEnumerable<TLink> ChildrenOf(string parentQName) =>
+        _childrenByParent.TryGetValue(parentQName, out var children)
+            ? children
+            : Array.Empty<TLink>();
+
+    public PagedResult<TLink> ChildrenPage(
+        string parentQName,
+        int page = 0,
+        int pageSize = TaxonomyIndex.DefaultPageSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (page < 0) throw new ArgumentOutOfRangeException(nameof(page));
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_childrenByParent.TryGetValue(parentQName, out var children))
+            return new PagedResult<TLink>(Array.Empty<TLink>(), page, pageSize, 0, false);
+
+        var start = (long)page * pageSize;
+        var end = start + pageSize;
+        var items = start >= children.Count
+            ? Array.Empty<TLink>()
+            : children.Skip((int)start).Take(pageSize).ToArray();
+        return new PagedResult<TLink>(
+            Array.AsReadOnly(items), page, pageSize, children.Count, children.Count > end);
+    }
+
+    public IEnumerable<string> Roots()
+    {
+        var children = new HashSet<string>(_links.Select(_child), StringComparer.Ordinal);
+        return _links.Select(_parent)
+            .Where(parent => !children.Contains(parent))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(parent => parent, StringComparer.Ordinal);
+    }
+}
+
 /// <summary>
 /// Paged, language-aware concept index over a <see cref="FilingProfile"/> (XBR03). The
 /// designer binds the taxonomy explorer to <see cref="Search"/>; results are ordered by
@@ -89,10 +150,17 @@ public sealed class TaxonomyIndex
 
     private readonly FilingProfile _profile;
     private readonly IReadOnlyList<PresentationLink> _links;
+    private readonly IReadOnlyList<CalculationLink> _calculationLinks;
+    private readonly IReadOnlyList<DefinitionLink> _definitionLinks;
+    private readonly IReadOnlyDictionary<string, TaxonomyLinkNetwork<CalculationLink>> _calculationNetworks;
+    private readonly IReadOnlyDictionary<(string RoleUri, string ArcRoleUri), TaxonomyLinkNetwork<DefinitionLink>> _definitionNetworks;
     private readonly IReadOnlyList<ConceptMetadata> _orderedConcepts;
     private readonly IReadOnlyDictionary<string, ConceptMetadata> _byQualifiedName;
     private readonly IReadOnlyDictionary<ExpandedConceptName, ConceptMetadata> _byExpandedName;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _presentationRolesByConcept;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _calculationRolesByConcept;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _definitionRolesByConcept;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _definitionArcRolesByRole;
 
     public TaxonomyIndex(FilingProfile profile, IEnumerable<PresentationLink>? links = null)
     {
@@ -142,6 +210,78 @@ public sealed class TaxonomyIndex
                 throw new ArgumentException("A taxonomy profile cannot contain duplicate presentation relationships.", nameof(profile));
         }
         _links = Array.AsReadOnly(linkArray);
+        _calculationLinks = Array.AsReadOnly((profile.CalculationLinks ?? Array.Empty<CalculationLink>()).ToArray());
+        _definitionLinks = Array.AsReadOnly((profile.DefinitionLinks ?? Array.Empty<DefinitionLink>()).ToArray());
+        if ((long)_links.Count + _calculationLinks.Count + _definitionLinks.Count > MaximumRelationships)
+            throw new ArgumentException($"A taxonomy profile cannot index more than {MaximumRelationships} relationships across linkbases.", nameof(profile));
+
+        var uniqueCalculationLinks = new HashSet<CalculationLink>();
+        foreach (var link in _calculationLinks)
+        {
+            if (link is null
+                || !IsValidRoleUri(link.RoleUri)
+                || (link.TargetRoleUri is not null && !IsValidRoleUri(link.TargetRoleUri))
+                || link.Weight is not (-1m or 1m)
+                || !knownQualifiedNames.Contains(link.ParentQName)
+                || !knownQualifiedNames.Contains(link.ChildQName))
+                throw new ArgumentException("Calculation relationships must have valid role URIs and reference indexed concepts.", nameof(profile));
+            if (!uniqueCalculationLinks.Add(link))
+                throw new ArgumentException("A taxonomy profile cannot contain duplicate calculation relationships.", nameof(profile));
+        }
+
+        var uniqueDefinitionLinks = new HashSet<DefinitionLink>();
+        foreach (var link in _definitionLinks)
+        {
+            if (link is null
+                || !IsValidRoleUri(link.RoleUri)
+                || !IsValidRoleUri(link.ArcRoleUri)
+                || (link.TargetRoleUri is not null && !IsValidRoleUri(link.TargetRoleUri))
+                || !knownQualifiedNames.Contains(link.ParentQName)
+                || !knownQualifiedNames.Contains(link.ChildQName)
+                || (link.ContextElement is not null && link.ContextElement is not ("segment" or "scenario")))
+                throw new ArgumentException("Definition relationships must have valid role URIs, supported attributes, and indexed endpoints.", nameof(profile));
+            if (!uniqueDefinitionLinks.Add(link))
+                throw new ArgumentException("A taxonomy profile cannot contain duplicate definition relationships.", nameof(profile));
+        }
+
+        _calculationRolesByConcept = BuildRolesByConcept(
+            _calculationLinks, link => link.RoleUri, link => link.ParentQName, link => link.ChildQName);
+        _definitionRolesByConcept = BuildRolesByConcept(
+            _definitionLinks, link => link.RoleUri, link => link.ParentQName, link => link.ChildQName);
+        _definitionArcRolesByRole = _definitionLinks
+            .GroupBy(link => link.RoleUri, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<string>)Array.AsReadOnly(group
+                    .Select(link => link.ArcRoleUri)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal)
+                    .ToArray()),
+                StringComparer.Ordinal);
+        _calculationNetworks = _calculationLinks
+            .GroupBy(link => link.RoleUri, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => new TaxonomyLinkNetwork<CalculationLink>(group
+                    .OrderBy(link => link.Order)
+                    .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+                    .ThenBy(link => link.Weight)
+                    .ThenBy(link => link.TargetRoleUri, StringComparer.Ordinal),
+                    link => link.ParentQName, link => link.ChildQName),
+                StringComparer.Ordinal);
+        _definitionNetworks = _definitionLinks
+            .GroupBy(link => (link.RoleUri, link.ArcRoleUri))
+            .ToDictionary(
+                group => group.Key,
+                group => new TaxonomyLinkNetwork<DefinitionLink>(group
+                    .OrderBy(link => link.Order)
+                    .ThenBy(link => link.ChildQName, StringComparer.Ordinal)
+                    .ThenBy(link => link.TargetRoleUri, StringComparer.Ordinal)
+                    .ThenBy(link => link.Usable)
+                    .ThenBy(link => link.Closed)
+                    .ThenBy(link => link.ContextElement, StringComparer.Ordinal),
+                    link => link.ParentQName, link => link.ChildQName));
+
         var rolesByConcept = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var link in _links)
         {
@@ -183,6 +323,33 @@ public sealed class TaxonomyIndex
         _presentationRolesByConcept.TryGetValue(qualifiedName, out var roles)
             ? roles
             : Array.Empty<string>();
+
+    public IReadOnlyList<string> CalculationRolesFor(string qualifiedName) =>
+        _calculationRolesByConcept.TryGetValue(qualifiedName, out var roles)
+            ? roles
+            : Array.Empty<string>();
+
+    public IReadOnlyList<string> DefinitionRolesFor(string qualifiedName) =>
+        _definitionRolesByConcept.TryGetValue(qualifiedName, out var roles)
+            ? roles
+            : Array.Empty<string>();
+
+    public IReadOnlyList<string> DefinitionArcRoles(string roleUri) =>
+        _definitionArcRolesByRole.TryGetValue(roleUri, out var arcRoles)
+            ? arcRoles
+            : Array.Empty<string>();
+
+    public TaxonomyLinkNetwork<CalculationLink> CalculationNetwork(string roleUri) =>
+        _calculationNetworks.TryGetValue(roleUri, out var network)
+            ? network
+            : new TaxonomyLinkNetwork<CalculationLink>(Array.Empty<CalculationLink>(),
+                link => link.ParentQName, link => link.ChildQName);
+
+    public TaxonomyLinkNetwork<DefinitionLink> DefinitionNetwork(string roleUri, string arcRoleUri) =>
+        _definitionNetworks.TryGetValue((roleUri, arcRoleUri), out var network)
+            ? network
+            : new TaxonomyLinkNetwork<DefinitionLink>(Array.Empty<DefinitionLink>(),
+                link => link.ParentQName, link => link.ChildQName);
 
     /// <summary>Whether this index is bound to the exact installed profile version.</summary>
     public bool IsCurrentFor(FilingProfile profile) =>
@@ -330,6 +497,42 @@ public sealed class TaxonomyIndex
 
     private static bool Contains(string haystack, string needle)
         => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsValidRoleUri(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 2048
+            || value.Any(char.IsWhiteSpace) || value.Any(char.IsControl)
+            || !Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            return false;
+        return uri.Scheme is not ("http" or "https")
+            || (!string.IsNullOrEmpty(uri.Host) && uri.UserInfo.Length == 0);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildRolesByConcept<TLink>(
+        IEnumerable<TLink> links,
+        Func<TLink, string> role,
+        Func<TLink, string> parent,
+        Func<TLink, string> child)
+    {
+        var roles = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (var link in links)
+        {
+            Add(parent(link));
+            Add(child(link));
+
+            void Add(string qualifiedName)
+            {
+                if (!roles.TryGetValue(qualifiedName, out var values))
+                    roles.Add(qualifiedName, values = new HashSet<string>(StringComparer.Ordinal));
+                values.Add(role(link));
+            }
+        }
+
+        return roles.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<string>)Array.AsReadOnly(pair.Value.Order(StringComparer.Ordinal).ToArray()),
+            StringComparer.Ordinal);
+    }
 
     /// <summary>True when a concept may carry a fact (concrete + monetary/string typed).</summary>
     public static bool IsFactTargetable(ConceptMetadata c) => !c.IsAbstract;

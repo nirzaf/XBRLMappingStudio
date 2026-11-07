@@ -52,3 +52,27 @@ public sealed record PresentationLink(
     string ParentQName,
     string ChildQName,
     decimal Order = 0);
+
+/// <summary>One ordered summation-item arc in a calculation linkbase.</summary>
+public sealed record CalculationLink(
+    string RoleUri,
+    string ParentQName,
+    string ChildQName,
+    decimal Weight,
+    decimal Order = 0,
+    string? TargetRoleUri = null);
+
+/// <summary>
+/// One ordered dimensional or other definition arc. Arc-specific XBRL attributes are
+/// retained so indexing does not collapse relationships that share concept endpoints.
+/// </summary>
+public sealed record DefinitionLink(
+    string RoleUri,
+    string ArcRoleUri,
+    string ParentQName,
+    string ChildQName,
+    decimal Order = 0,
+    string? TargetRoleUri = null,
+    bool? Usable = null,
+    bool? Closed = null,
+    string? ContextElement = null);

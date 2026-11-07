@@ -201,6 +201,8 @@ public class ExecutionPlanTests
             TaxonomyVersion = source.TaxonomyVersion,
             DimensionDomains = source.DimensionDomains,
             PresentationLinks = source.PresentationLinks,
+            CalculationLinks = source.CalculationLinks,
+            DefinitionLinks = source.DefinitionLinks,
             OutputFormat = source.OutputFormat,
             NamespaceUris = source.NamespaceUris,
             TaxonomyUrls = source.TaxonomyUrls,

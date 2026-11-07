@@ -190,6 +190,98 @@ public sealed class TaxonomyIndexTests
     }
 
     [Fact]
+    public void CalculationAndDefinitionNetworksKeepArcKindRoleOrderAndAttributes()
+    {
+        var source = Profile;
+        var calculationRole = "https://example.invalid/roles/calculation";
+        var definitionRole = "https://example.invalid/roles/dimensions";
+        var domainMemberArcRole = "https://xbrl.org/int/dim/arcrole/domain-member";
+        var profile = new FilingProfile
+        {
+            ProfileId = "typed-linkbases",
+            Digest = "sha256:typed-linkbases-v1",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            CalculationLinks = new[]
+            {
+                new CalculationLink(calculationRole,
+                    SyntheticProfile.Qualified("NetIncome"), SyntheticProfile.Qualified("Revenue"), -1m, 2m),
+                new CalculationLink(calculationRole,
+                    SyntheticProfile.Qualified("NetIncome"), SyntheticProfile.Qualified("Expenses"), 1m, 1m,
+                    "https://example.invalid/roles/calculation-target")
+            },
+            DefinitionLinks = new[]
+            {
+                new DefinitionLink(definitionRole, domainMemberArcRole,
+                    SyntheticProfile.Qualified("FinancialStatements"), SyntheticProfile.Qualified("Revenue"),
+                    1m, Usable: false, ContextElement: "segment"),
+                new DefinitionLink(definitionRole, domainMemberArcRole,
+                    SyntheticProfile.Qualified("FinancialStatements"), SyntheticProfile.Qualified("Expenses"),
+                    2m, Usable: true, ContextElement: "segment")
+            }
+        };
+        var index = new TaxonomyIndex(profile);
+
+        var calculations = index.CalculationNetwork(calculationRole)
+            .ChildrenPage(SyntheticProfile.Qualified("NetIncome"), pageSize: 1);
+        var definitions = index.DefinitionNetwork(definitionRole, domainMemberArcRole)
+            .ChildrenPage(SyntheticProfile.Qualified("FinancialStatements"), pageSize: 1);
+
+        Assert.Equal(new[] { calculationRole }, index.CalculationRolesFor(SyntheticProfile.Qualified("Revenue")));
+        Assert.Equal(new[] { definitionRole }, index.DefinitionRolesFor(SyntheticProfile.Qualified("Revenue")));
+        Assert.Equal(new[] { domainMemberArcRole }, index.DefinitionArcRoles(definitionRole));
+        Assert.Equal(2, calculations.TotalCount);
+        Assert.True(calculations.HasNext);
+        Assert.Equal(SyntheticProfile.Qualified("Expenses"), Assert.Single(calculations.Items).ChildQName);
+        Assert.Equal(1m, Assert.Single(calculations.Items).Weight);
+        Assert.Equal(2, definitions.TotalCount);
+        Assert.True(definitions.HasNext);
+        Assert.Equal(false, Assert.Single(definitions.Items).Usable);
+        Assert.Equal("segment", Assert.Single(definitions.Items).ContextElement);
+        Assert.Equal(new[] { SyntheticProfile.Qualified("FinancialStatements") },
+            index.DefinitionNetwork(definitionRole, domainMemberArcRole).Roots());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => index.CalculationNetwork(calculationRole)
+            .ChildrenPage(SyntheticProfile.Qualified("NetIncome"), cancellationToken: cancellation.Token));
+    }
+
+    [Fact]
+    public void CalculationAndDefinitionNetworksRejectInvalidArcMetadata()
+    {
+        var source = Profile;
+        var invalidWeight = new FilingProfile
+        {
+            ProfileId = "invalid-calculation-weight",
+            Digest = "sha256:invalid-calculation-weight",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            CalculationLinks = new[]
+            {
+                new CalculationLink("https://example.invalid/roles/calculation",
+                    SyntheticProfile.Qualified("NetIncome"), SyntheticProfile.Qualified("Revenue"), 0.5m)
+            }
+        };
+        Assert.Throws<ArgumentException>(() => new TaxonomyIndex(invalidWeight));
+
+        var invalidContext = new FilingProfile
+        {
+            ProfileId = "invalid-definition-context",
+            Digest = "sha256:invalid-definition-context",
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            DefinitionLinks = new[]
+            {
+                new DefinitionLink("https://example.invalid/roles/definition",
+                    "https://example.invalid/arcroles/domain-member",
+                    SyntheticProfile.Qualified("FinancialStatements"), SyntheticProfile.Qualified("Revenue"),
+                    ContextElement: "body")
+            }
+        };
+        Assert.Throws<ArgumentException>(() => new TaxonomyIndex(invalidContext));
+    }
+
+    [Fact]
     public void PresentationOccurrences_IgnoreCyclesAndKeepOtherValidPaths()
     {
         var source = Profile;
