@@ -25,5 +25,11 @@ Verification:
 - `FunctionLibraryEditorTests` passed 10/10.
 - Release Desktop test suite passed 106/106 with the isolated `bin-codex/`
   output path.
-- Native visual layout, screen-reader accessibility, broader function
+- Exact-head GitHub Actions run [42418772909](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42418772909)
+  passed repository hygiene, Ubuntu and Windows Release build/tests, and the
+  pinned Arelle worker integration for source
+  `b336c5157ae52f6b95b55abafb865a6fd814375b`.
+- The separate native UI observation could not activate the isolated window
+  after one refreshed retry; no controls were changed. The isolated process was
+  closed. Native visual layout, screen-reader accessibility, broader function
   signatures/operations, and installed-profile acceptance remain open.
