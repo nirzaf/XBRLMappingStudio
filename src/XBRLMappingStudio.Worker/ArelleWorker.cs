@@ -409,6 +409,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
 /// </summary>
 public sealed class ArelleWorker : IWorkerClient
 {
+    private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(30);
+
     private readonly Process _process;
     private readonly StreamWriter _stdin;
     private readonly StreamReader _stdout;
@@ -472,7 +474,7 @@ public sealed class ArelleWorker : IWorkerClient
             OperationId: "h-" + Guid.NewGuid().ToString("N"),
             JobId: "system",
             ProfileDigest: "-",
-            DeadlineUtc: DateTimeOffset.UtcNow.AddSeconds(15),
+            DeadlineUtc: DateTimeOffset.UtcNow.Add(HandshakeTimeout),
             Payload: JsonSerializer.SerializeToElement(new
             {
                 minimumProtocolVersion = WorkerProtocol.MinimumVersion,
