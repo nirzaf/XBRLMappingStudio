@@ -467,6 +467,7 @@ public sealed class PlanCompiler
                     var sumField = GetString(node, "sumField") ?? "";
                     var order = new List<string>();
                     var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
+                    var displayKeys = new Dictionary<string, string>(StringComparer.Ordinal);
                     var numericValueCounts = new Dictionary<string, int>(StringComparer.Ordinal);
                     var nilValueGroups = new HashSet<string>(StringComparer.Ordinal);
                     var missingValueGroups = new HashSet<string>(StringComparer.Ordinal);
@@ -478,6 +479,21 @@ public sealed class PlanCompiler
 
                     static long EstimateStringStorageBytes(string? value)
                         => value is null ? 0 : 24L + (long)value.Length * sizeof(char);
+
+                    static string EncodeGroupIdentity(IReadOnlyList<string> values)
+                    {
+                        var builder = new System.Text.StringBuilder();
+                        foreach (var value in values)
+                            builder.Append(value.Length.ToString(CultureInfo.InvariantCulture))
+                                .Append(':')
+                                .Append(value);
+                        return builder.ToString();
+                    }
+
+                    static string FormatGroupKey(IReadOnlyList<string> values)
+                        => string.Join("|", values.Select(value => value
+                            .Replace("\\", "\\\\", StringComparison.Ordinal)
+                            .Replace("|", "\\|", StringComparison.Ordinal)));
 
                     static long EstimateGroupPathBytes(SourceTransformationPath path)
                     {
@@ -522,7 +538,8 @@ public sealed class PlanCompiler
                     foreach (var (rec, itemIndex) in items.Select((item, index) => (item, index)))
                     {
                         if (!TryRecordFields(rec, out var fields)) continue;
-                        var bk = string.Join("|", keyFields.Select(kf => GetField(fields, kf).AsString()));
+                        var keyValues = keyFields.Select(kf => GetField(fields, kf).AsString()).ToArray();
+                        var bk = EncodeGroupIdentity(keyValues);
                         if (!totals.ContainsKey(bk))
                         {
                             if (order.Count >= ctx.MaxGroupCount)
@@ -541,7 +558,9 @@ public sealed class PlanCompiler
                                     nodeId: nodeId);
                                 break;
                             }
-                            var bucketBytes = 512L + EstimateStringStorageBytes(bk);
+                            var displayKey = FormatGroupKey(keyValues);
+                            var bucketBytes = 512L + EstimateStringStorageBytes(bk)
+                                + EstimateStringStorageBytes(displayKey);
                             if (!TryReserveGroupMemory(bucketBytes))
                             {
                                 diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
@@ -552,6 +571,7 @@ public sealed class PlanCompiler
                                 break;
                             }
                             order.Add(bk);
+                            displayKeys[bk] = displayKey;
                             totals[bk] = 0m;
                             numericValueCounts[bk] = 0;
                             groupNilValuePaths[bk] = new List<SourceTransformationPath>();
@@ -642,7 +662,7 @@ public sealed class PlanCompiler
                                     ? DataValue.ExplicitNil(PortShape.Decimal)
                                     : DataValue.Missing(PortShape.Decimal);
                         valueList.Add(aggregateValue);
-                        keyList.Add(DataValue.StringValue(bk));
+                        keyList.Add(DataValue.StringValue(displayKeys[bk]));
                         var valuePaths = groupValuePaths[bk];
                         if (aggregateValue.IsNil && groupNilValuePaths[bk].Count > 0)
                         {
@@ -671,7 +691,8 @@ public sealed class PlanCompiler
                         StoreSetPaths("values", outputIndex, ExtendPaths(valuePaths, nodeId));
                         StoreSetPaths("keys", outputIndex, ExtendPaths(groupKeyPaths[bk], nodeId));
                         if (ctx.IsPreview && aggregateValue.Presence == ValuePresence.Present)
-                            ctx.SampledTotals.Add(new SampledTotal(nodeId, $"group:{bk}", totals[bk], IsPartial: true));
+                            ctx.SampledTotals.Add(new SampledTotal(nodeId,
+                                $"group:{displayKeys[bk]}", totals[bk], IsPartial: true));
                     }
                     outputs["values"] = DataValue.Collection(valueList);
                     outputs["keys"] = DataValue.Collection(keyList);

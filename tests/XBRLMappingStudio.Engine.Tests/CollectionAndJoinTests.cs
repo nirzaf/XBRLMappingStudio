@@ -530,6 +530,44 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void GroupBy_CompositeKeysWithDelimiterValuesRemainDistinct()
+    {
+        var rows = new[]
+        {
+            GraphHarness.Row(("first", S("a|b")), ("second", S("c")), ("amount", D(1m))),
+            GraphHarness.Row(("first", S("a")), ("second", S("b|c")), ("amount", D(2m))),
+            GraphHarness.Row(("first", S("a|b")), ("second", S("c")), ("amount", D(3m)))
+        };
+        var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
+            new() { ["binding"] = Binding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By composite key",
+            new() { ["keys"] = "first,second", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection)
+            });
+        var edges = new List<MappingEdge> { GraphHarness.Link(collectRows, "items", group, "items") };
+        var sink = GraphHarness.FactSink(out var factEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new List<MappingNode> { collectRows, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, rows as IReadOnlyList<DataRecord>) }, preview: true);
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+        Assert.NotNull(result);
+        Assert.Equal(new[] { 4m, 2m }, result!.Facts.Select(fact => fact.Value!.Value));
+        Assert.Equal(new[] { "group:a\\|b|c", "group:a|b\\|c" },
+            context.SampledTotals.Select(total => total.Label));
+    }
+
+    [Fact]
     public void GroupBy_StopsBeforeCreatingGroupBeyondConfiguredLimit()
     {
         var rows = new[]
