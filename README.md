@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458) verified `454e5e4c7ee82e38757745ba1879bc46086ae424`: Windows and Ubuntu each passed 859 tests with 6 environment-gated Arelle subprocess skips; the pinned worker job passed 72 Python tests, 15 gated .NET Arelle tests, and 15 dependency-inventory tests. |
+| Tests | xUnit 2.9.3 | Latest functional-change CI [42411292675](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42411292675) verified `3c43a9bd25a64c6a56584a40905a5c19119c8750`: Windows and Ubuntu each passed 859 tests with 6 environment-gated Arelle subprocess skips; the pinned worker job passed 72 Python tests, 15 gated .NET Arelle tests, and 15 dependency-inventory tests. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -280,8 +280,8 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458)
-verified commit `454e5e4c7ee82e38757745ba1879bc46086ae424`. Repository hygiene,
+Latest functional-change CI [42411292675](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42411292675)
+verified commit `3c43a9bd25a64c6a56584a40905a5c19119c8750`. Repository hygiene,
 Windows and Ubuntu Release build/test, pinned Arelle integration, dependency-inventory
 tests, and SPDX generation passed. Each .NET OS matrix passed **859 tests, skipped 6
 environment-gated Arelle cases, and had 0 failures**. The eight suite counts were
@@ -289,7 +289,10 @@ Adapters 94, AI 72, Desktop 103, Engine 121, Integration 240, Ops 89, Project 26
 and XBRL 114. The worker job passed **72 Python protocol/offline tests**, **15 gated
 .NET Arelle execution tests**, and **15 dependency-inventory tests**. This head also
 verifies that a worker crash during SQLite destination validation preserves existing
-facts, receipt rows, and database bytes.
+facts, receipt rows, and database bytes. The Windows mixed-publication process-loss
+tests also passed after their child-process observation windows were extended to handle
+cold runner startup; they now include captured CLI output when the durable boundary is
+not reached.
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 

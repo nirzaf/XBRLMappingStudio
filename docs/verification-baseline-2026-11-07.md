@@ -270,8 +270,15 @@ the test verifies prior database bytes, fact rows, and receipt count are unchang
 that the failed manifest contains no database receipt. The focused Windows Release
 Integration test passed 1/1.
 
-Exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458)
-verified commit `454e5e4c7ee82e38757745ba1879bc46086ae424`: repository hygiene,
+The first follow-up CI run [42410718767](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410718767)
+exposed a Windows-only timing failure in `Cli_MixedProcessLossAfterXmlConfirmationReconcilesAndRetriesWithoutDuplicateRows`:
+the test stopped polling after four seconds before observing the durable operation key.
+The implementation was not implicated. The two process-loss tests now allow 15 seconds
+for child-process startup and include captured stdout/stderr if the expected durable state
+is still absent. The focused Windows tests passed 2/2 locally.
+
+Exact-head CI [42411292675](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42411292675)
+verified commit `3c43a9bd25a64c6a56584a40905a5c19119c8750`: repository hygiene,
 Windows and Ubuntu Release build/test, pinned Arelle worker integration, dependency
 inventory tests, and SPDX generation passed. Each OS matrix passed 859 .NET tests,
 skipped 6 environment-gated Arelle tests, and had no failures. The pinned job passed
