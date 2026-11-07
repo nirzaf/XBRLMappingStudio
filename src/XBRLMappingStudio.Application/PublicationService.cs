@@ -84,6 +84,7 @@ public sealed class PublicationService
                 manifest.RunId, destinationPath);
 
         var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
+        EnsureDestinationDoesNotReplaceInput(safeDestination, workspaceRoot, project, manifest);
         var payloadDigest = RunManifest.ComputeSha256(payload);
         var receipt = await PublishCoreAsync(safeDestination,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
@@ -138,6 +139,7 @@ public sealed class PublicationService
                 "Publication artifact does not match the report recorded by the run.", manifest.RunId, destinationPath);
 
         var safeDestination = PathGuard.EnsureWithin(workspaceRoot, destinationPath);
+        EnsureDestinationDoesNotReplaceInput(safeDestination, workspaceRoot, project, manifest);
         var receipt = await PublishCoreAsync(safeDestination,
             (stream, token) => artifact.CopyReportToAsync(stream, token),
             artifact.Sha256, artifact.Bytes, manifest.RunId, validateStagedArtifactAsync,
@@ -415,6 +417,30 @@ public sealed class PublicationService
         _journal.Save(new JournalEntry(runId, full, JournalState.Aborted,
             stagedDigest, null, lockToken, DateTimeOffset.UtcNow)
         { ValidatedDigest = validatedDigest });
+    }
+
+    private static void EnsureDestinationDoesNotReplaceInput(
+        string destinationPath,
+        string workspaceRoot,
+        MappingProject project,
+        RunManifest manifest)
+    {
+        var protectedPathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(destinationPath);
+        if (protectedPathDiagnostics.HasBlockingErrors)
+            throw PublicationFailed(
+                protectedPathDiagnostics.Items.First(diagnostic => diagnostic.IsBlocking).Code,
+                string.Join(Environment.NewLine, protectedPathDiagnostics.Items.Select(diagnostic => diagnostic.Message)),
+                manifest.RunId, destinationPath);
+
+        var sourceId = DestinationPathGuard.FindSourceIdAtPath(
+            destinationPath,
+            manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+                .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
+            workspaceRoot);
+        if (sourceId is not null)
+            throw PublicationFailed(DiagnosticCodes.IoUnsupportedOperation,
+                $"Report destination cannot replace source input '{sourceId}'. Choose a different destination path.",
+                manifest.RunId, destinationPath);
     }
 
     private static string? TryDigest(string path)

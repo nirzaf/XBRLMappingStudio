@@ -2,6 +2,7 @@ using System.Collections;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Csv;
 using XBRLMappingStudio.Adapters.Excel;
@@ -177,6 +178,159 @@ public sealed class DestinationPlanTests
         }
         finally
         {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishFileDestination_RejectsSourcePathWithoutChangingOriginalFile()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-file-destination-source-alias-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var originalBytes = await File.ReadAllBytesAsync(workbook);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = "excel",
+                Locator = Path.GetFileName(workbook),
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "xlsx-records-v1",
+                WriteMode = "replace"
+            };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = Synthetic.Digest
+            });
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            using var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var error = await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
+                project, result, dir, allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+            Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(workbook));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReportPublication_RejectsSourcePathWithoutChangingOriginalFile()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-report-source-alias-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var originalBytes = await File.ReadAllBytesAsync(workbook);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            using var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var reportBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
+            var publisher = new PublicationService(new RunJournal(databasePath: Path.Combine(dir, "journal.db")));
+            var error = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
+                workbook,
+                reportBytes,
+                dir,
+                project,
+                Synthetic,
+                allowSyntheticProfile: true,
+                result,
+                async (stagedPath, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await using var stream = File.OpenRead(stagedPath);
+                    return RunManifest.ComputeSha256(stream);
+                }));
+
+            Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+            Assert.Contains(binding.BindingId, error.Message, StringComparison.Ordinal);
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(workbook));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReportPublication_RejectsProjectFileWithoutChangingProject()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-report-project-alias-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(dir);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+            var projectPath = Path.Combine(dir, "mapping.xmap");
+            new ProjectManager(projectPath).Save(project);
+            var originalProjectBytes = await File.ReadAllBytesAsync(projectPath);
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            using var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var publisher = new PublicationService(new RunJournal(databasePath: Path.Combine(dir, "journal.db")));
+            var reportBytes = Encoding.UTF8.GetBytes(result.XbrlJson);
+            var error = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
+                projectPath,
+                reportBytes,
+                dir,
+                project,
+                Synthetic,
+                allowSyntheticProfile: true,
+                result,
+                async (stagedPath, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await using var stream = File.OpenRead(stagedPath);
+                    return RunManifest.ComputeSha256(stream);
+                }));
+
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+            Assert.Equal(originalProjectBytes, await File.ReadAllBytesAsync(projectPath));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
             Directory.Delete(dir, recursive: true);
         }
     }

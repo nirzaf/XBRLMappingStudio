@@ -1856,6 +1856,16 @@ public sealed class MappingJobService
         var root = Path.GetFullPath(workspaceRoot);
         var destinationPath = PathGuard.EnsureWithin(root,
             Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
+        var sourceIdAtDestination = DestinationPathGuard.FindSourceIdAtPath(
+            destinationPath,
+            result.Manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+                .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
+            root);
+        if (sourceIdAtDestination is not null)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"File destination cannot replace source input '{sourceIdAtDestination}'. Choose a different destination path.",
+                DiagnosticStage.Publication);
+
         var pathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(destinationPath);
         if (pathDiagnostics.HasBlockingErrors)
         {

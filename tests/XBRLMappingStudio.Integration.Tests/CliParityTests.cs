@@ -990,6 +990,56 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_ExecuteRejectsReportPathThatAliasesSourceAndPreservesWorkbook()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "source-report-alias.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var originalBytes = await File.ReadAllBytesAsync(_workbookPath);
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", _workbookPath, "--allow-synthetic-profile");
+
+        Assert.Equal(3, exit);
+        Assert.Contains("cannot replace source input", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(_workbookPath));
+    }
+
+    [Fact]
+    public async Task Cli_PreviewRejectsManifestPathThatAliasesSourceAndPreservesWorkbook()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var projectPath = Path.Combine(_dir, "source-manifest-alias.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var originalBytes = await File.ReadAllBytesAsync(_workbookPath);
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "preview", projectPath,
+            "--manifest", _workbookPath, "--allow-synthetic-profile");
+
+        Assert.Equal(3, exit);
+        Assert.Contains("cannot replace source input", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(_workbookPath));
+    }
+
+    [Fact]
+    public async Task Cli_ExecuteRejectsReportAndManifestUsingTheSamePath()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var projectPath = Path.Combine(_dir, "report-manifest-alias.xmap");
+        var sharedPath = Path.Combine(_dir, "shared-output.json");
+        new ProjectManager(projectPath).Save(project);
+
+        var (exit, _, stderr) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", sharedPath,
+            "--manifest", sharedPath,
+            "--allow-synthetic-profile");
+
+        Assert.Equal(2, exit);
+        Assert.Contains("report and run manifest must be different", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(sharedPath));
+    }
+
+    [Fact]
     public async Task Cli_ExecuteDisabledInstalledProfile_IsBlockedBeforeSourceReadAndPreservesOutput()
     {
         var catalogRoot = FilingProfileResolverTests.NewCatalogDirectory();

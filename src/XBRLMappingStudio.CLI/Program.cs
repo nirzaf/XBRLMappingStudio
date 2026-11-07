@@ -929,26 +929,65 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             if (conn.Path is not null) conns[id] = conn with { Path = GuardPath(conn.Path) };
         if (output is not null) output = GuardPath(output);
         if (manifestPath is not null) manifestPath = GuardPath(manifestPath);
-        if (publishDestination && output is not null)
+
+        if (!preview && output is not null && manifestPath is not null
+            && DestinationPathGuard.AreSamePath(output, manifestPath, workspaceRoot))
         {
-            var sqlitePath = Path.GetFullPath(Path.IsPathRooted(p.Destination!.Locator)
-                ? p.Destination.Locator : Path.Combine(projectDirectory, p.Destination.Locator));
-            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-            if (comparer.Equals(output, sqlitePath))
+            Console.Error.WriteLine("The report and run manifest must be different paths.");
+            return ExitCodesLocal.InvalidMapping;
+        }
+
+        if (publishDestination)
+        {
+            var destinationPath = Path.GetFullPath(Path.IsPathRooted(p.Destination!.Locator)
+                ? p.Destination.Locator : Path.Combine(workspaceRoot, p.Destination.Locator));
+            if (output is not null && DestinationPathGuard.AreSamePath(output, destinationPath, workspaceRoot))
             {
-                Console.Error.WriteLine("The xBRL-JSON file and SQLite database must be different paths.");
+                Console.Error.WriteLine("The report and saved destination must be different paths.");
                 return ExitCodesLocal.InvalidMapping;
             }
-            if (manifestPath is not null && comparer.Equals(manifestPath, output))
+            if (manifestPath is not null
+                && DestinationPathGuard.AreSamePath(manifestPath, destinationPath, workspaceRoot))
             {
-                Console.Error.WriteLine("The manifest and xBRL-JSON output must be different paths.");
+                Console.Error.WriteLine("The run manifest and saved destination must be different paths.");
                 return ExitCodesLocal.InvalidMapping;
             }
-            if (manifestPath is not null && comparer.Equals(manifestPath, sqlitePath))
+        }
+
+        var writeTargets = new List<(string Name, string Path)>();
+        if (!preview && output is not null) writeTargets.Add(("Report", output));
+        if (manifestPath is not null) writeTargets.Add(("Run manifest", manifestPath));
+        if (publishDestination && DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
+        {
+            var fileDestinationPath = Path.GetFullPath(Path.IsPathRooted(p.Destination.Locator)
+                ? p.Destination.Locator : Path.Combine(workspaceRoot, p.Destination.Locator));
+            writeTargets.Add(("Saved destination", fileDestinationPath));
+        }
+
+        var fullProjectPath = Path.GetFullPath(projectPath);
+        IEnumerable<(string SourceId, string? Path)> sourcePaths =
+            conns.Values.Select(connection => (connection.SourceId, connection.Path))
+            .Concat(p.Bindings.Select(binding => (SourceId: binding.BindingId, Path: (string?)binding.Locator)))
+            .Concat(new (string SourceId, string? Path)[]
             {
-                Console.Error.WriteLine("The manifest and SQLite database must be different paths.");
-                return ExitCodesLocal.InvalidMapping;
+                ("project-file", fullProjectPath),
+                ("project-lock", fullProjectPath + ProjectManager.LockSuffix),
+                ("project-backup", fullProjectPath + ProjectManager.BackupSuffix)
+            });
+        foreach (var (targetName, targetPath) in writeTargets)
+        {
+            var protectedPathDiagnostics = DestinationPlanValidator.ValidateFileDestinationPath(targetPath);
+            if (protectedPathDiagnostics.HasBlockingErrors)
+            {
+                PrintDiagnostics(protectedPathDiagnostics.Items);
+                return ExitCodesLocal.DataError;
             }
+
+            var sourceId = DestinationPathGuard.FindSourceIdAtPath(targetPath, sourcePaths, workspaceRoot);
+            if (sourceId is null) continue;
+            Console.Error.WriteLine(
+                $"IO: {DiagnosticCodes.IoUnsupportedOperation}: {targetName} path cannot replace source input '{sourceId}'. Choose a different path.");
+            return ExitCodesLocal.DataError;
         }
 
         // EG03/XG01: an unattended (non-preview) execute is a production publication and
