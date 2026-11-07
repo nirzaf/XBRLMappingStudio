@@ -249,7 +249,7 @@
             <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
               <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
                 <TextBlock Text="Preview facts and run results" FontWeight="Bold" />
-                <TextBlock Grid.Row="1" Text="{Binding PreviewResultSummary}" TextWrapping="Wrap"
+                <TextBlock Name="PreviewResultSummaryText" Grid.Row="1" Text="{Binding PreviewResultSummary}" TextWrapping="Wrap"
                            Margin="0,3"
                            AutomationProperties.Name="Run result status and preview qualification" />
                 <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto" Margin="0,2">
@@ -265,7 +265,7 @@
                           IsEnabled="{Binding CanNextFactPreviewPage}"
                           AutomationProperties.Name="Next fact results page" />
                 </Grid>
-                <ListBox Grid.Row="3" ItemsSource="{Binding PreviewFacts}"
+                <ListBox Name="GeneratedFactResultsList" Grid.Row="3" ItemsSource="{Binding PreviewFacts}"
                          SelectedItem="{Binding SelectedPreviewFact, Mode=TwoWay}"
                          SelectionMode="Single" AutomationProperties.Name="Generated fact results">
                   <ListBox.ItemTemplate>
@@ -277,9 +277,9 @@
                 <Grid Grid.Row="4" ColumnDefinitions="*,Auto"
                       IsVisible="{Binding HasSelectedPreviewFact}">
                   <StackPanel Spacing="2">
-                    <TextBlock Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
+                    <TextBlock Name="SelectedFactStageText" Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
                                MaxHeight="38" AutomationProperties.Name="Selected fact mapping stage" />
-                    <ListBox ItemsSource="{Binding SelectedPreviewFact.Evidence}"
+                    <ListBox Name="SelectedFactEvidenceList" ItemsSource="{Binding SelectedPreviewFact.Evidence}"
                              SelectedItem="{Binding SelectedPreviewEvidence, Mode=TwoWay}"
                              Height="54" SelectionMode="Single"
                              AutomationProperties.Name="Selected fact contributing source evidence">
@@ -292,7 +292,7 @@
                     <TextBlock Text="Transformation path for selected source" FontWeight="SemiBold" />
                     <ScrollViewer MaxHeight="88" VerticalScrollBarVisibility="Auto"
                                   AutomationProperties.Name="Selected source transformation path details">
-                      <TextBlock Text="{Binding SelectedPreviewEvidence.TransformationPathDisplay}"
+                      <TextBlock Name="SelectedFactTransformationPathText" Text="{Binding SelectedPreviewEvidence.TransformationPathDisplay}"
                                  TextWrapping="Wrap" />
                     </ScrollViewer>
                   </StackPanel>

@@ -304,3 +304,19 @@ passed 105/105. The full Integration suite passed 240 tests and skipped 6
 environment-gated Arelle cases. Builds used isolated `bin-codex` output because
 the checked-out Desktop Debug assemblies were held open by an existing app process.
 Native visual and screen-reader acceptance remain open.
+
+## UX-07 result drill-down journeys
+
+The result pane now identifies an individual source locator when a fact has one
+contributor, or summarizes the number of contributing source references when it
+has several. The focused headless tests open `MainWindow`, inspect its controls
+before running a preview, select a result, and verify the stage, evidence list,
+and selected transformation-path binding. They cover a one-to-many aggregate
+with six cell references, zero versus a missing amount, and two duplicate facts
+whose separate selections reveal `Financials!B4` and `Financials!B5`. The 501-row
+SQLite result-window test also verifies both contributing columns and the detail
+path for in-memory and spool-backed runs.
+
+The focused paging and drill-down executions passed 4/4; the full Desktop suite
+passed 105/105. These tests exercise Avalonia controls headlessly. Native visual,
+screen-reader and PDF-source navigation acceptance remain open.

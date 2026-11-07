@@ -167,12 +167,22 @@ public sealed class MappingOperationViewModelTests
 
             window = new MainWindow { DataContext = activeViewModel };
             window.Show();
+            var resultSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("PreviewResultSummaryText"));
+            var resultsList = Assert.IsType<ListBox>(window.FindControl<ListBox>("GeneratedFactResultsList"));
             var previousButton = Assert.IsType<Button>(window.FindControl<Button>("PreviousFactPreviewPageButton"));
             var nextButton = Assert.IsType<Button>(window.FindControl<Button>("NextFactPreviewPageButton"));
             var pageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("FactPageSummaryText"));
+            var stageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactStageText"));
+            var evidenceList = Assert.IsType<ListBox>(window.FindControl<ListBox>("SelectedFactEvidenceList"));
+            var evidencePath = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactTransformationPathText"));
             Assert.Equal("Previous fact results page", AutomationProperties.GetName(previousButton));
             Assert.Equal("Next fact results page", AutomationProperties.GetName(nextButton));
+            Assert.Equal("Generated fact results", AutomationProperties.GetName(resultsList));
+            Assert.Equal("Selected fact contributing source evidence", AutomationProperties.GetName(evidenceList));
+            Assert.Equal("Run a preview or full execution to inspect generated facts and evidence.", resultSummary.Text);
             Assert.Equal("No fact results are available.", pageSummary.Text);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
+            Assert.Empty(activeViewModel.PreviewFacts);
             Assert.False(previousButton.IsEnabled);
             Assert.False(nextButton.IsEnabled);
 
@@ -192,13 +202,30 @@ public sealed class MappingOperationViewModelTests
             }
             finally { activeViewModel.PropertyChanged -= handler; }
 
-            Assert.StartsWith("Full run · 501 fact(s)", activeViewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.StartsWith("Full run · 501 fact(s)", resultSummary.Text, StringComparison.Ordinal);
             Assert.StartsWith("Published paged-result.json", activeViewModel.StatusText, StringComparison.Ordinal);
             Assert.True(File.Exists(outputPath));
             Assert.Equal(500, activeViewModel.PreviewFacts.Count);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
             Assert.Equal("Facts 1–500 of 501", activeViewModel.FactPageSummary);
             Assert.Equal("Facts 1–500 of 501", pageSummary.Text);
-            Assert.Equal("Entity-0001", activeViewModel.PreviewFacts[0].SemanticFact!.EntityIdentifier);
+            var firstPageFact = Assert.Single(activeViewModel.PreviewFacts,
+                fact => fact.SemanticFact?.EntityIdentifier == "Entity-0001");
+            Assert.Same(firstPageFact, resultsList.SelectedItem);
+            Assert.Contains("2 contributing source references", firstPageFact.Display, StringComparison.Ordinal);
+            Assert.Equal(firstPageFact.StageSummary, stageSummary.Text);
+            var firstPageEvidence = Assert.IsAssignableFrom<IEnumerable<PreviewEvidenceRow>>(evidenceList.ItemsSource)
+                .ToArray();
+            Assert.Equal(new[] { "financials.Current", "financials.Entity" },
+                firstPageEvidence.Select(evidence => evidence.Source.Locator)
+                    .OrderBy(locator => locator, StringComparer.Ordinal));
+            Assert.Contains(firstPageFact.Display, Assert.IsAssignableFrom<IEnumerable<FactRow>>(resultsList.ItemsSource)
+                .Select(fact => fact.Display), StringComparer.Ordinal);
+            var currentValueEvidence = Assert.Single(firstPageEvidence,
+                evidence => evidence.Source.Locator == "financials.Current");
+            evidenceList.SelectedItem = currentValueEvidence;
+            Assert.Same(currentValueEvidence, activeViewModel.SelectedPreviewEvidence);
+            Assert.Equal(currentValueEvidence.TransformationPathDisplay, evidencePath.Text);
             Assert.False(previousButton.IsEnabled);
             Assert.True(nextButton.IsEnabled);
             Assert.False(activeViewModel.PreviousFactPreviewPageCommand.CanExecute(null));
@@ -207,9 +234,14 @@ public sealed class MappingOperationViewModelTests
             activeViewModel.NextFactPreviewPageCommand.Execute(null);
 
             Assert.Single(activeViewModel.PreviewFacts);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
             Assert.Equal("Facts 501–501 of 501", activeViewModel.FactPageSummary);
             Assert.Equal("Facts 501–501 of 501", pageSummary.Text);
             Assert.Equal("Entity-0501", activeViewModel.PreviewFacts[0].SemanticFact!.EntityIdentifier);
+            Assert.Same(activeViewModel.PreviewFacts[0], resultsList.SelectedItem);
+            Assert.Contains("financials.Current", Assert.IsAssignableFrom<IEnumerable<PreviewEvidenceRow>>(evidenceList.ItemsSource)
+                .Select(evidence => evidence.Source.Locator), StringComparer.Ordinal);
+            Assert.Equal(activeViewModel.PreviewFacts[0].StageSummary, stageSummary.Text);
             Assert.True(previousButton.IsEnabled);
             Assert.False(nextButton.IsEnabled);
             Assert.True(activeViewModel.PreviousFactPreviewPageCommand.CanExecute(null));
@@ -330,42 +362,67 @@ public sealed class MappingOperationViewModelTests
         }
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task JoinedPreviewShowsOneToManyContributorsAndKeepsMissingDistinctFromZero()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-one-to-many-preview-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        MainWindowViewModel? viewModel = null;
+        MainWindow? window = null;
         try
         {
             var workbookPath = TestFixtures.MaterializeOneToManyRevenueWorkbook(directory);
             var project = TestFixtures.BuildOneToManyGroupedRevenueMappingProject(workbookPath);
-            var viewModel = new MainWindowViewModel(project, null,
+            var activeViewModel = new MainWindowViewModel(project, null,
                 (_, _) => throw new NotSupportedException("The fixture uses Excel sources."));
-            viewModel.AllowSyntheticProfile = true;
-            viewModel.SaveProjectTo(Path.Combine(directory, "one-to-many-mapping.xmap"));
+            viewModel = activeViewModel;
+            activeViewModel.AllowSyntheticProfile = true;
+            activeViewModel.SaveProjectTo(Path.Combine(directory, "one-to-many-mapping.xmap"));
+
+            window = new MainWindow { DataContext = activeViewModel };
+            window.Show();
+            var resultSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("PreviewResultSummaryText"));
+            var resultsList = Assert.IsType<ListBox>(window.FindControl<ListBox>("GeneratedFactResultsList"));
+            var pageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("FactPageSummaryText"));
+            var stageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactStageText"));
+            var evidenceList = Assert.IsType<ListBox>(window.FindControl<ListBox>("SelectedFactEvidenceList"));
+            var evidencePath = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactTransformationPathText"));
+
+            // Observe the loaded result pane before starting the preview.
+            Assert.Equal("Run a preview or full execution to inspect generated facts and evidence.", resultSummary.Text);
+            Assert.Equal("No fact results are available.", pageSummary.Text);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
+            Assert.Empty(activeViewModel.PreviewFacts);
+            Assert.Equal("Generated fact results", AutomationProperties.GetName(resultsList));
+            Assert.Equal("Selected fact contributing source evidence", AutomationProperties.GetName(evidenceList));
 
             var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var observedBusy = false;
             PropertyChangedEventHandler handler = (_, eventArgs) =>
             {
                 if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
-                if (viewModel.IsBusy) observedBusy = true;
+                if (activeViewModel.IsBusy) observedBusy = true;
                 else if (observedBusy) operationStopped.TrySetResult();
             };
-            viewModel.PropertyChanged += handler;
+            activeViewModel.PropertyChanged += handler;
             try
             {
-                viewModel.PreviewCommand.Execute(null);
+                activeViewModel.PreviewCommand.Execute(null);
                 await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
             }
-            finally { viewModel.PropertyChanged -= handler; }
+            finally { activeViewModel.PropertyChanged -= handler; }
 
-            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
-            Assert.Contains("partial", viewModel.PreviewResultSummary, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal(2, viewModel.PreviewFacts.Count);
-            var revenueFact = Assert.Single(viewModel.PreviewFacts,
+            Assert.StartsWith("Preview only", resultSummary.Text, StringComparison.Ordinal);
+            Assert.Contains("partial", resultSummary.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("Facts 1–2 of 2", pageSummary.Text);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
+            Assert.Equal(2, activeViewModel.PreviewFacts.Count);
+            var revenueFact = Assert.Single(activeViewModel.PreviewFacts,
                 fact => fact.SemanticFact?.EntityIdentifier == "Revenue");
             Assert.Equal(20m, revenueFact.SemanticFact!.Value);
+            Assert.Contains("6 contributing source references", revenueFact.Display, StringComparison.Ordinal);
+            Assert.Contains(revenueFact.Display, Assert.IsAssignableFrom<IEnumerable<FactRow>>(resultsList.ItemsSource)
+                .Select(row => row.Display), StringComparer.Ordinal);
             var locators = revenueFact.Evidence.Select(evidence => evidence.Source.Locator)
                 .OrderBy(locator => locator, StringComparer.Ordinal).ToArray();
             Assert.Equal(new[]
@@ -373,61 +430,133 @@ public sealed class MappingOperationViewModelTests
                 "Dimensions!A4", "Dimensions!A5", "Dimensions!B4", "Dimensions!B5",
                 "Transactions!A4", "Transactions!C4"
             }, locators);
-            Assert.Contains(viewModel.PreviewFacts,
+            Assert.Contains(activeViewModel.PreviewFacts,
                 fact => fact.SemanticFact is { EntityIdentifier: "Zero", Value: 0m });
-            Assert.DoesNotContain(viewModel.PreviewFacts,
+            var zeroFact = Assert.Single(activeViewModel.PreviewFacts,
+                fact => fact.SemanticFact is { EntityIdentifier: "Zero", Value: 0m });
+            Assert.Contains("= 0", zeroFact.Display, StringComparison.Ordinal);
+            Assert.DoesNotContain(activeViewModel.PreviewFacts,
                 fact => fact.SemanticFact?.EntityIdentifier == "Missing amount");
+
+            // Act through the result-list selection and verify the rendered detail pane.
+            resultsList.SelectedItem = revenueFact;
+            Assert.Same(revenueFact, activeViewModel.SelectedPreviewFact);
+            Assert.Equal(revenueFact.StageSummary, stageSummary.Text);
+            var renderedEvidence = Assert.IsAssignableFrom<IEnumerable<PreviewEvidenceRow>>(evidenceList.ItemsSource)
+                .ToArray();
+            Assert.Equal(6, renderedEvidence.Length);
+            Assert.Equal(locators, renderedEvidence.Select(evidence => evidence.Source.Locator)
+                .OrderBy(locator => locator, StringComparer.Ordinal).ToArray());
+            evidenceList.SelectedIndex = 0;
+            Assert.Same(renderedEvidence[0], activeViewModel.SelectedPreviewEvidence);
+            Assert.Equal(renderedEvidence[0].TransformationPathDisplay, evidencePath.Text);
+            Assert.Contains("Joined Revenue fact", stageSummary.Text, StringComparison.Ordinal);
+
+            foreach (var evidence in renderedEvidence)
+            {
+                var expectedCollector = evidence.Source.Locator.StartsWith("Dimensions!", StringComparison.Ordinal)
+                    ? "Collect dimensions"
+                    : "Collect transactions";
+                Assert.Contains(expectedCollector, evidence.TransformationPathDisplay, StringComparison.Ordinal);
+                Assert.Contains("Match transaction dimensions", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+            }
         }
         finally
         {
+            window?.Close();
+            viewModel?.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task DuplicateFactPreviewKeepsEachOccurrenceAndItsSourceRowSeparate()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-duplicate-preview-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        MainWindowViewModel? viewModel = null;
+        MainWindow? window = null;
         try
         {
             var workbookPath = TestFixtures.MaterializeGroupedRevenueWorkbook(directory);
             var project = TestFixtures.BuildRevenueMappingProject(workbookPath);
-            var viewModel = new MainWindowViewModel(project, null,
+            var activeViewModel = new MainWindowViewModel(project, null,
                 (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
-            viewModel.AllowSyntheticProfile = true;
-            viewModel.SaveProjectTo(Path.Combine(directory, "duplicate-mapping.xmap"));
+            viewModel = activeViewModel;
+            activeViewModel.AllowSyntheticProfile = true;
+            activeViewModel.SaveProjectTo(Path.Combine(directory, "duplicate-mapping.xmap"));
+
+            window = new MainWindow { DataContext = activeViewModel };
+            window.Show();
+            var resultSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("PreviewResultSummaryText"));
+            var resultsList = Assert.IsType<ListBox>(window.FindControl<ListBox>("GeneratedFactResultsList"));
+            var pageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("FactPageSummaryText"));
+            var stageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactStageText"));
+            var evidenceList = Assert.IsType<ListBox>(window.FindControl<ListBox>("SelectedFactEvidenceList"));
+            var evidencePath = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactTransformationPathText"));
+
+            // Observe the initial XAML result controls before triggering the preview.
+            Assert.Equal("Run a preview or full execution to inspect generated facts and evidence.", resultSummary.Text);
+            Assert.Equal("No fact results are available.", pageSummary.Text);
+            Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
+            Assert.Empty(activeViewModel.PreviewFacts);
 
             var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var observedBusy = false;
             PropertyChangedEventHandler handler = (_, eventArgs) =>
             {
                 if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
-                if (viewModel.IsBusy) observedBusy = true;
+                if (activeViewModel.IsBusy) observedBusy = true;
                 else if (observedBusy) operationStopped.TrySetResult();
             };
-            viewModel.PropertyChanged += handler;
+            activeViewModel.PropertyChanged += handler;
             try
             {
-                viewModel.PreviewCommand.Execute(null);
+                activeViewModel.PreviewCommand.Execute(null);
                 await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
             }
-            finally { viewModel.PropertyChanged -= handler; }
+            finally { activeViewModel.PropertyChanged -= handler; }
 
-            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
-            Assert.Equal(2, viewModel.PreviewFacts.Count);
-            var facts = viewModel.PreviewFacts
+            Assert.StartsWith("Preview only", resultSummary.Text, StringComparison.Ordinal);
+            Assert.Equal("Facts 1–2 of 2", pageSummary.Text);
+            var facts = activeViewModel.PreviewFacts
                 .OrderBy(fact => fact.Evidence.Single().Source.Locator, StringComparer.Ordinal)
                 .ToArray();
+            Assert.Equal(2, facts.Length);
             Assert.Equal(10_000m, facts[0].SemanticFact!.Value);
             Assert.Equal(10_000m, facts[1].SemanticFact!.Value);
             Assert.Equal(facts[0].SemanticFact!.ConceptName, facts[1].SemanticFact!.ConceptName);
             Assert.Equal(facts[0].SemanticFact!.EntityIdentifier, facts[1].SemanticFact!.EntityIdentifier);
             Assert.Equal("Financials!B4", facts[0].Evidence.Single().Source.Locator);
             Assert.Equal("Financials!B5", facts[1].Evidence.Single().Source.Locator);
+            Assert.Contains("source Financials!B4", facts[0].Display, StringComparison.Ordinal);
+            Assert.Contains("source Financials!B5", facts[1].Display, StringComparison.Ordinal);
+
+            // Select both duplicate business facts and verify source evidence follows each selection.
+            var displayedFacts = Assert.IsAssignableFrom<IEnumerable<FactRow>>(resultsList.ItemsSource).ToArray();
+            Assert.Equal(2, displayedFacts.Length);
+            var firstIndex = Array.FindIndex(displayedFacts, fact => ReferenceEquals(fact, facts[0]));
+            var secondIndex = Array.FindIndex(displayedFacts, fact => ReferenceEquals(fact, facts[1]));
+            Assert.True(firstIndex >= 0);
+            Assert.True(secondIndex >= 0);
+            resultsList.SelectedIndex = firstIndex;
+            Assert.Same(facts[0], activeViewModel.SelectedPreviewFact);
+            Assert.Equal(facts[0].StageSummary, stageSummary.Text);
+            var firstEvidence = Assert.IsAssignableFrom<IEnumerable<PreviewEvidenceRow>>(evidenceList.ItemsSource).ToArray();
+            Assert.Equal("Financials!B4", Assert.Single(firstEvidence).Source.Locator);
+            Assert.Equal(firstEvidence[0].TransformationPathDisplay, evidencePath.Text);
+
+            resultsList.SelectedIndex = secondIndex;
+            Assert.Same(facts[1], activeViewModel.SelectedPreviewFact);
+            Assert.Equal(facts[1].StageSummary, stageSummary.Text);
+            var secondEvidence = Assert.IsAssignableFrom<IEnumerable<PreviewEvidenceRow>>(evidenceList.ItemsSource).ToArray();
+            Assert.Equal("Financials!B5", Assert.Single(secondEvidence).Source.Locator);
+            Assert.Equal(secondEvidence[0].TransformationPathDisplay, evidencePath.Text);
         }
         finally
         {
+            window?.Close();
+            viewModel?.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
     }

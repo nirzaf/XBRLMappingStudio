@@ -5923,10 +5923,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             .Concat(transformationPathsBySource.Keys)
             .Distinct()
             .ToArray();
+        var sourceSummary = evidenceSources.Length switch
+        {
+            0 => "source evidence not recorded",
+            1 => $"source {evidenceSources[0].Locator}",
+            _ => $"{evidenceSources.Length} contributing source references"
+        };
         return new FactRow
         {
             SemanticFact = fact,
-            Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
+            Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}; {sourceSummary}",
             StageSummary = stage,
             Evidence = evidenceSources.Select(source =>
             {
