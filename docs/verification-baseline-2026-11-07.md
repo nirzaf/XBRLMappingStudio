@@ -149,3 +149,24 @@ Current limits: the CLI XML output path requires an in-memory full run and is
 not available for the disk-backed large-run artifact or mixed file/SQLite
 publication. Real-profile qualification remains owner-gated and the real
 Arelle rule/plugin completion contract remains unavailable.
+
+## TAX-02 mapped-import network canary
+
+The pinned-Arelle worker fixture now declares an external schema URI on a
+loopback HTTP canary and maps that exact URI to a hash-pinned local package
+file. The canary records every parsed HTTP method and path. Arelle completed
+the taxonomy load with the expected concepts and made no HTTP request, showing
+that this mapped import used the local file. This fixture does not establish
+OS-level no-egress isolation or qualify unmapped/other external references.
+
+Verification:
+
+- The local worker suite ran 56 tests: 47 passed and 9 were skipped because
+  this Windows environment lacks Arelle/lxml or symlink privileges.
+- Exact-head CI [run 42329883479](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42329883479)
+  passed repository hygiene, both Windows and Ubuntu build/test matrices, and
+  pinned Arelle integration on commit `c421bd765dff256b901e7cee9763d17849d18617`.
+  The pinned worker job ran all 56 Python tests and all 12 gated .NET Arelle
+  execution tests.
+- Arelle emitted a non-failing `ResourceWarning` for its temporary offline
+  catalog ZIP stream; the taxonomy test and cleanup succeeded.
