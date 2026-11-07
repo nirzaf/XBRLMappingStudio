@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status_note": "Scenarios without raw benchmark records remain proposed. Fixture availability does not establish that any target threshold passed.",
+  "status_note": "Scenarios without raw benchmark records remain proposed. A measured record proves only that samples were captured; it does not establish that any target threshold passed.",
   "scenarios": [
     {
       "id": "desktop-startup-cold",
@@ -20,11 +20,15 @@
     },
     {
       "id": "sqlite-source-100k",
-      "status": "proposed",
+      "status": "measured-synthetic-integration-process-tree",
       "depends_on": "BEN-03",
       "fixture": "synthetic-financials-sqlite-v1 with 100000 rows",
       "interaction": "Release CLI execution or the tracked 100k-row integration scenario",
-      "automation_status": "command-level process-tree capture available"
+      "automation_status": "two Windows Release integration process-tree captures; not an isolated product CLI or desktop measurement",
+      "measurement_records": [
+        "results/sqlite-source-100k-windows-release-run-01.json",
+        "results/sqlite-source-100k-windows-release-run-02.json"
+      ]
     },
     {
       "id": "graph-canvas-100-2000",
