@@ -30,20 +30,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu is the authoritative gate (dev host + CI parity);
-        # windows exercises the eventual product target.
-        os: [ ubuntu-latest, windows-latest ]
+        # Pin Ubuntu 24.04 to keep the authoritative Linux gate stable across
+        # GitHub's ubuntu-latest image migration; Windows exercises the product target.
+        os: [ ubuntu-24.04, windows-latest ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python for worker process tests
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
@@ -69,7 +69,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-and-dependency-reports-${{ matrix.os }}
           path: |
@@ -79,13 +79,13 @@ jobs:
 
   arelle-worker:
     name: Arelle worker integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -96,7 +96,7 @@ jobs:
         run: python -m unittest discover -s tools/worker/tests -v
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
@@ -120,7 +120,7 @@ jobs:
         run: python tools/dependency_inventory.py --output artifacts/dependencies.spdx.json
 
       - name: Upload SPDX release dependency inventory
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dependency-sbom
           path: artifacts/dependencies.spdx.json
@@ -128,10 +128,10 @@ jobs:
 
   hygiene:
     name: Repository hygiene
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Reject committed build output (bin/ obj/)
         shell: bash

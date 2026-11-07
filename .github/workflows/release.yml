@@ -29,7 +29,7 @@ env:
 jobs:
   meta:
     name: Resolve version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -54,21 +54,21 @@ jobs:
   verify:
     name: Build & test (gate)
     needs: meta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: '3.12' }
       - name: Install pinned worker dependency metadata
         run: python -m pip install --require-hashes -r tools/worker/requirements.lock
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with: { dotnet-version: '10.0.x' }
       - run: dotnet restore ${{ env.SOLUTION }} --locked-mode
       - name: Generate SPDX release dependency inventory
         run: python tools/dependency_inventory.py --output artifacts/dependencies.spdx.json
       - run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
       - run: dotnet test ${{ env.SOLUTION }} -c Release --no-build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dependency-sbom
           path: artifacts/dependencies.spdx.json
@@ -77,7 +77,7 @@ jobs:
   publish-cli:
     name: CLI ${{ matrix.rid }}
     needs: [ meta, verify ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -89,8 +89,8 @@ jobs:
           - rid: osx-x64
             os_ext: tar.gz
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
         with: { dotnet-version: '10.0.x' }
       - name: Restore locked multi-RID NuGet graph
         run: dotnet restore src/XBRLMappingStudio.CLI/XBRLMappingStudio.CLI.csproj --locked-mode -p:Configuration=Release
@@ -110,7 +110,7 @@ jobs:
           else
             tar czf "../../xbrl-studio-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" .
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cli-${{ matrix.rid }}
           path: 'xbrl-studio-*-${{ matrix.rid }}.*'
@@ -119,14 +119,14 @@ jobs:
   publish-desktop:
     name: Desktop ${{ matrix.rid }}
     needs: [ meta, verify ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         rid: [ win-x64, linux-x64, osx-x64 ]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
         with: { dotnet-version: '10.0.x' }
       - name: Restore locked multi-RID NuGet graph
         run: dotnet restore src/XBRLMappingStudio.Desktop/XBRLMappingStudio.Desktop.csproj --locked-mode -p:Configuration=Release
@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           cd out
           tar czf "../desktop-${{ needs.meta.outputs.version }}-${{ matrix.rid }}.tar.gz" desktop-${{ matrix.rid }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: desktop-${{ matrix.rid }}
           path: 'desktop-*-${{ matrix.rid }}.tar.gz'
@@ -151,10 +151,10 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: [ meta, publish-cli, publish-desktop ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: '*'
           path: dist
@@ -170,7 +170,7 @@ jobs:
             | xargs -0 sha256sum > SHA256SUMS.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: XBRL Mapping Studio ${{ needs.meta.outputs.tag }}
