@@ -233,7 +233,7 @@ class ArelleWorkerTests(unittest.TestCase):
     def test_validate_report_returns_profile_bound_completion_report(self):
         request = self.request(report())
         with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)):
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1, ())):
             result = arelle_worker.handle(request, self.args)
 
         self.assertEqual("success", result["status"])
@@ -247,7 +247,7 @@ class ArelleWorkerTests(unittest.TestCase):
         request = self.request(report())
         request["validationRequirements"]["requiredRules"] = ["rule:mandatory"]
         with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1, ())) as run_arelle:
             result = arelle_worker.handle(request, self.args)
 
         self.assertEqual("success", result["status"])
@@ -277,13 +277,49 @@ class ArelleWorkerTests(unittest.TestCase):
         request["validationRequirements"]["requiredPlugins"] = ["validate/EFM"]
         self.args.plugin = ["validate/EFM"]
         with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)):
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1, ())):
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("incompleteValidation", result["status"])
+        self.assertFalse(result["result"]["completed"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual("unavailable", completion["requiredPlugins"][0]["status"])
+        self.assertIn("loaded module registry", completion["requiredPlugins"][0]["detail"])
+        self.assertTrue(any(item["code"] == "XBR010" and item["isBlocking"]
+                            for item in result["diagnostics"]))
+
+    def test_validate_report_marks_plugin_pass_only_when_runtime_reports_it_loaded(self):
+        request = self.request(report())
+        request["validationRequirements"]["requiredPlugins"] = ["validate/EFM"]
+        self.args.plugin = ["validate/EFM"]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle",
+                                  return_value=(True, [], 1, ("validate/EFM",))):
             result = arelle_worker.handle(request, self.args)
 
         self.assertEqual("success", result["status"])
         completion = result["result"]["validationCompletion"]
-        self.assertEqual("unavailable", completion["requiredPlugins"][0]["status"])
-        self.assertIn("machine-readable evidence", completion["requiredPlugins"][0]["detail"])
+        self.assertEqual("pass", completion["requiredPlugins"][0]["status"])
+        self.assertIn("runtime registry", completion["requiredPlugins"][0]["detail"])
+
+    def test_validate_report_marks_explicit_plugin_load_error_as_failure(self):
+        request = self.request(report())
+        request["validationRequirements"]["requiredPlugins"] = ["validate/EFM"]
+        self.args.plugin = ["validate/EFM"]
+        logs = [{
+            "levelname": "error",
+            "messageCode": "arelle:pluginLoadingError",
+            "msg": "Unable to load module validate/EFM",
+        }]
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(False, logs, 0, ())):
+            result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("incompleteValidation", result["status"])
+        completion = result["result"]["validationCompletion"]
+        self.assertEqual("fail", completion["requiredPlugins"][0]["status"])
+        self.assertTrue(any(item["code"] == "XBR010" and item["isBlocking"]
+                            for item in result["diagnostics"]))
 
     def test_validate_report_rejects_requirements_substituted_from_installed_profile(self):
         self.args.profile_manifest_data = {
@@ -369,7 +405,7 @@ class ArelleWorkerTests(unittest.TestCase):
             request["payload"] = {"taxonomyPath": "entry.xsd"}
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                    mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 42)):
+                    mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 42, ("validate/EFM",))):
                 result = arelle_worker.handle(request, self.args)
 
         self.assertEqual("success", result["status"])
@@ -380,6 +416,7 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("sha256:fixture", result["result"]["profileDigest"])
         self.assertEqual("entry.xsd", result["result"]["taxonomyEntryPoint"])
         self.assertEqual(["validate/EFM"], result["result"]["requiredPlugins"])
+        self.assertEqual(["validate/EFM"], result["result"]["loadedPlugins"])
         self.assertEqual(["rule:taxonomy-check"], result["result"]["requiredChecks"])
         self.assertIn("validate-report", result["result"]["capabilities"])
         self.assertEqual(42, result["result"]["conceptCount"])
@@ -412,12 +449,45 @@ class ArelleWorkerTests(unittest.TestCase):
                 "msg": "Unable to load module validate/EFM",
             }]
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                    mock.patch.object(arelle_worker, "run_arelle", return_value=(False, logs, 0)):
+                    mock.patch.object(arelle_worker, "run_arelle", return_value=(False, logs, 0, ())):
                 result = arelle_worker.handle(request, self.args)
 
         self.assertEqual("incompleteValidation", result["status"])
+        self.assertEqual([], result["result"]["loadedPlugins"])
         self.assertTrue(any(item["code"] == "XBR010" for item in result["diagnostics"]))
-        self.assertIn("required Arelle plugin is unavailable", result["error"])
+        self.assertIn("required Arelle plugin did not complete loading", result["error"])
+
+    def test_load_taxonomy_requires_positive_required_plugin_load_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text("<schema/>", encoding="utf-8")
+            entry_digest = "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()
+            self.args.taxonomy_root = str(root)
+            self.args.plugin = ["validate/EFM"]
+            self.args.profile_manifest_data = {
+                "schemaVersion": 2,
+                "profileId": "fixture-profile",
+                "version": "2.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": ["validate/EFM"],
+                "packageFiles": {"entry.xsd": entry_digest},
+            }
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+
+            with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                    mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1, ())):
+                result = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("incompleteValidation", result["status"])
+        self.assertFalse(result["result"]["completed"])
+        self.assertEqual([], result["result"]["loadedPlugins"])
+        self.assertTrue(any(item["code"] == "XBR010" and item["isBlocking"]
+                            for item in result["diagnostics"]))
 
     def test_taxonomy_dependency_closure_accepts_pinned_relative_xsd_and_xlink_edges(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -617,7 +687,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 observed["mapped_content"] = (
                     Path(observed["mappings"]["https://example.invalid/"]) /
                     "remote.xsd").read_text(encoding="utf-8")
-                return True, [], 1
+                return True, [], 1, ()
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
                     mock.patch.object(arelle_worker, "run_arelle", side_effect=capture_arelle) as run_arelle:
@@ -669,7 +739,7 @@ class ArelleWorkerTests(unittest.TestCase):
                     encoding="utf-8")
                 observed["loaded_dependency"] = (
                     Path(snapshot_entry).parent / "dependency.xsd").read_text(encoding="utf-8")
-                return True, [], 1
+                return True, [], 1, ()
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
                     mock.patch.object(arelle_worker, "run_arelle", side_effect=mutate_installed_file_then_load):
@@ -750,13 +820,13 @@ class ArelleWorkerTests(unittest.TestCase):
                 observed["mapped_dependency"] = (
                     Path(observed["mappings"]["https://taxonomy.example/test/"]) /
                     "dependency.xsd").read_text(encoding="utf-8")
-                return True, [], 2
+                return True, [], 2, ()
 
             with mock.patch.object(arelle_worker, "run_arelle", side_effect=load_snapshot):
                 result = arelle_worker.run_arelle_with_verified_taxonomy(
                     "SyntheticPackage/schemas/entry.xsd", closure, root, package_files, self.args)
 
-            self.assertEqual((True, [], 2), result)
+            self.assertEqual((True, [], 2, ()), result)
             self.assertTrue(observed["plugins"][-1].endswith("arelle_offline_taxonomy_catalog.py"))
             self.assertIn("dependency.xsd", observed["mapped_entry"])
             self.assertIn("DependencyType", observed["mapped_dependency"])
@@ -828,7 +898,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 observed["mapped_dependency"] = (
                     Path(observed["mappings"]["https://taxonomy.example/test/"]) /
                     "dependency.xsd").read_text(encoding="utf-8")
-                return True, [], 2
+                return True, [], 2, ()
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
                     mock.patch.object(arelle_worker, "run_arelle", side_effect=fake_arelle):
@@ -883,6 +953,61 @@ class ArelleWorkerTests(unittest.TestCase):
             arelle_worker.run_arelle("entry.xsd", self.args)
 
         self.assertEqual("plugin-one|plugin-two", runtime_options.call_args.kwargs["plugins"])
+
+    def test_arelle_run_collects_only_modules_from_the_loaded_plugin_registry(self):
+        session = mock.MagicMock()
+        session.__enter__.return_value = session
+        session.run.return_value = True
+        session.get_log_messages.return_value = []
+        session.get_models.return_value = []
+        plugin_manager = SimpleNamespace(modulePluginInfos={
+            "loaded-plugin": {"name": "loaded-plugin", "moduleURL": "profile/loaded-plugin"},
+        }, pluginConfig={"modules": {
+            "loaded-plugin": {
+                "entryPoint": {"name": "profile/loaded-plugin", "module": "plugin.module"},
+            },
+            "configured-but-not-loaded": {
+                "name": "configured-but-not-loaded", "moduleURL": "profile/unloaded-plugin",
+            },
+        }})
+        plugin_manager_api = SimpleNamespace(getInstance=lambda: plugin_manager)
+
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "PluginManager", plugin_manager_api), \
+                mock.patch.object(arelle_worker, "Session", return_value=session), \
+                mock.patch.object(arelle_worker, "RuntimeOptions"):
+            result = arelle_worker.run_arelle("entry.xsd", self.args)
+
+        self.assertEqual((True, [], 0,
+                          ("loaded-plugin", "plugin.module", "profile/loaded-plugin")), result)
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Pinned Arelle runtime supplies the plugin loader for this integration fixture.")
+    def test_arelle_run_reports_a_plugin_imported_by_the_pinned_runtime(self):
+        with tempfile.TemporaryDirectory(prefix="xms-plugin-evidence-") as temporary:
+            root = Path(temporary)
+            entry = root / "entry.xsd"
+            entry.write_text(
+                '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                'targetNamespace="urn:xms:plugin-evidence">'
+                '<xs:element name="Entry" type="xs:string"/></xs:schema>',
+                encoding="utf-8")
+            plugin = root / "xms_evidence_plugin.py"
+            plugin.write_text(
+                "def add_options(_parser):\n"
+                "    return None\n"
+                "__pluginInfo__ = {\n"
+                "    'name': 'xms-evidence-plugin',\n"
+                "    'version': '1.0',\n"
+                "    'CntlrCmdLine.Options': add_options,\n"
+                "}\n",
+                encoding="utf-8")
+            self.args.plugin = [str(plugin)]
+
+            ok, logs, _concept_count, loaded_plugins = arelle_worker.run_arelle(entry, self.args)
+
+        self.assertTrue(ok, logs)
+        self.assertIn(str(plugin), loaded_plugins)
 
     def test_arelle_runtime_options_enforce_exact_offline_mode(self):
         session = mock.MagicMock()
@@ -1158,7 +1283,7 @@ print("offline-network-denied")
             observed["path"] = Path(entrypoint)
             observed["temporary_path"] = temporary_path
             observed["report"] = json.loads(Path(entrypoint).read_text(encoding="utf-8"))
-            return True, [], 1
+            return True, [], 1, ()
 
         try:
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -1234,7 +1359,7 @@ print("offline-network-denied")
                 schema_ref = observed["root"].find("{http://www.xbrl.org/2003/linkbase}schemaRef")
                 observed["taxonomy_exists"] = (Path(entrypoint).parent /
                     schema_ref.get("{http://www.w3.org/1999/xlink}href")).is_file()
-                return True, [], 1
+                return True, [], 1, ()
 
             try:
                 with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -1292,7 +1417,7 @@ print("offline-network-denied")
             valid + " trailing",
         ]
         with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
-                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1)) as run_arelle:
+                mock.patch.object(arelle_worker, "run_arelle", return_value=(True, [], 1, ())) as run_arelle:
             for raw_text in malformed_reports:
                 directory = Path(tempfile.mkdtemp(prefix="xms-large-"))
                 if sys.platform != "win32":
@@ -1338,7 +1463,7 @@ print("offline-network-denied")
             shutil.copyfile(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd",
                             workspace / "arelle-test-taxonomy.xsd")
 
-            ok, logs, concept_count = arelle_worker.run_arelle(report_path, self.args)
+            ok, logs, concept_count, _loaded_plugins = arelle_worker.run_arelle(report_path, self.args)
 
         self.assertTrue(ok, logs)
         self.assertGreater(concept_count, 0)

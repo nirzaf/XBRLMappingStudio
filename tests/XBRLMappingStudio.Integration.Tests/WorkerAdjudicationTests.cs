@@ -399,6 +399,79 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task InstalledProfilePreflight_RejectsTaxonomyLoadWithoutExactLoadedPluginEvidence()
+    {
+        var sourceProfile = SyntheticProfile.Build();
+        const string profileId = "fixture-installed-profile";
+        const string profileDigest = "sha256:fixture-installed-profile";
+        var requiredPlugins = new[] { "validate/EFM" };
+        var profile = new FilingProfile
+        {
+            ProfileId = profileId,
+            Digest = profileDigest,
+            Concepts = sourceProfile.Concepts,
+            SupportedUnits = sourceProfile.SupportedUnits,
+            TaxonomyVersion = sourceProfile.TaxonomyVersion,
+            DimensionDomains = sourceProfile.DimensionDomains,
+            OutputFormat = sourceProfile.OutputFormat,
+            NamespaceUris = sourceProfile.NamespaceUris,
+            TaxonomyUrls = sourceProfile.TaxonomyUrls,
+            PackageHashes = sourceProfile.PackageHashes,
+            RequiredChecks = new HashSet<string>(StringComparer.Ordinal),
+            RequiredPlugins = requiredPlugins.ToHashSet(StringComparer.Ordinal)
+        };
+        var missingSourcePath = Path.Combine(_dir, "missing-source.xlsx");
+        var project = ProfileIdentityTests.ProjectWithProfile(
+            TestFixtures.BuildRevenueMappingProject(missingSourcePath), profileId, profileDigest);
+        var taxonomyLoadResult = JsonSerializer.SerializeToElement(new
+        {
+            engine = "Arelle",
+            engineVersion = "2.47.4",
+            capabilities = new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport },
+            completed = true,
+            profileSchemaVersion = 2,
+            profileId,
+            profileVersion = "1.0.0",
+            profileDigest,
+            taxonomyEntryPoint = "entry.xsd",
+            requiredPlugins,
+            requiredChecks = Array.Empty<string>(),
+            loadedPlugins = Array.Empty<string>(),
+            conceptCount = 1
+        });
+        var requests = new List<WorkerRequest>();
+        var handshake = new WorkerHandshake(WorkerProtocol.CurrentVersion, "arelle/2.47.4",
+            new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport })
+        {
+            ArelleAvailable = true,
+            ProfileSchemaVersion = 2,
+            ProfileId = profileId,
+            ProfileVersion = "1.0.0",
+            ProfileDigest = profileDigest,
+            TaxonomyEntryPoint = "entry.xsd",
+            RequiredPlugins = requiredPlugins,
+            RequiredChecks = Array.Empty<string>()
+        };
+        var worker = new FakeWorker(request =>
+        {
+            requests.Add(request);
+            return new WorkerResponse(request.OperationId, WorkerStatus.Success, taxonomyLoadResult,
+                Array.Empty<Diagnostic>(), null);
+        }, handshake, autoCompletion: false);
+
+        var result = await new MappingJobService(profile, worker).RunAsync(
+            project, Connections(project, missingSourcePath), new Dictionary<string, string>(),
+            preview: false, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Empty(result.Manifest.Inputs);
+        Assert.Equal(new[] { WorkerOperations.LoadTaxonomy }, requests.Select(request => request.Operation));
+        Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrProfileMismatch && diagnostic.IsBlocking);
+    }
+
+    [Fact]
     public async Task StagedArtifactValidation_UsesExactStagedBytesForLocalSyntheticRuleEvidence()
     {
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);

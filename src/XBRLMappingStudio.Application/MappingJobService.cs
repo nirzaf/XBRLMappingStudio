@@ -323,12 +323,14 @@ public sealed class MappingJobService
                 || loadedProfile.Capabilities is null
                 || loadedProfile.RequiredPlugins is null
                 || loadedProfile.RequiredChecks is null
+                || loadedProfile.LoadedPlugins is null
                 || loadedProfile.ProfileSchemaVersion != handshake.ProfileSchemaVersion
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileId, handshake.ProfileId)
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileVersion, handshake.ProfileVersion)
                 || !StringComparer.Ordinal.Equals(loadedProfile.ProfileDigest, _profile.Digest)
                 || !StringComparer.Ordinal.Equals(loadedProfile.TaxonomyEntryPoint, taxonomyEntryPoint)
                 || !loadedProfile.RequiredPlugins.SequenceEqual(handshake.RequiredPlugins, StringComparer.Ordinal)
+                || !loadedProfile.LoadedPlugins.SequenceEqual(handshake.RequiredPlugins, StringComparer.Ordinal)
                 || !loadedProfile.RequiredChecks.SequenceEqual(handshake.RequiredChecks, StringComparer.Ordinal)
                 || !loadedProfile.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
                 return PreflightFailure(manifest, RunOutcome.IncompleteConfiguration,

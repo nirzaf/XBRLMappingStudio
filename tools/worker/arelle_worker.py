@@ -88,11 +88,13 @@ OASIS_CATALOG_NAMESPACE = "urn:oasis:names:tc:entity:xmlns:xml:catalog"
 TAXONOMY_PACKAGE_NAMESPACE = "http://xbrl.org/2016/taxonomy-package"
 
 try:
+    from arelle import PluginManager
     from arelle.api.Session import Session
     from arelle.RuntimeOptions import RuntimeOptions
 
     ARELLE_AVAILABLE = True
 except Exception:  # The host must fail closed if this optional runtime is absent.
+    PluginManager = None
     RuntimeOptions = None
     Session = None
     ARELLE_AVAILABLE = False
@@ -1723,12 +1725,72 @@ def run_arelle(entrypoint, args, temporary_path=None):
     with Session() as session:
         ok = session.run(options)
         logs = session.get_log_messages()
+        loaded_plugins = loaded_plugin_identifiers()
         models = session.get_models()
         concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
         for model in models:
             session._cntlr.modelManager.close(model)
     gc.collect()
-    return ok, logs, concept_count
+    return ok, logs, concept_count, loaded_plugins
+
+
+def loaded_plugin_identifiers():
+    """Return identifiers from Arelle's registry of modules imported in this session."""
+    if PluginManager is None:
+        return ()
+    try:
+        manager = PluginManager.getInstance()
+        module_plugin_infos = getattr(manager, "modulePluginInfos", None)
+    except Exception:
+        return ()
+    if not isinstance(module_plugin_infos, dict):
+        return ()
+
+    plugin_config = getattr(manager, "pluginConfig", {})
+    configured_modules = plugin_config.get("modules", {}) if isinstance(plugin_config, dict) else {}
+    if not isinstance(configured_modules, dict):
+        configured_modules = {}
+    identifiers = set()
+    for name, plugin_info in module_plugin_infos.items():
+        if isinstance(name, str) and name:
+            identifiers.add(name)
+        metadata = [plugin_info, configured_modules.get(name)]
+        for item in metadata:
+            if isinstance(item, dict):
+                for key in ("name", "moduleURL"):
+                    identifier = item.get(key)
+                    if isinstance(identifier, str) and identifier:
+                        identifiers.add(identifier)
+                entry_point = item.get("entryPoint")
+                if isinstance(entry_point, dict):
+                    for key in ("name", "module"):
+                        identifier = entry_point.get(key)
+                        if isinstance(identifier, str) and identifier:
+                            identifiers.add(identifier)
+    return tuple(sorted(identifiers))
+
+
+def required_plugin_completions(required_plugins, loaded_identifiers, failures=(), missing=()):
+    """Adjudicate required plugin IDs using only the current run's loaded module registry."""
+    loaded = set(loaded_identifiers)
+    failed = set(failures)
+    not_configured = set(missing)
+    completions = []
+    for plugin in required_plugins:
+        if plugin in not_configured:
+            status = "unavailable"
+            detail = "Required plugin was not configured for this worker."
+        elif plugin in failed:
+            status = "fail"
+            detail = "Arelle reported that the required plugin could not be loaded."
+        elif plugin in loaded:
+            status = "pass"
+            detail = "Arelle's runtime registry confirms the required plugin module loaded."
+        else:
+            status = "unavailable"
+            detail = "Arelle did not report the required plugin in its loaded module registry."
+        completions.append({"identifier": plugin, "status": status, "detail": detail})
+    return completions
 
 
 def log_diagnostics(logs, op_id, temporary_path=None):
@@ -1864,23 +1926,33 @@ def handle(req, args):
                     profile["packageFiles"],
                     profile.get("offlineReferences", {}),
                 )
-                ok, logs, concept_count = run_arelle_with_verified_taxonomy(
+                ok, logs, concept_count, loaded_plugins = run_arelle_with_verified_taxonomy(
                     relative, dependency_paths, args.taxonomy_root, profile["packageFiles"], args)
                 relative_entry_point = relative
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
-                ok, logs, concept_count = run_arelle(taxonomy_path, args)
+                ok, logs, concept_count, loaded_plugins = run_arelle(taxonomy_path, args)
                 relative_entry_point = os.path.relpath(
                     taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
-            plugin_failures = required_plugin_load_failures(
-                logs, profile.get("requiredPlugins", []) if profile else [])
-            if plugin_failures:
-                diags = [diagnostic(op_id, "XBR010", "error",
-                                    "Required Arelle plugin could not be loaded: " + plugin,
-                                    "plugin:" + plugin)
-                         for plugin in plugin_failures]
-                return response(op_id, "incompleteValidation", {"conceptCount": concept_count}, diags,
-                                "A required Arelle plugin is unavailable")
+            required_plugins = profile.get("requiredPlugins", []) if profile else []
+            plugin_failures = required_plugin_load_failures(logs, required_plugins)
+            plugin_completions = required_plugin_completions(
+                required_plugins, loaded_plugins, failures=plugin_failures)
+            incomplete_plugins = [item for item in plugin_completions if item["status"] != "pass"]
+            if incomplete_plugins:
+                diags = [diagnostic(
+                    op_id, "XBR010", "error",
+                    ("Required Arelle plugin failed to load: " if item["status"] == "fail"
+                     else "Arelle did not confirm that required plugin loaded: ") + item["identifier"],
+                    "plugin:" + item["identifier"])
+                    for item in incomplete_plugins]
+                return response(op_id, "incompleteValidation", {
+                    "completed": False,
+                    "conceptCount": concept_count,
+                    "requiredPlugins": required_plugins,
+                    "loadedPlugins": [item["identifier"] for item in plugin_completions
+                                      if item["status"] == "pass"],
+                }, diags, "A required Arelle plugin did not complete loading")
             diags = log_diagnostics(logs, op_id)
             if not ok or any(d["isBlocking"] for d in diags):
                 return response(op_id, "domainFailure", {"conceptCount": concept_count}, diags,
@@ -1894,7 +1966,8 @@ def handle(req, args):
                 "profileVersion": profile.get("version") if profile else None,
                 "profileDigest": profile.get("profileDigest") if profile else None,
                 "taxonomyEntryPoint": relative_entry_point,
-                "requiredPlugins": profile.get("requiredPlugins", []) if profile else [],
+                "requiredPlugins": required_plugins,
+                "loadedPlugins": [item["identifier"] for item in plugin_completions],
                 "requiredChecks": profile.get("requiredChecks", []) if profile else [],
                 "conceptCount": concept_count,
                 "completed": True,
@@ -2012,13 +2085,8 @@ def handle(req, args):
                 "status": "unavailable",
                 "detail": "Arelle does not expose a machine-readable completion signal for this required rule.",
             } for rule in required_rules]
-            plugin_completions = [{
-                "identifier": plugin,
-                "status": "unavailable",
-                "detail": ("Required plugin was not configured for this worker."
-                           if plugin in missing_plugins else
-                           "Arelle did not provide machine-readable evidence that the required plugin loaded."),
-            } for plugin in required_plugins]
+            plugin_completions = required_plugin_completions(
+                required_plugins, (), missing=missing_plugins)
             completion = {
                 "profileId": profile_id,
                 "profileDigest": profile_digest,
@@ -2074,17 +2142,19 @@ def handle(req, args):
                     run_args = copy.copy(args)
                     run_args.plugin = list(getattr(args, "plugin", []) or [])
                     run_args.plugin.append(str(mapping_plugin))
-                ok, logs, concept_count = run_arelle(path, run_args, workdir)
+                ok, logs, concept_count, loaded_plugins = run_arelle(path, run_args, workdir)
                 plugin_failures = required_plugin_load_failures(logs, required_plugins)
-                if plugin_failures:
-                    diags = [diagnostic(op_id, "XBR010", "error",
-                                        "Required Arelle plugin could not be loaded: " + plugin,
-                                        "plugin:" + plugin)
-                             for plugin in plugin_failures]
-                    for item in plugin_completions:
-                        if item["identifier"] in plugin_failures:
-                            item["status"] = "unavailable"
-                            item["detail"] = "Arelle reported that the required plugin could not be loaded."
+                plugin_completions = required_plugin_completions(
+                    required_plugins, loaded_plugins, failures=plugin_failures)
+                completion["requiredPlugins"] = plugin_completions
+                incomplete_plugins = [item for item in plugin_completions if item["status"] != "pass"]
+                if incomplete_plugins:
+                    diags = [diagnostic(
+                        op_id, "XBR010", "error",
+                        ("Required Arelle plugin failed to load: " if item["status"] == "fail"
+                         else "Arelle did not confirm that required plugin loaded: ") + item["identifier"],
+                        "plugin:" + item["identifier"])
+                        for item in incomplete_plugins]
                     return response(op_id, "incompleteValidation", {
                         "engine": "Arelle", "engineVersion": ENGINE_VERSION,
                         "completed": False, "conceptCount": concept_count,

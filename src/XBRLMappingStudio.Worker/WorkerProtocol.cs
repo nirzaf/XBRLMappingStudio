@@ -107,6 +107,8 @@ public sealed record WorkerTaxonomyLoadResult(
     int ConceptCount)
 {
     public IReadOnlyList<string> RequiredChecks { get; init; } = Array.Empty<string>();
+    /// <summary>Required plugin IDs positively observed in Arelle's loaded-module registry.</summary>
+    public IReadOnlyList<string> LoadedPlugins { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>Mandatory validation identifiers sent with each report request.</summary>
