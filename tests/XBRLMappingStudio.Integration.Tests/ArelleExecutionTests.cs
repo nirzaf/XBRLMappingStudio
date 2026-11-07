@@ -560,8 +560,10 @@ public sealed class ArelleExecutionTests
             Assert.Equal(2, processIds.Length);
             if (OperatingSystem.IsWindows())
             {
-                Assert.True(processLines[2] == "True", "The worker must be assigned to the kill-on-close Job Object before it creates children.");
-                Assert.True(processLines[3] == "True", "The worker's child must inherit the Job Object.");
+                Assert.True(processLines[2] == "True",
+                    $"The worker must be assigned to the kill-on-close Job Object before it creates children (probe: {processLines[2]}).");
+                Assert.True(processLines[3] == "True",
+                    $"The worker's child must inherit the Job Object (probe: {processLines[3]}).");
             }
 
             cancellation.Cancel();
@@ -746,11 +748,21 @@ public sealed class ArelleExecutionTests
             handle = kernel32.OpenProcess(0x1000, 0, process_id)
             kernel32.OpenJobObjectW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
             kernel32.OpenJobObjectW.restype = ctypes.c_void_p
+            kernel32.IsProcessInJob.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+            kernel32.IsProcessInJob.restype = ctypes.c_int
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
             job = kernel32.OpenJobObjectW(0x0004, 0, f"XBRLMappingStudio.Worker.{os.getpid()}")
             result = ctypes.c_int()
             try:
-                if not handle or not job or not kernel32.IsProcessInJob(handle, job, ctypes.byref(result)):
-                    return "error"
+                if not handle:
+                    return f"error:OpenProcess:{ctypes.get_last_error()}"
+                if not job:
+                    error = ctypes.get_last_error()
+                    kernel32.IsProcessInJob(handle, None, ctypes.byref(result))
+                    return f"error:OpenJobObjectW:{error}:any={bool(result.value)}:pid={process_id}:self={os.getpid()}"
+                if not kernel32.IsProcessInJob(handle, job, ctypes.byref(result)):
+                    return f"error:IsProcessInJob:{ctypes.get_last_error()}"
                 return str(bool(result.value))
             finally:
                 if handle:

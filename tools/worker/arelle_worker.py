@@ -3,10 +3,12 @@
 
 import argparse
 from collections import deque
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 import gc
 import hashlib
 import json
+import logging
 import math
 import os
 import posixpath
@@ -29,6 +31,11 @@ SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_DIAGNOSTICS = 128
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000
+MAX_ARELLE_LOG_RECORDS = 512
+MAX_ARELLE_LOG_BYTES = 1024 * 1024
+MAX_ARELLE_LOG_VALUE_ITEMS = 16
+MAX_ARELLE_LOG_VALUE_CHARS = 2_048
+MAX_ARELLE_LOG_VALUE_DEPTH = 4
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
 MAX_PROFILE_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -123,10 +130,7 @@ def response(op_id, status, result=None, diagnostics=None, error=None):
 
 
 def diagnostic(op_id, code, level, message, rule=None):
-    severity = str(level or "error").lower()
-    severity = {"info": "information", "warn": "warning", "fatal": "critical"}.get(severity, severity)
-    if severity not in ("information", "warning", "error", "critical"):
-        severity = "error"
+    severity = _diagnostic_severity(level)
     return {
         "code": code,
         "subsystem": "XBRL",
@@ -137,6 +141,160 @@ def diagnostic(op_id, code, level, message, rule=None):
         "operationId": op_id,
         "ruleIdentifier": rule,
     }
+
+
+def _diagnostic_severity(level):
+    severity = str(level or "error").lower().replace("_", "-")
+    severity = {
+        "info": "information",
+        "warn": "warning",
+        "fatal": "critical",
+        "info-result": "information",
+        "info-semantic": "information",
+        "warning-semantic": "warning",
+        "assertion-satisfied": "information",
+        "inconsistency": "warning",
+        "error-semantic": "error",
+        "assertion-not-satisfied": "error",
+    }.get(severity, severity)
+    if severity not in ("information", "warning", "error", "critical"):
+        return "error"
+    return severity
+
+
+def _bounded_log_value(value, depth=0):
+    """Copy a log value into a small JSON-safe shape without retaining raw objects."""
+    if depth >= MAX_ARELLE_LOG_VALUE_DEPTH:
+        return "<log-value-depth-limit>"
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, int):
+        if value.bit_length() > 64:
+            return f"<large-integer:{value.bit_length()}-bits>"
+        return value
+    if isinstance(value, Decimal):
+        sign, digits, exponent = value.as_tuple()
+        if len(digits) <= MAX_ARELLE_LOG_VALUE_CHARS:
+            return str(value)[:MAX_ARELLE_LOG_VALUE_CHARS]
+        exponent_text = str(exponent)[:MAX_ARELLE_LOG_VALUE_CHARS - 3]
+        sign_text = "-" if sign else ""
+        marker = "…e"
+        prefix_length = max(0, MAX_ARELLE_LOG_VALUE_CHARS - len(sign_text) - len(marker) - len(exponent_text))
+        prefix = "".join(str(digit) for digit in digits[:prefix_length])
+        return sign_text + prefix + marker + exponent_text
+    if isinstance(value, str):
+        return value[:MAX_ARELLE_LOG_VALUE_CHARS]
+    if isinstance(value, bytes):
+        return value[:MAX_ARELLE_LOG_VALUE_CHARS].decode("utf-8", errors="replace")
+    if isinstance(value, Mapping):
+        result = {}
+        iterator = iter(value.items())
+        truncated = False
+        for _ in range(MAX_ARELLE_LOG_VALUE_ITEMS):
+            try:
+                key, item = next(iterator)
+            except StopIteration:
+                break
+            safe_key = key[:128] if isinstance(key, str) else f"<{type(key).__name__}>"
+            result[safe_key] = _bounded_log_value(item, depth + 1)
+        else:
+            sentinel = object()
+            truncated = next(iterator, sentinel) is not sentinel
+        if truncated:
+            result["__xms_truncated__"] = True
+        return result
+    if isinstance(value, (list, tuple)):
+        result = []
+        iterator = iter(value)
+        for _ in range(MAX_ARELLE_LOG_VALUE_ITEMS):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            result.append(_bounded_log_value(item, depth + 1))
+        else:
+            sentinel = object()
+            if next(iterator, sentinel) is not sentinel:
+                result.append("<additional-values-omitted>")
+        return result
+    return f"<{type(value).__name__}>"
+
+
+def _bounded_log_message(record):
+    message = _bounded_log_value(getattr(record, "msg", ""))
+    raw_arguments = getattr(record, "args", {})
+    arguments = _bounded_log_value(raw_arguments)
+    if isinstance(raw_arguments, tuple) and isinstance(arguments, list):
+        arguments = tuple(arguments)
+    try:
+        if arguments and len(arguments) > 0:
+            message = message % arguments
+    except (TypeError, ValueError, KeyError, OverflowError):
+        pass
+    return _bounded_log_value(message)
+
+
+def _is_blocking_log_level(level):
+    return _diagnostic_severity(level) in ("error", "critical")
+
+
+class BoundedLogMessages(list):
+    """Structured log rows with explicit counts for records omitted by bounded capture."""
+
+    def __init__(self):
+        super().__init__()
+        self.bytes_retained = 0
+        self.suppressed_count = 0
+        self.suppressed_blocking = False
+
+    def suppress(self, level):
+        self.suppressed_count += 1
+        self.suppressed_blocking = self.suppressed_blocking or _is_blocking_log_level(level)
+
+
+class BoundedArelleLogHandler(logging.Handler):
+    """Capture Arelle messages without retaining its unbounded raw LogRecord buffer."""
+
+    def __init__(self, max_records=MAX_ARELLE_LOG_RECORDS, max_bytes=MAX_ARELLE_LOG_BYTES):
+        super().__init__()
+        if max_records < 1 or max_bytes < 1:
+            raise ValueError("Arelle log capture limits must be positive.")
+        self.max_records = max_records
+        self.max_bytes = max_bytes
+        self.messages = BoundedLogMessages()
+
+    def emit(self, record):
+        level = getattr(record, "levelname", "error")
+        try:
+            if len(self.messages) >= self.max_records:
+                self.messages.suppress(level)
+                return
+            arguments = _bounded_log_value(getattr(record, "args", {}))
+            message = _bounded_log_message(record)
+            if isinstance(message, str):
+                message = message[:MAX_DIAGNOSTIC_MESSAGE_CHARS]
+            else:
+                message = _bounded_log_value(message)
+            args = arguments.get("args", {}) if isinstance(arguments, Mapping) else {}
+            row = {
+                "levelname": str(level)[:128],
+                "messageCode": _bounded_log_value(getattr(record, "messageCode", "")),
+                "msg": message,
+                "refs": _bounded_log_value(getattr(record, "refs", [])),
+                "args": _bounded_log_value(args),
+            }
+            encoded_size = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            if self.messages.bytes_retained + encoded_size > self.max_bytes:
+                self.messages.suppress(level)
+                return
+            self.messages.append(row)
+            self.messages.bytes_retained += encoded_size
+        except Exception:
+            # A malformed extension log record cannot break validation. Record that
+            # it was omitted as blocking uncertainty rather than silently succeeding.
+            self.messages.suppress("error")
 
 
 def valid_request(req):
@@ -1722,9 +1880,10 @@ def run_arelle(entrypoint, args, temporary_path=None):
         plugins="|".join(args.plugin) if args.plugin else None,
         disclosureSystemName=args.disclosure_system,
     )
+    log_handler = BoundedArelleLogHandler()
     with Session() as session:
-        ok = session.run(options)
-        logs = session.get_log_messages()
+        ok = session.run(options, logHandler=log_handler)
+        logs = log_handler.messages
         loaded_plugins = loaded_plugin_identifiers()
         models = session.get_models()
         concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
@@ -1819,12 +1978,14 @@ def log_diagnostics(logs, op_id, temporary_path=None):
         else:
             suppressed += 1
             suppressed_blocking = suppressed_blocking or finding["isBlocking"]
+    suppressed += getattr(logs, "suppressed_count", 0)
+    suppressed_blocking = suppressed_blocking or getattr(logs, "suppressed_blocking", False)
     if suppressed:
         result.append(diagnostic(
             op_id,
             "XBR009",
             "error" if suppressed_blocking else "warning",
-            f"{suppressed} additional Arelle validation findings were omitted after the first {MAX_RESPONSE_DIAGNOSTICS} details.",
+            f"{suppressed} additional Arelle log records were omitted by bounded capture or response limits.",
             "arelle:diagnostic-limit",
         ))
     return result

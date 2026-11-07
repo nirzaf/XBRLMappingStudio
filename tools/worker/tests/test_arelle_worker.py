@@ -2,6 +2,7 @@ import hashlib
 import http.server
 import io
 import json
+import logging
 import runpy
 import socket
 import subprocess
@@ -10,6 +11,7 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -185,7 +187,7 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual(arelle_worker.MAX_RESPONSE_DIAGNOSTICS + 1, len(diagnostics))
         self.assertTrue(all(item["isBlocking"] for item in diagnostics))
         self.assertEqual("arelle:diagnostic-limit", diagnostics[-1]["ruleIdentifier"])
-        self.assertIn("7 additional Arelle validation findings were omitted", diagnostics[-1]["message"])
+        self.assertIn("bounded capture or response limits", diagnostics[-1]["message"])
 
         long_message = "x" * (arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS + 10)
         single = arelle_worker.log_diagnostics(
@@ -193,6 +195,94 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertLessEqual(len(single[0]["message"]), arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS)
         self.assertTrue(single[0]["message"].endswith("…"))
         self.assertFalse(single[0]["isBlocking"])
+
+    def test_arelle_log_handler_bounds_raw_capture_and_preserves_omitted_severity(self):
+        handler = arelle_worker.BoundedArelleLogHandler(max_records=2, max_bytes=16_384)
+        for level, message_code in (
+            (logging.INFO, "fixture:info"),
+            (logging.WARNING, "fixture:warning"),
+            (logging.ERROR, "fixture:error"),
+        ):
+            record = logging.LogRecord("arelle", level, "worker.py", 10, "finding", (), None)
+            record.messageCode = message_code
+            record.refs = []
+            handler.emit(record)
+
+        self.assertEqual(2, len(handler.messages))
+        self.assertFalse(hasattr(handler, "logRecordBuffer"))
+        self.assertEqual(1, handler.messages.suppressed_count)
+        self.assertTrue(handler.messages.suppressed_blocking)
+        diagnostics = arelle_worker.log_diagnostics(handler.messages, "bounded-op")
+        self.assertTrue(diagnostics[-1]["isBlocking"])
+        self.assertIn("1 additional Arelle log records", diagnostics[-1]["message"])
+
+        warning_handler = arelle_worker.BoundedArelleLogHandler(max_records=1, max_bytes=16_384)
+        for _ in range(2):
+            record = logging.LogRecord("arelle", logging.WARNING, "worker.py", 10, "warning", (), None)
+            warning_handler.emit(record)
+        warning_diagnostics = arelle_worker.log_diagnostics(warning_handler.messages, "bounded-op")
+        self.assertFalse(warning_diagnostics[-1]["isBlocking"])
+
+    def test_arelle_custom_log_levels_keep_their_diagnostic_severity(self):
+        expected = {
+            "INFO-RESULT": ("information", False),
+            "INFO-SEMANTIC": ("information", False),
+            "WARNING-SEMANTIC": ("warning", False),
+            "ASSERTION-SATISFIED": ("information", False),
+            "INCONSISTENCY": ("warning", False),
+            "ERROR-SEMANTIC": ("error", True),
+            "ASSERTION-NOT-SATISFIED": ("error", True),
+        }
+        for level, (severity, blocking) in expected.items():
+            with self.subTest(level=level):
+                finding = arelle_worker.diagnostic("severity-op", "XBR009", level, "fixture")
+                self.assertEqual(severity, finding["severity"])
+                self.assertEqual(blocking, finding["isBlocking"])
+
+    def test_arelle_log_handler_caps_message_values_and_total_capture_bytes(self):
+        record = logging.LogRecord(
+            "arelle", logging.WARNING, "worker.py", 10,
+            "value %(payload)s", ({"payload": "x" * 1_000_000},), None)
+        capped = arelle_worker.BoundedArelleLogHandler(max_records=4, max_bytes=512)
+        capped.emit(record)
+        self.assertLessEqual(capped.messages.bytes_retained, capped.max_bytes)
+        self.assertEqual(1, capped.messages.suppressed_count)
+        self.assertFalse(capped.messages.suppressed_blocking)
+
+        bounded = arelle_worker.BoundedArelleLogHandler(max_records=4, max_bytes=16_384)
+        bounded.emit(record)
+        self.assertLessEqual(len(bounded.messages[0]["msg"]),
+                             arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS)
+
+        positional = logging.LogRecord(
+            "arelle", logging.ERROR, "worker.py", 10, "finding %s", ("specific issue",), None)
+        formatted = arelle_worker.BoundedArelleLogHandler()
+        formatted.emit(positional)
+        self.assertEqual("finding specific issue", formatted.messages[0]["msg"])
+
+        large_integer = 1 << 100_000
+        structured = logging.LogRecord(
+            "arelle", logging.ERROR, "worker.py", 10, "finding", (), None)
+        structured.args = {"args": {"value": large_integer}}
+        bounded_integer = arelle_worker.BoundedArelleLogHandler()
+        bounded_integer.emit(structured)
+        self.assertEqual("<large-integer:100001-bits>",
+                         bounded_integer.messages[0]["args"]["value"])
+
+        decimal_record = logging.LogRecord(
+            "arelle", logging.ERROR, "worker.py", 10,
+            "value=%s", (Decimal("9" * 5_000),), None)
+        bounded_decimal = arelle_worker.BoundedArelleLogHandler()
+        bounded_decimal.emit(decimal_record)
+        self.assertLessEqual(len(bounded_decimal.messages[0]["msg"]),
+                             arelle_worker.MAX_DIAGNOSTIC_MESSAGE_CHARS)
+
+        non_finite = logging.LogRecord(
+            "arelle", logging.ERROR, "worker.py", 10, "finding", (), None)
+        non_finite.args = {"args": {"value": float("nan")}}
+        bounded_float = arelle_worker.BoundedArelleLogHandler()
+        bounded_float.emit(non_finite)
+        self.assertEqual("nan", bounded_float.messages[0]["args"]["value"])
 
     def test_emit_replaces_oversized_response_with_bounded_failure(self):
         output = io.StringIO()
@@ -953,6 +1043,8 @@ class ArelleWorkerTests(unittest.TestCase):
             arelle_worker.run_arelle("entry.xsd", self.args)
 
         self.assertEqual("plugin-one|plugin-two", runtime_options.call_args.kwargs["plugins"])
+        self.assertIsInstance(session.run.call_args.kwargs["logHandler"],
+                              arelle_worker.BoundedArelleLogHandler)
 
     def test_arelle_run_collects_only_modules_from_the_loaded_plugin_registry(self):
         session = mock.MagicMock()
