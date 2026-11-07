@@ -171,6 +171,7 @@ public sealed class PlanCompiler
         var node = graph.Nodes[nodeId];
         return (snapshot, setSlots, ctx, diag) =>
         {
+            ctx.CancellationToken.ThrowIfCancellationRequested();
             var outputs = new Dictionary<string, DataValue>(StringComparer.Ordinal);
 
             // Resolve a set-phase input port as a flat list: an upstream set producer's
@@ -186,7 +187,7 @@ public sealed class PlanCompiler
                     if (v.Raw is IReadOnlyList<DataValue> list) return list;
                     return new[] { v };
                 }
-                return ResolveCollection(snapshot, e);
+                return ResolveCollection(snapshot, e, ctx.CancellationToken);
             }
 
             IReadOnlyList<IReadOnlyList<SourceTransformationPath>> ReadSetInputPaths(string port)
@@ -197,20 +198,28 @@ public sealed class PlanCompiler
                 if (setSlots.TryGetValue(key, out var value))
                 {
                     if (value.Raw is IReadOnlyList<DataValue> list)
-                        return Enumerable.Range(0, list.Count)
-                            .Select(index => (IReadOnlyList<SourceTransformationPath>)ctx.Provenance
-                                .GetSourceTransformationPaths(ProvenanceTracker.SetSlotKey(
-                                    e.SourceNodeId, e.SourcePortName, index)))
-                            .ToArray();
+                    {
+                        var paths = new List<IReadOnlyList<SourceTransformationPath>>(list.Count);
+                        for (var index = 0; index < list.Count; index++)
+                        {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            paths.Add(ctx.Provenance.GetSourceTransformationPaths(ProvenanceTracker.SetSlotKey(
+                                e.SourceNodeId, e.SourcePortName, index)));
+                        }
+                        return paths;
+                    }
                     return new[] { ctx.Provenance.GetSourceTransformationPaths(
                         ProvenanceTracker.SetSlotKey(e.SourceNodeId, e.SourcePortName)) };
                 }
 
-                return Enumerable.Range(0, snapshot.Count)
-                    .Select(index => (IReadOnlyList<SourceTransformationPath>)ctx.Provenance
-                        .GetSourceTransformationPaths(ProvenanceTracker.SlotKey(
-                            e.SourceNodeId, e.SourcePortName, index)))
-                    .ToArray();
+                var snapshotPaths = new List<IReadOnlyList<SourceTransformationPath>>(snapshot.Count);
+                for (var index = 0; index < snapshot.Count; index++)
+                {
+                    ctx.CancellationToken.ThrowIfCancellationRequested();
+                    snapshotPaths.Add(ctx.Provenance.GetSourceTransformationPaths(ProvenanceTracker.SlotKey(
+                        e.SourceNodeId, e.SourcePortName, index)));
+                }
+                return snapshotPaths;
             }
 
             IReadOnlyList<SourceTransformationPath> ReadSetFieldPaths(
@@ -237,10 +246,14 @@ public sealed class PlanCompiler
                 var key = ProvenanceTracker.SetSlotKey(nodeId, port, itemIndex, fieldName);
                 foreach (var path in paths)
                 {
+                    ctx.CancellationToken.ThrowIfCancellationRequested();
                     ctx.Provenance.RecordSourceTransformationPath(key, path);
                     ctx.Provenance.RecordSource(key, path.Source);
                     foreach (var transformationId in path.TransformationIds)
+                    {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         ctx.Provenance.RecordTransformation(key, transformationId);
+                    }
                 }
             }
 
@@ -250,12 +263,12 @@ public sealed class PlanCompiler
                 var extended = new List<SourceTransformationPath>();
                 foreach (var path in paths)
                 {
-                    var ids = path.TransformationIds.Contains(transformationId, StringComparer.Ordinal)
-                        ? path.TransformationIds
-                        : path.TransformationIds.Append(transformationId).ToArray();
-                    if (!extended.Any(existing => existing.Source == path.Source
-                        && existing.TransformationIds.SequenceEqual(ids, StringComparer.Ordinal)))
-                        extended.Add(new SourceTransformationPath(path.Source, ids));
+                    ctx.CancellationToken.ThrowIfCancellationRequested();
+                    var ids = AppendTransformationId(path.TransformationIds, transformationId,
+                        ctx.CancellationToken);
+                    var candidate = new SourceTransformationPath(path.Source, ids);
+                    if (!ContainsEquivalentPath(extended, candidate, ctx.CancellationToken))
+                        extended.Add(candidate);
                 }
                 return extended;
             }
@@ -264,9 +277,11 @@ public sealed class PlanCompiler
                 IEnumerable<SourceTransformationPath> candidates)
             {
                 foreach (var candidate in candidates)
-                    if (!target.Any(existing => existing.Source == candidate.Source
-                        && existing.TransformationIds.SequenceEqual(candidate.TransformationIds, StringComparer.Ordinal)))
+                {
+                    ctx.CancellationToken.ThrowIfCancellationRequested();
+                    if (!ContainsEquivalentPath(target, candidate, ctx.CancellationToken))
                         target.Add(candidate);
+                }
             }
 
             switch (node.NodeType)
@@ -280,6 +295,7 @@ public sealed class PlanCompiler
                     {
                         for (int r = 0; r < snapshot.Count; r++)
                         {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
                             var v = snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName);
                             // Keep one slot per source row. Reducers decide whether missing
                             // values are ignored, and Sum must distinguish an empty input
@@ -315,6 +331,7 @@ public sealed class PlanCompiler
                     var hasMissingValue = false;
                     for (var index = 0; index < items.Count; index++)
                     {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         var it = items[index];
                         if (it.IsMissing)
                         {
@@ -352,8 +369,11 @@ public sealed class PlanCompiler
                         AddDistinctPaths(contributingPaths, nilPaths);
                         if (hasMissingValue)
                             for (var index = 0; index < items.Count; index++)
+                            {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (items[index].IsMissing && index < itemPaths.Count)
                                     AddDistinctPaths(contributingPaths, itemPaths[index]);
+                            }
                     }
                     outputs["value"] = aggregateValue;
                     StoreSetPaths("value", null, ExtendPaths(contributingPaths, nodeId));
@@ -370,6 +390,7 @@ public sealed class PlanCompiler
                     var contributingPaths = new List<SourceTransformationPath>();
                     for (var index = 0; index < items.Count; index++)
                     {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         var it = items[index];
                         if (it.IsMissing || it.IsNil) continue;
                         c++;
@@ -387,6 +408,7 @@ public sealed class PlanCompiler
                     var firstIndex = -1;
                     for (var index = 0; index < items.Count; index++)
                     {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         if (items[index].IsMissing || items[index].IsNil) continue;
                         firstIndex = index;
                         break;
@@ -420,9 +442,11 @@ public sealed class PlanCompiler
                         int limit = ctx.IsPreview ? Math.Min(records.Count, ctx.PreviewRowLimit) : records.Count;
                         for (int r = 0; r < limit; r++)
                         {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
                             var dict = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                             foreach (var f in records[r].Fields)
                             {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (retain is null || retain.Contains(f.Key, StringComparer.Ordinal))
                                 {
                                     dict[f.Key] = f.Value;
@@ -480,22 +504,43 @@ public sealed class PlanCompiler
                     static long EstimateStringStorageBytes(string? value)
                         => value is null ? 0 : 24L + (long)value.Length * sizeof(char);
 
-                    static string EncodeGroupIdentity(IReadOnlyList<string> values)
+                    static string EncodeGroupIdentity(
+                        IReadOnlyList<string> values, CancellationToken cancellationToken)
                     {
                         var builder = new System.Text.StringBuilder();
                         foreach (var value in values)
-                            builder.Append(value.Length.ToString(CultureInfo.InvariantCulture))
-                                .Append(':')
-                                .Append(value);
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            builder.Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':');
+                            foreach (var character in value)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                builder.Append(character);
+                            }
+                        }
                         return builder.ToString();
                     }
 
-                    static string FormatGroupKey(IReadOnlyList<string> values)
-                        => string.Join("|", values.Select(value => value
-                            .Replace("\\", "\\\\", StringComparison.Ordinal)
-                            .Replace("|", "\\|", StringComparison.Ordinal)));
+                    static string FormatGroupKey(
+                        IReadOnlyList<string> values, CancellationToken cancellationToken)
+                    {
+                        var builder = new System.Text.StringBuilder();
+                        for (var valueIndex = 0; valueIndex < values.Count; valueIndex++)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (valueIndex > 0) builder.Append('|');
+                            foreach (var character in values[valueIndex])
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                if (character is '\\' or '|') builder.Append('\\');
+                                builder.Append(character);
+                            }
+                        }
+                        return builder.ToString();
+                    }
 
-                    static long EstimateGroupPathBytes(SourceTransformationPath path)
+                    static long EstimateGroupPathBytes(
+                        SourceTransformationPath path, CancellationToken cancellationToken)
                     {
                         var oneCopy = 96L
                             + EstimateStringStorageBytes(path.Source.SourceId)
@@ -503,7 +548,10 @@ public sealed class PlanCompiler
                             + EstimateStringStorageBytes(path.Source.DisplayName)
                             + 24L + (long)path.TransformationIds.Count * 16L;
                         foreach (var transformationId in path.TransformationIds)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
                             oneCopy = checked(oneCopy + EstimateStringStorageBytes(transformationId));
+                        }
                         // Include the retained source path plus headroom for the set-output
                         // and fact provenance copies produced after aggregation.
                         return checked(oneCopy * 3);
@@ -523,11 +571,10 @@ public sealed class PlanCompiler
                     {
                         foreach (var candidate in candidates)
                         {
-                            if (target.Any(existing => existing.Source == candidate.Source
-                                && existing.TransformationIds.SequenceEqual(candidate.TransformationIds,
-                                    StringComparer.Ordinal)))
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            if (ContainsEquivalentPath(target, candidate, ctx.CancellationToken))
                                 continue;
-                            if (!TryReserveGroupMemory(EstimateGroupPathBytes(candidate)))
+                            if (!TryReserveGroupMemory(EstimateGroupPathBytes(candidate, ctx.CancellationToken)))
                                 return false;
                             target.Add(candidate);
                         }
@@ -537,9 +584,15 @@ public sealed class PlanCompiler
                     bool exceededWorkingMemory = false;
                     foreach (var (rec, itemIndex) in items.Select((item, index) => (item, index)))
                     {
-                        if (!TryRecordFields(rec, out var fields)) continue;
-                        var keyValues = keyFields.Select(kf => GetField(fields, kf).AsString()).ToArray();
-                        var bk = EncodeGroupIdentity(keyValues);
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
+                        if (!TryRecordFields(rec, ctx.CancellationToken, out var fields)) continue;
+                        var keyValues = new string[keyFields.Length];
+                        for (var keyIndex = 0; keyIndex < keyFields.Length; keyIndex++)
+                        {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            keyValues[keyIndex] = GetField(fields, keyFields[keyIndex]).AsString();
+                        }
+                        var bk = EncodeGroupIdentity(keyValues, ctx.CancellationToken);
                         if (!totals.ContainsKey(bk))
                         {
                             if (order.Count >= ctx.MaxGroupCount)
@@ -558,7 +611,7 @@ public sealed class PlanCompiler
                                     nodeId: nodeId);
                                 break;
                             }
-                            var displayKey = FormatGroupKey(keyValues);
+                            var displayKey = FormatGroupKey(keyValues, ctx.CancellationToken);
                             var bucketBytes = 512L + EstimateStringStorageBytes(bk)
                                 + EstimateStringStorageBytes(displayKey);
                             if (!TryReserveGroupMemory(bucketBytes))
@@ -583,6 +636,7 @@ public sealed class PlanCompiler
                         {
                             foreach (var keyField in keyFields)
                             {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 var paths = ReadSetFieldPaths(inputEdge, itemIndex, keyField);
                                 if (!TryAddGroupPaths(groupKeyPaths[bk], paths)
                                     || !TryAddGroupPaths(groupValuePaths[bk], paths))
@@ -650,6 +704,7 @@ public sealed class PlanCompiler
                     var keyList = new List<DataValue>();
                     foreach (var bk in order)
                     {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         var outputIndex = valueList.Count;
                         var hasNumericValue = numericValueCounts[bk] > 0;
                         // A missing member makes the group total unknown, even if
@@ -669,9 +724,8 @@ public sealed class PlanCompiler
                             valuePaths = new List<SourceTransformationPath>(groupValuePaths[bk]);
                             foreach (var nilPath in groupNilValuePaths[bk])
                             {
-                                if (valuePaths.Any(existing => existing.Source == nilPath.Source
-                                    && existing.TransformationIds.SequenceEqual(nilPath.TransformationIds,
-                                        StringComparer.Ordinal)))
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
+                                if (ContainsEquivalentPath(valuePaths, nilPath, ctx.CancellationToken))
                                     continue;
                                 valuePaths.Add(nilPath);
                             }
@@ -681,9 +735,8 @@ public sealed class PlanCompiler
                             valuePaths = new List<SourceTransformationPath>(groupValuePaths[bk]);
                             foreach (var unknownPath in groupNilValuePaths[bk].Concat(groupMissingValuePaths[bk]))
                             {
-                                if (valuePaths.Any(existing => existing.Source == unknownPath.Source
-                                    && existing.TransformationIds.SequenceEqual(unknownPath.TransformationIds,
-                                        StringComparer.Ordinal)))
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
+                                if (ContainsEquivalentPath(valuePaths, unknownPath, ctx.CancellationToken))
                                     continue;
                                 valuePaths.Add(unknownPath);
                             }
@@ -752,7 +805,8 @@ public sealed class PlanCompiler
                     var unmatchedRightRows = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
                     foreach (var (rec, itemIndex) in right.Select((record, index) => (record, index)))
                     {
-                        if (!TryRecordFields(rec, out var fields)) continue;
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
+                        if (!TryRecordFields(rec, ctx.CancellationToken, out var fields)) continue;
                         if (!TryGetJoinKey(fields, rightKey, out var rk))
                         {
                             unmatchedRightRows.Add((fields, itemIndex));
@@ -784,16 +838,27 @@ public sealed class PlanCompiler
                         var leftKeyCounts = new Dictionary<string, int>(StringComparer.Ordinal);
                         foreach (var record in left)
                         {
-                            if (!TryRecordFields(record, out var fields)
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            if (!TryRecordFields(record, ctx.CancellationToken, out var fields)
                                 || !TryGetJoinKey(fields, leftKey, out var key))
                                 continue;
                             leftKeyCounts.TryGetValue(key, out var count);
                             leftKeyCounts[key] = count + 1;
                         }
 
-                        if (index.Any(pair => pair.Value.Count > 1
-                            && leftKeyCounts.TryGetValue(pair.Key, out var leftCount)
-                            && leftCount > 1))
+                        var hasManyToManyKey = false;
+                        foreach (var pair in index)
+                        {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            if (pair.Value.Count > 1
+                                && leftKeyCounts.TryGetValue(pair.Key, out var leftCount)
+                                && leftCount > 1)
+                            {
+                                hasManyToManyKey = true;
+                                break;
+                            }
+                        }
+                        if (hasManyToManyKey)
                         {
                             diag.Error(DiagnosticCodes.MapManyToManyJoinBlocked,
                                 DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
@@ -810,6 +875,7 @@ public sealed class PlanCompiler
                         Dictionary<string, DataValue>? l, int? leftItemIndex,
                         Dictionary<string, DataValue>? r, int? rightItemIndex)
                     {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
                         if (joined.Count >= ctx.MaxJoinExpansionRows)
                         {
                             diag.Error(DiagnosticCodes.MapJoinExpansionExceeded, DiagnosticSubsystem.Mapping,
@@ -820,11 +886,19 @@ public sealed class PlanCompiler
                         }
 
                         var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
-                        if (l is not null) foreach (var kv in l) merged[kv.Key] = kv.Value;
+                        if (l is not null)
+                        {
+                            foreach (var kv in l)
+                            {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
+                                merged[kv.Key] = kv.Value;
+                            }
+                        }
                         if (r is not null)
                         {
                             foreach (var kv in r)
                             {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (!merged.TryGetValue(kv.Key, out var leftValue))
                                 {
                                     merged[kv.Key] = kv.Value;
@@ -864,6 +938,7 @@ public sealed class PlanCompiler
                             : Array.Empty<SourceTransformationPath>();
                         foreach (var fieldName in merged.Keys)
                         {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
                             var fieldPaths = new List<SourceTransformationPath>();
                             var hasLeftField = l is not null && l.ContainsKey(fieldName);
                             var hasRightField = r is not null && r.ContainsKey(fieldName);
@@ -894,7 +969,8 @@ public sealed class PlanCompiler
 
                     foreach (var (rec, itemIndex) in left.Select((record, index) => (record, index)))
                     {
-                        if (!TryRecordFields(rec, out var fields)) continue;
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
+                        if (!TryRecordFields(rec, ctx.CancellationToken, out var fields)) continue;
                         var hasJoinKey = TryGetJoinKey(fields, leftKey, out var lk);
                         List<(Dictionary<string, DataValue> Fields, int ItemIndex)>? bucket = null;
                         if (hasJoinKey && index.TryGetValue(lk, out var matchingRows) && matchingRows.Count > 0)
@@ -903,6 +979,7 @@ public sealed class PlanCompiler
                         {
                             foreach (var rrow in bucket)
                             {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (!AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex))
                                 {
                                     outputs["rows"] = DataValue.Collection(joined);
@@ -925,10 +1002,12 @@ public sealed class PlanCompiler
                     {
                         foreach (var rk in rightOrder)
                         {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
                             var bucket = index[rk];
                             if (matchedRights.Contains(rk)) continue;
                             foreach (var rrow in bucket)
                             {
+                                ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (!AddRow(null, null, rrow.Fields, rrow.ItemIndex))
                                 {
                                     outputs["rows"] = DataValue.Collection(joined);
@@ -942,6 +1021,7 @@ public sealed class PlanCompiler
                     {
                         foreach (var (fields, itemIndex) in unmatchedRightRows)
                         {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
                             if (!AddRow(null, null, fields, itemIndex))
                             {
                                 outputs["rows"] = DataValue.Collection(joined);
@@ -965,12 +1045,71 @@ public sealed class PlanCompiler
         };
     }
 
+    private static IReadOnlyList<string> AppendTransformationId(
+        IReadOnlyList<string> ids, string transformationId, CancellationToken cancellationToken)
+    {
+        foreach (var id in ids)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.Equals(id, transformationId, StringComparison.Ordinal))
+                return ids;
+        }
+
+        var extended = new string[ids.Count + 1];
+        for (var index = 0; index < ids.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            extended[index] = ids[index];
+        }
+        extended[^1] = transformationId;
+        return extended;
+    }
+
+    private static bool SameTransformationIds(
+        IReadOnlyList<string> left,
+        IReadOnlyList<string> right,
+        CancellationToken cancellationToken)
+    {
+        if (left.Count != right.Count) return false;
+        for (var index = 0; index < left.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!string.Equals(left[index], right[index], StringComparison.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool ContainsEquivalentPath(
+        IEnumerable<SourceTransformationPath> paths,
+        SourceTransformationPath candidate,
+        CancellationToken cancellationToken)
+    {
+        foreach (var existing in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (existing.Source == candidate.Source
+                && SameTransformationIds(existing.TransformationIds, candidate.TransformationIds,
+                    cancellationToken))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>Unwrap a Record-shaped DataValue into its field dictionary.</summary>
-    private static bool TryRecordFields(DataValue rec, out Dictionary<string, DataValue> fields)
+    private static bool TryRecordFields(
+        DataValue rec,
+        CancellationToken cancellationToken,
+        out Dictionary<string, DataValue> fields)
     {
         if (rec.Raw is IReadOnlyDictionary<string, DataValue> dict)
         {
-            fields = dict.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+            fields = new Dictionary<string, DataValue>(dict.Count, StringComparer.Ordinal);
+            foreach (var (key, value) in dict)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                fields.Add(key, value);
+            }
             return true;
         }
         fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
@@ -994,12 +1133,15 @@ public sealed class PlanCompiler
     }
 
     private static IReadOnlyList<DataValue> ResolveCollection(
-        RowSnapshot snapshot, MappingEdge? edge)
+        RowSnapshot snapshot, MappingEdge? edge, CancellationToken cancellationToken)
     {
         if (edge is null) return Array.Empty<DataValue>();
         var list = new List<DataValue>(snapshot.Count);
         for (int r = 0; r < snapshot.Count; r++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             list.Add(snapshot.Get(r, edge.SourceNodeId, edge.SourcePortName));
+        }
         return list;
     }
 
@@ -1020,6 +1162,7 @@ public sealed class PlanCompiler
             var inputs = new Dictionary<string, DataValue>(StringComparer.Ordinal);
             foreach (var port in node.InputPorts)
             {
+                ctx.CancellationToken.ThrowIfCancellationRequested();
                 var edge = graph.IncomingEdge(nodeId, port.Name);
                 if (edge is null)
                 {
@@ -1044,7 +1187,8 @@ public sealed class PlanCompiler
                 periodInputConnected, factConstructSourcePaths);
             foreach (var (name, value) in outputs)
             {
-                DecimalDomain.ValidateValue(value, ctx.MaxSignificantDigits, nodeId);
+                ctx.CancellationToken.ThrowIfCancellationRequested();
+                DecimalDomain.ValidateValue(value, ctx.MaxSignificantDigits, nodeId, ctx.CancellationToken);
                 frame.Set(nodeId, name, value);
 
                 // Propagate all upstream contributors across transforms and joins,
@@ -1077,16 +1221,17 @@ public sealed class PlanCompiler
         var paths = new List<SourceTransformationPath>();
         foreach (var port in node.InputPorts)
         {
+            context.CancellationToken.ThrowIfCancellationRequested();
             var slotKey = ProvenanceTracker.SlotKey(node.NodeId, port.Name, row);
             foreach (var path in context.Provenance.GetSourceTransformationPaths(slotKey))
             {
-                var transformationIds = path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)
-                    ? path.TransformationIds
-                    : path.TransformationIds.Append(node.NodeId).ToArray();
-                if (paths.Any(existing => existing.Source == path.Source
-                    && existing.TransformationIds.SequenceEqual(transformationIds, StringComparer.Ordinal)))
+                context.CancellationToken.ThrowIfCancellationRequested();
+                var transformationIds = AppendTransformationId(path.TransformationIds, node.NodeId,
+                    context.CancellationToken);
+                var candidate = new SourceTransformationPath(path.Source, transformationIds);
+                if (ContainsEquivalentPath(paths, candidate, context.CancellationToken))
                     continue;
-                paths.Add(new SourceTransformationPath(path.Source, transformationIds));
+                paths.Add(candidate);
             }
         }
         return paths;

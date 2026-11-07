@@ -625,6 +625,47 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void CollectRows_CancellationStopsSetPhaseAndDiscardsPartialOutput()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var rows = new CancellingRecordList(
+            Enumerable.Range(1, 8)
+                .Select(index => GraphHarness.Row(("entity", S($"E{index}")), ("amount", D(index))))
+                .ToArray(),
+            cancellation,
+            cancelAfterReads: 2);
+        var collectRows = GraphHarness.Node(NodeTypeConstants.CollectRows, "Rows",
+            new() { ["binding"] = Binding },
+            outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
+        var group = GraphHarness.Node(NodeTypeConstants.GroupBy, "By entity",
+            new() { ["keys"] = "entity", ["sumField"] = "amount" },
+            inputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) },
+            outputs: new[]
+            {
+                GraphHarness.P("values", PortShape.Decimal, PortCardinality.Collection),
+                GraphHarness.P("keys", PortShape.String, PortCardinality.Collection),
+            });
+        var edges = new List<MappingEdge> { GraphHarness.Link(collectRows, "items", group, "items") };
+        var sink = GraphHarness.FactSink(out var factEdges, group, "values", PortCardinality.Collection);
+        edges.AddRange(factEdges);
+        var project = GraphHarness.Project(
+            new List<MappingNode> { collectRows, group }.Concat(sink), edges,
+            bindings: new[] { GraphHarness.Binding(Binding) });
+        var context = GraphHarness.Ctx(
+            new[] { (Binding, (IReadOnlyList<DataRecord>)rows) },
+            cancellationToken: cancellation.Token);
+
+        var result = GraphHarness.Run(project, context, out var compile);
+
+        Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+        Assert.NotNull(result);
+        Assert.Equal(RunOutcome.Cancelled, result!.Outcome);
+        Assert.Empty(result.Facts);
+        Assert.Equal(2, rows.IndexedReads);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == DiagnosticCodes.MapExecutionCancelled);
+    }
+
+    [Fact]
     public void GroupBy_BlocksBeforeExceedingConfiguredWorkingMemoryEstimate()
     {
         var rows = new[]
@@ -1357,5 +1398,30 @@ public class CollectionAndJoinTests
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(d => d.Message)));
         Assert.Contains(result!.Diagnostics, d => d.Code == "MAP016");
         Assert.Empty(result.Facts);
+    }
+
+    private sealed class CancellingRecordList(
+        IReadOnlyList<DataRecord> records,
+        CancellationTokenSource cancellation,
+        int cancelAfterReads) : IReadOnlyList<DataRecord>
+    {
+        public int Count => records.Count;
+        public int IndexedReads { get; private set; }
+
+        public DataRecord this[int index]
+        {
+            get
+            {
+                IndexedReads++;
+                var record = records[index];
+                if (IndexedReads == cancelAfterReads)
+                    cancellation.Cancel();
+                return record;
+            }
+        }
+
+        public IEnumerator<DataRecord> GetEnumerator() => records.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }

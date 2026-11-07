@@ -115,6 +115,7 @@ public sealed class ExecutionPlan
                 // Row-scoped sinks emit here. Set-driven sinks are deferred.
                 foreach (var sinkId in SinkNodeIds)
                 {
+                    context.CancellationToken.ThrowIfCancellationRequested();
                     if (SinkSetInputPorts.ContainsKey(sinkId)) continue;
                     if (frame.TryGet(sinkId, "fact", out var factSlot)
                         && factSlot.Raw is PendingFact pf)
@@ -141,13 +142,16 @@ public sealed class ExecutionPlan
                     var outputs = step.Evaluator(snapshot, setSlots, context, context.Diagnostics);
                     foreach (var (port, value) in outputs)
                     {
-                        DecimalDomain.ValidateValue(value, context.MaxSignificantDigits, step.NodeId);
+                        context.CancellationToken.ThrowIfCancellationRequested();
+                        DecimalDomain.ValidateValue(value, context.MaxSignificantDigits, step.NodeId,
+                            context.CancellationToken);
                         setSlots[ProvenanceTracker.SlotKey(step.NodeId, port)] = value;
                     }
                 }
 
                 foreach (var sinkId in SinkNodeIds)
                 {
+                    context.CancellationToken.ThrowIfCancellationRequested();
                     if (!SinkSetInputPorts.TryGetValue(sinkId, out var ports) || ports.Count == 0)
                         continue;
                     EmitSetSink(sinkId, frames, setSlots, context, facts);
@@ -195,6 +199,7 @@ public sealed class ExecutionPlan
         ExecutionContext context,
         List<PendingFact> facts)
     {
+        context.CancellationToken.ThrowIfCancellationRequested();
         var sources = SinkSetInputSources.TryGetValue(sinkId, out var s) ? s : null;
         if (sources is null) return;
 
@@ -202,6 +207,7 @@ public sealed class ExecutionPlan
         int iterationCount = 1;
         foreach (var (portName, (srcNode, srcPort)) in sources)
         {
+            context.CancellationToken.ThrowIfCancellationRequested();
             var key = ProvenanceTracker.SlotKey(srcNode, srcPort);
             if (setSlots.TryGetValue(key, out var v) && v.Raw is IReadOnlyList<DataValue> list)
             {
@@ -218,10 +224,12 @@ public sealed class ExecutionPlan
 
         for (int idx = 0; idx < iterationCount; idx++)
         {
+            context.CancellationToken.ThrowIfCancellationRequested();
             var frame = new EvaluationFrame { RowIndex = 10_000 + idx };
             // Copy template scalar slots.
             foreach (var slot in template.Slots)
             {
+                context.CancellationToken.ThrowIfCancellationRequested();
                 var dot = slot.Key.IndexOf('.');
                 if (dot < 0) continue;
                 frame.Set(slot.Key.Substring(0, dot), slot.Key.Substring(dot + 1), slot.Value);
@@ -231,6 +239,7 @@ public sealed class ExecutionPlan
             // inputs by upstream edge, observes them.
             foreach (var (portName, (srcNode, srcPort)) in sources)
             {
+                context.CancellationToken.ThrowIfCancellationRequested();
                 var key = ProvenanceTracker.SlotKey(srcNode, srcPort);
                 if (!setSlots.TryGetValue(key, out var v)) continue;
                 DataValue emitValue = v;

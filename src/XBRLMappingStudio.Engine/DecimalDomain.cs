@@ -281,7 +281,15 @@ internal static class DecimalDomain
     }
 
     public static void ValidateValue(DataValue value, int maxSignificantDigits, string nodeId)
+        => ValidateValue(value, maxSignificantDigits, nodeId, CancellationToken.None);
+
+    internal static void ValidateValue(
+        DataValue value,
+        int maxSignificantDigits,
+        string nodeId,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (value.Presence != ValuePresence.Present) return;
         if (value.Shape == PortShape.Decimal
             && !FitsSignificantDigitLimit(value.AsDecimal(), maxSignificantDigits))
@@ -293,12 +301,18 @@ internal static class DecimalDomain
         if (value.Raw is IReadOnlyList<DataValue> collection)
         {
             foreach (var item in collection)
-                ValidateValue(item, maxSignificantDigits, nodeId);
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateValue(item, maxSignificantDigits, nodeId, cancellationToken);
+            }
         }
         else if (value.Raw is IReadOnlyDictionary<string, DataValue> fields)
         {
             foreach (var field in fields.Values)
-                ValidateValue(field, maxSignificantDigits, nodeId);
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ValidateValue(field, maxSignificantDigits, nodeId, cancellationToken);
+            }
         }
     }
 

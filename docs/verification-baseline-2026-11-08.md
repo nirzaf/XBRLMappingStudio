@@ -61,3 +61,22 @@ Verification:
 - Exact-head GitHub Actions run [42420628157](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42420628157)
   passed repository hygiene, Windows and Ubuntu Release build/tests, and the
   pinned Arelle integration on source `df53aa671eafa92eb4c4d6280082ac66699e44d5`.
+
+## ENG-02 set-phase cancellation
+
+Set-phase engine reducers now check the run token inside collection, aggregate,
+GroupBy, join, provenance and sink-emission loops. Decimal-domain validation
+also checks cancellation while traversing nested collections and records.
+`CollectRows_CancellationStopsSetPhaseAndDiscardsPartialOutput` cancels while
+the set-phase collection reads its second record and verifies no third record
+is read and no fact is returned. Before the implementation change, the same
+fixture read all 8 records (24 indexed field reads) before observing cancellation.
+
+Verification:
+
+- The focused cancellation regression passed 1/1.
+- The Release Engine suite passed 122/122.
+- `LargeRunExecutionTests.GroupByBudgetOverflow_BlocksPublicationAndPreservesPriorFile`
+  passed 1/1, confirming an over-budget aggregate still cannot replace the prior
+  output.
+- Large-run set-phase streaming and aggregation spill/recovery remain open.
