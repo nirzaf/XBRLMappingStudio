@@ -79,4 +79,7 @@ Verification:
 - `LargeRunExecutionTests.GroupByBudgetOverflow_BlocksPublicationAndPreservesPriorFile`
   passed 1/1, confirming an over-budget aggregate still cannot replace the prior
   output.
+- Exact-head GitHub Actions run [42423095593](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42423095593)
+  passed repository hygiene, Windows and Ubuntu Release build/tests, and the
+  pinned Arelle integration on source `2b6fb0c07ea47d372a2be2da25027ee6cfbacb9b`.
 - Large-run set-phase streaming and aggregation spill/recovery remain open.
