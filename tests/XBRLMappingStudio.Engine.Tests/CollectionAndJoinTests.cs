@@ -1126,6 +1126,51 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
+    public void JoinManyToManyPolicy_FailsClosedBeforeProducingCartesianRows()
+    {
+        var left = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("a", D(1m))),
+            GraphHarness.Row(("k", S("1")), ("a", D(2m)))
+        };
+        var right = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("label", S("first"))),
+            GraphHarness.Row(("k", S("1")), ("label", S("second")))
+        };
+
+        var blocked = RunJoinToGroupedFacts(left, right, "Inner", "All", manyToMany: "Fail");
+        Assert.Contains(blocked.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapManyToManyJoinBlocked && diagnostic.IsBlocking);
+        Assert.Empty(blocked.Facts);
+
+        // Duplicate suppression is applied before the many-to-many check, so First
+        // keeps the existing one-to-many behavior for legacy projects.
+        var first = RunJoinToGroupedFacts(left, right, "Inner", "First", manyToMany: "Fail");
+        Assert.Equal(new[] { 3m }, first.Facts.Select(fact => fact.Value!.Value));
+        Assert.DoesNotContain(first.Diagnostics, diagnostic => diagnostic.IsBlocking);
+
+        var oneToMany = RunJoinToGroupedFacts(
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(5m))) },
+            right, "Inner", "All", manyToMany: "Fail");
+        Assert.Equal(new[] { 10m }, oneToMany.Facts.Select(fact => fact.Value!.Value));
+        Assert.DoesNotContain(oneToMany.Diagnostics, diagnostic => diagnostic.IsBlocking);
+    }
+
+    [Fact]
+    public void JoinUnknownManyToManyPolicy_FailsClosed()
+    {
+        var result = RunJoinToGroupedFacts(
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(10m))) },
+            new[] { GraphHarness.Row(("k", S("1")), ("label", S("x"))) },
+            "Inner", "All", manyToMany: "Merge");
+
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapInvalidJoinManyToManyPolicy && diagnostic.IsBlocking);
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
     public void JoinExpansionBudget_BlocksBeforePublication()
     {
         const string Left = "L";
@@ -1193,7 +1238,8 @@ public class CollectionAndJoinTests
         string cardinality,
         string duplicateKey,
         int maxJoinRows = 200_000,
-        string fieldConflict = "Right")
+        string fieldConflict = "Right",
+        string manyToMany = "Allow")
     {
         const string leftBinding = "join-left";
         const string rightBinding = "join-right";
@@ -1205,7 +1251,8 @@ public class CollectionAndJoinTests
             outputs: new[] { GraphHarness.P("items", PortShape.Record, PortCardinality.Collection) });
         var join = GraphHarness.Node(NodeTypeConstants.Join, "Join",
             new() { ["leftKey"] = "k", ["rightKey"] = "k", ["cardinality"] = cardinality,
-                ["duplicateKey"] = duplicateKey, ["fieldConflict"] = fieldConflict },
+                ["duplicateKey"] = duplicateKey, ["fieldConflict"] = fieldConflict,
+                ["manyToMany"] = manyToMany },
             inputs: new[]
             {
                 GraphHarness.P("left", PortShape.Record, PortCardinality.Collection),

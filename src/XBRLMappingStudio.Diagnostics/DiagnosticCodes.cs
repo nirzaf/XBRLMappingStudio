@@ -37,6 +37,8 @@ public static class DiagnosticCodes
     public const string MapInvalidJoinFieldConflictPolicy = "MAP027";
     public const string MapInvalidJoinDuplicateKeyPolicy = "MAP028";
     public const string MapInvalidDivideByZeroPolicy = "MAP029";
+    public const string MapInvalidJoinManyToManyPolicy = "MAP030";
+    public const string MapManyToManyJoinBlocked = "MAP031";
 
     // PRJ - Project schema and lifecycle
     public const string PrjSchemaVersionUnsupported = "PRJ001";

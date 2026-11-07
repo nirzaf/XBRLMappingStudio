@@ -429,6 +429,8 @@ public sealed class FunctionCatalog
                 ["rightKey"] = new("rightKey", PortShape.String, true),
                 ["cardinality"] = new("cardinality", PortShape.String, false, "Inner", Description: "Inner | Left | Right | Full"),
                 ["duplicateKey"] = new("duplicateKey", PortShape.String, false, "All", Description: "Fail | First | All"),
+                ["manyToMany"] = new("manyToMany", PortShape.String, false, "Allow",
+                    Description: "Allow | Fail; legacy default is Allow."),
                 ["fieldConflict"] = new("fieldConflict", PortShape.String, false, "Right",
                     Description: "Left | Right | Fail; legacy default is Right.")
             }),

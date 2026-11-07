@@ -709,6 +709,7 @@ public sealed class PlanCompiler
                     var rightKey = GetString(node, "rightKey") ?? "";
                     var cardinality = GetString(node, "cardinality") ?? "Inner";
                     var dupPolicy = GetString(node, "duplicateKey") ?? "All";
+                    var manyToManyPolicy = GetString(node, "manyToMany") ?? "Allow";
                     var fieldConflict = GetString(node, "fieldConflict") ?? "Right";
                     if (cardinality is not ("Inner" or "Left" or "Right" or "Full"))
                     {
@@ -722,6 +723,15 @@ public sealed class PlanCompiler
                         diag.Error(DiagnosticCodes.MapInvalidJoinDuplicateKeyPolicy,
                             DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
                             $"Unknown join duplicateKey '{dupPolicy}'. Expected Fail, First or All.",
+                            nodeId: nodeId);
+                        outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                        return outputs;
+                    }
+                    if (manyToManyPolicy is not ("Allow" or "Fail"))
+                    {
+                        diag.Error(DiagnosticCodes.MapInvalidJoinManyToManyPolicy,
+                            DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                            $"Unknown join manyToMany '{manyToManyPolicy}'. Expected Allow or Fail.",
                             nodeId: nodeId);
                         outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
                         return outputs;
@@ -767,6 +777,31 @@ public sealed class PlanCompiler
                             continue; // First: keep only the first per key
                         }
                         bucket.Add((fields, itemIndex));
+                    }
+
+                    if (manyToManyPolicy == "Fail")
+                    {
+                        var leftKeyCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                        foreach (var record in left)
+                        {
+                            if (!TryRecordFields(record, out var fields)
+                                || !TryGetJoinKey(fields, leftKey, out var key))
+                                continue;
+                            leftKeyCounts.TryGetValue(key, out var count);
+                            leftKeyCounts[key] = count + 1;
+                        }
+
+                        if (index.Any(pair => pair.Value.Count > 1
+                            && leftKeyCounts.TryGetValue(pair.Key, out var leftCount)
+                            && leftCount > 1))
+                        {
+                            diag.Error(DiagnosticCodes.MapManyToManyJoinBlocked,
+                                DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                                "Join inputs contain a duplicate key on both sides; manyToMany=Fail blocks the Cartesian match.",
+                                nodeId: nodeId);
+                            outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                            return outputs;
+                        }
                     }
 
                     var joined = new List<DataValue>();
