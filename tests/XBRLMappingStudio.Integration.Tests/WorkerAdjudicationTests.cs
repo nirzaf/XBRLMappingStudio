@@ -49,6 +49,34 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         };
     }
 
+    private async Task AssertFailedRunCannotPublishAsync(
+        MappingProject project,
+        FilingProfile profile,
+        JobResult result,
+        string destinationName)
+    {
+        var destination = Path.Combine(_dir, destinationName);
+        var priorBytes = System.Text.Encoding.UTF8.GetBytes("prior-accepted-report");
+        await File.WriteAllBytesAsync(destination, priorBytes);
+        var journal = new RunJournal(Path.Combine(_dir, destinationName + "-journal"));
+        var publisher = new PublicationService(journal);
+        var exception = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
+            destination,
+            System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
+            _dir,
+            project,
+            profile,
+            allowSyntheticProfile: true,
+            result: result,
+            validateStagedArtifactAsync: (_, _) => Task.FromResult("unused"),
+            cancellationToken: CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.XbrApprovalRequired, exception.Code);
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+        Assert.Null(journal.Load(result.Manifest.RunId));
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
     [Fact]
     public async Task WorkerSuccess_WithBlockingDiagnostic_IsInvalid_AndNotPublishable()
     {
@@ -936,14 +964,15 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
     [Fact]
     public async Task WorkerTimedOut_IsOperationalFailure_WithWkrTimeoutDiagnostic_AndNotPublishable()
     {
-        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
         var worker = new FakeWorker(req => new WorkerResponse(
             req.OperationId, WorkerStatus.TimedOut, Result: null,
             // Simulates a hung worker that never dies and returns no diagnostics of its own.
             Array.Empty<Diagnostic>(),
             Error: "Per-request deadline elapsed."));
 
-        var svc = new MappingJobService(SyntheticProfile.Build(), worker);
+        var profile = SyntheticProfile.Build();
+        var svc = new MappingJobService(profile, worker);
         var result = await svc.RunAsync(project, Connections(project, _workbookPath),
             new Dictionary<string, string>(), preview: false, CancellationToken.None);
 
@@ -953,6 +982,8 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
             d => d.Code == DiagnosticCodes.WkrTimeout);
         Assert.True(timeout.IsBlocking);
         Assert.Equal(DiagnosticStage.Worker, timeout.Stage);
+        await AssertFailedRunCannotPublishAsync(project, profile, result,
+            "worker-timeout-report.json");
     }
 
     // XBR08 crash path: a worker that terminated unexpectedly yields WKR003 and is
@@ -976,26 +1007,8 @@ public sealed class WorkerAdjudicationTests : IAsyncLifetime
         Assert.Contains(result.Manifest.Diagnostics,
             d => d.Code == DiagnosticCodes.WkrCrash && d.IsBlocking);
 
-        var destination = Path.Combine(_dir, "worker-crash-report.json");
-        var priorBytes = System.Text.Encoding.UTF8.GetBytes("prior-accepted-report");
-        await File.WriteAllBytesAsync(destination, priorBytes);
-        var journal = new RunJournal(Path.Combine(_dir, "worker-crash-journal"));
-        var publisher = new PublicationService(journal);
-        var exception = await Assert.ThrowsAsync<PublicationException>(() => publisher.PublishAuthorizedAsync(
-            destination,
-            System.Text.Encoding.UTF8.GetBytes(result.XbrlJson),
-            _dir,
-            project,
-            profile,
-            allowSyntheticProfile: true,
-            result: result,
-            validateStagedArtifactAsync: (_, _) => Task.FromResult("unused"),
-            cancellationToken: CancellationToken.None));
-
-        Assert.Equal(DiagnosticCodes.XbrApprovalRequired, exception.Code);
-        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
-        Assert.Null(journal.Load(result.Manifest.RunId));
-        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+        await AssertFailedRunCannotPublishAsync(project, profile, result,
+            "worker-crash-report.json");
     }
 
     [Fact]
