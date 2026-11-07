@@ -41,6 +41,18 @@ public sealed class SqliteTargetPublisher
     public const int MaximumPreviewBytes = 4 * 1024 * 1024;
     public const int DefaultPreviewSampleLimit = 10;
 
+    private readonly Action<int>? _afterRecordWritten;
+
+    public SqliteTargetPublisher()
+    {
+    }
+
+    /// <summary>Provides a deterministic post-upsert boundary for transactional fault tests.</summary>
+    internal SqliteTargetPublisher(Action<int> afterRecordWritten)
+    {
+        _afterRecordWritten = afterRecordWritten ?? throw new ArgumentNullException(nameof(afterRecordWritten));
+    }
+
     public async Task<SqlitePublishReceipt> PublishAsync(SourceConnection destination,
         IReadOnlyList<DataRecord> records, IReadOnlyList<string> businessKey,
         string operationKey, string intentFingerprint, CancellationToken cancellationToken = default)
@@ -130,11 +142,13 @@ public sealed class SqliteTargetPublisher
             upsert.Parameters.Add(parameter);
             return parameter;
         }).ToArray();
+        var writtenRows = 0;
         foreach (var record in records)
         {
             cancellationToken.ThrowIfCancellationRequested();
             for (var i = 0; i < columns.Length; i++) parameters[i].Value = ToSql(record.Fields[columns[i]]);
             await upsert.ExecuteNonQueryAsync(cancellationToken);
+            _afterRecordWritten?.Invoke(++writtenRows);
         }
         var completed = DateTimeOffset.UtcNow;
         await using (var receipt = connection.CreateCommand())

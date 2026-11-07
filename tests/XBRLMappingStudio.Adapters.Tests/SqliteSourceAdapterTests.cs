@@ -679,6 +679,59 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task CancellationAfterFirstSqliteUpsertRollsBackRowsAndReceipt()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("cancel-mid-transaction.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE report (account TEXT PRIMARY KEY, amount TEXT);";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var destination = new SourceConnection("target", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "report" });
+        await new SqliteTargetPublisher().PublishAsync(destination,
+            new[] { Record("baseline", 10m) }, new[] { "account" }, "accepted-operation", "accepted-intent");
+        var beforeBytes = await File.ReadAllBytesAsync(path);
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelledAfterFirstWrite = false;
+        var publisher = new SqliteTargetPublisher(writtenRows =>
+        {
+            if (writtenRows == 1)
+            {
+                cancelledAfterFirstWrite = true;
+                cancellation.Cancel();
+            }
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => publisher.PublishAsync(destination,
+            new[] { Record("baseline", 11m), Record("new", 20m) }, new[] { "account" },
+            "cancelled-operation", "cancelled-intent", cancellation.Token));
+
+        Assert.True(cancelledAfterFirstWrite);
+        Assert.Equal(beforeBytes, await File.ReadAllBytesAsync(path));
+        await using var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        await read.OpenAsync();
+        await using var check = read.CreateCommand();
+        check.CommandText = "SELECT account,amount FROM report ORDER BY account";
+        await using (var reader = await check.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("baseline", reader.GetString(0));
+            Assert.Equal("10", reader.GetString(1));
+            Assert.False(await reader.ReadAsync());
+        }
+        check.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts";
+        Assert.Equal(1L, await check.ExecuteScalarAsync());
+        check.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts WHERE operation_key='cancelled-operation'";
+        Assert.Equal(0L, await check.ExecuteScalarAsync());
+    }
+
+    [Fact]
     public async Task TargetRejectsBusinessKeyWithoutUniqueConstraintBeforeWriting()
     {
         using var ws = new TempWorkspace();

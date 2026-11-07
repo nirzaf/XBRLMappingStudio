@@ -45,8 +45,16 @@ on an injected row-write failure and cancellation after staging for all four
 file destination formats; exhaustive cancellation/process-crash timing across
 all targets remains open.
 
+`SqliteSourceAdapterTests.CancellationAfterFirstSqliteUpsertRollsBackRowsAndReceipt`
+uses an internal post-row test hook to cancel after the first upsert has executed
+inside the transaction. It confirms the prior database bytes and fact value are
+restored, the accepted receipt remains, and no receipt is added for the canceled
+operation.
+
 Verification:
 
 - The focused cancellation test passed 1/1.
 - The Release Integration suite passed 241 tests and skipped 6 environment-gated
   Arelle cases (247 total).
+- The focused mid-transaction cancellation regression passed 1/1, and the full
+  Release Adapters suite passed 95/95.
