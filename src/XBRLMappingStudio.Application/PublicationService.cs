@@ -162,11 +162,13 @@ public sealed class PublicationService
         TimeSpan? lockTimeout = null,
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync = null,
         CancellationToken cancellationToken = default,
-        bool refuseDifferentExisting = false)
+        bool refuseDifferentExisting = false,
+        Action<string>? afterAtomicReplaceForTest = null)
         => PublishCoreAsync(destinationPath,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
             RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
-            cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting).GetAwaiter().GetResult();
+            cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting,
+            afterAtomicReplaceForTest).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -178,7 +180,8 @@ public sealed class PublicationService
         CancellationToken cancellationToken,
         Action<string>? beforeReplaceFault = null,
         TimeSpan? lockTimeout = null,
-        bool refuseDifferentExisting = false)
+        bool refuseDifferentExisting = false,
+        Action<string>? afterAtomicReplaceForTest = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -379,6 +382,7 @@ public sealed class PublicationService
                     $"Atomic replace failed for run '{runId}'; prior destination preserved. {ex.Message}",
                     runId, full);
             }
+            afterAtomicReplaceForTest?.Invoke(full);
             _journal.Save(new JournalEntry(runId, full, JournalState.Replaced,
                 stagedDigest, null, lk.Token, DateTimeOffset.UtcNow)
             { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });

@@ -262,6 +262,35 @@ public sealed class MixedPublicationCoordinatorTests
         Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
     }
 
+    [Fact]
+    public async Task AbruptProcessTerminationAfterAtomicReplace_ReconcilesAndRemovesPriorFileBackup()
+    {
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "local-state.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var runId = "atomic-crash-" + Guid.NewGuid().ToString("N");
+        var priorBytes = Encoding.UTF8.GetBytes("prior accepted atomic report");
+        var reportBytes = CrashPublicationContract.AtomicReportBytes;
+        var backupPath = filePath + $".xbsl-prev-{runId}";
+        var stagingPath = filePath + $".xbsl-staging-{runId}";
+        await File.WriteAllBytesAsync(filePath, priorBytes);
+
+        var exitCode = await StartCrashHarnessAsync("atomic-after-replace", statePath, filePath, runId);
+
+        Assert.NotEqual(0, exitCode);
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+        Assert.True(File.Exists(backupPath));
+        Assert.Equal(priorBytes, await File.ReadAllBytesAsync(backupPath));
+
+        var recovery = Assert.Single(new RunJournal(databasePath: statePath).RecoverUnfinalized());
+        Assert.Equal(runId, recovery.RunId);
+        Assert.Equal(RecoveryDecision.Finalized, recovery.Decision);
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+        Assert.False(File.Exists(backupPath));
+        Assert.False(File.Exists(stagingPath));
+        Assert.Empty(new RunJournal(databasePath: statePath).RecoverUnfinalized());
+    }
+
     private static MixedPublicationIntent IntentForCrash(
         string stage, string filePath, byte[] reportBytes, string targetPath)
         => new(CrashPublicationContract.OperationKey(stage), "sha256:mixed-intent-" + stage,

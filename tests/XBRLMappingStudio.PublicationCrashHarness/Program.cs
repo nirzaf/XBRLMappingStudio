@@ -11,6 +11,8 @@ public static class CrashPublicationContract
 {
     public static byte[] ReportBytes => Encoding.UTF8.GetBytes("accepted mixed-publication report");
 
+    public static byte[] AtomicReportBytes => Encoding.UTF8.GetBytes("accepted atomic-publication report");
+
     public static string OperationKey(string stage) => "mixed-crash-" + stage;
 
     public static string SqliteOperationKey(string stage) => "sqlite-crash-" + stage;
@@ -24,6 +26,9 @@ internal static class Program
     {
         if (args.Length != 4)
             return 2;
+
+        if (StringComparer.Ordinal.Equals(args[0], "atomic-after-replace"))
+            return CrashAfterAtomicReplace(args);
 
         var stage = args[0];
         var statePath = Path.GetFullPath(args[1]);
@@ -62,6 +67,19 @@ internal static class Program
                 return receipt;
             });
 
+        return 0;
+    }
+
+    private static int CrashAfterAtomicReplace(string[] args)
+    {
+        var statePath = Path.GetFullPath(args[1]);
+        var filePath = Path.GetFullPath(args[2]);
+        var runId = args[3];
+        var service = new PublicationService(new RunJournal(databasePath: statePath));
+        service.Publish(filePath, CrashPublicationContract.AtomicReportBytes, runId,
+            validateStagedArtifactAsync: (stagedPath, _) =>
+                Task.FromResult(DestinationLock.DigestFile(stagedPath)),
+            afterAtomicReplaceForTest: _ => KillCurrentProcess());
         return 0;
     }
 

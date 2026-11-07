@@ -313,6 +313,7 @@ public sealed class RunJournal
             if (exists && entry.StagedDigest is not null
                 && DestinationLock.DigestFile(entry.DestinationPath) == entry.StagedDigest)
             {
+                DeletePriorPublicationBackup(entry);
                 Save(entry with { State = JournalState.Finalized, FinalDigest = entry.StagedDigest });
                 actions.Add(new RecoveryAction(entry.RunId, RecoveryDecision.Finalized,
                     "Destination matches staged digest; entry finalized."));
@@ -326,6 +327,15 @@ public sealed class RunJournal
             }
         }
         return actions;
+    }
+
+    private static void DeletePriorPublicationBackup(JournalEntry entry)
+    {
+        var backupPath = entry.DestinationPath + $".xbsl-prev-{entry.RunId}";
+        try { File.Delete(backupPath); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        catch (ArgumentException) { }
     }
 }
 
