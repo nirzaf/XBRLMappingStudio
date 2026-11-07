@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using XBRLMappingStudio.Diagnostics;
 
@@ -21,6 +22,30 @@ public static class ProjectSerializer
     /// <summary>Serialize a project to canonical JSON text.</summary>
     public static string Serialize(MappingProject project)
         => JsonSerializer.Serialize(project, Options);
+
+    /// <summary>
+    /// Create an independent Save As copy. A copy gets a new audit identity and cannot
+    /// inherit the source project's publication approvals. Locators remain unchanged;
+    /// relative paths resolve from the copy's new project directory.
+    /// </summary>
+    public static MappingProject CreateIndependentCopy(MappingProject project)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var json = JsonNode.Parse(Serialize(project)) as JsonObject
+            ?? throw new InvalidOperationException("Project serialization did not produce a JSON object.");
+        var now = DateTimeOffset.UtcNow;
+        json["projectId"] = Id.New();
+        json["semanticRevision"] = 1;
+        json["layoutGeneration"] = 1;
+        json["approvals"] = new JsonArray();
+        if (json["metadata"] is JsonObject metadata)
+        {
+            metadata["createdUtc"] = JsonSerializer.SerializeToNode(now, Options);
+            metadata["lastModifiedUtc"] = JsonSerializer.SerializeToNode(now, Options);
+        }
+
+        return Deserialize(json.ToJsonString(Options));
+    }
 
     /// <summary>
     /// Deserialize a project. Throws <see cref="ProjectSchemaException"/> when the

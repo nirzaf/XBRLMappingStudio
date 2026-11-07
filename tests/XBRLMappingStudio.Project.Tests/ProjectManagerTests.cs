@@ -48,6 +48,22 @@ public sealed class ProjectManagerTests : IDisposable
     }
 
     [Fact]
+    public void SaveNew_RefusesToReplaceExistingProject()
+    {
+        var path = ProjectPath();
+        var manager = new ProjectManager(path);
+        manager.Save(TestFixtures.BuildRevenueMappingProject());
+        var originalBytes = File.ReadAllBytes(path);
+
+        var exception = Assert.Throws<ProjectSaveException>(() =>
+            manager.SaveNew(TestFixtures.BuildRevenueMappingProject()));
+
+        Assert.Equal(Diagnostics.DiagnosticCodes.PrjRevisionConflict, exception.Code);
+        Assert.Equal(originalBytes, File.ReadAllBytes(path));
+        Assert.False(File.Exists(manager.LockPath));
+    }
+
+    [Fact]
     public void LayoutOnlyEdit_DoesNotBump_SemanticRevision()
     {
         var seed = Guid.Parse("33333333-1111-2222-3333-444444444445");

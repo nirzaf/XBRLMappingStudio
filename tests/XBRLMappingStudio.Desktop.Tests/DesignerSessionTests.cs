@@ -261,6 +261,98 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task SaveAsToNewPathCreatesIndependentIdentityAndClearsApprovals()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-copy", Guid.NewGuid().ToString("n"));
+        var sourceDirectory = Path.Combine(dir, "source");
+        var destinationDirectory = Path.Combine(dir, "copy");
+        Directory.CreateDirectory(sourceDirectory);
+        Directory.CreateDirectory(destinationDirectory);
+        var sourcePath = Path.Combine(sourceDirectory, "mapping.xmap");
+        var copyPath = Path.Combine(destinationDirectory, "mapping-copy.xmap");
+        var sourceFile = Path.Combine(sourceDirectory, "input.csv");
+        var copySourceFile = Path.Combine(destinationDirectory, "input.csv");
+        await File.WriteAllTextAsync(sourceFile, "Revenue\n1250\n");
+        await File.WriteAllTextAsync(copySourceFile, "Expense\n2500\n");
+        try
+        {
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with { Locator = "input.csv" };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = project.ProfileDigest
+            });
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectSavePath = copyPath,
+                ConfirmIndependentCopy = true
+            };
+            var viewModel = new MainWindowViewModel(project, dialog);
+            viewModel.SaveProjectTo(sourcePath);
+            var sourceManager = new ProjectManager(sourcePath);
+            var originalBytes = await File.ReadAllBytesAsync(sourcePath);
+
+            await viewModel.SaveProjectAsAsync();
+
+            var savedSource = sourceManager.Load();
+            var savedCopy = new ProjectManager(copyPath).Load();
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(sourcePath));
+            Assert.NotEqual(savedSource.ProjectId, savedCopy.ProjectId);
+            Assert.Empty(savedCopy.Approvals);
+            Assert.Equal(savedSource.ComputeSemanticDigest(), savedCopy.ComputeSemanticDigest());
+            Assert.Equal("input.csv", savedCopy.Bindings[0].Locator);
+            Assert.Equal(copyPath, viewModel.ProjectPath);
+            Assert.Contains("prior approvals were cleared", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("new project folder", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Contains("Expense", viewModel.SourceColumns);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SaveAsIndependentCopyCancellationPreservesActiveProject()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-copy-cancel", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var sourcePath = Path.Combine(dir, "active.xmap");
+        var copyPath = Path.Combine(dir, "copy", "copy.xmap");
+        Directory.CreateDirectory(Path.GetDirectoryName(copyPath)!);
+        try
+        {
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectSavePath = copyPath,
+                ConfirmIndependentCopy = false
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            viewModel.SaveProjectTo(sourcePath);
+            viewModel.Session.MoveNode("n0", 123, 456);
+            var activeProjectId = viewModel.Session.Project.ProjectId;
+            var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
+
+            await viewModel.SaveProjectAsAsync();
+
+            Assert.Equal(sourcePath, viewModel.ProjectPath);
+            Assert.Equal(activeProjectId, viewModel.Session.Project.ProjectId);
+            Assert.True(viewModel.IsProjectDirty);
+            Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(sourcePath));
+            Assert.False(File.Exists(copyPath));
+            Assert.Contains("Canceled Save As", viewModel.StatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task OpeningProject_ReconnectsSavedWorkspaceSourceBinding()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xms-project-lifecycle-source", Guid.NewGuid().ToString("n"));
@@ -2232,6 +2324,7 @@ public sealed class DesignerSessionTests
         public UnsavedProjectChoice UnsavedChoice { get; set; } = UnsavedProjectChoice.Cancel;
         public string? FileDestinationPath { get; set; }
         public bool ConfirmationResult { get; set; }
+        public bool ConfirmIndependentCopy { get; set; }
         public int ConfirmationCount { get; private set; }
         public string? ConfirmedTable { get; private set; }
         public IReadOnlyList<string> ConfirmedBusinessKey { get; private set; } = Array.Empty<string>();
@@ -2241,6 +2334,8 @@ public sealed class DesignerSessionTests
 
         public Task<string?> OpenProjectAsync() => Task.FromResult(ProjectOpenPath);
         public Task<string?> SaveProjectAsync() => Task.FromResult(ProjectSavePath);
+        public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)
+            => Task.FromResult(ConfirmIndependentCopy);
         public Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
             => Task.FromResult(UnsavedChoice);
         public Task<string?> SaveReportAsync() => Task.FromResult<string?>(null);

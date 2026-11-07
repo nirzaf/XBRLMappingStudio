@@ -4946,13 +4946,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         try
         {
             var path = ProjectPath;
+            var requireNewPath = path is null;
             if (path is null)
             {
                 if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return false; }
                 path = await _fileDialog.SaveProjectAsync();
             }
             if (path is null) return false;
-            SaveProjectTo(path);
+            SaveProjectTo(path, requireNewPath);
             return true;
         }
         catch (Exception ex) { StatusText = $"Save failed: {ex.Message}"; return false; }
@@ -4971,12 +4972,32 @@ public sealed class MainWindowViewModel : ViewModelBase
                 StatusText = "Save As stopped because that path already contains another project. Choose a new path to avoid replacing it.";
                 return;
             }
-            SaveProjectTo(fullPath);
+            if (ProjectPath is not null && !PathsEqual(ProjectPath, fullPath))
+            {
+                var projectName = Path.GetFileNameWithoutExtension(ProjectPath);
+                if (!await _fileDialog.ConfirmSaveAsIndependentCopyAsync(projectName, fullPath))
+                {
+                    StatusText = "Canceled Save As; the active project is unchanged.";
+                    return;
+                }
+
+                var copy = ProjectSerializer.CreateIndependentCopy(Session.Project);
+                var manager = new ProjectManager(fullPath);
+                manager.SaveNew(copy);
+                var profileAvailable = ActivateProject(manager, copy);
+                if (profileAvailable) await LoadWorkspaceBindingsAsync(profileAvailable);
+                StatusText = $"Saved {Path.GetFileName(fullPath)} as an independent project; prior approvals were cleared. Relative paths now resolve from the new project folder.";
+                return;
+            }
+            SaveProjectTo(fullPath, requireNewPath: ProjectPath is null);
         }
         catch (Exception ex) { StatusText = $"Save As failed: {ex.Message}"; }
     }
 
     public void SaveProjectTo(string path)
+        => SaveProjectTo(path, requireNewPath: false);
+
+    private void SaveProjectTo(string path, bool requireNewPath)
     {
         var hadProjectPath = ProjectPath is not null;
         var fullPath = Path.GetFullPath(path);
@@ -4984,9 +5005,14 @@ public sealed class MainWindowViewModel : ViewModelBase
             && PathsEqual(_migrationSourcePath, fullPath))
             throw new InvalidOperationException(
                 "A taxonomy migration draft must be saved separately from its pinned source project.");
+        if (hadProjectPath && !PathsEqual(ProjectPath, fullPath))
+            throw new InvalidOperationException("Use Save As to save a project to a different path.");
         var manager = new ProjectManager(fullPath);
-        var saved = manager.Save(Session.Project,
-            PathsEqual(ProjectPath, manager.FullPath) ? _expectedLayoutGeneration : null);
+        var saved = hadProjectPath
+            ? manager.Save(Session.Project, _expectedLayoutGeneration)
+            : requireNewPath
+                ? manager.SaveNew(Session.Project)
+                : manager.Save(Session.Project);
         ProjectPath = manager.FullPath;
         _expectedLayoutGeneration = saved.NewLayoutGeneration;
         _savedProjectSnapshot = ProjectSerializer.Serialize(Session.Project);

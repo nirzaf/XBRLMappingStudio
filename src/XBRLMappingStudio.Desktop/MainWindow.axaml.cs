@@ -116,6 +116,42 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
         return LocalPath(file?.Path);
     }
 
+    public async Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)
+    {
+        var dialog = new Window
+        {
+            Title = "Create independent project copy",
+            Width = 500,
+            Height = 260,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var create = new Button { Content = "Create copy", IsDefault = true, MinWidth = 110 };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 100 };
+        create.Click += (_, _) => dialog.Close(true);
+        cancel.Click += (_, _) => dialog.Close(false);
+
+        var content = new StackPanel { Spacing = 14, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Saving '{projectName}' to '{Path.GetFileName(destinationPath)}' creates an independent project. "
+                + "It gets a new identity and clears existing approvals. Relative paths resolve from the new project "
+                + "folder, and files are not copied. The current project file remains unchanged.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(create);
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<bool>(owner);
+    }
+
     public async Task<UnsavedProjectChoice> ConfirmUnsavedProjectChangesAsync(string projectName, string action)
     {
         var dialog = new Window

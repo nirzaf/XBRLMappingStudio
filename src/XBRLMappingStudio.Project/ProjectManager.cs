@@ -73,6 +73,19 @@ public sealed class ProjectManager
     /// conflict (BASE03 acceptance).
     /// </summary>
     public SaveResult Save(MappingProject project, int? expectedLayoutGeneration = null)
+        => SaveCore(project, expectedLayoutGeneration, requireNewFile: false);
+
+    /// <summary>
+    /// Save a new project without replacing any file at the target path. The final move is
+    /// create-only, so a target that appears while the copy is being saved is preserved.
+    /// </summary>
+    public SaveResult SaveNew(MappingProject project)
+        => SaveCore(project, expectedLayoutGeneration: null, requireNewFile: true);
+
+    private SaveResult SaveCore(
+        MappingProject project,
+        int? expectedLayoutGeneration,
+        bool requireNewFile)
     {
         // Determine whether semantic content changed vs. the last loaded state.
         var newDigest = project.ComputeSemanticDigest();
@@ -80,12 +93,19 @@ public sealed class ProjectManager
         // Under an exclusive per-project writer lock (BASE03).
         using var writerLock = AcquireExclusiveLock();
 
+        if (requireNewFile && File.Exists(FullPath))
+        {
+            throw new ProjectSaveException(
+                DiagnosticCodes.PrjRevisionConflict,
+                "Project file already exists; refusing to replace it.");
+        }
+
         int currentSemanticRevision = project.SemanticRevision;
         int currentLayoutGeneration = project.LayoutGeneration;
         bool semanticChanged;
 
         // Re-read the current generation from disk to detect concurrent edits.
-        if (File.Exists(FullPath))
+        if (!requireNewFile && File.Exists(FullPath))
         {
             var diskJson = File.ReadAllText(FullPath);
             var diskProject = ProjectSerializer.Deserialize(diskJson);
@@ -151,13 +171,18 @@ public sealed class ProjectManager
             File.WriteAllText(tmpPath, json);
 
             // Preserve prior version as backup (BASE03: retain readable original).
-            if (File.Exists(FullPath))
+            if (!requireNewFile && File.Exists(FullPath))
             {
                 File.Copy(FullPath, BackupPath, overwrite: true);
             }
 
-            // Atomic same-filesystem replace. On Linux, File.Replace uses rename(2).
-            if (File.Exists(FullPath))
+            // New copies use a create-only move to preserve a target that raced the
+            // initial existence check. Regular saves atomically replace the current file.
+            if (requireNewFile)
+            {
+                File.Move(tmpPath, FullPath);
+            }
+            else if (File.Exists(FullPath))
             {
                 File.Replace(tmpPath, FullPath, destinationBackupFileName: null);
             }
@@ -175,7 +200,10 @@ public sealed class ProjectManager
             }
             throw new ProjectSaveException(
                 DiagnosticCodes.PrjAtomicSaveFailed,
-                "Failed to atomically replace project file.", ex);
+                requireNewFile
+                    ? "Failed to create new project file without replacing an existing target."
+                    : "Failed to atomically replace project file.",
+                ex);
         }
 
         return new SaveResult(
