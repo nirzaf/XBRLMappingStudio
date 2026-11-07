@@ -45,9 +45,10 @@ Core capabilities implemented here:
   fires (for example, an empty fact set) is recorded as `XBR014` and resolves the run to
   incomplete rather than a silent success.
 - **Durable AI06 audit trail** — every accept/edit/reject/batch/undo decision persists to
-  the versioned `suggestion_audit` table with governed actor, method, prompt-template
-  revision and bounded original/approved payloads; a broken sink is captured on
-  `AuditLog.PersistenceFaults` and cannot block the analyst.
+  the versioned `suggestion_audit` table with actor, method, prompt-template
+  revision and bounded original/approved payloads. A durable append must succeed before
+  the reviewed project change is applied; a sink failure leaves the suggestion pending and
+  the project unchanged.
 - **Report re-import** — an XBRL instance can be read back as records and remapped.
 - **Adapters** — Excel (read/write), CSV, JSON (read/write), XML (read/write), and XBRL
   report input, each behind a capability-gated, direction-checked interface. `MappingJobService`
@@ -141,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Exact-head CI [42409129339](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42409129339) verified commit `03106e837d094f4a8feda572e8668bae01a95543`: Windows and Ubuntu each passed 858 tests with 6 environment-gated Arelle subprocess skips; the pinned worker job passed 72 Python tests and 15 gated .NET Arelle tests. |
+| Tests | xUnit 2.9.3 | Latest exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458) verified `454e5e4c7ee82e38757745ba1879bc46086ae424`: Windows and Ubuntu each passed 859 tests with 6 environment-gated Arelle subprocess skips; the pinned worker job passed 72 Python tests, 15 gated .NET Arelle tests, and 15 dependency-inventory tests. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -279,6 +280,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
+Latest exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458)
+verified commit `454e5e4c7ee82e38757745ba1879bc46086ae424`. Repository hygiene,
+Windows and Ubuntu Release build/test, pinned Arelle integration, dependency-inventory
+tests, and SPDX generation passed. Each .NET OS matrix passed **859 tests, skipped 6
+environment-gated Arelle cases, and had 0 failures**. The eight suite counts were
+Adapters 94, AI 72, Desktop 103, Engine 121, Integration 240, Ops 89, Project 26,
+and XBRL 114. The worker job passed **72 Python protocol/offline tests**, **15 gated
+.NET Arelle execution tests**, and **15 dependency-inventory tests**. This head also
+verifies that a worker crash during SQLite destination validation preserves existing
+facts, receipt rows, and database bytes.
+
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 
 The compound-unit slice run [42308787441](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42308787441) verified exact source commit `2887939e0be99c710faa6aa973337b7d81c671e5`: repository hygiene, Windows and Ubuntu Release build/test, pinned worker integration, dependency inventory, and SPDX generation all passed. Each .NET OS matrix passed **747 tests** and skipped **5** environment-gated Arelle subprocess cases. The pinned worker job passed all **11** gated .NET Arelle execution tests. Local verification passed the same eight-project suite: **747 passed, 0 failed, 5 skipped**; the skipped cases require the pinned Arelle subprocess runtime.
@@ -287,7 +299,7 @@ The profile-aware XML QName round-trip run [42311840089](https://github.com/nirz
 
 The OPS-02 hostile-path and worker-failure publication regressions are included in commit `03106e837d094f4a8feda572e8668bae01a95543`; exact-head CI [42409129339](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42409129339) passed on Windows and Ubuntu, with pinned Arelle integration and repository hygiene also passing. Coverage verifies literal handling of hostile worker paths/arguments and that timeout or crash cannot replace a prior report. The two-process worker limit is shared within one application process; the broader implementation status and qualification gates are recorded in [`docs/implementation-status.md`](docs/implementation-status.md).
 
-The exact-head CI run [42409129339](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42409129339) verified source commit `03106e837d094f4a8feda572e8668bae01a95543`. Repository hygiene, Release build/test on Windows and Ubuntu, pinned Arelle integration, dependency-inventory tests, and SPDX generation all passed. Each .NET OS matrix passed **858 tests, skipped 6 environment-gated Arelle cases, and had 0 failures**; per-project counts are listed below. The separate worker job passed **72 Python protocol/offline tests** and **15 gated .NET Arelle execution tests**; the dependency-inventory generator passed **15 Python tests**.
+The prior exact-head CI run [42409129339](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42409129339) verified source commit `03106e837d094f4a8feda572e8668bae01a95543`; it passed on both operating systems with 858 tests and 6 environment-gated Arelle skips. The suite inventory and coverage are listed below.
 
 | Suite | Count | Covers |
 |---|---:|---|
@@ -296,7 +308,7 @@ The exact-head CI run [42409129339](https://github.com/nirzaf/XBRLMappingStudio/
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 94 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
 | Ops.Tests | 89 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 239 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Integration.Tests | 240 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
 | Desktop.Tests | 103 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
 | Project.Tests | 26 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 

@@ -260,3 +260,22 @@ process held the normal Release output assemblies. `git diff --check` passed.
 These results do not establish customer taxonomy or regulator
 qualification; typed dimensions, concept-to-hypercube applicability, complete
 BCP-47 metadata, and owner gates remain open.
+
+## OPS-01 SQLite worker-failure publication isolation
+
+`SqliteDestinationWorkflowTests.WorkerFailure_CannotReplaceExistingSqliteFactsOrReceipt`
+first publishes one accepted synthetic fact and receipt, then injects a worker crash
+during validation of the next run. The publication is rejected before target mutation;
+the test verifies prior database bytes, fact rows, and receipt count are unchanged, and
+that the failed manifest contains no database receipt. The focused Windows Release
+Integration test passed 1/1.
+
+Exact-head CI [42410033458](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42410033458)
+verified commit `454e5e4c7ee82e38757745ba1879bc46086ae424`: repository hygiene,
+Windows and Ubuntu Release build/test, pinned Arelle worker integration, dependency
+inventory tests, and SPDX generation passed. Each OS matrix passed 859 .NET tests,
+skipped 6 environment-gated Arelle tests, and had no failures. The pinned job passed
+72 Python worker tests, 15 gated .NET Arelle execution tests, and 15 dependency
+inventory tests. This verifies the synthetic-profile failure-isolation path only;
+full cancellation/process-crash coverage across all targets and owner-authorized
+real-profile publication remain open.
