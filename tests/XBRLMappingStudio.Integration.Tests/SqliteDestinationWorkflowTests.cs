@@ -152,6 +152,65 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MixedPublication_ReconcilesCommittedSqliteLegAfterCallerLosesReceipt()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        using var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
+
+        var outputPath = Path.Combine(_directory, "mixed-recovery-report.json");
+        var localStatePath = Path.Combine(_directory, "mixed-recovery-state.db");
+        var journal = new RunJournal(databasePath: localStatePath);
+        var publisher = new PublicationService(journal);
+        var store = new MixedPublicationStore(new LocalApplicationDatabase(localStatePath));
+        var coordinator = new MixedPublicationCoordinator(store);
+        var intent = MixedPublicationIntent.Create(project, result, outputPath,
+            Encoding.UTF8.GetByteCount(result.XbrlJson), _databasePath, "facts");
+        Func<string, CancellationToken, Task<string>> validate = (stagedPath, token) =>
+            service.ValidateStagedArtifactAsync(stagedPath, outputPath, result, token);
+
+        var interrupted = await coordinator.PublishAsync(intent,
+            token => publisher.PublishAuthorizedAsync(outputPath, Encoding.UTF8.GetBytes(result.XbrlJson),
+                _directory, project, _profile, true, result, validate, token,
+                refuseDifferentExisting: true),
+            async (prepared, token) =>
+            {
+                _ = await service.PublishDestinationAsync(project, result, _directory,
+                    true, token, prepared);
+                throw new IOException("Injected caller interruption after SQLite commit.");
+            });
+
+        Assert.IsType<IOException>(interrupted.Failure);
+        Assert.Equal(DestinationPublicationState.Confirmed, interrupted.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Unknown, interrupted.Record.SqliteState);
+        Assert.Single(await ReadFactsAsync(_databasePath));
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+        var publishedFile = await File.ReadAllBytesAsync(outputPath);
+
+        var reconciled = await coordinator.ReconcileAsync(intent.OperationKey);
+
+        Assert.NotNull(reconciled);
+        Assert.Equal(DestinationPublicationState.Confirmed, reconciled!.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, reconciled.SqliteState);
+        Assert.NotNull(reconciled.SqliteOperationKey);
+        Assert.NotNull(reconciled.SqliteIntentFingerprint);
+        Assert.Equal(1, reconciled.SqliteRowsWritten);
+
+        var retry = await coordinator.PublishAsync(intent,
+            _ => throw new InvalidOperationException("Confirmed destinations must not be published again."),
+            (_, _) => throw new InvalidOperationException("A reconciled SQLite receipt must not be replayed."));
+
+        Assert.Null(retry.Failure);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.SqliteState);
+        Assert.Equal(publishedFile, await File.ReadAllBytesAsync(outputPath));
+        Assert.Single(await ReadFactsAsync(_databasePath));
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task DestinationChangePreviewMatchesInsertCountAndLeavesDatabaseBytesUnchanged()
     {
         var project = ConfiguredProject(_workbookPath);
