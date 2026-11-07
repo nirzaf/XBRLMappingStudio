@@ -44,10 +44,12 @@
       "depends_on": "BEN-05",
       "fixture": "synthetic digest-bound profile with 20000 concepts",
       "interaction": "100 warm searches and 100 bounded lazy role-page expansions, with index recreation and cancellation integrity checks",
-      "automation_status": "one Windows Release synthetic component run and process-tree capture are retained; real taxonomy, native UI, repeatability, and target-hardware qualification remain open",
+      "automation_status": "two Windows Release synthetic component runs and process-tree captures are retained with matching fixture and artifact digests; real taxonomy, native UI, and target-hardware qualification remain open",
       "measurement_records": [
         "results/taxonomy-search-20k-windows-release-run-01.json",
-        "results/taxonomy-search-20k-process-windows-release-run-01.json"
+        "results/taxonomy-search-20k-process-windows-release-run-01.json",
+        "results/taxonomy-search-20k-windows-release-run-02.json",
+        "results/taxonomy-search-20k-process-windows-release-run-02.json"
       ]
     },
     {

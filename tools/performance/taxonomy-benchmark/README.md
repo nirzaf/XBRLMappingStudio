@@ -24,27 +24,19 @@ Both output paths must be new files. The index record contains the generated
 profile digest; the process-tree record includes the machine description,
 compiled artifact digest, and resource samples.
 
-## Captured synthetic sample
+## Captured synthetic samples
 
-One local Windows Release run was captured on 2026-11-07 at source revision
-3a42b0bc1bc163169109ce1212495cb8bf3fbc5c. The synthetic profile contained
-20,000 concepts and its digest was
-sha256:122c292da2e92edb2917fbe79d220c11dbbe7d397ae668608f8134dd4914c14c.
-Across 100 warm searches, p50 was 3.1895 ms, p95 was 6.3932 ms, and maximum
-was 27.5184 ms. Across 100 bounded role-page expansions, p50 was 0.0016 ms,
-p95 was 0.0073 ms, and maximum was 1.3213 ms. The process-tree harness ran for
-1.59 seconds and captured four samples, three complete; its observed peaks
-were 75,337,728 working-set bytes and 55,595,008 private bytes.
+Two local Windows Release runs were captured on 2026-11-07. The synthetic
+profile contained 20,000 concepts and both runs recorded the same profile
+digest, sha256:122c292da2e92edb2917fbe79d220c11dbbe7d397ae668608f8134dd4914c14c.
+Both process-tree records also recorded the same compiled-artifact hash.
 
-The raw index and process-tree records are
-[taxonomy-search-20k-windows-release-run-01.json](../results/taxonomy-search-20k-windows-release-run-01.json)
-and
-[taxonomy-search-20k-process-windows-release-run-01.json](../results/taxonomy-search-20k-process-windows-release-run-01.json).
-They record the local machine, runtime, artifact/profile digests and all query
-samples. The process sample is short and coarse; these observations are
-synthetic component measurements only. Both records explicitly claim no
-threshold pass and do not qualify a real taxonomy, native UI interaction,
-customer hardware or release performance.
+| Run | Search p50 / p95 / max (ms) | Role expansion p50 / p95 / max (ms) | Process duration / samples | Peak working set / private bytes |
+|---|---:|---:|---:|---:|
+| 01 | 3.1895 / 6.3932 / 27.5184 | 0.0016 / 0.0073 / 1.3213 | 1.59 s / 4 (3 complete) | 75,337,728 / 55,595,008 |
+| 02 | 1.9000 / 3.8539 / 10.9004 | 0.0007 / 0.0051 / 0.5881 | 1.04 s / 3 (2 complete) | 70,201,344 / 50,917,376 |
+
+The raw index and process-tree records are [run 01 index](../results/taxonomy-search-20k-windows-release-run-01.json), [run 01 process tree](../results/taxonomy-search-20k-process-windows-release-run-01.json), [run 02 index](../results/taxonomy-search-20k-windows-release-run-02.json), and [run 02 process tree](../results/taxonomy-search-20k-process-windows-release-run-02.json). They record the local machine, runtime, artifact/profile digests and all query samples. The process captures are short and coarse; these observations are synthetic component measurements only. All records explicitly claim no threshold pass and do not qualify a real taxonomy, native UI interaction, customer hardware or release performance.
 
 The output schema is `taxonomy_benchmark.schema.json`. Measurements are labeled
 `measured_synthetic_only` and always set `thresholdPassClaimed` to `false`.
