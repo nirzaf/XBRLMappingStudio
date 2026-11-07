@@ -82,6 +82,14 @@ public sealed class FilingProfileResolver
                 .ThenBy(profile => profile.Digest, StringComparer.Ordinal).ToArray()
             : Array.Empty<FilingProfile>();
 
+    /// <summary>Return all registered profile versions in stable identity order.</summary>
+    public IReadOnlyList<FilingProfile> GetAllProfiles()
+        => _profiles.Values.SelectMany(versions => versions)
+            .OrderBy(profile => profile.ProfileId, StringComparer.Ordinal)
+            .ThenBy(profile => profile.TaxonomyVersion, StringComparer.Ordinal)
+            .ThenBy(profile => profile.Digest, StringComparer.Ordinal)
+            .ToArray();
+
     public FilingProfileResolution Resolve(
         MappingProject project,
         bool allowSyntheticProfile,

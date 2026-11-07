@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Automation;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
@@ -119,6 +120,168 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
         });
         return LocalPath(file?.Path);
     }
+
+    public async Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
+        IReadOnlyList<LegacyProjectProfileOption> candidates,
+        string? declaredProfileId,
+        string? declaredProfileDigest)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        if (candidates.Count == 0) return null;
+
+        var dialog = new Window
+        {
+            Title = "Choose the legacy project's filing profile",
+            Width = 700,
+            Height = 440,
+            MinWidth = 620,
+            MinHeight = 400,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var profiles = new ComboBox
+        {
+            ItemsSource = candidates,
+            SelectedIndex = 0,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+            MinHeight = 36
+        };
+        AutomationProperties.SetName(profiles, "Installed filing profile version");
+        var syntheticOptIn = new CheckBox
+        {
+            Content = "Allow the synthetic development profile for this adoption",
+            IsChecked = false,
+            IsEnabled = false
+        };
+        AutomationProperties.SetName(syntheticOptIn, "Allow synthetic development profile");
+        var continueButton = new Button
+        {
+            Content = "Continue",
+            IsDefault = true,
+            MinWidth = 110,
+            IsEnabled = false
+        };
+        var cancelButton = new Button { Content = "Cancel", IsCancel = true, MinWidth = 100 };
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancelButton);
+        actions.Children.Add(continueButton);
+
+        void RefreshContinueState()
+        {
+            var selected = profiles.SelectedItem as LegacyProjectProfileOption;
+            syntheticOptIn.IsEnabled = selected?.IsSynthetic == true;
+            if (selected?.IsSynthetic != true) syntheticOptIn.IsChecked = false;
+            continueButton.IsEnabled = selected is not null
+                && (!selected.IsSynthetic || syntheticOptIn.IsChecked == true);
+        }
+
+        profiles.SelectionChanged += (_, _) => RefreshContinueState();
+        syntheticOptIn.IsCheckedChanged += (_, _) => RefreshContinueState();
+        dialog.Opened += (_, _) => profiles.Focus();
+        cancelButton.Click += (_, _) => dialog.Close(null);
+        continueButton.Click += (_, _) =>
+        {
+            if (profiles.SelectedItem is not LegacyProjectProfileOption selected) return;
+            dialog.Close(new LegacyProjectProfileSelection(
+                selected.ProfileId,
+                selected.ProfileDigest,
+                selected.IsSynthetic && syntheticOptIn.IsChecked == true));
+        };
+        RefreshContinueState();
+
+        var content = new StackPanel { Spacing = 12, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = "Profile identity cannot be inferred from this file. Choose the exact installed version "
+                + "that the project was built for. The selected ID and digest will be checked before any copy is saved.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Already declared: profile ID {FormatIdentity(declaredProfileId)}; "
+                + $"digest {FormatIdentity(declaredProfileDigest)}.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock { Text = "Installed profile version (ID, version and digest):" });
+        content.Children.Add(profiles);
+        content.Children.Add(syntheticOptIn);
+        content.Children.Add(new TextBlock
+        {
+            Text = "This creates a new project file, leaves the source untouched and clears all existing approvals. "
+                + "Relative source and destination paths will resolve from the new file's folder. Real filing profiles "
+                + "remain unavailable until their owner and rights gates are approved.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<LegacyProjectProfileSelection?>(owner);
+    }
+
+    public async Task<bool> ConfirmLegacyProjectProfileAdoptionAsync(
+        string sourcePath,
+        string destinationPath,
+        LegacyProjectProfileOption selectedProfile,
+        IReadOnlyList<string> addedIdentityFields)
+    {
+        var dialog = new Window
+        {
+            Title = "Create adopted project copy",
+            Width = 680,
+            Height = 420,
+            CanResize = true,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var create = new Button { Content = "Create new project", IsDefault = true, MinWidth = 140 };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 100 };
+        create.Click += (_, _) => dialog.Close(true);
+        cancel.Click += (_, _) => dialog.Close(false);
+
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(create);
+        var content = new StackPanel { Spacing = 12, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Create '{Path.GetFileName(destinationPath)}' from '{Path.GetFileName(sourcePath)}'?",
+            FontWeight = Avalonia.Media.FontWeight.Bold,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Exact profile: {selectedProfile.ProfileId} · taxonomy {selectedProfile.TaxonomyVersion} · "
+                + selectedProfile.ProfileDigest
+                + (selectedProfile.IsSynthetic ? " (synthetic development profile)" : string.Empty),
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Identity fields to add: {string.Join(", ", addedIdentityFields)}. "
+                + "The new file gets an independent project ID and has no inherited approvals. "
+                + "The selected profile does not certify that this identity is historically correct; verify it against your filing requirements.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = "The source file is never overwritten. Relative source and destination paths are retained and "
+                + "will resolve from the new project's folder. Choose a new destination; an existing file cannot be replaced.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<bool>(owner);
+    }
+
+    private static string FormatIdentity(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "(missing)" : value;
 
     public async Task<string?> OpenFunctionPackageAsync()
     {

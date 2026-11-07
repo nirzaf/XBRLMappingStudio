@@ -27,6 +27,7 @@
       <MenuItem Header="_File">
         <MenuItem Header="_New" Command="{Binding NewProjectCommand}" />
         <MenuItem Header="_Open..." Command="{Binding OpenProjectCommand}" />
+        <MenuItem Header="Adopt _Legacy Profile..." Command="{Binding AdoptLegacyProjectProfileCommand}" />
         <MenuItem Header="_Save" Command="{Binding SaveProjectCommand}" />
         <MenuItem Header="Save _As..." Command="{Binding SaveProjectAsCommand}" />
         <MenuItem Header="_Close Project" Command="{Binding CloseProjectCommand}" />

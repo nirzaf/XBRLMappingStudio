@@ -206,11 +206,30 @@ Verification:
 - The two CLI subprocess adoption tests passed 2/2. They verify the synthetic
   opt-in gate, exact selected identity, unchanged source bytes, no same-path
   replacement, and preservation of an existing destination.
-- The full Release Integration suite passed 232 tests, skipped 6 gated Arelle
-  tests, and had no failures.
+- The final Release Desktop suite passed 103/103, including independent-copy
+  creation, synthetic opt-in refusal, source-change refusal, and the normal-open
+  migration hint.
+- The final Release solution suite passed 845 tests, skipped 6 environment-gated
+  Arelle tests, and had no failures.
+- Test build output was isolated under a temporary directory because another
+  Desktop process held the normal Release output files. That process was left
+  untouched.
+- The native UI helper found the isolated QA window but failed to activate it
+  twice (`failed to activate captured window`); no UI interactions were made.
+  Native visual acceptance remains unverified; this is an automation limitation,
+  not an observed application defect.
 - `git diff --check` passed before commit.
 
 The ordinary project loader still refuses unpinned legacy files; the explicit
-CLI path is the compatibility decision and no profile is inferred. Desktop does
-not yet expose this migration flow. Adoption of real profiles remains gated by
-the owner and rights decisions, and the new exact-head CI result is pending.
+CLI and Desktop adoption paths require a caller-selected profile and do not
+infer identity. The Desktop File menu links failed legacy opens to `Adopt Legacy
+Profile`; the chooser displays exact profile ID, taxonomy version and digest,
+and the separate confirmation names the destination and cleared approvals. The
+workflow uses a create-only Save As copy, preserves the source, blocks synthetic
+adoption until explicit opt-in, and rejects a source that changed after profile
+selection. Headless Desktop tests cover the success, synthetic opt-in, stale
+source, and normal-open recovery-message paths. The final local Release solution
+suite passed 845 tests and skipped 6 environment-gated Arelle cases. The native
+UI helper could not activate the isolated app window after a refreshed retry;
+no UI interaction occurred, so visual native acceptance remains unverified.
+Real-profile adoption remains owner-gated.

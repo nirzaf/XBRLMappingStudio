@@ -1395,6 +1395,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public RelayCommand NewProjectCommand { get; }
     public RelayCommand OpenProjectCommand { get; }
+    public RelayCommand AdoptLegacyProjectProfileCommand { get; }
     public RelayCommand SaveProjectCommand { get; }
     public RelayCommand SaveProjectAsCommand { get; }
     public RelayCommand CloseProjectCommand { get; }
@@ -1509,6 +1510,7 @@ public sealed class MainWindowViewModel : ViewModelBase
 
         NewProjectCommand = new RelayCommand(async _ => await NewProjectAsync());
         OpenProjectCommand = new RelayCommand(async _ => await OpenProjectAsync());
+        AdoptLegacyProjectProfileCommand = new RelayCommand(async _ => await AdoptLegacyProjectProfileAsync());
         SaveProjectCommand = new RelayCommand(async _ => await SaveProjectAsync());
         SaveProjectAsCommand = new RelayCommand(async _ => await SaveProjectAsAsync());
         CloseProjectCommand = new RelayCommand(async _ => await CloseProjectAsync());
@@ -2200,7 +2202,128 @@ public sealed class MainWindowViewModel : ViewModelBase
             if (openedFromBackup)
                 StatusText += " Recovered from a validated backup; the original remains untouched. Use Save As to create an independent recovery copy.";
         }
+        catch (ProjectSchemaException ex) when (
+            ex.Message.Contains("profile identity cannot be inferred", StringComparison.OrdinalIgnoreCase))
+        {
+            StatusText = $"Open failed: {ex.Message} Use File > Adopt Legacy Profile to create a separately identified copy.";
+        }
         catch (Exception ex) { StatusText = $"Open failed: {ex.Message}"; }
+    }
+
+    public async Task AdoptLegacyProjectProfileAsync()
+    {
+        if (_fileDialog is null) { StatusText = "Project file picker is unavailable."; return; }
+        if (IsBusy || IsSourceLoading)
+        {
+            StatusText = "Profile adoption is unavailable while another project operation is running.";
+            return;
+        }
+
+        try
+        {
+            var sourcePath = await _fileDialog.OpenProjectAsync();
+            if (sourcePath is null) return;
+
+            var sourceManager = new ProjectManager(Path.GetFullPath(sourcePath));
+            var originalBytes = sourceManager.ReadSnapshotBytes();
+            var identity = LegacyProjectProfileAdoption.InspectIdentity(originalBytes);
+            var candidates = _profileResolver.GetAllProfiles()
+                .Where(profile => (identity.ExistingProfileId is null
+                        || StringComparer.Ordinal.Equals(identity.ExistingProfileId, profile.ProfileId))
+                    && (identity.ExistingProfileDigest is null
+                        || StringComparer.Ordinal.Equals(identity.ExistingProfileDigest, profile.Digest)))
+                .Select(profile => new LegacyProjectProfileOption(
+                    profile.ProfileId,
+                    profile.Digest,
+                    profile.TaxonomyVersion,
+                    StringComparer.Ordinal.Equals(profile.ProfileId, SyntheticProfile.ProfileId)))
+                .ToArray();
+            if (candidates.Length == 0)
+            {
+                StatusText = "No registered profile version matches the identity already declared by this legacy project. "
+                    + "Install the exact profile version; no identity was inferred and no files were changed.";
+                return;
+            }
+
+            var selection = await _fileDialog.SelectLegacyProjectProfileAsync(
+                candidates, identity.ExistingProfileId, identity.ExistingProfileDigest);
+            if (selection is null)
+            {
+                StatusText = "Canceled legacy profile selection; the source and active project are unchanged.";
+                return;
+            }
+
+            var selectedProfile = candidates.FirstOrDefault(candidate =>
+                StringComparer.Ordinal.Equals(candidate.ProfileId, selection.ProfileId)
+                && StringComparer.Ordinal.Equals(candidate.ProfileDigest, selection.ProfileDigest));
+            if (selectedProfile is null)
+                throw new InvalidOperationException("The selected profile version was not in the displayed installed-profile list.");
+
+            var draft = LegacyProjectProfileAdoption.CreateDraft(
+                originalBytes, selectedProfile.ProfileId, selectedProfile.ProfileDigest);
+            var profileResolution = _profileResolver.Resolve(
+                draft.Project,
+                selection.AllowSyntheticProfile,
+                DiagnosticStage.Validation,
+                operationId: "desktop-legacy-profile-adoption");
+            if (!profileResolution.Success)
+            {
+                StatusText = "Profile adoption blocked: " + string.Join(" ",
+                    profileResolution.Diagnostics.Items.Select(diagnostic =>
+                        $"{diagnostic.Code}: {diagnostic.Message}"));
+                return;
+            }
+
+            if (!await ConfirmUnsavedChangesAsync("adopt a legacy project's profile")) return;
+            var destinationPath = await _fileDialog.SaveProjectAsync();
+            if (destinationPath is null)
+            {
+                StatusText = "Canceled legacy project Save As; the source and active project are unchanged.";
+                return;
+            }
+
+            var destinationFullPath = Path.GetFullPath(destinationPath);
+            if (PathsEqual(sourceManager.FullPath, destinationFullPath))
+            {
+                StatusText = "Profile adoption requires a new project path; the source file is never overwritten.";
+                return;
+            }
+            if (File.Exists(destinationFullPath))
+            {
+                StatusText = "Profile adoption stopped because that destination already exists. Choose a new path; "
+                    + "existing project files are never replaced.";
+                return;
+            }
+            if (!await _fileDialog.ConfirmLegacyProjectProfileAdoptionAsync(
+                    sourceManager.FullPath, destinationFullPath, selectedProfile, draft.AddedIdentityFields))
+            {
+                StatusText = "Canceled legacy project adoption; the source and active project are unchanged.";
+                return;
+            }
+
+            var sourceSha256 = Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant();
+            var result = new LegacyProjectProfileAdoptionService(_profileResolver).Adopt(
+                sourceManager.FullPath,
+                destinationFullPath,
+                selectedProfile.ProfileId,
+                selectedProfile.ProfileDigest,
+                selection.AllowSyntheticProfile,
+                expectedSourceSha256: sourceSha256);
+            var adoptedManager = new ProjectManager(result.DestinationPath);
+            var adoptedProject = adoptedManager.Load();
+            var profileAvailable = ActivateProject(adoptedManager, adoptedProject);
+            if (profileAvailable) await LoadWorkspaceBindingsAsync(profileAvailable);
+            StatusText = $"Adopted {Path.GetFileName(sourceManager.FullPath)} as {Path.GetFileName(result.DestinationPath)} "
+                + $"for {result.ProfileId} ({result.ProfileDigest}). The source remains unchanged, "
+                + "the new project has a separate identity with approvals cleared, and relative paths now resolve "
+                + "from the new project folder.";
+        }
+        catch (LegacyProjectProfileAdoptionBlockedException ex)
+        {
+            StatusText = "Profile adoption blocked: " + string.Join(" ",
+                ex.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}"));
+        }
+        catch (Exception ex) { StatusText = $"Legacy profile adoption failed: {ex.Message}"; }
     }
 
     public async Task<bool> ConfirmCloseApplicationAsync()

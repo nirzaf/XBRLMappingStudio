@@ -7,11 +7,36 @@ public enum UnsavedProjectChoice
     Discard
 }
 
+public sealed record LegacyProjectProfileOption(
+    string ProfileId,
+    string ProfileDigest,
+    string TaxonomyVersion,
+    bool IsSynthetic)
+{
+    public override string ToString()
+        => $"{ProfileId} · taxonomy {TaxonomyVersion} · {ProfileDigest}"
+            + (IsSynthetic ? " · development only" : string.Empty);
+}
+
+public sealed record LegacyProjectProfileSelection(
+    string ProfileId,
+    string ProfileDigest,
+    bool AllowSyntheticProfile);
+
 /// <summary>Platform file-picker boundary for project and report destinations.</summary>
 public interface IProjectFileDialog
 {
     Task<string?> OpenProjectAsync();
     Task<string?> SaveProjectAsync();
+    Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
+        IReadOnlyList<LegacyProjectProfileOption> candidates,
+        string? declaredProfileId,
+        string? declaredProfileDigest);
+    Task<bool> ConfirmLegacyProjectProfileAdoptionAsync(
+        string sourcePath,
+        string destinationPath,
+        LegacyProjectProfileOption selectedProfile,
+        IReadOnlyList<string> addedIdentityFields);
     Task<string?> OpenFunctionPackageAsync();
     Task<string?> SaveFunctionPackageAsync();
     Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath);

@@ -349,6 +349,15 @@ public sealed class FunctionLibraryEditorTests
         public string? SavePath { get; init; }
         public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
+        public Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
+            IReadOnlyList<LegacyProjectProfileOption> candidates,
+            string? declaredProfileId,
+            string? declaredProfileDigest) => Task.FromResult<LegacyProjectProfileSelection?>(null);
+        public Task<bool> ConfirmLegacyProjectProfileAdoptionAsync(
+            string sourcePath,
+            string destinationPath,
+            LegacyProjectProfileOption selectedProfile,
+            IReadOnlyList<string> addedIdentityFields) => Task.FromResult(false);
         public Task<string?> OpenFunctionPackageAsync() => Task.FromResult(OpenPath);
         public Task<string?> SaveFunctionPackageAsync() => Task.FromResult(SavePath);
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath) => Task.FromResult(false);

@@ -18,7 +18,8 @@ public sealed class LegacyProjectProfileAdoptionService(FilingProfileResolver pr
         string destinationPath,
         string selectedProfileId,
         string selectedProfileDigest,
-        bool allowSyntheticProfile)
+        bool allowSyntheticProfile,
+        string? expectedSourceSha256 = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -36,6 +37,10 @@ public sealed class LegacyProjectProfileAdoptionService(FilingProfileResolver pr
         var sourceManager = new ProjectManager(sourceFullPath);
         var originalBytes = sourceManager.ReadSnapshotBytes();
         var sourceDigest = Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant();
+        if (expectedSourceSha256 is not null
+            && !StringComparer.OrdinalIgnoreCase.Equals(expectedSourceSha256, sourceDigest))
+            throw new InvalidOperationException(
+                "The legacy source project changed after profile selection; no copy was written.");
         var draft = LegacyProjectProfileAdoption.CreateDraft(
             originalBytes, selectedProfileId, selectedProfileDigest);
 

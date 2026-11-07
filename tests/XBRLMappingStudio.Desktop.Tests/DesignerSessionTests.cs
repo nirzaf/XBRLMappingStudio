@@ -8,6 +8,7 @@ using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.AI;
 using XBRLMappingStudio.Engine;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 
 namespace XBRLMappingStudio.Desktop.Tests;
 
@@ -553,6 +554,138 @@ public sealed class DesignerSessionTests
             Assert.Equal("source", reopened.SelectedSourceBindingId);
             Assert.Equal(firstViewModel.Session.Project.ComputeSemanticDigest(), reopened.Session.Project.ComputeSemanticDigest());
             Assert.False(reopened.IsProjectDirty);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyProfileAdoptionCreatesNewFileOnlyAfterExplicitSyntheticOptIn()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-legacy-profile-adoption", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var sourcePath = Path.Combine(dir, "legacy.xmap");
+        var destinationPath = Path.Combine(dir, "adopted", "mapping.xmap");
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+        try
+        {
+            var sourceProject = Project();
+            sourceProject.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = sourceProject.SemanticRevision,
+                SemanticDigest = sourceProject.ComputeSemanticDigest(),
+                ApprovedBy = "legacy-reviewer",
+                ApprovedUtc = DateTimeOffset.Parse("2026-11-01T00:00:00Z"),
+                ProfileDigest = sourceProject.ProfileDigest
+            });
+            var legacyJson = JsonNode.Parse(ProjectSerializer.Serialize(sourceProject))!.AsObject();
+            legacyJson.Remove("profileId");
+            legacyJson.Remove("profileDigest");
+            await File.WriteAllTextAsync(sourcePath, legacyJson.ToJsonString(ProjectSerializer.Options));
+            var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = sourcePath,
+                ProjectSavePath = destinationPath,
+                LegacyProfileSelection = new LegacyProjectProfileSelection(
+                    SyntheticProfile.ProfileId, SyntheticProfile.Build().Digest, AllowSyntheticProfile: true),
+                ConfirmLegacyAdoption = true
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+            var activeProjectId = viewModel.Session.Project.ProjectId;
+
+            await viewModel.AdoptLegacyProjectProfileAsync();
+
+            var adopted = new ProjectManager(destinationPath).Load();
+            Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(sourcePath));
+            Assert.NotEqual(sourceProject.ProjectId, adopted.ProjectId);
+            Assert.NotEqual(activeProjectId, viewModel.Session.Project.ProjectId);
+            Assert.Empty(adopted.Approvals);
+            Assert.Equal(SyntheticProfile.ProfileId, adopted.ProfileId);
+            Assert.Equal(SyntheticProfile.Build().Digest, adopted.ProfileDigest);
+            Assert.Equal(sourceProject.Nodes.Select(node => node.NodeId), adopted.Nodes.Select(node => node.NodeId));
+            Assert.Equal(sourceProject.Edges.Select(edge => edge.EdgeId), adopted.Edges.Select(edge => edge.EdgeId));
+            Assert.Equal(destinationPath, viewModel.ProjectPath);
+            Assert.Equal(new[] { "profileId", "profileDigest" }, dialog.ConfirmedAddedIdentityFields);
+            Assert.Contains("source remains unchanged", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("approvals cleared", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OpeningLegacyProjectExplainsExplicitAdoptionAction()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-legacy-profile-open-hint", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var sourcePath = Path.Combine(dir, "legacy.xmap");
+        try
+        {
+            var legacy = JsonNode.Parse(ProjectSerializer.Serialize(Project()))!.AsObject();
+            legacy.Remove("profileId");
+            legacy.Remove("profileDigest");
+            await File.WriteAllTextAsync(sourcePath, legacy.ToJsonString(ProjectSerializer.Options));
+            var originalBytes = await File.ReadAllBytesAsync(sourcePath);
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = sourcePath };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+
+            await viewModel.OpenProjectAsync();
+
+            Assert.Null(viewModel.ProjectPath);
+            Assert.Contains("profile identity cannot be inferred", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Adopt Legacy Profile", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(sourcePath));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyProfileAdoptionRequiresSyntheticOptInAndPreservesSourceWhenSourceChanges()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xms-legacy-profile-adoption-gates", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var sourcePath = Path.Combine(dir, "legacy.xmap");
+        var destinationPath = Path.Combine(dir, "adopted.xmap");
+        try
+        {
+            var legacy = JsonNode.Parse(ProjectSerializer.Serialize(Project()))!.AsObject();
+            legacy.Remove("profileId");
+            legacy.Remove("profileDigest");
+            await File.WriteAllTextAsync(sourcePath, legacy.ToJsonString(ProjectSerializer.Options));
+            var originalBytes = await File.ReadAllBytesAsync(sourcePath);
+            var dialog = new TestProjectFileDialog(null)
+            {
+                ProjectOpenPath = sourcePath,
+                ProjectSavePath = destinationPath,
+                LegacyProfileSelection = new LegacyProjectProfileSelection(
+                    SyntheticProfile.ProfileId, SyntheticProfile.Build().Digest, AllowSyntheticProfile: false),
+                ConfirmLegacyAdoption = true
+            };
+            var viewModel = new MainWindowViewModel(Project(), dialog);
+
+            await viewModel.AdoptLegacyProjectProfileAsync();
+
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(sourcePath));
+            Assert.False(File.Exists(destinationPath));
+            Assert.Equal(0, dialog.SaveProjectRequestCount);
+            Assert.Contains("explicit opt-in", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+
+            dialog.LegacyProfileSelection = new LegacyProjectProfileSelection(
+                SyntheticProfile.ProfileId, SyntheticProfile.Build().Digest, AllowSyntheticProfile: true);
+            dialog.OnLegacyProfileSelected = () => File.AppendAllText(sourcePath, " ");
+            await viewModel.AdoptLegacyProjectProfileAsync();
+
+            Assert.Equal(originalBytes.Concat(new byte[] { (byte)' ' }), await File.ReadAllBytesAsync(sourcePath));
+            Assert.False(File.Exists(destinationPath));
+            Assert.Contains("changed after profile selection", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -2771,6 +2904,13 @@ public sealed class DesignerSessionTests
         public bool ConfirmationResult { get; set; }
         public bool ConfirmIndependentCopy { get; set; }
         public bool ConfirmBackupRecovery { get; set; }
+        public LegacyProjectProfileSelection? LegacyProfileSelection { get; set; }
+        public bool ConfirmLegacyAdoption { get; set; }
+        public Action? OnLegacyProfileSelected { get; set; }
+        public int LegacyProfileSelectionCallCount { get; private set; }
+        public int AdoptionConfirmationCount { get; private set; }
+        public int SaveProjectRequestCount { get; private set; }
+        public IReadOnlyList<string> ConfirmedAddedIdentityFields { get; private set; } = Array.Empty<string>();
         public int BackupRecoveryConfirmationCount { get; private set; }
         public int ConfirmationCount { get; private set; }
         public string? ConfirmedTable { get; private set; }
@@ -2780,7 +2920,30 @@ public sealed class DesignerSessionTests
         public string? ConfirmedFileFormat { get; private set; }
 
         public Task<string?> OpenProjectAsync() => Task.FromResult(ProjectOpenPath);
-        public Task<string?> SaveProjectAsync() => Task.FromResult(ProjectSavePath);
+        public Task<string?> SaveProjectAsync()
+        {
+            SaveProjectRequestCount++;
+            return Task.FromResult(ProjectSavePath);
+        }
+        public Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
+            IReadOnlyList<LegacyProjectProfileOption> candidates,
+            string? declaredProfileId,
+            string? declaredProfileDigest)
+        {
+            LegacyProfileSelectionCallCount++;
+            OnLegacyProfileSelected?.Invoke();
+            return Task.FromResult(LegacyProfileSelection);
+        }
+        public Task<bool> ConfirmLegacyProjectProfileAdoptionAsync(
+            string sourcePath,
+            string destinationPath,
+            LegacyProjectProfileOption selectedProfile,
+            IReadOnlyList<string> addedIdentityFields)
+        {
+            AdoptionConfirmationCount++;
+            ConfirmedAddedIdentityFields = addedIdentityFields.ToArray();
+            return Task.FromResult(ConfirmLegacyAdoption);
+        }
         public Task<string?> OpenFunctionPackageAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveFunctionPackageAsync() => Task.FromResult<string?>(null);
         public Task<bool> ConfirmSaveAsIndependentCopyAsync(string projectName, string destinationPath)

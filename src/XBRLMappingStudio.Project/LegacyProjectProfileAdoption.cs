@@ -12,6 +12,13 @@ namespace XBRLMappingStudio.Project;
 /// </summary>
 public static class LegacyProjectProfileAdoption
 {
+    public static LegacyProjectProfileIdentityInspection InspectIdentity(ReadOnlySpan<byte> originalBytes)
+    {
+        var json = DecodeUtf8(originalBytes);
+        using var document = ParseDocument(json);
+        return InspectIdentity(document.RootElement);
+    }
+
     public static LegacyProjectProfileAdoptionDraft CreateDraft(
         ReadOnlySpan<byte> originalBytes,
         string selectedProfileId,
@@ -23,80 +30,89 @@ public static class LegacyProjectProfileAdoption
             throw new ArgumentException("An explicit profile digest is required.", nameof(selectedProfileDigest));
 
         var json = DecodeUtf8(originalBytes);
-        JsonDocument document;
+        using var document = ParseDocument(json);
+        var identity = InspectIdentity(document.RootElement);
+        if (identity.ExistingProfileId is not null
+            && !StringComparer.Ordinal.Equals(identity.ExistingProfileId, selectedProfileId))
+            throw new InvalidOperationException(
+                "The selected profile ID conflicts with the identity already declared by the project.");
+        if (identity.ExistingProfileDigest is not null
+            && !StringComparer.Ordinal.Equals(identity.ExistingProfileDigest, selectedProfileDigest))
+            throw new InvalidOperationException(
+                "The selected profile digest conflicts with the identity already declared by the project.");
+
+        JsonObject root;
         try
         {
-            document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
+            root = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions { MaxDepth = 64 }) as JsonObject
+                ?? throw new JsonException("Project root must be an object.");
+        }
+        catch (JsonException ex)
+        {
+            throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
+                "Legacy project could not be copied for profile adoption.", ex);
+        }
+
+        root["profileId"] = selectedProfileId;
+        root["profileDigest"] = selectedProfileDigest;
+        var identityBoundJson = root.ToJsonString(ProjectSerializer.Options);
+
+        EnsureNoUnsupportedFields(identityBoundJson);
+        var project = ProjectSerializer.Deserialize(identityBoundJson);
+        var independentCopy = ProjectSerializer.CreateIndependentCopy(project);
+        return new LegacyProjectProfileAdoptionDraft(independentCopy, identity.MissingFields);
+    }
+
+    private static JsonDocument ParseDocument(string json)
+    {
+        try
+        {
+            return JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
         }
         catch (JsonException ex)
         {
             throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
                 "Legacy project is not valid UTF-8 JSON and was not changed.", ex);
         }
-
-        using (document)
-        {
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-                throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
-                    "Legacy project root must be a JSON object.");
-
-            var existingProfileId = ReadIdentity(document.RootElement, "profileId");
-            var existingProfileDigest = ReadIdentity(document.RootElement, "profileDigest");
-            var missingFields = new List<string>(2);
-            if (existingProfileId.IsMissing) missingFields.Add("profileId");
-            if (existingProfileDigest.IsMissing) missingFields.Add("profileDigest");
-            if (missingFields.Count == 0)
-                throw new InvalidOperationException(
-                    "Project already declares a complete profile identity; ordinary project loading must be used.");
-
-            if (!existingProfileId.IsMissing
-                && !StringComparer.Ordinal.Equals(existingProfileId.Value, selectedProfileId))
-                throw new InvalidOperationException(
-                    "The selected profile ID conflicts with the identity already declared by the project.");
-            if (!existingProfileDigest.IsMissing
-                && !StringComparer.Ordinal.Equals(existingProfileDigest.Value, selectedProfileDigest))
-                throw new InvalidOperationException(
-                    "The selected profile digest conflicts with the identity already declared by the project.");
-
-            JsonObject root;
-            try
-            {
-                root = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions { MaxDepth = 64 }) as JsonObject
-                    ?? throw new JsonException("Project root must be an object.");
-            }
-            catch (JsonException ex)
-            {
-                throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
-                    "Legacy project could not be copied for profile adoption.", ex);
-            }
-
-            root["profileId"] = selectedProfileId;
-            root["profileDigest"] = selectedProfileDigest;
-            var identityBoundJson = root.ToJsonString(ProjectSerializer.Options);
-
-            EnsureNoUnsupportedFields(identityBoundJson);
-            var project = ProjectSerializer.Deserialize(identityBoundJson);
-            var independentCopy = ProjectSerializer.CreateIndependentCopy(project);
-            return new LegacyProjectProfileAdoptionDraft(independentCopy, missingFields.AsReadOnly());
-        }
     }
 
-    private static IdentityValue ReadIdentity(JsonElement root, string propertyName)
+    private static LegacyProjectProfileIdentityInspection InspectIdentity(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
+                "Legacy project root must be a JSON object.");
+
+        var existingProfileId = ReadIdentity(root, "profileId");
+        var existingProfileDigest = ReadIdentity(root, "profileDigest");
+        var missingFields = new List<string>(2);
+        if (existingProfileId is null) missingFields.Add("profileId");
+        if (existingProfileDigest is null) missingFields.Add("profileDigest");
+        if (missingFields.Count == 0)
+            throw new InvalidOperationException(
+                "Project already declares a complete profile identity; ordinary project loading must be used.");
+
+        return new LegacyProjectProfileIdentityInspection(
+            existingProfileId,
+            existingProfileDigest,
+            missingFields.AsReadOnly());
+    }
+
+    private static string? ReadIdentity(JsonElement root, string propertyName)
     {
         var matches = root.EnumerateObject().Where(property =>
             StringComparer.Ordinal.Equals(property.Name, propertyName)).ToArray();
         if (matches.Length > 1)
             throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
                 $"Legacy project contains duplicate '{propertyName}' fields; profile adoption is ambiguous.");
-        if (matches.Length == 0) return new IdentityValue(null, IsMissing: true);
+        if (matches.Length == 0) return null;
 
         var value = matches[0].Value;
         return value.ValueKind switch
         {
-            JsonValueKind.Null => new IdentityValue(null, IsMissing: true),
+            JsonValueKind.Null => null,
             JsonValueKind.String when string.IsNullOrWhiteSpace(value.GetString())
-                => new IdentityValue(null, IsMissing: true),
-            JsonValueKind.String => new IdentityValue(value.GetString(), IsMissing: false),
+                => null,
+            JsonValueKind.String => value.GetString(),
             _ => throw new ProjectSchemaException(DiagnosticCodes.PrjCorruptFile,
                 $"Legacy project field '{propertyName}' must be a string or absent; it was not changed.")
         };
@@ -134,9 +150,12 @@ public static class LegacyProjectProfileAdoption
                 "Legacy project is not valid UTF-8 and was not changed.", ex);
         }
     }
-
-    private readonly record struct IdentityValue(string? Value, bool IsMissing);
 }
+
+public sealed record LegacyProjectProfileIdentityInspection(
+    string? ExistingProfileId,
+    string? ExistingProfileDigest,
+    IReadOnlyList<string> MissingFields);
 
 public sealed record LegacyProjectProfileAdoptionDraft(
     MappingProject Project,
