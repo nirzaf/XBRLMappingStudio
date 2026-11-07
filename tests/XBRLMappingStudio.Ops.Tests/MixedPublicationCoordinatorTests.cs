@@ -1,17 +1,71 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Project;
 using XBRLMappingStudio.PublicationCrashHarness;
 
 namespace XBRLMappingStudio.Ops.Tests;
 
 public sealed class MixedPublicationCoordinatorTests
 {
+    [Fact]
+    public void JsonIntentKeepsLegacyOperationKeyForExistingReconciliationRows()
+    {
+        using var workspace = new TemporaryDirectory();
+        const string report = "{\"facts\":[]}";
+        var bytes = Encoding.UTF8.GetBytes(report);
+        var project = new MappingProject
+        {
+            ProjectId = "project-legacy-json-mix",
+            Name = "Legacy JSON mixed publication",
+            ProfileId = "profile-synthetic",
+            ProfileDigest = "sha256:profile"
+        };
+        var manifest = new RunManifest
+        {
+            RunId = "run-legacy-json-mix",
+            OperationId = "operation-legacy-json-mix",
+            ProjectId = project.ProjectId,
+            SemanticRevision = project.SemanticRevision,
+            ProjectSemanticDigest = project.ComputeSemanticDigest(),
+            ProfileDigest = "sha256:profile",
+            EngineVersion = "engine-test",
+            StartedUtc = DateTimeOffset.Parse("2026-11-01T00:00:00Z", CultureInfo.InvariantCulture),
+            Inputs = new[]
+            {
+                new InputIdentity("source-b", "excel", "sha256:source-b", false, "b.xlsx", "row-key")
+                    { SnapshotStrategy = "bounded-snapshot" },
+                new InputIdentity("source-a", "csv", "sha256:source-a", true, "a.csv", "row-number")
+            },
+            FrozenParameters = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["locale"] = "en",
+                ["year"] = "2025"
+            },
+            Outputs = new[]
+            {
+                new OutputIdentity("<memory>", RunManifest.ComputeSha256(bytes), bytes.LongLength, "xbrl-json")
+            },
+            Outcome = RunOutcome.Success
+        };
+        var result = new JobResult(manifest, Array.Empty<XBRLMappingStudio.XBRL.XbrlFact>(), report,
+            new DiagnosticBag(), Array.Empty<XBRLMappingStudio.Engine.SampledTotal>());
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var sqlitePath = Path.Combine(workspace.Path, "destination.db");
+
+        var intent = MixedPublicationIntent.Create(project, result, filePath, bytes.LongLength,
+            sqlitePath, "facts");
+
+        Assert.Equal(LegacyFingerprint(project, manifest, filePath, sqlitePath, "facts", bytes.LongLength),
+            intent.Fingerprint);
+    }
+
     [Fact]
     public async Task FileConfirmedSqliteRejected_RetryKeepsFileAndUsesSameSqliteIntent()
     {
@@ -442,4 +496,40 @@ public sealed class MixedPublicationCoordinatorTests
             try { Directory.Delete(Path, recursive: true); } catch (IOException) { }
         }
     }
+
+    private static string LegacyFingerprint(MappingProject project, RunManifest manifest,
+        string filePath, string sqlitePath, string sqliteTable, long fileBytes)
+    {
+        var builder = new StringBuilder();
+        Append(builder, project.ProjectId);
+        Append(builder, project.SemanticRevision.ToString(CultureInfo.InvariantCulture));
+        Append(builder, project.ComputeSemanticDigest());
+        Append(builder, manifest.ProfileDigest);
+        Append(builder, manifest.EngineVersion);
+        Append(builder, Path.GetFullPath(filePath));
+        Append(builder, Path.GetFullPath(sqlitePath));
+        Append(builder, sqliteTable);
+        var report = Assert.Single(manifest.Outputs, output => output.Kind == "xbrl-json");
+        Append(builder, report.Digest);
+        Append(builder, fileBytes.ToString(CultureInfo.InvariantCulture));
+        foreach (var input in manifest.Inputs.OrderBy(input => input.SourceId, StringComparer.Ordinal))
+        {
+            Append(builder, input.SourceId);
+            Append(builder, input.Kind);
+            Append(builder, input.Digest ?? string.Empty);
+            Append(builder, input.IsReplayable ? "1" : "0");
+            Append(builder, input.RowIdentityStrategy ?? string.Empty);
+            Append(builder, input.SnapshotStrategy ?? string.Empty);
+        }
+        foreach (var parameter in manifest.FrozenParameters.OrderBy(parameter => parameter.Key, StringComparer.Ordinal))
+        {
+            Append(builder, parameter.Key);
+            Append(builder, parameter.Value);
+        }
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
+            .ToLowerInvariant();
+    }
+
+    private static void Append(StringBuilder builder, string value)
+        => builder.Append(value.Length).Append(':').Append(value);
 }

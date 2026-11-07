@@ -31,7 +31,7 @@ public sealed class LocalApplicationDatabaseTests
         using (var version = schema.CreateCommand())
         {
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(7L, version.ExecuteScalar());
+            Assert.Equal(8L, version.ExecuteScalar());
             version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence','pdf_review_audit','taxonomy_profile_index','mixed_publication_reconciliation')";
             Assert.Equal(5L, version.ExecuteScalar());
         }
@@ -124,7 +124,7 @@ public sealed class LocalApplicationDatabaseTests
         { ValidatedDigest = "sha256:validated" };
         journal.Save(receiptEntry);
 
-        Assert.Equal(7, LocalApplicationDatabase.CurrentSchemaVersion);
+        Assert.Equal(8, LocalApplicationDatabase.CurrentSchemaVersion);
         var legacyEntry = journal.Load("legacy-v2");
         Assert.Equal("/workspace/report.json", legacyEntry?.DestinationPath);
         Assert.Equal(JournalState.Finalized, legacyEntry?.State);
@@ -135,7 +135,7 @@ public sealed class LocalApplicationDatabaseTests
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(7L, check.ExecuteScalar());
+        Assert.Equal(8L, check.ExecuteScalar());
         check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
         Assert.Equal("compact", check.ExecuteScalar());
         check.CommandText = "SELECT project_id FROM project_registry WHERE project_path='/workspace/legacy.xmap'";
@@ -173,11 +173,60 @@ public sealed class LocalApplicationDatabaseTests
         check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
         Assert.Equal("compact", check.ExecuteScalar());
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(7L, check.ExecuteScalar());
+        Assert.Equal(8L, check.ExecuteScalar());
         check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_source_evidence'";
         Assert.Equal(1L, check.ExecuteScalar());
         check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_review_audit'";
         Assert.Equal(1L, check.ExecuteScalar());
+    }
+
+    [Fact]
+    public void MigratesVersionSevenMixedPublicationRowsAsXbrlJson()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "v7-mixed-state.db");
+        using (var legacy = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE mixed_publication_reconciliation (
+                    operation_key TEXT PRIMARY KEY NOT NULL,
+                    intent_fingerprint TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_digest TEXT NOT NULL,
+                    file_state TEXT NOT NULL,
+                    file_failure_code TEXT,
+                    sqlite_path TEXT NOT NULL,
+                    sqlite_table TEXT NOT NULL,
+                    sqlite_operation_key TEXT,
+                    sqlite_intent_fingerprint TEXT,
+                    sqlite_state TEXT NOT NULL,
+                    sqlite_rows_written INTEGER,
+                    sqlite_failure_code TEXT,
+                    updated_utc TEXT NOT NULL
+                );
+                INSERT INTO mixed_publication_reconciliation(
+                    operation_key,intent_fingerprint,file_path,file_digest,file_state,
+                    sqlite_path,sqlite_table,sqlite_state,updated_utc)
+                VALUES('legacy-mix','sha256:intent','/workspace/report.json','sha256:file','Confirmed',
+                    '/workspace/facts.db','facts','Pending','2026-11-01T00:00:00Z');
+                PRAGMA user_version=7;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var database = new LocalApplicationDatabase(path);
+        using var connection = database.OpenConnection();
+        using var check = connection.CreateCommand();
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(8L, check.ExecuteScalar());
+        check.CommandText = "SELECT file_kind,file_state,file_digest FROM mixed_publication_reconciliation WHERE operation_key='legacy-mix'";
+        using var reader = check.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("xbrl-json", reader.GetString(0));
+        Assert.Equal("Confirmed", reader.GetString(1));
+        Assert.Equal("sha256:file", reader.GetString(2));
     }
 
     [Fact]

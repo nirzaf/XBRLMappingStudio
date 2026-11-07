@@ -838,9 +838,9 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         Console.Error.WriteLine("--output-format must be xbrl-json or xbrl-xml.");
         return ExitCodesLocal.IncompleteProfile;
     }
-    if (outputFormat == "xbrl-xml" && (preview || output is null || publishDestination))
+    if (outputFormat == "xbrl-xml" && (preview || output is null))
     {
-        Console.Error.WriteLine("xBRL-XML output requires execute --output and cannot be combined with preview or --publish-destination.");
+        Console.Error.WriteLine("xBRL-XML output requires execute --output and cannot be combined with preview.");
         return ExitCodesLocal.InvalidMapping;
     }
 
@@ -1045,8 +1045,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
             PrintDiagnostics(new[] { diagnostic });
         }
 
-        if (!preview && output is not null && !publishDestination
-            && outputFormat == "xbrl-xml" && result.IsPublishable)
+        if (!preview && output is not null && outputFormat == "xbrl-xml" && result.IsPublishable)
         {
             if (result.LargeArtifact is not null)
             {
@@ -1115,10 +1114,10 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                     {
                         var destinationPath = Path.GetFullPath(Path.IsPathRooted(p.Destination!.Locator)
                             ? p.Destination.Locator : Path.Combine(projectDirectory, p.Destination.Locator));
-                        var reportBytes = result.LargeArtifact?.Bytes
-                            ?? System.Text.Encoding.UTF8.GetByteCount(result.XbrlJson);
+                        var mixedFilePayload = selectedOutputPayload ?? System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
+                        var reportBytes = result.LargeArtifact?.Bytes ?? mixedFilePayload.LongLength;
                         var intent = MixedPublicationIntent.Create(
-                            p, result, output, reportBytes, destinationPath, p.Destination.Table);
+                            p, result, output, reportBytes, destinationPath, p.Destination.Table, selectedOutputKind);
                         var coordinator = new MixedPublicationCoordinator(
                             new MixedPublicationStore(new LocalApplicationDatabase()));
                         var publisher = new PublicationService(new RunJournal());
@@ -1131,11 +1130,11 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                                         stagedPath, output, result, validationToken), token,
                                     refuseDifferentExisting: true)
                                 : await publisher.PublishAuthorizedAsync(
-                                    output, System.Text.Encoding.UTF8.GetBytes(result.XbrlJson), workspaceRoot,
+                                    output, mixedFilePayload, workspaceRoot,
                                     p, profile, allowSyntheticProfile, result,
                                     (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
-                                        stagedPath, output, result, validationToken), token,
-                                    refuseDifferentExisting: true),
+                                        stagedPath, output, result, validationToken, selectedOutputKind), token,
+                                    refuseDifferentExisting: true, outputKind: selectedOutputKind),
                             (onIntentPrepared, token) => service.PublishDestinationAsync(
                                 p, result, projectDirectory, allowSyntheticProfile, token, onIntentPrepared),
                             cts.Token);
@@ -1145,7 +1144,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                         {
                             result.Manifest.PublishedArtifactDigest = attempt.Record.FileDigest;
                             result.Manifest.Outputs = result.Manifest.Outputs
-                                .Select(existing => existing.Kind == "xbrl-json"
+                                .Select(existing => existing.Kind == intent.FileKind
                                     ? existing with { Path = attempt.Record.FilePath }
                                     : existing)
                                 .ToArray();

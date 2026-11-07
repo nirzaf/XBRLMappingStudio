@@ -17,7 +17,8 @@ public sealed record MixedPublicationIntent(
     string FileDigest,
     long FileBytes,
     string SqlitePath,
-    string SqliteTable)
+    string SqliteTable,
+    string FileKind = "xbrl-json")
 {
     public static MixedPublicationIntent Create(
         MappingProject project,
@@ -25,8 +26,13 @@ public sealed record MixedPublicationIntent(
         string filePath,
         long fileBytes,
         string sqlitePath,
-        string sqliteTable)
+        string sqliteTable,
+        string fileKind = "xbrl-json")
     {
+        if (fileKind is not ("xbrl-json" or "xbrl-xml"))
+            throw new ArgumentOutOfRangeException(nameof(fileKind), fileKind,
+                "Mixed publication supports xBRL-JSON and xBRL-XML file artifacts.");
+
         var manifest = result.Manifest;
         var builder = new StringBuilder();
         Append(builder, project.ProjectId);
@@ -37,7 +43,13 @@ public sealed record MixedPublicationIntent(
         Append(builder, Path.GetFullPath(filePath));
         Append(builder, Path.GetFullPath(sqlitePath));
         Append(builder, sqliteTable);
-        var report = manifest.Outputs.Single(output => output.Kind == "xbrl-json");
+        var report = manifest.Outputs.SingleOrDefault(output => output.Kind == fileKind)
+            ?? throw new InvalidDataException($"Run manifest has no unique '{fileKind}' file output.");
+        if (report.Bytes != fileBytes)
+            throw new InvalidDataException($"The '{fileKind}' output length does not match the mixed publication payload.");
+        // Keep existing xBRL-JSON operation keys stable across the v8 migration so
+        // retries still find their v7 reconciliation row. XML needs a discriminator.
+        if (fileKind == "xbrl-xml") Append(builder, fileKind);
         Append(builder, report.Digest);
         Append(builder, fileBytes.ToString(CultureInfo.InvariantCulture));
         foreach (var input in manifest.Inputs.OrderBy(input => input.SourceId, StringComparer.Ordinal))
@@ -58,7 +70,8 @@ public sealed record MixedPublicationIntent(
         var fingerprint = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))
             .ToLowerInvariant();
         return new MixedPublicationIntent("mix-" + fingerprint["sha256:".Length..], fingerprint,
-            Path.GetFullPath(filePath), report.Digest, fileBytes, Path.GetFullPath(sqlitePath), sqliteTable);
+            Path.GetFullPath(filePath), report.Digest, fileBytes, Path.GetFullPath(sqlitePath), sqliteTable,
+            fileKind);
     }
 
     private static void Append(StringBuilder builder, string value)
@@ -80,11 +93,12 @@ public sealed record MixedPublicationRecord(
     DestinationPublicationState SqliteState,
     int? SqliteRowsWritten,
     string? SqliteFailureCode,
-    DateTimeOffset UpdatedUtc)
+    DateTimeOffset UpdatedUtc,
+    string FileKind = "xbrl-json")
 {
     public IReadOnlyList<DestinationPublicationOutcome> ToManifestOutcomes() => new[]
     {
-        new DestinationPublicationOutcome("xbrl-json", FilePath, FileState,
+        new DestinationPublicationOutcome(FileKind, FilePath, FileState,
             FileState == DestinationPublicationState.Confirmed ? FileDigest : null,
             FailureCode: FileFailureCode),
         new DestinationPublicationOutcome("sqlite", SqlitePath, SqliteState,
@@ -109,16 +123,17 @@ public sealed class MixedPublicationStore
             insert.Transaction = transaction;
             insert.CommandText = """
                 INSERT INTO mixed_publication_reconciliation(
-                    operation_key,intent_fingerprint,file_path,file_digest,file_state,file_failure_code,
+                    operation_key,intent_fingerprint,file_path,file_digest,file_kind,file_state,file_failure_code,
                     sqlite_path,sqlite_table,sqlite_operation_key,sqlite_intent_fingerprint,
                     sqlite_state,sqlite_rows_written,sqlite_failure_code,updated_utc)
-                VALUES($key,$intent,$file,$digest,'Pending',NULL,$sqlite,$table,NULL,NULL,'Pending',NULL,NULL,$updated)
+                VALUES($key,$intent,$file,$digest,$fileKind,'Pending',NULL,$sqlite,$table,NULL,NULL,'Pending',NULL,NULL,$updated)
                 ON CONFLICT(operation_key) DO NOTHING;
                 """;
             insert.Parameters.AddWithValue("$key", intent.OperationKey);
             insert.Parameters.AddWithValue("$intent", intent.Fingerprint);
             insert.Parameters.AddWithValue("$file", intent.FilePath);
             insert.Parameters.AddWithValue("$digest", intent.FileDigest);
+            insert.Parameters.AddWithValue("$fileKind", intent.FileKind);
             insert.Parameters.AddWithValue("$sqlite", intent.SqlitePath);
             insert.Parameters.AddWithValue("$table", intent.SqliteTable);
             insert.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
@@ -129,6 +144,7 @@ public sealed class MixedPublicationStore
         if (!StringComparer.Ordinal.Equals(record.IntentFingerprint, intent.Fingerprint)
             || !PathComparer.Equals(record.FilePath, intent.FilePath)
             || !StringComparer.Ordinal.Equals(record.FileDigest, intent.FileDigest)
+            || !StringComparer.Ordinal.Equals(record.FileKind, intent.FileKind)
             || !PathComparer.Equals(record.SqlitePath, intent.SqlitePath)
             || !StringComparer.Ordinal.Equals(record.SqliteTable, intent.SqliteTable))
             throw new InvalidDataException("Mixed publication key is already bound to a different intent.");
@@ -203,7 +219,7 @@ public sealed class MixedPublicationStore
         command.CommandText = """
             SELECT operation_key,intent_fingerprint,file_path,file_digest,file_state,file_failure_code,
                    sqlite_path,sqlite_table,sqlite_operation_key,sqlite_intent_fingerprint,
-                   sqlite_state,sqlite_rows_written,sqlite_failure_code,updated_utc
+                   sqlite_state,sqlite_rows_written,sqlite_failure_code,updated_utc,file_kind
             FROM mixed_publication_reconciliation WHERE operation_key=$key
             """;
         command.Parameters.AddWithValue("$key", operationKey);
@@ -215,7 +231,7 @@ public sealed class MixedPublicationStore
             reader.GetString(6), reader.GetString(7), NullableString(reader, 8), NullableString(reader, 9),
             Enum.Parse<DestinationPublicationState>(reader.GetString(10)),
             reader.IsDBNull(11) ? null : reader.GetInt32(11), NullableString(reader, 12),
-            DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture));
+            DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture), reader.GetString(14));
     }
 
     private static string? NullableString(SqliteDataReader reader, int column)

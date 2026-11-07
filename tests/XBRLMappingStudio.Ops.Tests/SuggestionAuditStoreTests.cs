@@ -221,7 +221,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
         using (var check = verify.CreateCommand())
         {
             check.CommandText = "PRAGMA user_version";
-            Assert.Equal(7L, check.ExecuteScalar());
+            Assert.Equal(8L, check.ExecuteScalar());
             check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='taxonomy_profile_index'";
             Assert.Equal(1L, check.ExecuteScalar());
         }

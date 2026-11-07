@@ -354,7 +354,7 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Cli_MixedPublicationRejectsXmlWithoutChangingEitherDestination()
+    public async Task Cli_MixedPublicationPublishesXmlWithDurableReconciliationAndRetry()
     {
         var targetPath = Path.Combine(_dir, "xml-mixed-target.db");
         await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
@@ -367,9 +367,17 @@ public sealed class CliParityTests : IAsyncLifetime
             BusinessKey = new List<string> { "fact_key" },
             WriteMode = "upsert"
         };
+        project.Approvals.Clear();
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
         var projectPath = Path.Combine(_dir, "xml-mixed-publication.xmap");
         new ProjectManager(projectPath).Save(project);
-        var targetBefore = await File.ReadAllBytesAsync(targetPath);
         var outputPath = Path.Combine(_dir, "xml-mixed-report.xml");
         var manifestPath = Path.Combine(_dir, "xml-mixed-manifest.json");
 
@@ -377,12 +385,67 @@ public sealed class CliParityTests : IAsyncLifetime
             "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
             "--manifest", manifestPath, "--allow-synthetic-profile");
 
-        Assert.Equal(2, exit);
-        Assert.Contains("cannot be combined with preview or --publish-destination", stderr,
-            StringComparison.Ordinal);
-        Assert.Equal(targetBefore, await File.ReadAllBytesAsync(targetPath));
-        Assert.False(File.Exists(outputPath));
-        Assert.False(File.Exists(manifestPath));
+        Assert.True(exit == 0, $"XML mixed publication failed ({exit}).\n{stderr}");
+        Assert.Contains("Published mixed operation", stderr, StringComparison.Ordinal);
+        var xmlBytes = await File.ReadAllBytesAsync(outputPath);
+        var xml = new System.Text.UTF8Encoding(false, true).GetString(xmlBytes);
+        var fact = Assert.Single(XmlSerializer.ReadFacts(xml, SyntheticProfile.Build()));
+        Assert.Equal(SyntheticProfile.Qualified("Revenue"), fact.ConceptName);
+        Assert.Equal(1_250_000m, fact.Value);
+
+        string reconciliationId;
+        using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath)))
+        {
+            var root = manifest.RootElement;
+            reconciliationId = root.GetProperty("PublicationReconciliationId").GetString()!;
+            var xmlIdentity = Assert.Single(root.GetProperty("Outputs").EnumerateArray(),
+                output => output.GetProperty("Kind").GetString() == "xbrl-xml");
+            Assert.Equal(Path.GetFullPath(outputPath), xmlIdentity.GetProperty("Path").GetString());
+            Assert.Equal(RunManifest.ComputeSha256(xmlBytes), xmlIdentity.GetProperty("Digest").GetString());
+            Assert.Equal(root.GetProperty("PublishedArtifactDigest").GetString(),
+                xmlIdentity.GetProperty("Digest").GetString());
+            var outcomes = root.GetProperty("PublicationOutcomes").EnumerateArray().ToArray();
+            Assert.Equal(2, outcomes.Length);
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "sqlite"
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+        }
+        var targetAfterFirstPublication = await File.ReadAllBytesAsync(targetPath);
+
+        var retryManifestPath = Path.Combine(_dir, "xml-mixed-retry-manifest.json");
+        var (retryExit, _, retryError) = await RunCliAsync(LocateCli(), "execute", projectPath,
+            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--manifest", retryManifestPath, "--allow-synthetic-profile");
+        Assert.Equal(0, retryExit);
+        Assert.Equal(targetAfterFirstPublication, await File.ReadAllBytesAsync(targetPath));
+        Assert.Equal(RunManifest.ComputeSha256(xmlBytes),
+            RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
+        using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
+        {
+            Assert.Equal(reconciliationId,
+                retryManifest.RootElement.GetProperty("PublicationReconciliationId").GetString());
+            Assert.Contains(retryManifest.RootElement.GetProperty("PublicationOutcomes").EnumerateArray(),
+                outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+                    && outcome.GetProperty("State").GetString() == "Confirmed");
+        }
+
+        var (reconcileExit, reconcileStdout, reconcileStderr) = await RunCliAsync(LocateCli(),
+            "reconcile-publication", reconciliationId);
+        Assert.True(reconcileExit == 0, $"XML reconciliation failed.\n{reconcileStderr}");
+        using (var reconciled = JsonDocument.Parse(reconcileStdout))
+            Assert.Contains(reconciled.RootElement.GetProperty("outcomes").EnumerateArray(),
+                outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+                    && outcome.GetProperty("State").GetString() == "Confirmed");
+
+        await using var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+        await target.OpenAsync();
+        await using var command = target.CreateCommand();
+        command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
     }
 
     [Fact]

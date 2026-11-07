@@ -13,11 +13,12 @@ public sealed class LocalApplicationDatabase
     /// AI06: v2 widens <c>suggestion_audit</c> with governed-actor and prompt-template
     /// columns. v3 adds the digest of the artifact accepted by the profile worker to
     /// the publication journal and durable receipt. v4 adds managed PDF evidence
-    /// references, v5 adds append-only PDF review audit events, and v6 adds an
-    /// integrity-checked offline taxonomy metadata cache, and v7 adds durable mixed
-    /// file/SQLite publication reconciliation. Migrations are non-destructive.
+    /// references, v5 adds append-only PDF review audit events, v6 adds an
+    /// integrity-checked offline taxonomy metadata cache, v7 adds durable mixed
+    /// file/SQLite publication reconciliation, and v8 records its file artifact kind.
+    /// Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 8;
     public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
@@ -396,6 +397,18 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=7;
                 """;
             migration7.ExecuteNonQuery();
+        }
+        if (version < 8)
+        {
+            using var migration8 = connection.CreateCommand();
+            migration8.Transaction = transaction;
+            migration8.CommandText = """
+                ALTER TABLE mixed_publication_reconciliation
+                    ADD COLUMN file_kind TEXT NOT NULL DEFAULT 'xbrl-json'
+                    CHECK(file_kind IN ('xbrl-json','xbrl-xml'));
+                PRAGMA user_version=8;
+                """;
+            migration8.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();
