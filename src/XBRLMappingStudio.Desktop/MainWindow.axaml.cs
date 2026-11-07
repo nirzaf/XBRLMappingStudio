@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Closing += OnWindowClosing;
+        Closed += OnWindowClosed;
     }
 
     private void InitializeComponent()
@@ -64,6 +65,11 @@ public partial class MainWindow : Window
         {
             _closePromptRunning = false;
         }
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        if (DataContext is IDisposable disposable) disposable.Dispose();
     }
 }
 

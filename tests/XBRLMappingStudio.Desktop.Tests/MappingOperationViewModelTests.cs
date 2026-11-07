@@ -1,6 +1,11 @@
 using System.ComponentModel;
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Headless.XUnit;
+using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Desktop;
 using XBRLMappingStudio.Desktop.ViewModels;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
@@ -97,6 +102,130 @@ public sealed class MappingOperationViewModelTests
         }
         finally
         {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [AvaloniaTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FullRunFactResultsArePagedForMemoryAndSpoolBackedRuns(bool forceLargeRun)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-fact-pages-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        MainWindowViewModel? viewModel = null;
+        MainWindow? window = null;
+        try
+        {
+            var databasePath = await CreatePagedFactDatabaseAsync(directory, rowCount: 501);
+            var project = TestFixtures.BuildRevenueMappingProject(databasePath);
+            var binding = project.Bindings.Single();
+            project.Bindings[0] = binding with
+            {
+                Kind = "sqlite",
+                Locator = Path.GetFileName(databasePath),
+                Configuration = new Dictionary<string, object?>
+                {
+                    ["table"] = "financials",
+                    ["decimalColumns"] = "Current,Prior"
+                }
+            };
+            var entityNodeIndex = project.Nodes.FindIndex(node => node.DisplayName == "Entity");
+            Assert.True(entityNodeIndex >= 0);
+            var entityNode = project.Nodes[entityNodeIndex];
+            project.Nodes[entityNodeIndex] = entityNode with
+            {
+                NodeType = NodeTypeConstants.ExcelField,
+                DisplayName = "Source entity",
+                Parameters = new Dictionary<string, object?>
+                {
+                    ["bindingId"] = binding.BindingId,
+                    ["column"] = "Entity"
+                }
+            };
+            var profile = SyntheticProfile.Build();
+            project.Approvals.Clear();
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "fact-page-test-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = profile.Digest,
+                Authority = "test-fixture"
+            });
+
+            var outputPath = Path.Combine(directory, "paged-result.json");
+            var budget = new ExecutionBudget(InMemorySourceRecordLimit: forceLargeRun ? 1 : 1_000,
+                RowBatchSize: 64);
+            var activeViewModel = new MainWindowViewModel(project, new FixedReportFileDialog(outputPath),
+                (_, _) => throw new NotSupportedException("The fixture uses a SQLite source."),
+                executionBudget: budget);
+            viewModel = activeViewModel;
+            activeViewModel.AllowSyntheticProfile = true;
+            activeViewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
+
+            window = new MainWindow { DataContext = activeViewModel };
+            window.Show();
+            var previousButton = Assert.IsType<Button>(window.FindControl<Button>("PreviousFactPreviewPageButton"));
+            var nextButton = Assert.IsType<Button>(window.FindControl<Button>("NextFactPreviewPageButton"));
+            var pageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("FactPageSummaryText"));
+            Assert.Equal("Previous fact results page", AutomationProperties.GetName(previousButton));
+            Assert.Equal("Next fact results page", AutomationProperties.GetName(nextButton));
+            Assert.Equal("No fact results are available.", pageSummary.Text);
+            Assert.False(previousButton.IsEnabled);
+            Assert.False(nextButton.IsEnabled);
+
+            var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedBusy = false;
+            PropertyChangedEventHandler handler = (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                if (activeViewModel.IsBusy) observedBusy = true;
+                else if (observedBusy) operationStopped.TrySetResult();
+            };
+            activeViewModel.PropertyChanged += handler;
+            try
+            {
+                activeViewModel.ExecuteCommand.Execute(null);
+                await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            }
+            finally { activeViewModel.PropertyChanged -= handler; }
+
+            Assert.StartsWith("Full run · 501 fact(s)", activeViewModel.PreviewResultSummary, StringComparison.Ordinal);
+            Assert.StartsWith("Published paged-result.json", activeViewModel.StatusText, StringComparison.Ordinal);
+            Assert.True(File.Exists(outputPath));
+            Assert.Equal(500, activeViewModel.PreviewFacts.Count);
+            Assert.Equal("Facts 1–500 of 501", activeViewModel.FactPageSummary);
+            Assert.Equal("Facts 1–500 of 501", pageSummary.Text);
+            Assert.Equal("Entity-0001", activeViewModel.PreviewFacts[0].SemanticFact!.EntityIdentifier);
+            Assert.False(previousButton.IsEnabled);
+            Assert.True(nextButton.IsEnabled);
+            Assert.False(activeViewModel.PreviousFactPreviewPageCommand.CanExecute(null));
+            Assert.True(activeViewModel.NextFactPreviewPageCommand.CanExecute(null));
+
+            activeViewModel.NextFactPreviewPageCommand.Execute(null);
+
+            Assert.Single(activeViewModel.PreviewFacts);
+            Assert.Equal("Facts 501–501 of 501", activeViewModel.FactPageSummary);
+            Assert.Equal("Facts 501–501 of 501", pageSummary.Text);
+            Assert.Equal("Entity-0501", activeViewModel.PreviewFacts[0].SemanticFact!.EntityIdentifier);
+            Assert.True(previousButton.IsEnabled);
+            Assert.False(nextButton.IsEnabled);
+            Assert.True(activeViewModel.PreviousFactPreviewPageCommand.CanExecute(null));
+            Assert.False(activeViewModel.NextFactPreviewPageCommand.CanExecute(null));
+
+            activeViewModel.PreviousFactPreviewPageCommand.Execute(null);
+
+            Assert.Equal(500, activeViewModel.PreviewFacts.Count);
+            Assert.Equal("Facts 1–500 of 501", activeViewModel.FactPageSummary);
+            Assert.Equal("Facts 1–500 of 501", pageSummary.Text);
+            Assert.Equal("Entity-0001", activeViewModel.PreviewFacts[0].SemanticFact!.EntityIdentifier);
+        }
+        finally
+        {
+            window?.Close();
+            viewModel?.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
     }
@@ -416,6 +545,33 @@ public sealed class MappingOperationViewModelTests
             workerFactory);
         viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
         return viewModel;
+    }
+
+    private static async Task<string> CreatePagedFactDatabaseAsync(string directory, int rowCount)
+    {
+        var path = Path.Combine(directory, "paged-source.db");
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using (var create = database.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE financials (Id INTEGER PRIMARY KEY, Line TEXT NOT NULL, "
+                + "Current TEXT NOT NULL, Prior TEXT NOT NULL, Entity TEXT NOT NULL);";
+            await create.ExecuteNonQueryAsync();
+        }
+        await using var insert = database.CreateCommand();
+        insert.CommandText = "INSERT INTO financials(Id, Line, Current, Prior, Entity) "
+            + "VALUES($id, 'Revenue', $current, '1100', $entity);";
+        var id = insert.Parameters.Add("$id", SqliteType.Integer);
+        var current = insert.Parameters.Add("$current", SqliteType.Text);
+        var entity = insert.Parameters.Add("$entity", SqliteType.Text);
+        for (var row = 0; row < rowCount; row++)
+        {
+            id.Value = row + 1;
+            current.Value = (1_250 + row).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            entity.Value = $"Entity-{row + 1:D4}";
+            await insert.ExecuteNonQueryAsync();
+        }
+        return path;
     }
 
     private sealed class FixedReportFileDialog(string outputPath) : IProjectFileDialog

@@ -65,6 +65,8 @@ public sealed record ExecutionBudget(
 /// </summary>
 public sealed class LargeRunArtifact : IDisposable
 {
+    public const int MaximumFactsPerPage = 500;
+
     private readonly string _directory;
     private readonly LargeRunFactStore _facts;
     private bool _disposed;
@@ -95,6 +97,18 @@ public sealed class LargeRunArtifact : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         return _facts.InInputOrder(cancellationToken);
+    }
+
+    /// <summary>Reads a bounded page of facts in original input order.</summary>
+    public IReadOnlyList<XbrlFact> ReadFactsPage(int offset, int count,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (count < 0 || count > MaximumFactsPerPage)
+            throw new ArgumentOutOfRangeException(nameof(count),
+                $"Fact pages must contain between 0 and {MaximumFactsPerPage} facts.");
+        return _facts.ReadPage(offset, count, cancellationToken);
     }
 
     /// <summary>Streams facts with the same deterministic occurrence IDs written to xBRL-JSON.</summary>
@@ -373,6 +387,30 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
 
     public IEnumerable<XbrlFact> InSemanticOrder(CancellationToken cancellationToken)
         => ReadFacts("semantic_sort_key, seq", cancellationToken);
+
+    public IReadOnlyList<XbrlFact> ReadPage(int offset, int count,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (count == 0 || offset >= _count) return Array.Empty<XbrlFact>();
+        Finish(cancellationToken);
+        using var command = _connection.CreateCommand();
+        command.CommandText = "SELECT fact_json FROM facts ORDER BY seq LIMIT $limit OFFSET $offset;";
+        command.Parameters.AddWithValue("$limit", count);
+        command.Parameters.AddWithValue("$offset", offset);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var reader = command.ExecuteReader();
+        cancellationToken.ThrowIfCancellationRequested();
+        var facts = new List<XbrlFact>(Math.Min(count, _count - offset));
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var json = reader.GetString(0);
+            facts.Add(JsonSerializer.Deserialize<XbrlFact>(json, JsonOptions)
+                ?? throw new InvalidDataException("The disk-backed fact spool contains an invalid fact row."));
+        }
+        return facts;
+    }
 
     public IEnumerator<XbrlFact> GetEnumerator() => InInputOrder().GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();

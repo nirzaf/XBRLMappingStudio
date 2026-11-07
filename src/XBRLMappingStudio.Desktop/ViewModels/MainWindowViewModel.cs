@@ -410,8 +410,9 @@ public sealed record AdapterCapabilityOption(
 /// the source / preview / properties / diagnostics panes. All editing behaviour lives in
 /// the portable session so it is testable without a display.
 /// </summary>
-public sealed class MainWindowViewModel : ViewModelBase
+public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 {
+    private const int FactPreviewPageSize = LargeRunArtifact.MaximumFactsPerPage;
     private string _title = "XBRL Mapping Studio";
     private string _statusText = "Ready";
     private NodeViewModel? _selectedNode;
@@ -532,6 +533,14 @@ public sealed class MainWindowViewModel : ViewModelBase
     private string _selectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
     private string _selectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
     private string _previewResultSummary = "Run a preview or full execution to inspect generated facts and evidence.";
+    private LargeRunArtifact? _previewLargeArtifact;
+    private IReadOnlyList<XbrlFact> _previewInMemoryFacts = Array.Empty<XbrlFact>();
+    private IReadOnlyList<MappingNode> _previewMappingNodes = Array.Empty<MappingNode>();
+    private string? _previewSemanticDigest;
+    private int _previewFactCount;
+    private int _factPreviewPage;
+    private string _factPageSummary = "No fact results are available.";
+    private bool _isDisposed;
     private FactRow? _selectedPreviewFact;
     private PreviewEvidenceRow? _selectedPreviewEvidence;
     private PdfEvidenceRegion? _selectedPreviewPdfEvidence;
@@ -543,6 +552,7 @@ public sealed class MainWindowViewModel : ViewModelBase
     private readonly Func<string, CancellationToken, Task<PdfDigitalDocument>> _pdfDocumentLoader;
     private readonly Func<PdfEvidenceStore> _pdfEvidenceStoreFactory;
     private readonly Func<PdfReviewAuditStore> _pdfReviewAuditStoreFactory;
+    private readonly ExecutionBudget _executionBudget;
     private readonly SqliteDestinationInspector _destinationInspector = new();
 
     private FilingProfile _profile;
@@ -608,6 +618,10 @@ public sealed class MainWindowViewModel : ViewModelBase
                 CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                PreviousFactPreviewPageCommand?.NotifyCanExecuteChanged();
+                NextFactPreviewPageCommand?.NotifyCanExecuteChanged();
+                Raise(nameof(CanPreviousFactPreviewPage));
+                Raise(nameof(CanNextFactPreviewPage));
                 RefreshFactInputRebindingAvailability();
                 SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
@@ -1027,6 +1041,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         get => _previewResultSummary;
         private set => Set(ref _previewResultSummary, value);
     }
+    public string FactPageSummary
+    {
+        get => _factPageSummary;
+        private set => Set(ref _factPageSummary, value);
+    }
+    public bool CanPreviousFactPreviewPage => !IsBusy && _factPreviewPage > 0;
+    public bool CanNextFactPreviewPage => !IsBusy
+        && ((_factPreviewPage + 1) * FactPreviewPageSize) < _previewFactCount;
     public FactRow? SelectedPreviewFact
     {
         get => _selectedPreviewFact;
@@ -1429,6 +1451,8 @@ public sealed class MainWindowViewModel : ViewModelBase
     public RelayCommand RejectSelectedSuggestionCommand { get; }
     public RelayCommand NextPageCommand { get; }
     public RelayCommand PreviousPageCommand { get; }
+    public RelayCommand PreviousFactPreviewPageCommand { get; }
+    public RelayCommand NextFactPreviewPageCommand { get; }
     public RelayCommand BuildPdfTemplateCommand { get; }
     public RelayCommand SavePdfReviewCommand { get; }
     public RelayCommand ApplyPdfCorrectionCommand { get; }
@@ -1483,7 +1507,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         Func<string, CancellationToken, Task<PdfDigitalDocument>>? pdfDocumentLoader = null,
         Func<PdfEvidenceStore>? pdfEvidenceStoreFactory = null,
         Func<PdfReviewAuditStore>? pdfReviewAuditStoreFactory = null,
-        Func<TaxonomyConceptIndexStore>? taxonomyIndexStoreFactory = null)
+        Func<TaxonomyConceptIndexStore>? taxonomyIndexStoreFactory = null,
+        ExecutionBudget? executionBudget = null)
     {
         _fileDialog = fileDialog;
         _sqliteSchemaLoader = sqliteSchemaLoader;
@@ -1495,6 +1520,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             new PdfEvidenceStore(new LocalApplicationDatabase()));
         _pdfReviewAuditStoreFactory = pdfReviewAuditStoreFactory ?? (() =>
             new PdfReviewAuditStore(new LocalApplicationDatabase()));
+        _executionBudget = executionBudget ?? ExecutionBudget.Default;
         _profileResolver = profileResolver ?? FilingProfileResolver.DevelopmentOnly();
         _workerFactory = workerFactory ?? FilingProfileWorkerFactory.ForInstalledProfiles(_profileResolver);
         _profile = CreateUnresolvedProfileIdentity(project);
@@ -1554,6 +1580,10 @@ public sealed class MainWindowViewModel : ViewModelBase
         RejectSelectedSuggestionCommand = new RelayCommand(_ => RejectSelectedSuggestion());
         NextPageCommand = new RelayCommand(_ => { if (HasNextPage) { _resultPage++; RunSearch(keepPage: true); } });
         PreviousPageCommand = new RelayCommand(_ => { if (_resultPage > 0) { _resultPage--; RunSearch(keepPage: true); } });
+        PreviousFactPreviewPageCommand = new RelayCommand(_ => NavigateFactPreviewPage(-1),
+            _ => CanPreviousFactPreviewPage);
+        NextFactPreviewPageCommand = new RelayCommand(_ => NavigateFactPreviewPage(1),
+            _ => CanNextFactPreviewPage);
         BuildPdfTemplateCommand = new RelayCommand(_ => BuildPdfTemplate());
         SavePdfReviewCommand = new RelayCommand(async _ => await SavePdfReviewAsync(), _ => CanSavePdfReview);
         ApplyPdfCorrectionCommand = new RelayCommand(_ => ApplySelectedPdfCorrection(), _ => CanApplyPdfCorrection);
@@ -1571,6 +1601,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         InvalidateMappingOperationIfStale();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
         var currentProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
+        var currentSemanticDigest = Session.Project.ComputeSemanticDigest();
         FunctionLibrary.RefreshFromProject();
         if (!_isApplyingTaxonomyMigration && _taxonomyMigrationProposal is { } migrationProposal
             && (!StringComparer.Ordinal.Equals(migrationProposal.SourceProjectSnapshotJson,
@@ -1582,8 +1613,11 @@ public sealed class MainWindowViewModel : ViewModelBase
             && _migrationDraftSnapshot is not null && ProjectPath is null
             && !StringComparer.Ordinal.Equals(_migrationDraftSnapshot, currentProjectSnapshot))
             TaxonomyMigrationSummary = "The migration draft has unsaved edits. Undo them or save the draft as a separate project before restoring the source.";
+        if (_previewSemanticDigest is { } previewDigest
+            && !StringComparer.Ordinal.Equals(previewDigest, currentSemanticDigest))
+            ClearDisplayedRunResult("Mapping changed after this run; run again to refresh fact results.");
         if (_destinationPreviewSemanticDigest is not null
-            && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, Session.Project.ComputeSemanticDigest()))
+            && !StringComparer.Ordinal.Equals(_destinationPreviewSemanticDigest, currentSemanticDigest))
             ResetDestinationPreviewSummary("The project changed after this preview; rerun the dry run to refresh its estimate.");
         SyncSelectedNodeWithSession();
         Raise(nameof(Nodes));
@@ -2783,7 +2817,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var service = new MappingJobService(profile, worker);
+            var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
@@ -2845,10 +2879,11 @@ public sealed class MainWindowViewModel : ViewModelBase
                 return;
             }
 
+            var resultFactCount = result.LargeArtifact?.FactCount ?? result.Facts.Count;
             ShowRunResult(result);
-            DestinationPreviewSummary = $"{result.Facts.Count} fact row(s) fit {plan.Format}. The existing file was not read or changed during dry run; publication stages and validates a replacement.";
+            DestinationPreviewSummary = $"{resultFactCount} fact row(s) fit {plan.Format}. The existing file was not read or changed during dry run; publication stages and validates a replacement.";
             _destinationPreviewSemanticDigest = semanticDigest;
-            StatusText = $"Dry run complete: {result.Facts.Count} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
+            StatusText = $"Dry run complete: {resultFactCount} fact row(s) fit {plan.Format} at {Path.GetFileName(_destinationPath)}. No file was written. Publication requires a current approval and final confirmation.";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2920,7 +2955,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var service = new MappingJobService(profile, worker);
+            var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(project, connections, ReadParameters(),
                 preview: false, cancellationToken, CreateMappingProgress(operation));
             operation.CompleteMappingRun();
@@ -2939,6 +2974,8 @@ public sealed class MainWindowViewModel : ViewModelBase
                         : $"Execution ended with {result.Manifest.Outcome}. The file destination was not changed.";
                 return;
             }
+
+            var resultFactCount = result.LargeArtifact?.FactCount ?? result.Facts.Count;
 
             var diagnostics = IsSqliteDestination
                 ? DestinationPlanValidator.ValidateSchema(plan,
@@ -2960,9 +2997,9 @@ public sealed class MainWindowViewModel : ViewModelBase
 
             var confirmed = IsSqliteDestination
                 ? await _fileDialog.ConfirmDestinationPublicationAsync(
-                    _destinationPath!, plan.Table, plan.BusinessKey, result.Facts.Count, project.ComputeSemanticDigest())
+                    _destinationPath!, plan.Table, plan.BusinessKey, resultFactCount, project.ComputeSemanticDigest())
                 : await _fileDialog.ConfirmFileDestinationPublicationAsync(
-                    _destinationPath!, plan.Format, result.Facts.Count, project.ComputeSemanticDigest());
+                    _destinationPath!, plan.Format, resultFactCount, project.ComputeSemanticDigest());
             if (!IsMappingOperationCurrent(operation))
             {
                 StatusText = OperationStoppedStatus(operation, "Destination publication");
@@ -5174,21 +5211,14 @@ public sealed class MainWindowViewModel : ViewModelBase
         SourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
         ReplaceSuggestionRows(Array.Empty<SuggestionRow>());
         SuggestionFilter = "";
-        PreviewFacts.Clear();
-        SelectedPreviewFact = null;
-        SelectedPreviewEvidence = null;
-        _selectedPreviewPdfEvidence = null;
-        PreviewResultSummary = "Run a preview or full execution to inspect generated facts and evidence.";
+        ClearDisplayedRunResult("Run a preview or full execution to inspect generated facts and evidence.");
         Raise(nameof(SelectedPdfEvidence));
-        Diagnostics.Clear();
         Raise(nameof(SourceColumns));
         Raise(nameof(SourceTables));
         Raise(nameof(HasSourceTables));
         Raise(nameof(SelectedSourceTable));
         Raise(nameof(AiSuggestions));
         Raise(nameof(FilteredAiSuggestions));
-        Raise(nameof(PreviewFacts));
-        Raise(nameof(Diagnostics));
     }
 
     private void ClearDestinationSelection()
@@ -5379,7 +5409,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            using var result = await new MappingJobService(profile, worker).RunAsync(
+            using var result = await new MappingJobService(profile, worker, executionBudget: _executionBudget).RunAsync(
                 project, connections, ReadParameters(), preview: true, cancellationToken,
                 CreateMappingProgress(operation));
             operation.CompleteMappingRun();
@@ -5451,7 +5481,7 @@ public sealed class MainWindowViewModel : ViewModelBase
             var root = WorkspaceRoot();
             var connections = BuildConnections(root);
             await using var worker = _workerFactory.Create(profile);
-            var service = new MappingJobService(profile, worker);
+            var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(
                 project, connections, ReadParameters(), preview: false, cancellationToken,
                 CreateMappingProgress(operation));
@@ -5808,84 +5838,156 @@ public sealed class MainWindowViewModel : ViewModelBase
     {
         Diagnostics.Clear();
         ReplaceItems(Diagnostics, result.Diagnostics.Items.Select(ToDiagnosticRow));
+        var errors = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        var warnings = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning);
+        var resultFactCount = result.LargeArtifact?.FactCount ?? result.Facts.Count;
+        _previewLargeArtifact?.Dispose();
+        _previewLargeArtifact = result.TransferLargeArtifactOwnership();
+        _previewInMemoryFacts = _previewLargeArtifact is null ? result.Facts : Array.Empty<XbrlFact>();
+        _previewFactCount = resultFactCount;
+        _previewMappingNodes = Session.Project.Nodes.Select(node => node.ShallowCopy()).ToArray();
+        _previewSemanticDigest = Session.Project.ComputeSemanticDigest();
+        _factPreviewPage = 0;
+        LoadFactPreviewPage();
+        var provenanceStatus = FormatProvenanceStatus(result.Manifest.ProvenanceStatus);
+        PreviewResultSummary = result.Manifest.IsPreview
+            ? $"Preview only · {resultFactCount} sampled fact(s). "
+                + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published. {provenanceStatus}"
+            : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s). See Diagnostics for details. {provenanceStatus}";
+        Raise(nameof(Diagnostics));
+    }
+
+    private void LoadFactPreviewPage()
+    {
         PreviewFacts.Clear();
         SelectedPreviewFact = null;
         SelectedPreviewEvidence = null;
         _selectedPreviewPdfEvidence = null;
         Raise(nameof(SelectedPdfEvidence));
-        var transformationNames = Session.Project.Nodes
+        var offset = _factPreviewPage * FactPreviewPageSize;
+        var facts = _previewLargeArtifact is not null
+            ? _previewLargeArtifact.ReadFactsPage(offset, FactPreviewPageSize)
+            : _previewInMemoryFacts.Skip(offset).Take(FactPreviewPageSize).ToArray();
+        var transformationNames = _previewMappingNodes
             .GroupBy(node => node.NodeId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First().DisplayName, StringComparer.Ordinal);
-        foreach (var fact in result.Facts.Take(500))
-        {
-            var value = fact.IsNil ? "nil" : fact.Value?.ToString() ?? fact.TextValue ?? "(empty)";
-            var unit = fact.Unit?.ToString() ?? fact.CompoundUnit?.CanonicalKey;
-            var sourceNodes = Session.Project.Nodes
-                .Where(node => node.NodeType == NodeTypeConstants.FactConstruct
-                    && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("concept")?.ToString(), fact.ConceptName))
-                .OrderBy(node => node.NodeId, StringComparer.Ordinal)
-                .ToArray();
-            var provenanceMatchedNodes = sourceNodes
-                .Where(node => fact.SourceTransformationPaths.Any(path =>
-                    path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)))
-                .ToArray();
-            // Multiple FactConstruct nodes may legitimately emit the same concept.
-            // Prefer the exact producer recorded in this fact's provenance paths;
-            // retain the old fallback for imported/legacy facts without that link.
-            var stageNodes = provenanceMatchedNodes.Length > 0 ? provenanceMatchedNodes : sourceNodes;
-            var stage = stageNodes.Length switch
-            {
-                0 => "Fact construction stage could not be matched to a saved mapping node.",
-                1 => $"Fact construction · {stageNodes[0].DisplayName} ({stageNodes[0].NodeId}). "
-                    + DescribeFactInputSources(stageNodes[0], "value"),
-                _ => "Fact construction node is ambiguous for this concept; candidate paths: "
-                    + string.Join(" | ", stageNodes.Select(node =>
-                        $"{node.DisplayName} ({node.NodeId}): {DescribeFactInputSources(node, "value")}"))
-            };
-            var transformationPathsBySource = new Dictionary<SourceReference, PreviewTransformationPathSummary>();
-            foreach (var path in fact.SourceTransformationPaths)
-            {
-                if (!transformationPathsBySource.TryGetValue(path.Source, out var summary))
-                {
-                    summary = new PreviewTransformationPathSummary();
-                    transformationPathsBySource.Add(path.Source, summary);
-                }
-                summary.Add(path);
-            }
-            var evidenceSources = fact.ContributingSources
-                .Concat(transformationPathsBySource.Keys)
-                .Distinct()
-                .ToArray();
-            PreviewFacts.Add(new FactRow
-            {
-                SemanticFact = fact,
-                Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
-                StageSummary = stage,
-                Evidence = evidenceSources.Select(source =>
-                {
-                    transformationPathsBySource.TryGetValue(source, out var summary);
-                    return new PreviewEvidenceRow(
-                        source,
-                        summary?.DisplayedPaths ?? Array.Empty<SourceTransformationPath>(),
-                        summary?.AdditionalPathCount ?? 0,
-                        transformationNames);
-                }).ToArray()
-            });
-        }
-        var errors = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-        var warnings = result.Diagnostics.Items.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning);
-        var resultFactCount = result.LargeArtifact?.FactCount ?? result.Facts.Count;
-        var truncationNote = resultFactCount > PreviewFacts.Count
-            ? $" Showing the first {PreviewFacts.Count} of {resultFactCount} fact(s)."
-            : "";
-        var provenanceStatus = FormatProvenanceStatus(result.Manifest.ProvenanceStatus);
-        PreviewResultSummary = result.Manifest.IsPreview
-            ? $"Preview only · {PreviewFacts.Count} sampled fact(s). "
-                + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published. {provenanceStatus}"
-            : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s).{truncationNote} See Diagnostics for details. {provenanceStatus}";
+        foreach (var fact in facts)
+            PreviewFacts.Add(CreateFactRow(fact, _previewMappingNodes, transformationNames));
+
         SelectedPreviewFact = PreviewFacts.FirstOrDefault();
-        Raise(nameof(Diagnostics));
+        FactPageSummary = _previewFactCount == 0
+            ? "No generated facts."
+            : $"Facts {offset + 1}–{offset + PreviewFacts.Count} of {_previewFactCount}";
         Raise(nameof(PreviewFacts));
+        RaiseFactPreviewPageState();
+    }
+
+    private FactRow CreateFactRow(XbrlFact fact, IReadOnlyList<MappingNode> mappingNodes,
+        IReadOnlyDictionary<string, string> transformationNames)
+    {
+        var value = fact.IsNil ? "nil" : fact.Value?.ToString() ?? fact.TextValue ?? "(empty)";
+        var unit = fact.Unit?.ToString() ?? fact.CompoundUnit?.CanonicalKey;
+        var sourceNodes = mappingNodes
+            .Where(node => node.NodeType == NodeTypeConstants.FactConstruct
+                && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("concept")?.ToString(), fact.ConceptName))
+            .OrderBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToArray();
+        var provenanceMatchedNodes = sourceNodes
+            .Where(node => fact.SourceTransformationPaths.Any(path =>
+                path.TransformationIds.Contains(node.NodeId, StringComparer.Ordinal)))
+            .ToArray();
+        // Multiple FactConstruct nodes may legitimately emit the same concept.
+        // Prefer the exact producer recorded in this fact's provenance paths;
+        // retain the old fallback for imported/legacy facts without that link.
+        var stageNodes = provenanceMatchedNodes.Length > 0 ? provenanceMatchedNodes : sourceNodes;
+        var stage = stageNodes.Length switch
+        {
+            0 => "Fact construction stage could not be matched to a saved mapping node.",
+            1 => $"Fact construction · {stageNodes[0].DisplayName} ({stageNodes[0].NodeId}). "
+                + DescribeFactInputSources(stageNodes[0], "value"),
+            _ => "Fact construction node is ambiguous for this concept; candidate paths: "
+                + string.Join(" | ", stageNodes.Select(node =>
+                    $"{node.DisplayName} ({node.NodeId}): {DescribeFactInputSources(node, "value")}"))
+        };
+        var transformationPathsBySource = new Dictionary<SourceReference, PreviewTransformationPathSummary>();
+        foreach (var path in fact.SourceTransformationPaths)
+        {
+            if (!transformationPathsBySource.TryGetValue(path.Source, out var summary))
+            {
+                summary = new PreviewTransformationPathSummary();
+                transformationPathsBySource.Add(path.Source, summary);
+            }
+            summary.Add(path);
+        }
+        var evidenceSources = fact.ContributingSources
+            .Concat(transformationPathsBySource.Keys)
+            .Distinct()
+            .ToArray();
+        return new FactRow
+        {
+            SemanticFact = fact,
+            Display = $"{fact.ConceptName} = {value}{(unit is null ? "" : " " + unit)}; {fact.Period}",
+            StageSummary = stage,
+            Evidence = evidenceSources.Select(source =>
+            {
+                transformationPathsBySource.TryGetValue(source, out var summary);
+                return new PreviewEvidenceRow(
+                    source,
+                    summary?.DisplayedPaths ?? Array.Empty<SourceTransformationPath>(),
+                    summary?.AdditionalPathCount ?? 0,
+                    transformationNames);
+            }).ToArray()
+        };
+    }
+
+    private void NavigateFactPreviewPage(int direction)
+    {
+        if (IsBusy) return;
+        var targetPage = _factPreviewPage + direction;
+        if (targetPage < 0 || targetPage * FactPreviewPageSize >= _previewFactCount) return;
+        _factPreviewPage = targetPage;
+        LoadFactPreviewPage();
+    }
+
+    private void RaiseFactPreviewPageState()
+    {
+        Raise(nameof(CanPreviousFactPreviewPage));
+        Raise(nameof(CanNextFactPreviewPage));
+        PreviousFactPreviewPageCommand?.NotifyCanExecuteChanged();
+        NextFactPreviewPageCommand?.NotifyCanExecuteChanged();
+    }
+
+    private void ClearDisplayedRunResult(string summary)
+    {
+        _previewLargeArtifact?.Dispose();
+        _previewLargeArtifact = null;
+        _previewInMemoryFacts = Array.Empty<XbrlFact>();
+        _previewMappingNodes = Array.Empty<MappingNode>();
+        _previewSemanticDigest = null;
+        _previewFactCount = 0;
+        _factPreviewPage = 0;
+        PreviewFacts.Clear();
+        SelectedPreviewFact = null;
+        SelectedPreviewEvidence = null;
+        _selectedPreviewPdfEvidence = null;
+        PreviewResultSummary = summary;
+        FactPageSummary = "No fact results are available.";
+        Diagnostics.Clear();
+        Raise(nameof(SelectedPdfEvidence));
+        Raise(nameof(PreviewFacts));
+        Raise(nameof(Diagnostics));
+        RaiseFactPreviewPageState();
+    }
+
+    public void Dispose()
+    {
+        if (_isDisposed) return;
+        _isDisposed = true;
+        _session.Changed -= OnSessionChanged;
+        _session.SelectionChanged -= OnSessionSelectionChanged;
+        _activeMappingOperation?.Cancellation.Cancel();
+        _previewLargeArtifact?.Dispose();
+        _previewLargeArtifact = null;
     }
 
     private static string FormatProvenanceStatus(RunProvenanceStatus status)

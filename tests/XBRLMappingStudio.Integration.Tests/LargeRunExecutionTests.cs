@@ -47,6 +47,17 @@ public sealed class LargeRunExecutionTests
             Assert.Contains(project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct).NodeId,
                 small.Facts[0].TransformationIds);
             Assert.Equal(small.Facts[0].TransformationIds, artifact.Facts[0].TransformationIds);
+
+            var transferredArtifact = Assert.IsType<LargeRunArtifact>(large.TransferLargeArtifactOwnership());
+            Assert.Same(artifact, transferredArtifact);
+            large.Dispose();
+            Assert.Equal(small.Facts.Skip(3).Take(4).Select(FactSnapshot),
+                transferredArtifact.ReadFactsPage(3, 4).Select(FactSnapshot));
+            Assert.Empty(transferredArtifact.ReadFactsPage(transferredArtifact.FactCount, 500));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                transferredArtifact.ReadFactsPage(0, LargeRunArtifact.MaximumFactsPerPage + 1));
+            transferredArtifact.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => transferredArtifact.ReadFactsPage(0, 1));
         }
         finally { TryDeleteDirectory(root); }
     }

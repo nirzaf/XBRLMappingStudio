@@ -2588,10 +2588,26 @@ public sealed record JobResult(
     // reviewer cannot mistake a sampled total for a full-run figure.
     IReadOnlyList<SampledTotal> SampledTotals) : IDisposable
 {
+    private int _ownsLargeArtifact = 1;
+
     /// <summary>Disk-backed large-run report and facts. Owned by this result.</summary>
     public LargeRunArtifact? LargeArtifact { get; init; }
 
-    public void Dispose() => LargeArtifact?.Dispose();
+    /// <summary>
+    /// Transfers cleanup responsibility to a longer-lived consumer while leaving the
+    /// artifact accessible through <see cref="LargeArtifact"/> for publication work.
+    /// </summary>
+    public LargeRunArtifact? TransferLargeArtifactOwnership()
+    {
+        if (Interlocked.Exchange(ref _ownsLargeArtifact, 0) == 0) return null;
+        return LargeArtifact;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _ownsLargeArtifact, 0) != 0)
+            LargeArtifact?.Dispose();
+    }
 
     /// <summary>
     /// OG01 fail-closed publishing: only a completed, full-run (non-preview) execution

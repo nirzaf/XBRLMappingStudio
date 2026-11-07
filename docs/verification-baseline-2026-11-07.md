@@ -286,3 +286,21 @@ skipped 6 environment-gated Arelle tests, and had no failures. The pinned job pa
 inventory tests. This verifies the synthetic-profile failure-isolation path only;
 full cancellation/process-crash coverage across all targets and owner-authorized
 real-profile publication remain open.
+
+## UX-07 bounded fact-result paging
+
+The desktop now presents facts in 500-row pages from either the in-memory result
+or the large-run SQLite spool. `JobResult.TransferLargeArtifactOwnership` keeps
+the spool alive for later page reads while leaving it accessible to publication;
+the viewmodel releases it when replacing/clearing results or closing the window.
+The result panel exposes named Previous/Next buttons, disabled state, and a range
+such as `Facts 1–500 of 501`.
+
+The focused Avalonia headless paging test passed 2/2 for in-memory and forced
+spool-backed runs. It observes the initial page controls, verifies their accessible
+names and disabled state, runs 501 facts, advances to row 501, then returns to row
+1. The focused artifact transfer/page test passed 1/1. The full Desktop suite
+passed 105/105. The full Integration suite passed 240 tests and skipped 6
+environment-gated Arelle cases. Builds used isolated `bin-codex` output because
+the checked-out Desktop Debug assemblies were held open by an existing app process.
+Native visual and screen-reader acceptance remain open.

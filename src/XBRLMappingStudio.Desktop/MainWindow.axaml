@@ -247,12 +247,25 @@
                                   Edges="{Binding Edges}"
                                   AutomationProperties.Name="Mapping graph" />
             <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
-              <Grid RowDefinitions="Auto,Auto,*,Auto">
+              <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
                 <TextBlock Text="Preview facts and run results" FontWeight="Bold" />
                 <TextBlock Grid.Row="1" Text="{Binding PreviewResultSummary}" TextWrapping="Wrap"
                            Margin="0,3"
                            AutomationProperties.Name="Run result status and preview qualification" />
-                <ListBox Grid.Row="2" ItemsSource="{Binding PreviewFacts}"
+                <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto" Margin="0,2">
+                  <Button Name="PreviousFactPreviewPageButton" Content="Previous"
+                          Command="{Binding PreviousFactPreviewPageCommand}"
+                          IsEnabled="{Binding CanPreviousFactPreviewPage}"
+                          AutomationProperties.Name="Previous fact results page" />
+                  <TextBlock Name="FactPageSummaryText" Grid.Column="1" Text="{Binding FactPageSummary}"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             AutomationProperties.Name="Fact results page and total count" />
+                  <Button Name="NextFactPreviewPageButton" Grid.Column="2" Content="Next"
+                          Command="{Binding NextFactPreviewPageCommand}"
+                          IsEnabled="{Binding CanNextFactPreviewPage}"
+                          AutomationProperties.Name="Next fact results page" />
+                </Grid>
+                <ListBox Grid.Row="3" ItemsSource="{Binding PreviewFacts}"
                          SelectedItem="{Binding SelectedPreviewFact, Mode=TwoWay}"
                          SelectionMode="Single" AutomationProperties.Name="Generated fact results">
                   <ListBox.ItemTemplate>
@@ -261,7 +274,7 @@
                     </DataTemplate>
                   </ListBox.ItemTemplate>
                 </ListBox>
-                <Grid Grid.Row="3" ColumnDefinitions="*,Auto"
+                <Grid Grid.Row="4" ColumnDefinitions="*,Auto"
                       IsVisible="{Binding HasSelectedPreviewFact}">
                   <StackPanel Spacing="2">
                     <TextBlock Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
