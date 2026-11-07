@@ -51,6 +51,7 @@ public sealed class WorkerSupervisor
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var validatedArguments = WorkerProcessArgumentBudget.ValidateAndCopy(executable, arguments);
         using var watchdog = new CancellationTokenSource(deadline);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             watchdog.Token, cancellationToken);
@@ -80,7 +81,7 @@ public sealed class WorkerSupervisor
                 CreateNoWindow = true,
                 StandardOutputEncoding = new UTF8Encoding(false),
             };
-            foreach (var a in arguments) psi.ArgumentList.Add(a);
+            foreach (var a in validatedArguments) psi.ArgumentList.Add(a);
 
             var started = WorkerProcessTree.Start(psi);
             using var process = started.Process;

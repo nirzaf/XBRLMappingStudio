@@ -229,6 +229,29 @@ public class SupervisionTests
     }
 
     [Fact]
+    public void ArelleWorker_RejectsNulArgumentBeforeStartingProcess()
+    {
+        var error = Assert.Throws<ArgumentException>(() =>
+            new ArelleWorker("unavailable-runtime", new[] { "worker.py", "invalid\0argument" }));
+
+        Assert.Contains("NUL", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Supervisor_RejectsUnboundedArgumentEnumerationBeforeStartingProcess()
+    {
+        static IEnumerable<string> EndlessArguments()
+        {
+            while (true) yield return "argument";
+        }
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() => new WorkerSupervisor().RunAsync(
+            "unavailable-runtime", EndlessArguments(), TimeSpan.FromSeconds(1)));
+
+        Assert.Contains("argument limit", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task StdinPayload_IsDelimitedToWorker_AndBoundedResponseCaptured()
     {
         // 'cat' echoes stdin on stdout: proves framed hand-off works end to end

@@ -438,6 +438,8 @@ public sealed class ArelleWorker : IWorkerClient
         IReadOnlyList<string>? expectedRequiredPlugins = null,
         IReadOnlyCollection<string>? expectedRequiredChecks = null)
     {
+        var validatedArguments = WorkerProcessArgumentBudget.ValidateAndCopy(
+            executablePath, args ?? Array.Empty<string>());
         ExecutablePath = executablePath;
         _expectedProfileId = expectedProfileId;
         _expectedProfileSchemaVersion = expectedProfileSchemaVersion;
@@ -457,7 +459,7 @@ public sealed class ArelleWorker : IWorkerClient
             StandardErrorEncoding = Encoding.UTF8,
             CreateNoWindow = true
         };
-        foreach (var a in args ?? Array.Empty<string>())
+        foreach (var a in validatedArguments)
             psi.ArgumentList.Add(a);
         var started = WorkerProcessTree.Start(psi);
         _process = started.Process;
