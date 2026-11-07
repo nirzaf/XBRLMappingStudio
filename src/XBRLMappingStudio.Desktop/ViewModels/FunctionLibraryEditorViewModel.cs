@@ -21,6 +21,23 @@ public sealed class FunctionRevisionRow
     public FunctionRevisionRow(FunctionDefinition definition) => Definition = definition;
 }
 
+/// <summary>A bounded synthetic value emitted at one function node during draft review.</summary>
+public sealed class FunctionNodePreviewRow
+{
+    public string NodeId { get; }
+    public string NodeDisplay { get; }
+    public decimal? Value { get; }
+    public string Preview { get; }
+
+    public FunctionNodePreviewRow(string nodeId, string nodeDisplay, decimal? value, string preview)
+    {
+        NodeId = nodeId;
+        NodeDisplay = nodeDisplay;
+        Value = value;
+        Preview = preview;
+    }
+}
+
 /// <summary>
 /// Headless-testable authoring surface for revision-pinned decimal functions. Draft graph
 /// edits stay isolated until saved; a saved revision is added to the mapping project in one
@@ -31,6 +48,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private const string InputMarkerType = "functionInput";
     private const string OutputMarkerType = "functionOutput";
     private const string PreviewBindingId = "function-preview";
+    private const int MaximumIntermediatePreviewRows = 64;
+    private const int MaximumIntermediatePreviewGraphNodes = 512;
 
     private readonly Func<DesignerSession> _projectSession;
     private readonly IProjectFileDialog? _fileDialog;
@@ -53,6 +72,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private string _importFunctionName = "";
 
     public ObservableCollection<FunctionRevisionRow> Functions { get; } = new();
+    public ObservableCollection<FunctionNodePreviewRow> NodePreviews { get; } = new();
 
     public DesignerSession Session => _draftSession;
     public IReadOnlyList<NodeViewModel> Nodes => _draftSession.Nodes;
@@ -268,6 +288,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         DraftFunctionId = "fn" + Guid.NewGuid().ToString("N")[..12];
         DraftName = "New numeric function";
         SetDraftSession(CreateDraftSession());
+        NodePreviews.Clear();
         PreviewStatus = "Run a synthetic numeric preview to inspect the draft output.";
         Status = "New draft. Add a numeric operation, test it, and save revision 1.";
         NotifyCommandState();
@@ -285,6 +306,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         DraftFunctionId = row.FunctionId;
         DraftName = row.Name;
         SetDraftSession(CreateDraftSession(row.Definition));
+        NodePreviews.Clear();
         PreviewStatus = "Run a synthetic numeric preview to inspect this revision draft.";
         Status = $"Loaded {row.FunctionId}@{row.Revision}. Saving will append revision {_expectedLatestRevision + 1}.";
         NotifyCommandState();
@@ -423,6 +445,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     {
         if (!TryParsePreviewInput(out var input))
         {
+            NodePreviews.Clear();
             PreviewStatus = "Enter a valid invariant decimal input.";
             return;
         }
@@ -430,6 +453,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         try
         {
             var function = BuildDraftDefinition();
+            RefreshIntermediatePreviews(function, input);
             var outcome = PreviewFunction(function, input);
             PreviewStatus = outcome.Success
                 ? $"Synthetic preview output: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. No filing or publication occurred."
@@ -437,8 +461,155 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException)
         {
+            NodePreviews.Clear();
             PreviewStatus = $"Preview blocked: {ex.Message}";
         }
+    }
+
+    private void RefreshIntermediatePreviews(FunctionDefinition function, decimal input)
+    {
+        NodePreviews.Clear();
+        var orderedNodes = TopologicallyOrderNodes(function);
+        var operations = orderedNodes
+            .Where(node => node.NodeType is not (InputMarkerType or OutputMarkerType))
+            .ToArray();
+        if (operations.Length == 0) return;
+
+        if (function.Nodes.Count > MaximumIntermediatePreviewGraphNodes)
+        {
+            NodePreviews.Add(new FunctionNodePreviewRow("", "Intermediate previews",
+                null, $"Per-node preview skipped: function has {function.Nodes.Count} graph nodes; the preview limit is {MaximumIntermediatePreviewGraphNodes}."));
+            return;
+        }
+
+        var previewCount = Math.Min(operations.Length, MaximumIntermediatePreviewRows);
+        for (var index = 0; index < previewCount; index++)
+        {
+            var node = operations[index];
+            var decimalOutput = node.OutputPorts.FirstOrDefault(port => port.Shape == PortShape.Decimal
+                && port.Cardinality == PortCardinality.Single);
+            if (decimalOutput is null)
+            {
+                NodePreviews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
+                    "No single Decimal output is available for a numeric preview."));
+                continue;
+            }
+
+            try
+            {
+                var prefix = BuildPrefixFunction(function, node, decimalOutput.Name);
+                var outcome = PreviewFunction(prefix, input);
+                NodePreviews.Add(outcome.Success
+                    ? new FunctionNodePreviewRow(node.NodeId, node.DisplayName, outcome.Value,
+                        $"Partial synthetic value: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. Not a filing result.")
+                    : new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
+                        $"Preview blocked: {outcome.Error}"));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException
+                                       or KeyNotFoundException or InvalidDataException)
+            {
+                NodePreviews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
+                    $"Preview blocked: {ex.Message}"));
+            }
+        }
+
+        if (operations.Length > previewCount)
+            NodePreviews.Add(new FunctionNodePreviewRow("", "Preview limit", null,
+                $"Showing the first {previewCount} of {operations.Length} operation nodes."));
+    }
+
+    private static FunctionDefinition BuildPrefixFunction(FunctionDefinition function,
+        MappingNode terminalNode, string terminalOutputPort)
+    {
+        var inputMarker = function.Nodes.SingleOrDefault(node => node.NodeType == InputMarkerType)
+            ?? throw new InvalidOperationException("Function input marker is missing.");
+        var outputMarker = function.Nodes.SingleOrDefault(node => node.NodeType == OutputMarkerType)
+            ?? throw new InvalidOperationException("Function output marker is missing.");
+        var nodesById = function.Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var incoming = function.Edges.GroupBy(edge => edge.TargetNodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var included = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<string>();
+        pending.Push(terminalNode.NodeId);
+        while (pending.Count > 0)
+        {
+            var nodeId = pending.Pop();
+            if (!included.Add(nodeId)) continue;
+            if (!nodesById.ContainsKey(nodeId))
+                throw new InvalidOperationException($"Function preview references unknown node '{nodeId}'.");
+            if (!incoming.TryGetValue(nodeId, out var edges)) continue;
+            foreach (var edge in edges) pending.Push(edge.SourceNodeId);
+        }
+
+        if (!included.Contains(inputMarker.NodeId))
+            throw new InvalidOperationException($"Node '{terminalNode.DisplayName}' is not connected to the function input.");
+        included.Add(outputMarker.NodeId);
+
+        var outputPort = outputMarker.InputPorts.SingleOrDefault()
+            ?? throw new InvalidOperationException("Function output marker must have one input port.");
+        var prefixEdges = function.Edges
+            .Where(edge => included.Contains(edge.SourceNodeId)
+                && included.Contains(edge.TargetNodeId)
+                && edge.TargetNodeId != outputMarker.NodeId)
+            .Select(edge => edge with { })
+            .ToList();
+        var previewEdgeId = "e-preview-output";
+        while (prefixEdges.Any(edge => StringComparer.Ordinal.Equals(edge.EdgeId, previewEdgeId)))
+            previewEdgeId += "-";
+        prefixEdges.Add(new MappingEdge
+        {
+            EdgeId = previewEdgeId,
+            SourceNodeId = terminalNode.NodeId,
+            SourcePortName = terminalOutputPort,
+            TargetNodeId = outputMarker.NodeId,
+            TargetPortName = outputPort.Name
+        });
+
+        return new FunctionDefinition
+        {
+            FunctionId = "fnpreview" + Guid.NewGuid().ToString("N"),
+            Name = $"{function.Name} intermediate preview",
+            Revision = 1,
+            CatalogVersion = function.CatalogVersion,
+            Inputs = function.Inputs.Select(port => port with { }).ToList(),
+            Outputs = function.Outputs.Select(port => port with { }).ToList(),
+            Nodes = function.Nodes.Where(node => included.Contains(node.NodeId))
+                .Select(node => node.ShallowCopy()).ToList(),
+            Edges = prefixEdges
+        };
+    }
+
+    private static IReadOnlyList<MappingNode> TopologicallyOrderNodes(FunctionDefinition function)
+    {
+        var originalOrder = function.Nodes.Select((node, index) => (node.NodeId, index))
+            .ToDictionary(item => item.NodeId, item => item.index, StringComparer.Ordinal);
+        var nodesById = function.Nodes.ToDictionary(node => node.NodeId, StringComparer.Ordinal);
+        var outgoing = function.Nodes.ToDictionary(node => node.NodeId, _ => new List<string>(), StringComparer.Ordinal);
+        var indegree = function.Nodes.ToDictionary(node => node.NodeId, _ => 0, StringComparer.Ordinal);
+        foreach (var edge in function.Edges)
+        {
+            if (!outgoing.TryGetValue(edge.SourceNodeId, out var targets)
+                || !indegree.ContainsKey(edge.TargetNodeId)) continue;
+            targets.Add(edge.TargetNodeId);
+            indegree[edge.TargetNodeId]++;
+        }
+
+        var ready = new SortedSet<(int Order, string NodeId)>();
+        foreach (var node in function.Nodes)
+            if (indegree[node.NodeId] == 0) ready.Add((originalOrder[node.NodeId], node.NodeId));
+        var ordered = new List<MappingNode>(function.Nodes.Count);
+        while (ready.Count > 0)
+        {
+            var item = ready.Min;
+            ready.Remove(item);
+            ordered.Add(nodesById[item.NodeId]);
+            foreach (var targetId in outgoing[item.NodeId])
+            {
+                if (--indegree[targetId] == 0)
+                    ready.Add((originalOrder[targetId], targetId));
+            }
+        }
+        return ordered.Count == function.Nodes.Count ? ordered : function.Nodes;
     }
 
     private void SaveFunctionRevision()

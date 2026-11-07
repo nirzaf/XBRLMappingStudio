@@ -88,6 +88,55 @@ public sealed class FunctionLibraryEditorTests
     }
 
     [Fact]
+    public void SyntheticPreview_ShowsOrderedPartialValuesForEachFunctionNode()
+    {
+        var projectSession = new DesignerSession(Project());
+        var editor = new FunctionLibraryEditorViewModel(() => projectSession);
+
+        editor.AddScaleCommand.Execute(null);
+        var scale = editor.Session.Project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Scale);
+        editor.Session.Select(scale.NodeId, additive: false);
+        editor.SelectedScaleFactor = "10";
+        editor.ApplyNodeParametersCommand.Execute(null);
+        editor.AddChangeSignCommand.Execute(null);
+        editor.AddRoundCommand.Execute(null);
+        var round = editor.Session.Project.Nodes.Single(node => node.NodeType == NodeTypeConstants.Round);
+        editor.Session.Select(round.NodeId, additive: false);
+        editor.SelectedRoundDigits = "0";
+        editor.SelectedRoundMode = "HalfUp";
+        editor.ApplyNodeParametersCommand.Execute(null);
+
+        editor.PreviewInput = "1.26";
+        editor.TestFunctionCommand.Execute(null);
+
+        Assert.Equal(3, editor.NodePreviews.Count);
+        Assert.Equal(new[] { NodeTypeConstants.Scale, NodeTypeConstants.ChangeSign, NodeTypeConstants.Round },
+            editor.NodePreviews.Select(row => editor.Session.Project.Nodes
+                .Single(node => node.NodeId == row.NodeId).NodeType));
+        Assert.Equal(12.6m, editor.NodePreviews[0].Value);
+        Assert.Equal(-12.6m, editor.NodePreviews[1].Value);
+        Assert.Equal(-13m, editor.NodePreviews[2].Value);
+        Assert.All(editor.NodePreviews, row => Assert.Contains("Not a filing result", row.Preview,
+            StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("output: -13", editor.PreviewStatus, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SyntheticPreview_BoundsDisplayedIntermediateNodes()
+    {
+        var projectSession = new DesignerSession(Project());
+        var editor = new FunctionLibraryEditorViewModel(() => projectSession);
+        for (var index = 0; index < 66; index++)
+            editor.AddChangeSignCommand.Execute(null);
+
+        editor.TestFunctionCommand.Execute(null);
+
+        Assert.Equal(65, editor.NodePreviews.Count);
+        Assert.Equal(64, editor.NodePreviews.Count(row => row.NodeId.Length > 0));
+        Assert.Contains("first 64 of 66", editor.NodePreviews[^1].Preview, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void SaveFunctionRevision_RefusesDraftAfterActiveProjectChanges()
     {
         var activeSession = new DesignerSession(Project());

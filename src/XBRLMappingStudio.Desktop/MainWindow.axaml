@@ -392,6 +392,18 @@
                           AutomationProperties.Name="Run a synthetic decimal function preview" />
                   <TextBlock Text="{Binding FunctionLibrary.PreviewStatus}"
                              TextWrapping="Wrap" AutomationProperties.Name="Function preview result" />
+                  <TextBlock Text="Intermediate node previews (partial synthetic values)" FontWeight="SemiBold" />
+                  <ListBox ItemsSource="{Binding FunctionLibrary.NodePreviews}" MaxHeight="230"
+                           AutomationProperties.Name="Function intermediate node previews">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:FunctionNodePreviewRow">
+                        <StackPanel Spacing="2" Margin="0,3">
+                          <TextBlock Text="{Binding NodeDisplay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock Text="{Binding Preview}" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
                   <TextBlock Text="{Binding FunctionLibrary.Status}"
                              TextWrapping="Wrap" AutomationProperties.Name="Function library status" />
                 </StackPanel>
