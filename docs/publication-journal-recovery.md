@@ -1,8 +1,9 @@
 # Atomic publication journal recovery
 
 This increment hardens the shared `RunJournal.RecoverUnfinalized` API used by the
-atomic report publisher. It adjudicates interrupted writes; it does not authorize,
-retry, or roll back a publication.
+atomic report publisher and exposes it through the explicit
+`xbrl-studio recover-file-publications` CLI command. It adjudicates interrupted
+writes; it does not authorize, retry, or roll back a publication.
 
 ## Confirmation contract
 
@@ -32,6 +33,12 @@ Malformed or unreadable individual entries do not prevent recovery of independen
 entries. Failure to enumerate/open the journal store itself still surfaces to the
 caller. Acquisition failures release any opened lock handle.
 
+The CLI command scans unresolved entries in the current user's local application
+database and writes a JSON summary to standard output. Exit code 0 means there are
+no unresolved entries or all checked entries were finalized; exit code 7 means at
+least one entry remains uncertain. It never starts a mapping, repeats validation,
+or republishes an artifact. It is explicit and is not run automatically at startup.
+
 The normal publisher also retains the previous accepted file if final receipt
 persistence fails after replacement. The destination may already contain the new
 bytes in this case; the caller must not interpret an exception as proof that no
@@ -54,8 +61,8 @@ ordering. Existing atomic and mixed-publication process-loss tests remain requir
 
 ## Remaining qualification
 
-- No startup or CLI recovery command is added. The shared recovery API has no
-  production entry point in this increment; its callers remain explicit.
+- Automatic startup recovery is not added. Recovery runs only when an operator
+  explicitly invokes the CLI command.
 - CSV, XLSX, record-JSON, and record-XML file adapters use a separate compensating
   publication path. Durable adapter journals, prior-run backup discovery, and
   exhaustive recovery across all destinations remain open under P1-13.

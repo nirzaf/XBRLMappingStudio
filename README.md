@@ -257,6 +257,7 @@ this development opt-in does not qualify a regulator profile.
 | `taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]` | Paged concept search against the synthetic development taxonomy. |
 | `validate-artifact <file.xbrl.json> [--allow-synthetic-profile]` | Local filing-rule validation requires the explicit development-profile flag; add `--arelle --python <exe> --taxonomy-root <dir>` (optionally `--package <zip>`, `--plugin <name>`, `--disclosure-system <name>`) for independent offline Arelle validation. Install the pinned worker runtime from `tools/worker/requirements.lock`. |
 | `inspect-run-result <runId>` | Look up a run's journal result. |
+| `recover-file-publications` | Reconcile incomplete atomic JSON/XML report journal entries from local app state. It finalizes only matching durable evidence, never reruns publication, and returns code 7 if any entry remains uncertain. |
 | `support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]` | Redacted diagnostic bundle. |
 
 For `--arelle`, optional worker settings are `--python <exe>` and

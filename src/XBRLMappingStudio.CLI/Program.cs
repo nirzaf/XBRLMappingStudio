@@ -40,6 +40,7 @@ return await XBRLMappingStudio.CLI.CliLifetime.RunAsync(async cancellationToken 
         "install-profile" => await InstallProfileAsync(rest, cancellationToken),
         "validate-artifact" => await ValidateArtifactAsync(rest, cancellationToken),
         "inspect-run-result" => InspectRunResult(rest),
+        "recover-file-publications" => RecoverFilePublications(rest, cancellationToken),
         "reconcile-publication" => await ReconcilePublicationAsync(rest, cancellationToken),
         "support-bundle" => SupportBundleCommand(rest),
         "execute" => await ExecuteAsync(rest, preview: false, cancellationToken),
@@ -80,6 +81,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile");
     Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
+    Console.Error.WriteLine("  xbrl-studio recover-file-publications (adjudicate interrupted atomic report writes; does not publish or retry)");
     Console.Error.WriteLine("  xbrl-studio reconcile-publication <mixed-operation-key>");
     Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]");
     Console.Error.WriteLine();
@@ -474,6 +476,18 @@ static int InspectRunResult(string[] args)
     }
     Console.WriteLine(JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
     return ExitCodesLocal.Success;
+}
+
+static int RecoverFilePublications(string[] args, CancellationToken cancellationToken)
+{
+    if (args.Length != 0)
+    {
+        Console.Error.WriteLine("Usage: xbrl-studio recover-file-publications");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+
+    return XBRLMappingStudio.CLI.FilePublicationRecoveryCommand.Execute(
+        new RunJournal(), Console.Out, cancellationToken);
 }
 
 static async Task<int> ReconcilePublicationAsync(string[] args, CancellationToken cancellationToken)

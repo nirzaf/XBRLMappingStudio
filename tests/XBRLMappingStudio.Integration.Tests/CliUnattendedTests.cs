@@ -5,6 +5,20 @@ namespace XBRLMappingStudio.Integration.Tests;
 
 public sealed partial class CliParityTests
 {
+    [Fact]
+    public async Task Cli_RecoveryCommandRejectsArgumentsWithoutOpeningLocalState()
+    {
+        using var process = Process.Start(BuildStartInfo(LocateCli(),
+            "recover-file-publications", "unexpected"))!;
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(ExitCodes.IncompleteProfile, process.ExitCode);
+        Assert.Empty(await stdout);
+        Assert.Contains("Usage: xbrl-studio recover-file-publications", await stderr);
+    }
+
     [Theory]
     [InlineData("taxonomy-search", "--page", "not-a-number")]
     [InlineData("taxonomy-search", "--size", "999999999999999999999")]

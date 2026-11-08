@@ -337,17 +337,19 @@ public sealed class RunJournal
     /// recovery never authorizes or retries publication. Uncertain entries are left
     /// untouched and do not prevent independent entries from being checked.
     /// </summary>
-    public IReadOnlyList<RecoveryAction> RecoverUnfinalized()
-        => RecoverUnfinalized(beforeAcquireForTest: null);
+    public IReadOnlyList<RecoveryAction> RecoverUnfinalized(CancellationToken cancellationToken = default)
+        => RecoverUnfinalized(beforeAcquireForTest: null, cancellationToken: cancellationToken);
 
     // Runs after the initial read and before acquisition so tests can deterministically
     // exercise a publisher changing the row while recovery's snapshot is stale.
     internal IReadOnlyList<RecoveryAction> RecoverUnfinalized(Action<JournalEntry>? beforeAcquireForTest,
-        Action<JournalEntry>? beforeFinalizeForTest = null, Action<JournalEntry>? afterReceiptForTest = null)
+        Action<JournalEntry>? beforeFinalizeForTest = null, Action<JournalEntry>? afterReceiptForTest = null,
+        CancellationToken cancellationToken = default)
     {
         var actions = new List<RecoveryAction>();
         foreach (var runId in RecoveryRunIds())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var snapshot = Load(runId);
@@ -398,7 +400,9 @@ public sealed class RunJournal
                     actions.Add(Retry(runId, "Destination missing; publication was not confirmed."));
                     continue;
                 }
+                cancellationToken.ThrowIfCancellationRequested();
                 var finalDigest = DestinationLock.DigestFile(entry.DestinationPath);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!StringComparer.Ordinal.Equals(finalDigest, entry.StagedDigest))
                 {
                     actions.Add(Retry(runId, "Destination digest does not match the staged payload."));
