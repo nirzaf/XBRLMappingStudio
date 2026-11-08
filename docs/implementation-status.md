@@ -238,3 +238,17 @@ Local DST-06 desktop snapshot capture/replay slice (2026-11-08): the full Deskto
 P1-06 table-only snapshot follow-on (2026-11-08): New version 2 captures retain only the configured table and attached indexes, with views, triggers and unrelated tables excluded; legacy version 1 full-database bundles remain readable. Metadata pins `sqlite-retained-table-v2` and `selected-table`, replay verifies the selected-table scope, and CLI/Desktop copy notices state the reduced scope. Storage and CLI tests cover legacy replay, selected-table contents, WAL consistency, cancellation, tampering, and SQLite's case-insensitive identifier resolution. The full Windows Release solution suite passed 1,189 tests, skipped 6 environment-gated Arelle cases and had 0 failures using isolated per-project output paths. Exact-head GitHub Actions run [42474596171](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42474596171) passed all four jobs on `ef47feff1ac408bedf33e0a99ee580dcc884316f`: repository hygiene, Ubuntu, Windows and pinned Arelle worker integration. Native desktop acceptance remains open because desktop input returned Access Denied after the user unlocked the session; no live source database was changed.
 
 P1-06 capture-integrity follow-on (2026-11-08): The exact SQLite source encoding, raw stored cell values, row scan order and adapter-visible rows are compared within the captured read transaction. Stored table/index DDL is admitted as one bounded statement before execution; direct retained-connection checks enforce selected-table scope. Windows Release focused verification passed 66 integrity/intent tests, 15 existing snapshot-store tests and all 3 table-snapshot integration cases, including the isolated 100,000-row memory case. Exact-head GitHub Actions [42481277509](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42481277509) passed repository hygiene, pinned Arelle, Ubuntu and Windows on `e3c526a06e3838200b0e0f3d7c5b378755eb539c`. Native desktop re-observation after the user reported the session unlocked again returned `GetCursorPos failed: Access is denied`; no further UI action was attempted and native acceptance remains open. Process/power-loss capture qualification, retention governance, other providers, real-profile licensing and regulator-specific acceptance remain open.
+
+## Desktop source-column binding guard follow-on (2026-11-08)
+
+Native synthetic-workbook review found that an unchanged schema fingerprint did
+not prove an `ExcelField` node's configured `column` or optional
+`rowFilterColumn` still existed. Desktop schema load/recheck now reports the
+affected mapping and blocks Preview/Execute until it is rebound;
+`MappingJobService` independently rejects missing mapped fields before opening
+source readers. The Desktop Release suite passed 117/117 and the application
+missing-column regression passed 1/1 on Windows. See
+[`verification-baseline-2026-11-08.md`](verification-baseline-2026-11-08.md).
+This covers the `ExcelField` source-node contract only; other source-reader
+constructs, customer workbook qualification, licensed IFRS data, regulator
+acceptance, and native accessibility remain open.

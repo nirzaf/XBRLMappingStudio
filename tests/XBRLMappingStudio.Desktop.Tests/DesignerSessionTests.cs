@@ -2428,7 +2428,19 @@ public sealed class DesignerSessionTests
             Assert.Contains("Current", viewModel.SourceColumns);
             Assert.Contains("Prior", viewModel.SourceColumns);
             Assert.True(sourceColumnNotification);
-            Assert.Equal("Loaded 4 fields from revenue.xlsx.", viewModel.StatusText);
+            Assert.True(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+            Assert.False(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.Contains("Revenue source field.column='Revenue'", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+
+            viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-value");
+            viewModel.SelectedSourceColumn = "Current";
+            viewModel.BindSourceColumnCommand.Execute(null);
+
+            Assert.False(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.Contains("Bound Current", viewModel.StatusText, StringComparison.Ordinal);
         }
         finally
         {
@@ -2615,10 +2627,64 @@ public sealed class DesignerSessionTests
             await viewModel.LoadSourceAsync(csv);
 
             Assert.False(viewModel.IsSourceSchemaDrifted);
-            Assert.True(viewModel.PreviewCommand.CanExecute(null));
-            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.True(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+            Assert.False(viewModel.ExecuteCommand.CanExecute(null));
             Assert.NotEqual(originalFingerprint, viewModel.Session.Project.Bindings.Single(binding => binding.Kind != "param").SchemaFingerprint);
             Assert.Contains("Operating Revenue", viewModel.SourceColumns);
+
+            viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-value");
+            viewModel.SelectedSourceColumn = "Operating Revenue";
+            viewModel.BindSourceColumnCommand.Execute(null);
+
+            Assert.False(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SourceSchemaRecheck_BlocksMissingMappedFieldUntilExcelFieldIsRebound()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-source-column-recheck", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        File.WriteAllText(csv, "Operating Revenue\n1250\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+
+            await viewModel.LoadSourceAsync(csv);
+
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+            Assert.True(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+            Assert.False(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.Contains("Revenue source field.column='Revenue'", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+
+            await viewModel.RevalidateSourceSchemaAsync();
+
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+            Assert.True(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.Contains("schema fingerprint is unchanged", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("Operating Revenue", viewModel.SourceColumns);
+
+            viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-value");
+            viewModel.SelectedSourceColumn = "Operating Revenue";
+            viewModel.BindSourceColumnCommand.Execute(null);
+
+            Assert.False(viewModel.HasUnresolvedSourceFieldMappings);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.Equal("Operating Revenue", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-value")
+                .Parameters.GetValueOrDefault("column")?.ToString());
         }
         finally
         {

@@ -127,6 +127,29 @@ public sealed class SchemaDriftTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MissingMappedColumn_BlocksBeforePreviewOrExecutionCanEmitNoFacts()
+    {
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        project.Bindings[0] = project.Bindings[0] with { SchemaFingerprint = null };
+        using (var workbook = new ClosedXML.Excel.XLWorkbook(_workbookPath))
+        {
+            workbook.Worksheet(TestFixtures.SheetName).Cell("B3").Value = "Current Amount";
+            workbook.Save();
+        }
+
+        var result = await NewService().RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: true, CancellationToken.None);
+
+        Assert.Equal(RunOutcome.DataError, result.Manifest.Outcome);
+        Assert.Empty(result.Facts);
+        Assert.False(result.IsPublishable);
+        var diagnostic = Assert.Single(result.Diagnostics.Items,
+            item => item.Code == DiagnosticCodes.IoSchemaMismatch && item.IsBlocking);
+        Assert.Contains(".column='Current'", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Rebind the source fields", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UnreviewedPdfInputReturnsBlockingDataErrorWithoutRunningMapping()
     {
         var profile = SyntheticProfile.Build();

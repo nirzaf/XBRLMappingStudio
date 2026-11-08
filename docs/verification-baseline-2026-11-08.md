@@ -373,3 +373,27 @@ explicit file-publication journal recovery command that never retries writes.
 The tests use synthetic fixtures. IFRS package rights/artifact identity,
 jurisdiction-specific acceptance, native Windows accessibility, and
 customer-release qualification remain open.
+
+## Desktop source-column binding guard (2026-11-08)
+
+A native synthetic-workbook smoke journey exposed a false pass: the saved project
+mapped an `ExcelField` node to `Revenue`, while the selected workbook's configured
+header row exposed only `Independent synthetic acceptance fixture`. Schema
+recheck reported the unchanged fingerprint as valid; Preview Sample then emitted
+zero facts and showed XBR014. The workbook copy and project used for the journey
+were isolated under the local temp directory. The untracked repository
+`mapping.xmap` fixture was read but not modified.
+
+Desktop source loading and schema recheck now compare each mapped `ExcelField`
+`column` and optional `rowFilterColumn` against the inspected source schema. The
+Desktop blocks Preview and Execute until the missing mapping is rebound and names
+the affected field node in its diagnostic. `MappingJobService` repeats the check
+before it opens source readers, so CLI and programmatic calls also return a
+blocking IO_SCHEMA_MISMATCH rather than silently producing zero facts.
+
+The full Windows Release Desktop suite passed 117/117. The application-level
+missing-column regression passed 1/1 and confirms a preview returns no facts,
+is not publishable, and reports the missing mapped column. Desktop rebind and
+schema-recheck regressions are included in the full suite. This synthetic check
+does not qualify real taxonomy or customer workbook behavior; no Execute or
+Publish action was taken.

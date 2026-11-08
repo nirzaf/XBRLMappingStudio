@@ -470,6 +470,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
     private bool _isSourceSchemaDrifted;
+    private bool _hasUnresolvedSourceFieldMappings;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
     private PdfDigitalDocument? _pdfDocument;
     private PdfTableTemplate? _pdfTemplate;
@@ -857,6 +858,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         private set
         {
             if (!Set(ref _isSourceSchemaDrifted, value)) return;
+            PreviewCommand?.NotifyCanExecuteChanged();
+            ExecuteCommand?.NotifyCanExecuteChanged();
+        }
+    }
+    public bool HasUnresolvedSourceFieldMappings
+    {
+        get => _hasUnresolvedSourceFieldMappings;
+        private set
+        {
+            if (!Set(ref _hasUnresolvedSourceFieldMappings, value)) return;
             PreviewCommand?.NotifyCanExecuteChanged();
             ExecuteCommand?.NotifyCanExecuteChanged();
         }
@@ -1690,9 +1701,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         });
         ValidateCommand = new RelayCommand(_ => Validate());
         PreviewCommand = new RelayCommand(async _ => await PreviewAsync(),
-            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted);
+            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted && !HasUnresolvedSourceFieldMappings);
         ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(),
-            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted);
+            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted && !HasUnresolvedSourceFieldMappings);
         CancelOperationCommand = new RelayCommand(_ => CancelMappingOperation(), _ => CanCancelOperation);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
         UndoCommand = new RelayCommand(_ => Undo());
@@ -1751,6 +1762,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private void OnSessionChanged()
     {
         InvalidateMappingOperationIfStale();
+        RefreshUnresolvedSourceFieldMappings();
         Raise(nameof(CanRevalidateSourceSchema));
         RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
@@ -2883,13 +2895,26 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var sourceName = string.IsNullOrWhiteSpace(binding.DisplayName)
                 ? binding.Kind
                 : binding.DisplayName;
+            var missingMappings = FindUnresolvedSourceFieldMappings(binding.BindingId,
+                schema.Columns.Select(column => column.Name));
+            HasUnresolvedSourceFieldMappings = missingMappings.Count > 0;
             if (drifted)
             {
                 SourceInspectionSummary = $"Schema drift detected for {sourceName}: the source now exposes "
                     + $"{schema.Columns.Count} field(s) ({string.Join(", ", schema.Columns.Select(column => column.Name))}). "
+                    + (missingMappings.Count > 0
+                        ? $"Mapped source field(s) are missing: {string.Join(", ", missingMappings)}. "
+                        : string.Empty)
                     + "The saved schema fingerprint and executable mappings remain unchanged. Review the field bindings, "
                     + "then choose this source again to accept the updated schema.";
                 StatusText = $"Source schema changed for {sourceName}. Preview and execution are blocked until the source is reviewed and reloaded.";
+            }
+            else if (missingMappings.Count > 0)
+            {
+                SourceInspectionSummary = $"Source mapping mismatch for {sourceName}: the schema fingerprint is unchanged, "
+                    + $"but mapped source field(s) are missing: {string.Join(", ", missingMappings)}. "
+                    + "Rebind each affected Excel Field node before preview or execution.";
+                StatusText = $"Source field mappings are incomplete for {sourceName}. Preview and execution are blocked until they are rebound.";
             }
             else
             {
@@ -3685,6 +3710,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
         InvalidateMappingOperationIfStale();
         IsSourceSchemaDrifted = false;
+        HasUnresolvedSourceFieldMappings = false;
         IsSourceLoading = true;
         var sqliteTableLoadPending = false;
         try
@@ -3765,8 +3791,21 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });
             SelectedSourceBindingId = binding.BindingId;
+            RefreshUnresolvedSourceFieldMappings();
             Raise(nameof(SourceColumns));
-            StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
+            if (HasUnresolvedSourceFieldMappings)
+            {
+                var missingMappings = FindUnresolvedSourceFieldMappings(binding.BindingId,
+                    schema.Columns.Select(column => column.Name));
+                SourceInspectionSummary = $"Source mapping mismatch for {binding.DisplayName ?? binding.Kind}: "
+                    + $"mapped source field(s) are missing: {string.Join(", ", missingMappings)}. "
+                    + "Rebind each affected Excel Field node before preview or execution.";
+                StatusText = $"Source field mappings are incomplete for {binding.DisplayName ?? binding.Kind}. Preview and execution are blocked until they are rebound.";
+            }
+            else
+            {
+                StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
+            }
         }
         catch (Exception ex)
         {
@@ -4671,7 +4710,42 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         { StatusText = "The selected node is not an Excel Field node."; return; }
         Session.SetNodeParameter(SelectedNode.NodeId, "column", SelectedSourceColumn);
         SelectedNode = Session.Nodes.FirstOrDefault(n => n.NodeId == SelectedNode.NodeId);
+        RefreshUnresolvedSourceFieldMappings();
         StatusText = $"Bound {SelectedSourceColumn} to {SelectedNodeDisplayName}.";
+    }
+
+    private IReadOnlyList<string> FindUnresolvedSourceFieldMappings(
+        string bindingId,
+        IEnumerable<string> availableColumns)
+    {
+        var columns = availableColumns.ToHashSet(StringComparer.Ordinal);
+        return Session.Project.Nodes
+            .Where(node => node.NodeType == NodeTypeConstants.ExcelField
+                && StringComparer.Ordinal.Equals(
+                    node.Parameters.GetValueOrDefault("bindingId")?.ToString(), bindingId))
+            .SelectMany(node => new[]
+            {
+                (NodeName: string.IsNullOrWhiteSpace(node.DisplayName) ? node.NodeId : node.DisplayName,
+                    Field: "column", Name: node.Parameters.GetValueOrDefault("column")?.ToString()),
+                (NodeName: string.IsNullOrWhiteSpace(node.DisplayName) ? node.NodeId : node.DisplayName,
+                    Field: "rowFilterColumn", Name: node.Parameters.GetValueOrDefault("rowFilterColumn")?.ToString())
+            })
+            .Where(mapping => mapping.Field == "column" || !string.IsNullOrWhiteSpace(mapping.Name))
+            .Where(mapping => string.IsNullOrWhiteSpace(mapping.Name) || !columns.Contains(mapping.Name))
+            .Select(mapping => $"{mapping.NodeName}.{mapping.Field}='{mapping.Name ?? "<unset>"}'")
+            .ToArray();
+    }
+
+    private void RefreshUnresolvedSourceFieldMappings()
+    {
+        if (SelectedSourceBindingId is null || SourceColumns.Count == 0)
+        {
+            HasUnresolvedSourceFieldMappings = false;
+            return;
+        }
+
+        HasUnresolvedSourceFieldMappings = FindUnresolvedSourceFieldMappings(
+            SelectedSourceBindingId, SourceColumns).Count > 0;
     }
 
     private void SetSelectedConcept()
@@ -5849,6 +5923,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         IsSourceLoading = false;
         _sqliteSourcePath = null;
         IsSourceSchemaDrifted = false;
+        HasUnresolvedSourceFieldMappings = false;
         _selectedSourceTable = null;
         ResetPdfReviewState();
         SelectedSourceBindingId = null;

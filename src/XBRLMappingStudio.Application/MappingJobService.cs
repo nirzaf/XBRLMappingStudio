@@ -472,6 +472,34 @@ public sealed class MappingJobService
                     manifest.Diagnostics = context.Diagnostics.Items;
                     return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
                 }
+                var availableColumns = schema.Columns.Select(column => column.Name)
+                    .ToHashSet(StringComparer.Ordinal);
+                var unresolvedFields = project.Nodes
+                    .Where(node => node.NodeType == NodeTypeConstants.ExcelField
+                        && StringComparer.Ordinal.Equals(
+                            node.Parameters.GetValueOrDefault("bindingId")?.ToString(), binding.BindingId))
+                    .SelectMany(node => new[]
+                    {
+                        (NodeName: string.IsNullOrWhiteSpace(node.DisplayName) ? node.NodeId : node.DisplayName,
+                            Field: "column", Name: node.Parameters.GetValueOrDefault("column")?.ToString()),
+                        (NodeName: string.IsNullOrWhiteSpace(node.DisplayName) ? node.NodeId : node.DisplayName,
+                            Field: "rowFilterColumn", Name: node.Parameters.GetValueOrDefault("rowFilterColumn")?.ToString())
+                    })
+                    .Where(mapping => mapping.Field == "column" || !string.IsNullOrWhiteSpace(mapping.Name))
+                    .Where(mapping => string.IsNullOrWhiteSpace(mapping.Name) || !availableColumns.Contains(mapping.Name))
+                    .Select(mapping => $"{mapping.NodeName}.{mapping.Field}='{mapping.Name ?? "<unset>"}'")
+                    .ToArray();
+                if (unresolvedFields.Length > 0)
+                {
+                    context.Diagnostics.Error(DiagnosticCodes.IoSchemaMismatch,
+                        DiagnosticSubsystem.Adapter, DiagnosticStage.Introspection,
+                        $"Source '{binding.DisplayName}' does not contain mapped source field(s): {string.Join(", ", unresolvedFields)}. Rebind the source fields before running.",
+                        operationId: opId);
+                    manifest.Outcome = RunOutcome.DataError;
+                    manifest.CompletedUtc = DateTimeOffset.UtcNow;
+                    manifest.Diagnostics = context.Diagnostics.Items;
+                    return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+                }
                 sourceConnections.Add(binding.BindingId, conn);
                 sourceSchemas.Add(binding.BindingId, schema);
                 sourceReadersOwner.Add(binding.BindingId, adapter.ReadFullAsync(conn, schema, cancellationToken), cancellationToken);
