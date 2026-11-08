@@ -230,6 +230,60 @@ public sealed class LocalApplicationDatabaseTests
     }
 
     [Fact]
+    public void FailedVersionEightMigrationRollsBackSchemaVersionAndHistoricalRows()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "rollback-v7.db");
+        using (var legacy = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE mixed_publication_reconciliation (
+                    operation_key TEXT PRIMARY KEY NOT NULL,
+                    intent_fingerprint TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_digest TEXT NOT NULL,
+                    file_state TEXT NOT NULL,
+                    file_failure_code TEXT,
+                    sqlite_path TEXT NOT NULL,
+                    sqlite_table TEXT NOT NULL,
+                    sqlite_operation_key TEXT,
+                    sqlite_intent_fingerprint TEXT,
+                    sqlite_state TEXT NOT NULL,
+                    sqlite_rows_written INTEGER,
+                    sqlite_failure_code TEXT,
+                    updated_utc TEXT NOT NULL,
+                    file_kind TEXT NOT NULL DEFAULT 'xbrl-json'
+                );
+                INSERT INTO mixed_publication_reconciliation(
+                    operation_key,intent_fingerprint,file_path,file_digest,file_state,
+                    sqlite_path,sqlite_table,sqlite_state,updated_utc,file_kind)
+                VALUES('preserve-me','sha256:intent','/workspace/report.json','sha256:file','Confirmed',
+                    '/workspace/facts.db','facts','Pending','2026-11-01T00:00:00Z','xbrl-xml');
+                PRAGMA user_version=7;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        Assert.Throws<SqliteException>(() => _ = new LocalApplicationDatabase(path));
+
+        using var verify = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        verify.Open();
+        using var check = verify.CreateCommand();
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(7L, check.ExecuteScalar());
+        check.CommandText = "SELECT operation_key,file_kind,file_state,file_digest FROM mixed_publication_reconciliation";
+        using var reader = check.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal("preserve-me", reader.GetString(0));
+        Assert.Equal("xbrl-xml", reader.GetString(1));
+        Assert.Equal("Confirmed", reader.GetString(2));
+        Assert.Equal("sha256:file", reader.GetString(3));
+        Assert.False(reader.Read());
+    }
+
+    [Fact]
     public void RefusesFutureSchemaWithoutChangingDatabase()
     {
         using var workspace = new TemporaryDirectory();
