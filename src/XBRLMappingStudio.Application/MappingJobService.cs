@@ -1195,7 +1195,8 @@ public sealed class MappingJobService
                     "Retained database or CSV input changed during validation. Retry with a stable input.");
             manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.ProvenanceStatus = AssessProvenanceStatus(
-                artifact.Facts, manifest.Inputs, manifest.Diagnostics);
+                artifact.InInputOrder(cancellationToken), manifest.Inputs, manifest.Diagnostics,
+                locators => artifact.FindFactsByLocators(locators, cancellationToken));
             manifest.Outputs = new[]
             {
                 new OutputIdentity(artifact.ReportPath, artifact.Sha256, artifact.Bytes, artifact.OutputKind)
@@ -1403,7 +1404,22 @@ public sealed class MappingJobService
         IReadOnlyList<InputIdentity> inputs,
         IReadOnlyList<Diagnostic> diagnostics)
     {
-        if (facts.Count == 0 || inputs.Count == 0)
+        ArgumentNullException.ThrowIfNull(facts);
+        return AssessProvenanceStatus(facts, inputs, diagnostics, locators =>
+        {
+            var allFacts = OimSerializer.GetFactLocatorMap(facts);
+            return locators.Where(allFacts.ContainsKey)
+                .ToDictionary(locator => locator, locator => allFacts[locator], StringComparer.Ordinal);
+        });
+    }
+
+    private static RunProvenanceStatus AssessProvenanceStatus(
+        IEnumerable<XbrlFact> facts,
+        IReadOnlyList<InputIdentity> inputs,
+        IReadOnlyList<Diagnostic> diagnostics,
+        Func<IReadOnlyList<string>, IReadOnlyDictionary<string, XbrlFact>> resolveFactLocators)
+    {
+        if (inputs.Count == 0)
             return RunProvenanceStatus.Incomplete;
 
         var verifiedInputs = inputs
@@ -1413,20 +1429,24 @@ public sealed class MappingJobService
         if (verifiedInputs.Count == 0)
             return RunProvenanceStatus.Incomplete;
 
+        var foundFacts = false;
         foreach (var fact in facts)
         {
+            foundFacts = true;
             if (fact.SourceTransformationPaths.Count == 0
-                || fact.SourceTransformationPaths.Any(path =>
-                    path.Source is null
-                    || string.IsNullOrWhiteSpace(path.Source.SourceId)
-                    || string.IsNullOrWhiteSpace(path.Source.Locator)
-                    || path.TransformationIds.Count == 0
-                    || path.TransformationIds.Any(string.IsNullOrWhiteSpace)
-                    || !verifiedInputs.Contains(path.Source.SourceId)))
+                || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs))
                 return RunProvenanceStatus.Incomplete;
         }
+        if (!foundFacts) return RunProvenanceStatus.Incomplete;
 
-        var factLocators = OimSerializer.GetFactLocatorMap(facts);
+        var diagnosticLocators = diagnostics.Select(diagnostic => diagnostic.FactLocator)
+            .Where(locator => !string.IsNullOrWhiteSpace(locator))
+            .Select(locator => locator!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var factsByLocator = diagnosticLocators.Length == 0
+            ? new Dictionary<string, XbrlFact>(StringComparer.Ordinal)
+            : resolveFactLocators(diagnosticLocators);
         foreach (var diagnostic in diagnostics)
         {
             if (diagnostic.Stage == DiagnosticStage.Worker
@@ -1435,7 +1455,7 @@ public sealed class MappingJobService
 
             if (!string.IsNullOrWhiteSpace(diagnostic.FactLocator))
             {
-                if (!factLocators.TryGetValue(diagnostic.FactLocator, out var fact)
+                if (!factsByLocator.TryGetValue(diagnostic.FactLocator, out var fact)
                     || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs)
                     || diagnostic.Source is null
                     || diagnostic.SourceTransformationPaths is not { Count: > 0 } diagnosticPaths
