@@ -334,4 +334,6 @@ Verification on the local Windows Release build:
 - `RepeatedReportOccurrences_PublishDistinctExcelAndSqliteRowsAgainstOccurrenceOracle`:
   1/1 passed with repeated facts, two periods, unit variants and two explicit
   dimensions preserved through Excel and SQLite output.
-- Exact-head CI is pending for this source change.
+- Exact-head CI [42452319288](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42452319288)
+  passed the Windows and Ubuntu Release suites, repository hygiene, and pinned
+  Arelle integration on commit `b5025e1069d2141fac419f1b48ae475992e0c505`.
