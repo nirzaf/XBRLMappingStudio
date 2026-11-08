@@ -17,6 +17,127 @@ namespace XBRLMappingStudio.Integration.Tests;
 public sealed class LargeRunExecutionTests
 {
     [Fact]
+    public async Task LargeMultipleBindings_ReturnsStructuredUnsupportedOutcome()
+    {
+        var root = NewDirectory();
+        try
+        {
+            var database = await CreateSourceDatabase(root, 9, variedValues: true);
+            var project = BuildProject(database);
+            var second = project.Bindings[0] with { BindingId = Id.New(), DisplayName = "Second source" };
+            project.Bindings.Add(second);
+            var connections = Connections(project, database).ToDictionary(item => item.Key, item => item.Value);
+            connections.Add(second.BindingId, new SourceConnection(second.BindingId, "sqlite", database,
+                new Dictionary<string, string> { ["table"] = "financials", ["decimalColumns"] = "Current,Prior" }));
+            var profile = SyntheticProfile.Build();
+            var service = new MappingJobService(profile, new DigestOnlyArtifactWorker(profile),
+                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 1));
+            using var result = await service.RunAsync(project, connections,
+                new Dictionary<string, string>(), false, default);
+            Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+            Assert.Contains(result.Manifest.Diagnostics, d => d.Code == DiagnosticCodes.IoUnsupportedOperation);
+            Assert.Null(result.LargeArtifact);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Theory]
+    [InlineData(false, 9)]
+    [InlineData(true, 9)]
+    [InlineData(false, 100_000)]
+    public async Task Csv_SmallAndLargeProduceIdenticalReportsAndImmutableDigests(bool mutate, int rowCount)
+    {
+        var root = NewDirectory();
+        try
+        {
+            var path = Path.Combine(root, "source.csv");
+            await File.WriteAllTextAsync(path, "Line,Current,Prior,Note\n" + string.Concat(
+                Enumerable.Range(0, rowCount).Select(i => $"Revenue,{1250 + i % 3},1100,\"line1\nline2 \"\"quoted\"\"\"\n")));
+            var project = TestFixtures.BuildRevenueMappingProject(path);
+            project.Bindings[0] = project.Bindings[0] with { Kind = "csv", Locator = path };
+            var source = project.Nodes.Single(n => n.NodeType == NodeTypeConstants.ExcelField);
+            project.Nodes[project.Nodes.IndexOf(source)] = source with
+            {
+                OutputPorts = new() { new PortDefinition("value", PortShape.String, PortCardinality.Single) }
+            };
+            var parse = new MappingNode
+            {
+                NodeId = Id.New(), NodeType = NodeTypeConstants.ParseDecimal, DisplayName = "Parse CSV amount",
+                Parameters = new() { ["culture"] = "invariant" },
+                InputPorts = new() { new PortDefinition("input", PortShape.String, PortCardinality.Single) },
+                OutputPorts = new() { new PortDefinition("value", PortShape.Decimal, PortCardinality.Single) }
+            };
+            project.Nodes.Add(parse);
+            var sourceEdge = project.Edges.Single(e => e.SourceNodeId == source.NodeId);
+            project.Edges[project.Edges.IndexOf(sourceEdge)] = sourceEdge with { SourceNodeId = parse.NodeId };
+            project.Edges.Add(new MappingEdge { EdgeId = Id.New(), SourceNodeId = source.NodeId,
+                SourcePortName = "value", TargetNodeId = parse.NodeId, TargetPortName = "input" });
+            var profile = SyntheticProfile.Build();
+            var connections = new Dictionary<string, SourceConnection>
+            {
+                [project.Bindings[0].BindingId] = new(project.Bindings[0].BindingId, "csv", path)
+            };
+            var worker = new DigestOnlyArtifactWorker(profile);
+            var smallService = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: rowCount,
+                    MaxProbeBytes: 256L * 1024 * 1024));
+            using var small = await smallService.RunAsync(project, connections,
+                new Dictionary<string, string>(), false, default);
+            Assert.True(small.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", small.Manifest.Diagnostics.Select(d => d.Message)));
+            var largeService = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 2, RowBatchSize: 256,
+                    MaxInMemorySourceBytes: 128, MaxReportBytes: 256L * 1024 * 1024,
+                    MaxSpoolBytes: 384L * 1024 * 1024));
+            bool mutated = false;
+            var memorySamples = new List<long>();
+            var progress = new InlineProgress<MappingJobProgress>(stage =>
+            {
+                if (rowCount >= 100_000 && stage.Stage == "Executing bounded row batch"
+                    && stage.Current is > 0 && stage.Current % (256 * 20) == 0)
+                    memorySamples.Add(GC.GetTotalMemory(forceFullCollection: true));
+                if (!mutate || mutated || stage.Stage != "Computing bounded source digest") return;
+                File.AppendAllText(path, "Revenue,9000,1100,changed\n");
+                mutated = true;
+            });
+            using var large = await largeService.RunAsync(project, connections,
+                new Dictionary<string, string>(), false, default, progress);
+            if (mutate)
+            {
+                Assert.True(mutated);
+                Assert.Equal(RunOutcome.DataError, large.Manifest.Outcome);
+                Assert.Contains(large.Manifest.Diagnostics, d => d.Code == DiagnosticCodes.IoInputIdentityChanged);
+                Assert.Null(large.LargeArtifact);
+                return;
+            }
+            Assert.True(large.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", large.Manifest.Diagnostics.Select(d => d.Message)));
+            var artifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
+            Assert.Null(small.LargeArtifact);
+            Assert.Equal(rowCount, artifact.FactCount);
+            Assert.Equal(RunManifest.ComputeSha256(small.XbrlJson), artifact.Sha256);
+            var expectedPath = Path.Combine(root, "small-report.json");
+            await File.WriteAllTextAsync(expectedPath, small.XbrlJson, new UTF8Encoding(false));
+            using (var expected = File.OpenRead(expectedPath))
+            using (var actual = artifact.OpenReportRead()) AssertStreamsEqual(expected, actual);
+            if (rowCount >= 100_000)
+            {
+                Assert.True(memorySamples.Count >= 5);
+                Assert.True(memorySamples.Max() - memorySamples.Min() < 64L * 1024 * 1024,
+                    $"CSV retained heap varied beyond 64 MiB: {memorySamples.Min()}..{memorySamples.Max()}");
+            }
+            Assert.Equal(small.Manifest.Inputs.Single().Digest, large.Manifest.Inputs.Single().Digest);
+            Assert.True(large.Manifest.Inputs.Single().IsReplayable);
+            Assert.DoesNotContain(large.Manifest.Diagnostics, d => d.Code == DiagnosticCodes.IoStableRowIdentityUnavailable);
+            File.AppendAllText(path, "Revenue,9000,1100,changed\n");
+            var error = await Assert.ThrowsAsync<PublicationException>(() => largeService.ValidateStagedArtifactAsync(
+                artifact.ReportPath, Path.Combine(root, "out.json"), large, default));
+            Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     public async Task SmallAndQualifiedLargeModes_ProduceByteIdenticalReportsAndSourceDigests()
     {
         var root = NewDirectory();
@@ -571,18 +692,22 @@ public sealed class LargeRunExecutionTests
         finally { TryDeleteDirectory(root); }
     }
 
-    [Fact]
-    public async Task OversizedInMemorySource_FailsBeforeSourceIdentityReadOrSchemaInspection()
+    [Theory]
+    [InlineData("json")]
+    [InlineData("csv")]
+    public async Task OversizedInMemorySource_FailsBeforeSourceIdentityReadOrSchemaInspection(string kind)
     {
         var root = NewDirectory();
         try
         {
             var database = await CreateSourceDatabase(root, 2, variedValues: false);
             var project = BuildProject(database);
-            var oversizedPath = Path.Combine(root, "oversized.csv");
-            await File.WriteAllBytesAsync(oversizedPath, Encoding.UTF8.GetBytes(new string('x', 1_024)));
+            var oversizedPath = Path.Combine(root, "oversized." + kind);
+            using (var stream = File.Create(oversizedPath))
+                stream.SetLength(kind == "csv"
+                    ? XBRLMappingStudio.Adapters.Csv.CsvAdapter.DefaultMaximumFileBytes + 1 : 1_024);
             var binding = project.Bindings.Single();
-            var connection = new SourceConnection(binding.BindingId, "csv", oversizedPath,
+            var connection = new SourceConnection(binding.BindingId, kind, oversizedPath,
                 new Dictionary<string, string> { ["delimiter"] = "," });
             var profile = SyntheticProfile.Build();
             var worker = new DigestOnlyArtifactWorker(profile);

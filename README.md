@@ -366,7 +366,9 @@ separates completed engineering increments from remaining engineering and owner-
 release qualification. New contracts cover [typed reusable functions](docs/decisions/MAP07-typed-function-signatures.md),
 [concept numeric policies](docs/concept-numeric-policies.md),
 [trusted publication approvals](docs/trusted-publication-approvals.md), and
-[unattended operations](docs/unattended-operations.md).
+[unattended operations](docs/unattended-operations.md). The
+[bounded CSV execution contract](docs/csv-streaming-execution.md) extends the
+single-source large-run path while retaining unchanged-file checks.
 
 Capabilities are tracked by stable guide IDs and delivery gates in
 [`docs/implementation-status.md`](./docs/implementation-status.md). This summary

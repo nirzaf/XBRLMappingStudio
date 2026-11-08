@@ -47,18 +47,31 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
         }
     }
 
+    public const int DefaultMaximumRowBytes = 4 * 1024 * 1024;
+    public const long DefaultMaximumFileBytes = 1024L * 1024 * 1024;
     private readonly Options _options;
+    private readonly int _maximumRowBytes;
+    private readonly long _maximumFileBytes;
 
     /// <summary>Test seam that aborts before replacement after staged content is parsed.</summary>
     public Func<string, bool>? ReconcileFailProbe { get; set; }
 
-    public CsvAdapter(Options? options = null) => _options = options ?? new Options();
+    public CsvAdapter(Options? options = null,
+        int maximumRowBytes = DefaultMaximumRowBytes,
+        long maximumFileBytes = DefaultMaximumFileBytes)
+    {
+        if (maximumRowBytes < 1) throw new ArgumentOutOfRangeException(nameof(maximumRowBytes));
+        if (maximumFileBytes < 1) throw new ArgumentOutOfRangeException(nameof(maximumFileBytes));
+        _options = options ?? new Options();
+        _maximumRowBytes = maximumRowBytes;
+        _maximumFileBytes = maximumFileBytes;
+    }
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
-        var text = ReadText(connection);
-        var rows = ParseRows(text);
-        var columns = BuildColumns(rows);
+        using var reader = OpenReader(connection, cancellationToken);
+        var first = ReadRows(reader, cancellationToken).FirstOrDefault() ?? Array.Empty<string>();
+        var columns = BuildColumns(new List<string[]> { first });
         ISourceSchema schema = TabularSchema.FromSource(connection.SourceId, columns);
         return Task.FromResult(schema);
     }
@@ -66,6 +79,7 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
     public Task<DataSample> ReadSampleAsync(SourceConnection connection, ISourceSchema schema,
         int maxRows, CancellationToken cancellationToken)
     {
+        if (maxRows < 0) throw new ArgumentOutOfRangeException(nameof(maxRows));
         var rows = new List<DataRecord>();
         bool truncated = false;
         int i = 0;
@@ -89,16 +103,19 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
 
     private IEnumerable<DataRecord> Enumerate(SourceConnection connection, ISourceSchema schema, CancellationToken ct)
     {
-        var text = ReadText(connection);
-        var parsed = ParseRows(text);
+        using var reader = OpenReader(connection, ct);
         var cols = schema.Columns;
-        int start = _options.HasHeader ? 1 : 0;
-        for (int r = start; r < parsed.Count; r++)
+        int r = -1;
+        foreach (var cells in ReadRows(reader, ct))
         {
+            r++;
+            if (_options.HasHeader && r == 0) continue;
             ct.ThrowIfCancellationRequested();
+            if (cells.Length > cols.Count)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"CSV row {r + 1} has more fields than the inspected schema.");
             var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal);
             var sources = new Dictionary<string, SourceReference>(StringComparer.Ordinal);
-            var cells = parsed[r];
             for (int c = 0; c < cols.Count; c++)
             {
                 var value = c < cells.Length ? cells[c] : "";
@@ -117,12 +134,46 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
         }
     }
 
-    private string ReadText(SourceConnection connection)
+    private StreamReader OpenReader(SourceConnection connection, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var path = connection.Path ?? throw new InvalidOperationException(
             $"CSV connection '{connection.SourceId}' has no file path.");
-        return DecodeText(File.ReadAllBytes(path));
+        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            4096, FileOptions.SequentialScan);
+        try
+        {
+            if (stream.Length > _maximumFileBytes)
+                throw BudgetExceeded($"CSV source exceeds the {_maximumFileBytes} byte file budget.");
+            // Preserve the original contract: strip UTF-8 BOM regardless of declared
+            // encoding, but do not auto-detect other BOMs or override that encoding.
+            Span<byte> prefix = stackalloc byte[3];
+            var count = stream.Read(prefix);
+            stream.Position = count == 3 && prefix.SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }) ? 3 : 0;
+            return new StreamReader(stream, new PreamblelessEncoding(_options.Encoding ?? new UTF8Encoding(false)),
+                detectEncodingFromByteOrderMarks: false, bufferSize: 4096);
+        }
+        catch { stream.Dispose(); throw; }
     }
+
+    // StreamReader otherwise strips the declared encoding's preamble even when
+    // BOM detection is disabled. Legacy decoding stripped UTF-8 only.
+    private sealed class PreamblelessEncoding(Encoding inner) : Encoding
+    {
+        public override byte[] GetPreamble() => Array.Empty<byte>();
+        public override Decoder GetDecoder() => inner.GetDecoder();
+        public override int GetByteCount(char[] chars, int index, int count) => inner.GetByteCount(chars, index, count);
+        public override int GetBytes(char[] chars, int charIndex, int charCount, byte[] bytes, int byteIndex)
+            => inner.GetBytes(chars, charIndex, charCount, bytes, byteIndex);
+        public override int GetCharCount(byte[] bytes, int index, int count) => inner.GetCharCount(bytes, index, count);
+        public override int GetChars(byte[] bytes, int byteIndex, int byteCount, char[] chars, int charIndex)
+            => inner.GetChars(bytes, byteIndex, byteCount, chars, charIndex);
+        public override int GetMaxByteCount(int charCount) => inner.GetMaxByteCount(charCount);
+        public override int GetMaxCharCount(int byteCount) => inner.GetMaxCharCount(byteCount);
+    }
+
+    private static AdapterException BudgetExceeded(string message)
+        => new(DiagnosticCodes.IoNumberOutOfBudget, message, isInputBudgetExceeded: true);
 
     private string DecodeText(byte[] bytes)
     {
@@ -135,48 +186,82 @@ public sealed class CsvAdapter : ISourceAdapter, ITargetAdapter
 
     private List<string[]> ParseRows(string text)
     {
-        var rows = new List<string[]>();
+        using var reader = new StringReader(text);
+        return ReadRows(reader, CancellationToken.None, enforceBudgets: false).ToList();
+    }
+
+    // A single bounded logical record is retained, including quoted multiline fields.
+    // Account for raw syntax as well as decoded content so delimiter/quote-only rows
+    // cannot evade the allocation bound. Cancellation is checked even inside a field.
+    private IEnumerable<string[]> ReadRows(TextReader reader, CancellationToken ct, bool enforceBudgets = true)
+    {
         var field = new StringBuilder();
         var record = new List<string>();
         bool inQuotes = false;
-
-        void EndField() { record.Add(field.ToString()); field.Clear(); }
-        void EndRecord() { EndField(); rows.Add(record.ToArray()); record.Clear(); }
-
-        for (int i = 0; i < text.Length; i++)
+        long rowBytes = 0;
+        int scanned = 0;
+        void Charge(int bytes)
         {
-            char ch = text[i];
+            rowBytes += bytes;
+            if (enforceBudgets && rowBytes > _maximumRowBytes)
+                throw BudgetExceeded($"CSV record exceeds the {_maximumRowBytes} byte row budget.");
+        }
+        void EndField() { Charge(32); record.Add(field.ToString()); field.Clear(); }
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            if ((scanned++ & 4095) == 0 && reader is StreamReader streamReader
+                && streamReader.BaseStream.Length > _maximumFileBytes)
+                throw BudgetExceeded($"CSV source exceeds the {_maximumFileBytes} byte file budget.");
+            int value = reader.Read();
+            if (value < 0) break;
+            Charge(2);
+            char ch = (char)value;
             if (inQuotes)
             {
                 if (ch == _options.Quote)
                 {
-                    if (i + 1 < text.Length && text[i + 1] == _options.Quote) { field.Append(_options.Quote); i++; }
+                    if (reader.Peek() == _options.Quote)
+                    {
+                        reader.Read(); Charge(2); field.Append(_options.Quote);
+                    }
                     else inQuotes = false;
                 }
                 else field.Append(ch);
             }
             else if (ch == _options.Quote) inQuotes = true;
             else if (ch == _options.Delimiter) EndField();
-            else if (ch == '\r') { /* swallow, handled with \n */ }
-            else if (ch == '\n') EndRecord();
+            else if (ch == '\r') { /* preserve CR swallowing outside quotes */ }
+            else if (ch == '\n')
+            {
+                EndField();
+                yield return record.ToArray();
+                record.Clear(); rowBytes = 0;
+            }
             else field.Append(ch);
         }
         if (inQuotes)
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "CSV output ended inside a quoted field.");
-        // Trailing field/record (handles empty trailing field and final line w/o newline).
-        if (field.Length > 0 || record.Count > 0) EndRecord();
-        return rows;
+        if (field.Length > 0 || record.Count > 0)
+        {
+            EndField();
+            yield return record.ToArray();
+        }
     }
 
     private static IReadOnlyList<ColumnSchema> BuildColumns(List<string[]> rows)
     {
         var first = rows.Count > 0 ? rows[0] : Array.Empty<string>();
         var cols = new List<ColumnSchema>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
         for (int c = 0; c < first.Length; c++)
         {
             var name = first[c].Trim();
             if (name.Length == 0) name = $"col_{c + 1}";
+            if (!names.Add(name))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"CSV schema contains duplicate column name '{name}'.");
             cols.Add(new ColumnSchema(name, PortShape.String, c, name));
         }
         return cols;

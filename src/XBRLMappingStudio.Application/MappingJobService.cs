@@ -399,7 +399,7 @@ public sealed class MappingJobService
         };
 
         // Bounded probe. Small and preview runs retain the existing in-memory plan;
-        // only a single streamed SQLite source may enter the qualified large path.
+        // only a single streamed SQLite or CSV source may enter the qualified large path.
         await using var sourceReadersOwner = new BufferedSourceReaderSet();
         var sourceReaders = sourceReadersOwner.Readers;
         var sourceConnections = new Dictionary<string, SourceConnection>(StringComparer.Ordinal);
@@ -421,6 +421,7 @@ public sealed class MappingJobService
             try
             {
                 if (!StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "sqlite")
+                    && !StringComparer.OrdinalIgnoreCase.Equals(conn.Kind, "csv")
                     && !IsBoundedInMemorySource(conn, out var sourceLimitReason))
                 {
                     context.Diagnostics.Error(DiagnosticCodes.IoNumberOutOfBudget,
@@ -559,15 +560,15 @@ public sealed class MappingJobService
 
         if (isLargeRun)
         {
-            var binding = project.Bindings.SingleOrDefault();
+            var binding = project.Bindings.Count == 1 ? project.Bindings[0] : null;
             if (binding is null || project.Bindings.Count != 1
                 || compile.Plan!.SetSteps.Count != 0
-                || !StringComparer.OrdinalIgnoreCase.Equals(sourceConnections[binding.BindingId].Kind, "sqlite")
+                || sourceConnections[binding.BindingId].Kind is not ("sqlite" or "csv")
                 || project.Destination is not null)
             {
                 context.Diagnostics.Error(DiagnosticCodes.IoUnsupportedOperation,
                     DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
-                    "Large-run execution is currently qualified only for one streamed SQLite source, a row-scoped plan, and no configured destination.",
+                    "Large-run execution is currently qualified only for one streamed SQLite or CSV source, a row-scoped plan, and no configured destination.",
                     operationId: opId);
                 manifest.Outcome = RunOutcome.IncompleteConfiguration;
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
@@ -578,7 +579,7 @@ public sealed class MappingJobService
             var connection = sourceConnections[binding.BindingId];
             var schema = sourceSchemas[binding.BindingId];
             var hasPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
-            if (!hasPrimaryKey)
+            if (!hasPrimaryKey && connection.Kind == "sqlite")
             {
                 context.Diagnostics.Warn(DiagnosticCodes.IoStableRowIdentityUnavailable,
                     DiagnosticSubsystem.Adapter, DiagnosticStage.Execution,
@@ -859,8 +860,9 @@ public sealed class MappingJobService
                     _executionBudget.MaxBatchBytes, BufferedSourceReader.EstimateRecordBytes, cancellationToken);
                 if (rows.Count == 0) break;
                 sourceRows = checked(sourceRows + rows.Count);
-                foreach (var row in rows)
-                    store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
+                if (connection.Kind == "sqlite")
+                    foreach (var row in rows)
+                        store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
 
                 context.LoadedSources[binding.BindingId] = rows;
                 var execution = await plan.ExecuteAsync(context);
@@ -945,8 +947,15 @@ public sealed class MappingJobService
             progress?.Report(new MappingJobProgress("Finalizing bounded source spool indexes"));
             store.Finish(cancellationToken);
             progress?.Report(new MappingJobProgress("Computing bounded source digest"));
-            var digest = store.ComputeSourceDigest(table, cancellationToken);
-            UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
+            if (connection.Kind == "sqlite")
+            {
+                var digest = store.ComputeSourceDigest(table, cancellationToken);
+                UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
+            }
+            else if (await FindChangedFileInputAsync(manifest.Inputs,
+                _executionBudget.MaxInMemorySourceBytes, cancellationToken) is not null)
+                throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
+                    "CSV input changed or could not be verified after its identity was recorded. Retry with a stable input.");
             var reportPath = Path.Combine(directory, outputKind == "xbrl-xml" ? "report.xml" : "report.json");
             long reportBytes;
             try
@@ -1094,6 +1103,10 @@ public sealed class MappingJobService
                 progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
+            if (connection.Kind == "csv" && await FindChangedFileInputAsync(manifest.Inputs,
+                _executionBudget.MaxInMemorySourceBytes, cancellationToken) is not null)
+                throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
+                    "CSV input changed during validation. Retry with a stable input.");
             manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.Outputs = new[]
             {
@@ -1115,7 +1128,7 @@ public sealed class MappingJobService
         catch (AdapterException ex)
         {
             context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, operationId));
-            manifest.Outcome = RunOutcome.DataError;
+            manifest.Outcome = ex.IsInputBudgetExceeded ? RunOutcome.IncompleteConfiguration : RunOutcome.DataError;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.Diagnostics = context.Diagnostics.Items;
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
@@ -1196,9 +1209,11 @@ public sealed class MappingJobService
                 reason = $"Source '{connection.SourceId}' is missing and cannot be size-checked before schema inspection.";
                 return false;
             }
-            if (info.Length > _executionBudget.MaxInMemorySourceBytes)
+            var maximumBytes = connection.Kind == "csv"
+                ? CsvAdapter.DefaultMaximumFileBytes : _executionBudget.MaxInMemorySourceBytes;
+            if (info.Length > maximumBytes)
             {
-                reason = $"Source '{connection.SourceId}' exceeds the {_executionBudget.MaxInMemorySourceBytes} byte in-memory source limit; use a streamed SQLite source for large runs.";
+                reason = $"Source '{connection.SourceId}' exceeds the {maximumBytes} byte source limit; use a bounded streamed source within its file budget for large runs.";
                 return false;
             }
             if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "excel"))
@@ -1330,6 +1345,11 @@ public sealed class MappingJobService
         string outputKind = "xbrl-json")
     {
         var manifest = result.Manifest;
+        var changedFile = await FindChangedFileInputAsync(manifest.Inputs,
+            _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+        if (changedFile is not null)
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                SourceIdentityMismatchMessage(changedFile), manifest.RunId, destinationPath);
         var output = manifest.Outputs.SingleOrDefault(identity => identity.Kind == outputKind);
         if (output is null)
             throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
@@ -1614,6 +1634,11 @@ public sealed class MappingJobService
         if (response.Status == WorkerStatus.Success && blocking is null
             && completion.State == ValidationCompletionState.Complete)
         {
+            changedFile = await FindChangedFileInputAsync(manifest.Inputs,
+                _executionBudget.MaxInMemorySourceBytes, cancellationToken);
+            if (changedFile is not null)
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    SourceIdentityMismatchMessage(changedFile), manifest.RunId, destinationPath);
             manifest.ValidatedArtifactDigest = digest;
             manifest.Diagnostics = manifest.Diagnostics.Concat(diagnostics).ToArray();
             return digest;
@@ -2159,7 +2184,7 @@ public sealed class MappingJobService
         int sqliteMaximumRowBytes = SqliteSourceAdapter.DefaultMaximumRowBytes) => conn.Kind switch
     {
         "excel" => ExcelAdapter.FromConnection(conn),
-        "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration)),
+        "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration), sqliteMaximumRowBytes),
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
         "xml" => new XmlAdapter(),
         "xbrl-report" => new XbrlReportAdapter(),
@@ -2293,7 +2318,14 @@ public sealed class MappingJobService
                 list.Add(new InputIdentity(kv.Key, "sqlite-table", null, IsReplayable: false, kv.Value.Path));
                 continue;
             }
-            if (StringComparer.Ordinal.Equals(kv.Value.Kind, "pdf-digital"))
+            if (StringComparer.Ordinal.Equals(kv.Value.Kind, "csv"))
+            {
+                var csvDigest = kv.Value.Path is null ? null : await ComputeFileDigestWithinLimitAsync(
+                    kv.Value.Path, CsvAdapter.DefaultMaximumFileBytes, ct);
+                list.Add(new InputIdentity(kv.Key, "file", csvDigest, csvDigest is not null, kv.Value.Path)
+                    { SnapshotStrategy = "csv-immutable-file" });
+            }
+            else if (StringComparer.Ordinal.Equals(kv.Value.Kind, "pdf-digital"))
             {
                 var pdfDigest = kv.Value.Path is null
                     ? null
@@ -2501,6 +2533,7 @@ public sealed class MappingJobService
             {
                 "pdf-review-manifest" => PdfSourceAdapter.MaxReviewManifestBytes,
                 _ when isPdfSource => PdfDigitalExtractionOptions.AbsoluteMaxFileBytes,
+                _ when input.SnapshotStrategy == "csv-immutable-file" => CsvAdapter.DefaultMaximumFileBytes,
                 _ => maximumSourceBytes
             };
             var currentDigest = input.Kind == "pdf-review-manifest" || isPdfSource

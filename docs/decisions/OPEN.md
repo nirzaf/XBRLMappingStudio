@@ -17,6 +17,14 @@ certification.
   application entry point only when a profile explicitly declares early
   adoption. See the [official 2025 taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/ifrs-accounting-taxonomy-2025/)
   and [2026 current-version guidance](https://www.ifrs.org/news-and-events/news/2026/02/ifrs-accounting-taxonomy-2025-to-remain-current-for-2026/).
+- **First jurisdiction priority:** Qatar, initially general non-financial listed
+  companies, before banking and insurance. Use IFRS Accounting Taxonomy 2025 as
+  the technical foundation for mapping and reporting preparation. This is not
+  Q-Disclosure certification or evidence that the base IFRS entry point is accepted
+  by Qatar. The official QSE sector split distinguishes **Other** (Consumer,
+  Industrials, Telecoms and Transportation) from **Real Estate**; the initial
+  customer/sector template must therefore be confirmed rather than treating all
+  non-financial companies as one official taxonomy category.
 - **Approval rule:** Require a recorded human approval for the current semantic
   revision, graph digest, and taxonomy profile digest. Material graph or profile
   changes invalidate that approval. Production publication requires successful
@@ -39,14 +47,45 @@ guide. The selected priorities above do not close these gates.
 - **Blocks:** XBR09, EXT01–04 (conditional), UI07 (installer targets a specific
   regulator packaging contract).
 - **Selected scope:** IFRS-based standards mapping and validation is the first
-  implementation target; no regulator submission certification is claimed.
-- **Still open:** Name a customer or filing authority, jurisdiction, authoritative
-  filing rules, and any required submission package. Defer jurisdiction-specific
-  filing compliance until that owner is confirmed.
+  implementation target, with Qatar/QFMA/QSE Q-Disclosure the first jurisdiction
+  priority; no regulator submission certification is claimed.
+- **Still open:** Identify the first customer and precise QSE sector template,
+  obtain the authorized current Qatar taxonomy, authoritative business/validation
+  rules and submission package contract, then qualify representative filings.
+  Jurisdiction selection does not authorize guessing the technical package or rules.
 - **Rationale:** Taxonomy rights, packaging format, iXBRL requirement, and
   extension-taxonomy rules each depend on the regulator. The selected IFRS
-  baseline does not identify which jurisdiction adopted IFRS or its local
-  filing rules.
+  baseline alone does not establish Qatar's local filing contract.
+
+### Qatar source evidence and remaining technical inputs
+
+Verified against public official sources on 2026-11-08:
+
+- [QSE Q-Disclosure](https://www.qe.com.qa/q-disclosure) describes a joint QSE/QFMA
+  initiative, mandatory for listed companies since 1 October 2020. It lists
+  annual audited, semi-annual reviewed and quarterly reporting, sector taxonomies,
+  five face financial statements, XBRL and additional business-rule validation,
+  and an auditor workflow. These public descriptions are not a complete technical
+  filing specification.
+- The [QSE-linked Q&A](https://www.qe.com.qa/documents/20181/979666/QBRL%2BQA.pdf/52722723-b0eb-74ba-62c9-278fe68cf45d?t=1601196743806)
+  says company users download taxonomy templates after login and obtain dedicated
+  manuals. It describes Super User approval/submission and no individual taxonomy
+  customization. This is rollout-era 2020/2021 guidance; current applicability,
+  deadlines and extension restrictions still need confirmation.
+- No authoritative publicly downloadable, versioned Qatar package has been
+  established here. Obtain its publisher/version/release date, applicable periods,
+  SHA-256 hashes, namespaces, entry points and full dependency closure. Also obtain
+  the current severity catalogue, mandatory facts/dimensions, identifiers,
+  unit/precision rules, language rules, accepted format/container, extension policy,
+  submission manual and authorized positive/negative filings. No Q-Disclosure
+  compliance or submission compatibility claim is allowed before that evidence.
+- [Official IFRS 2026 guidance](https://www.ifrs.org/content/dam/ifrs/standards/taxonomy/2026/guidance-on-use-of-2025-ifrs-taxonomy.pdf)
+  retains the 2025 taxonomy and entry points subject to regulator filing rules.
+  Element-reference effective/expiry dates still matter for the reporting period;
+  unchanged package version does not qualify every element for every period.
+
+No forms were submitted, accounts registered or taxonomy packages downloaded for
+this source review. Publication, human approval and licensing gates remain unchanged.
 
 ## Production Taxonomy Package
 

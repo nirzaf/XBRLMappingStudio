@@ -8,8 +8,10 @@ the real-taxonomy, installed-Windows, identity-enrollment or customer-data gates
 The owner's subsequent decision selects IFRS Accounting Taxonomy 2025 for
 standards-based mapping and validation. The priorities and unresolved rights are
 recorded in [OPEN.md](decisions/OPEN.md), preserved from upstream `4a6ab3b`.
-Regulator-specific compliance is deferred until a named customer/authority is
-confirmed. Local evaluation is conditional on the applicable terms; no taxonomy
+Qatar/QFMA/QSE Q-Disclosure is subsequently selected as the first jurisdiction
+priority for general non-financial listed companies. Its exact sector package,
+current rules and acceptance remain unverified; base IFRS output must not be
+described as Q-Disclosure compliant. Local evaluation is conditional on the applicable terms; no taxonomy
 bundling, redistribution or commercial distribution is authorized without
 documented rights. Synthetic fixtures and production fail-closed gates remain.
 
@@ -49,9 +51,11 @@ Release solution build succeeded with zero warnings and zero errors under SDK
 10.0.300 on Linux. The locked restore completed with NuGet vulnerability warnings
 treated as errors; the direct/transitive vulnerability report returned no findings.
 Full-solution Release tests passed **1,016**, with **6** environment-gated Arelle
-skips. Those Arelle cases passed in the separate enabled selection below. Exact
-pushed-commit Windows CI must still run; local Linux results are not Windows
-evidence. Additional checks cover:
+skips. Those Arelle cases passed in the separate enabled selection below.
+Exact-pushed-commit [CI 42454754704](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42454754704)
+passed Windows, Ubuntu, pinned Arelle integration and repository hygiene on
+`2eb33ebb5a9cbe8f00231e83a0df7a5940a68593`, including five repeated Windows worker
+cancellation runs. Later changes require their own CI evidence. Additional checks cover:
 
 - Full Engine suite: 155 passed; full Project suite: 32 passed.
 - Full XBRL suite: 166 passed, including shared numeric fixtures; profile-policy
@@ -66,6 +70,30 @@ evidence. Additional checks cover:
 - Synthetic taxonomy/graph performance fixture self-test passed. This is not
   target-hardware latency acceptance.
 
+## CSV and Qatar follow-on
+
+The [bounded CSV execution contract](csv-streaming-execution.md) adds streaming
+schema/sample/full reads with per-record/file limits and cancellation, preserves
+logical-record provenance and configured encoding, and rejects excess columns and
+duplicate resolved headers instead of losing source data. One row-scoped CSV
+binding can now enter the existing disk-backed large-run path. File hashes are
+rechecked before accepting results and at staged validation/publication; this is
+not a retained immutable extract. Multiple large bindings and set-phase plans
+remain unsupported with structured refusal.
+
+Follow-on verification: full Release build passed with zero warnings/errors;
+the full solution passed **1,038** tests with **6** environment-gated Arelle skips,
+and the enabled Arelle selection passed **15/15**. The full adapter suite passed
+113 tests and the large-run selection passed 27 tests, including a 100,000-row CSV
+small/large byte-stream and source-digest oracle with less than 64 MiB steady-state
+retained managed-heap variation. This is synthetic component evidence, not complete
+process-tree/Arelle memory or accepted target-hardware qualification.
+
+Qatar-first priorities and current public official-source evidence are recorded in
+[OPEN.md](decisions/OPEN.md). No Qatar technical package, filing-rule catalogue,
+license grant, or Q-Disclosure acceptance is invented. The generic CSV work does
+not enable a production taxonomy or change publication authorization.
+
 ## Remaining acceptance ledger
 
 The following items are deliberately open. Do not remove fail-closed restrictions
@@ -73,12 +101,12 @@ or represent these rows as completed to make a release appear ready.
 
 | Audit ID | Remaining acceptance |
 |---|---|
-| P0-01 | Final pushed-commit Windows/Ubuntu/Arelle CI must pass, including repeated Windows cancellation. |
-| P0-02 | IFRS Accounting Taxonomy 2025 is selected for standards mapping/validation. Applicable evaluation rights, exact official artifact/hash/dependency closure, offline resolution and permitted financial fixtures remain open. Regulator certification is deferred, not inferred. |
+| P0-01 | Resolved on `2eb33eb` by exact-commit Windows/Ubuntu/Arelle CI, including repeated Windows cancellation. Later increments must retain these gates. |
+| P0-02 | IFRS Accounting Taxonomy 2025 is selected for standards mapping/validation, with Qatar the first jurisdiction priority. Applicable evaluation rights, exact IFRS/Qatar artifacts and hashes, dependency closure, offline resolution and permitted financial fixtures remain open. Q-Disclosure compliance is unverified. |
 | P0-03 | Real-profile mandatory rule/plugin completion evidence. Existing synthetic evidence and missing-check refusal do not qualify a real authority. |
 | P0-04 | Authorized reviewer enrollment/revocation, protected host trust configuration, external signing workflow and CLI/Desktop deployment integration. The application API contract is implemented; production identity governance is not. |
 | P0-05 | Clean Windows installer, native/Python dependencies, signing, license clearance and installed upgrade/backup/rollback proof. |
-| P1-01 | Multiple large bindings and qualified large-file adapters under declared end-to-end resource budgets. |
+| P1-01 | Single row-scoped CSV large runs are added alongside SQLite. Multiple large bindings, further file adapters and end-to-end worker resource qualification remain open. |
 | P1-02 | Disk-backed grouping/joins, spill recovery and provenance qualification. |
 | P1-03 | Selected IFRS profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
