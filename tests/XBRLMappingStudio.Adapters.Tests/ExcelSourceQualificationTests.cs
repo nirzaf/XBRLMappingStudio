@@ -10,6 +10,39 @@ namespace XBRLMappingStudio.Adapters.Tests;
 public sealed class ExcelSourceQualificationTests
 {
     [Fact]
+    public async Task OversizedCompressedWorkbookIsRejectedBeforeParsing()
+    {
+        using var workspace = new TempWorkspace();
+        var path = workspace.PathFor("oversized.xlsx");
+        await File.WriteAllBytesAsync(path, new byte[32]);
+        var adapter = new ExcelAdapter(maximumInputBytes: 16);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(() => adapter
+            .InspectSchemaAsync(new SourceConnection("in", "excel", path), default));
+
+        Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, error.Code);
+        Assert.True(error.IsInputBudgetExceeded);
+    }
+
+    [Fact]
+    public async Task ExpandedWorkbookPackageIsRejectedBeforeClosedXmlLoadsIt()
+    {
+        using var workspace = new TempWorkspace();
+        var path = workspace.PathFor("expanded.xlsx");
+        await using (var file = File.Create(path))
+        using (var archive = new ZipArchive(file, ZipArchiveMode.Create))
+        await using (var entry = archive.CreateEntry("xl/workbook.xml").Open())
+            await entry.WriteAsync(System.Text.Encoding.UTF8.GetBytes(new string('x', 4096)));
+
+        var adapter = new ExcelAdapter(maximumExpandedBytes: 1024);
+        var error = await Assert.ThrowsAsync<AdapterException>(() => adapter
+            .InspectSchemaAsync(new SourceConnection("in", "excel", path), default));
+
+        Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, error.Code);
+        Assert.True(error.IsInputBudgetExceeded);
+    }
+
+    [Fact]
     public async Task ExplicitRangeRestrictsColumnsAndRowsAndAppliesHiddenRowPolicy()
     {
         using var workspace = new TempWorkspace();

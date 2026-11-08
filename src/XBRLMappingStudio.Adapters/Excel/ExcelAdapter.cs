@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Globalization;
+using System.IO.Compression;
 using System.Text;
 using ClosedXML.Excel;
 using XBRLMappingStudio.Diagnostics;
@@ -20,6 +21,10 @@ namespace XBRLMappingStudio.Adapters.Excel;
 /// </summary>
 public sealed class ExcelAdapter : ISourceAdapter
 {
+    public const long DefaultMaximumInputBytes = 128L * 1024 * 1024;
+    public const long DefaultMaximumExpandedBytes = 512L * 1024 * 1024;
+    public const int DefaultMaximumPackageEntries = 20_000;
+
     public string Kind => "excel";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
 
@@ -39,10 +44,25 @@ public sealed class ExcelAdapter : ISourceAdapter
     }
 
     private readonly FormulaPolicy _policy;
+    private readonly long _maximumInputBytes;
+    private readonly long _maximumExpandedBytes;
+    private readonly int _maximumPackageEntries;
 
-    public ExcelAdapter(FormulaPolicy policy = FormulaPolicy.AcceptCached)
+    public ExcelAdapter(FormulaPolicy policy = FormulaPolicy.AcceptCached,
+        long maximumInputBytes = DefaultMaximumInputBytes,
+        long maximumExpandedBytes = DefaultMaximumExpandedBytes,
+        int maximumPackageEntries = DefaultMaximumPackageEntries)
     {
+        if (maximumInputBytes < 1 || maximumInputBytes > DefaultMaximumInputBytes)
+            throw new ArgumentOutOfRangeException(nameof(maximumInputBytes));
+        if (maximumExpandedBytes < 1 || maximumExpandedBytes > DefaultMaximumExpandedBytes)
+            throw new ArgumentOutOfRangeException(nameof(maximumExpandedBytes));
+        if (maximumPackageEntries < 1 || maximumPackageEntries > DefaultMaximumPackageEntries)
+            throw new ArgumentOutOfRangeException(nameof(maximumPackageEntries));
         _policy = policy;
+        _maximumInputBytes = maximumInputBytes;
+        _maximumExpandedBytes = maximumExpandedBytes;
+        _maximumPackageEntries = maximumPackageEntries;
     }
 
     public static ExcelAdapter FromConnection(SourceConnection connection)
@@ -62,11 +82,13 @@ public sealed class ExcelAdapter : ISourceAdapter
         return new ExcelAdapter(policy);
     }
 
-    public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
+    public async Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
         var path = RequirePath(connection);
-        using var workbook = new XLWorkbook(path);
-        return Task.FromResult<ISourceSchema>(CreateSchema(workbook, connection));
+        var bytes = await ReadBoundedWorkbookAsync(path, cancellationToken).ConfigureAwait(false);
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var workbook = new XLWorkbook(stream);
+        return CreateSchema(workbook, connection);
     }
 
     public async Task<DataSample> ReadSampleAsync(
@@ -95,7 +117,9 @@ public sealed class ExcelAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "Excel source was given an incompatible schema description.", DiagnosticStage.Validation);
         var path = RequirePath(connection);
-        using var workbook = new XLWorkbook(path);
+        var bytes = await ReadBoundedWorkbookAsync(path, cancellationToken).ConfigureAwait(false);
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var workbook = new XLWorkbook(stream);
         var currentSchema = CreateSchema(workbook, connection);
         if (!StringComparer.Ordinal.Equals(currentSchema.Fingerprint, excelSchema.Fingerprint))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
@@ -327,6 +351,70 @@ public sealed class ExcelAdapter : ISourceAdapter
 
         return DataValue.StringValue(cell.ToString() ?? "", src);
     }
+
+    private async Task<byte[]> ReadBoundedWorkbookAsync(string path, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (input.Length > _maximumInputBytes)
+            throw InputBudgetExceeded($"Excel source exceeds the {_maximumInputBytes} byte compressed-file budget.");
+
+        await using var snapshot = new MemoryStream(checked((int)input.Length));
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            if (snapshot.Length > _maximumInputBytes - read)
+                throw InputBudgetExceeded($"Excel source exceeds the {_maximumInputBytes} byte compressed-file budget.");
+            await snapshot.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
+
+        var bytes = snapshot.ToArray();
+        await ValidatePackageBudgetAsync(bytes, cancellationToken).ConfigureAwait(false);
+        return bytes;
+    }
+
+    private async Task ValidatePackageBudgetAsync(byte[] bytes, CancellationToken cancellationToken)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var package = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+        if (package.Entries.Count > _maximumPackageEntries)
+            throw InputBudgetExceeded($"Excel package exceeds the {_maximumPackageEntries} entry budget.");
+
+        long declaredExpandedBytes = 0;
+        foreach (var entry in package.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (entry.Length > _maximumExpandedBytes - declaredExpandedBytes)
+                throw InputBudgetExceeded($"Excel package exceeds the {_maximumExpandedBytes} byte expanded-data budget.");
+            declaredExpandedBytes += entry.Length;
+        }
+
+        // Validate actual decompressed bytes as well as ZIP directory metadata. This
+        // prevents a forged length from bypassing the budget before ClosedXML loads it.
+        long expandedBytes = 0;
+        var buffer = new byte[64 * 1024];
+        foreach (var entry in package.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var content = entry.Open();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var read = await content.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                if (read > _maximumExpandedBytes - expandedBytes)
+                    throw InputBudgetExceeded($"Excel package exceeds the {_maximumExpandedBytes} byte expanded-data budget.");
+                expandedBytes += read;
+            }
+        }
+    }
+
+    private static AdapterException InputBudgetExceeded(string message)
+        => new(DiagnosticCodes.IoNumberOutOfBudget, message, isInputBudgetExceeded: true);
 
     private static string RequirePath(SourceConnection conn)
         => conn.Path ?? throw new InvalidOperationException(
