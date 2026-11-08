@@ -383,6 +383,97 @@ public sealed class DestinationPlanTests
         }
     }
 
+    [Fact]
+    public async Task PublishFileDestination_RejectsEveryNonSuccessOutcomeBeforeAnyFileMutation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-file-outcome-gate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration?.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal)
+                ?? new Dictionary<string, string>(StringComparer.Ordinal);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic));
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, configuration)
+                }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.True(result.IsPublishable);
+            var fileContracts = new[]
+            {
+                (Kind: "csv", Format: "csv-records-v2", Extension: "csv"),
+                (Kind: "excel", Format: "xlsx-records-v2", Extension: "xlsx"),
+                (Kind: "json", Format: "json-records-v1", Extension: "json"),
+                (Kind: "xml", Format: "xml-records-v1", Extension: "xml")
+            };
+            var rejectedOutcomes = Enum.GetValues<RunOutcome>()
+                .Where(outcome => outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+                .ToArray();
+
+            foreach (var outcome in rejectedOutcomes)
+            foreach (var contract in fileContracts)
+            {
+                result.Manifest.Outcome = outcome;
+                var fileName = $"{outcome.ToString().ToLowerInvariant()}-{contract.Kind}.{contract.Extension}";
+                project.Destination = new DestinationPlan
+                {
+                    Kind = contract.Kind,
+                    Locator = fileName,
+                    Table = string.Empty,
+                    BusinessKey = new List<string>(),
+                    Format = contract.Format,
+                    WriteMode = "replace"
+                };
+
+                var destinationPath = Path.Combine(directory, fileName);
+                var acceptedBytes = Encoding.UTF8.GetBytes($"accepted-{outcome}-{contract.Kind}");
+                await File.WriteAllBytesAsync(destinationPath, acceptedBytes);
+
+                var error = await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
+                    project, result, directory, allowSyntheticProfile: true, CancellationToken.None));
+
+                Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
+                Assert.Contains("Only a successful full run", error.Message, StringComparison.Ordinal);
+                Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(destinationPath));
+                Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == destinationPath);
+                Assert.False(File.Exists(destinationPath + ".staged"));
+            }
+
+            result.Manifest.Outcome = RunOutcome.Success;
+            result.Manifest.IsPreview = true;
+            project.Destination = new DestinationPlan
+            {
+                Kind = "csv",
+                Locator = "preview-report.csv",
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = "csv-records-v2",
+                WriteMode = "replace"
+            };
+            var previewPath = Path.Combine(directory, project.Destination.Locator);
+            var previewPriorBytes = Encoding.UTF8.GetBytes("accepted-before-preview");
+            await File.WriteAllBytesAsync(previewPath, previewPriorBytes);
+
+            var previewError = await Assert.ThrowsAsync<AdapterException>(() => service.PublishFileDestinationAsync(
+                project, result, directory, allowSyntheticProfile: true, CancellationToken.None));
+
+            Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, previewError.Code);
+            Assert.Contains("Only a successful full run", previewError.Message, StringComparison.Ordinal);
+            Assert.Equal(previewPriorBytes, await File.ReadAllBytesAsync(previewPath));
+            Assert.DoesNotContain(result.Manifest.Outputs, output => output.Path == previewPath);
+            Assert.False(File.Exists(previewPath + ".staged"));
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
     [Theory]
     [InlineData("csv", "csv-records-v1", "tampered-report.csv")]
     [InlineData("excel", "xlsx-records-v1", "tampered-report.xlsx")]
