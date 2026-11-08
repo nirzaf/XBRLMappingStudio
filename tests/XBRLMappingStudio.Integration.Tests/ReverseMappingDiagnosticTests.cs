@@ -1,9 +1,11 @@
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
+using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
 using XBRLMappingStudio.Worker;
 using XBRLMappingStudio.XBRL;
+using System.Text.Json;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
@@ -85,6 +87,57 @@ public sealed class ReverseMappingDiagnosticTests
         }
     }
 
+    [Fact]
+    public async Task RunAsync_ReportsReverseMappingLimitationWithoutBlockingValidFacts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-warning-success-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var reportPath = IndependentAcceptanceFixtures.Materialize(directory, "revenue-report.json");
+            var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+            var binding = project.Bindings.Single();
+            project.Bindings[0] = binding with
+            {
+                Kind = "xbrl-report",
+                Configuration = new Dictionary<string, object?>(),
+                SchemaFingerprint = null
+            };
+            var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var field = project.Nodes[fieldIndex];
+            var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+            {
+                ["column"] = "value"
+            };
+            parameters.Remove("rowFilterColumn");
+            parameters.Remove("rowFilterValue");
+            project.Nodes[fieldIndex] = field with { Parameters = parameters };
+
+            var result = await new MappingJobService(SyntheticProfile.Build(), new SuccessfulWorker()).RunAsync(
+                project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, "xbrl-report", reportPath)
+                },
+                new Dictionary<string, string>(),
+                preview: false,
+                CancellationToken.None);
+
+            Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
+            var fact = Assert.Single(result.Facts);
+            Assert.Equal(1_250_000_000m, fact.Value);
+            var warning = Assert.Single(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail);
+            Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
+            Assert.False(warning.IsBlocking);
+            Assert.Equal(binding.BindingId, warning.Source?.SourceId);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private sealed class SuccessfulWorker : IWorkerClient
     {
         public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
@@ -94,12 +147,35 @@ public sealed class ReverseMappingDiagnosticTests
                 new[] { WorkerOperations.LoadTaxonomy, WorkerOperations.ValidateReport }));
 
         public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
-            => Task.FromResult(new WorkerResponse(
+        {
+            JsonElement? result = request.Operation == WorkerOperations.ValidateReport
+                && request.ValidationRequirements is { } requirements
+                ? JsonSerializer.SerializeToElement(new
+                {
+                    validationCompletion = new
+                    {
+                        profileId = requirements.ProfileId,
+                        profileDigest = requirements.ProfileDigest,
+                        requiredRules = requirements.RequiredRules.Select(identifier => new
+                        {
+                            identifier,
+                            status = "pass"
+                        }),
+                        requiredPlugins = requirements.RequiredPlugins.Select(identifier => new
+                        {
+                            identifier,
+                            status = "pass"
+                        })
+                    }
+                })
+                : null;
+            return Task.FromResult(new WorkerResponse(
                 request.OperationId,
                 WorkerStatus.Success,
-                Result: null,
+                Result: result,
                 Diagnostics: Array.Empty<Diagnostic>(),
                 Error: null));
+        }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
