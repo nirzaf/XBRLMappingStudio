@@ -18,7 +18,8 @@ subject to these source limits.
 
 Full runs can use the disk-backed large-run path for one CSV binding with a row-scoped
 plan or the supported [single-GroupBy graph](disk-partitioned-grouping.md), and no
-configured destination. Multiple bindings and other set-phase plans remain
+configured destination. The separate [same-key Join/GroupBy contract](disk-partitioned-joins.md)
+also admits two SQLite/CSV bindings. Other multiple-binding and set-phase plans remain
 unsupported in large mode and return a structured configuration outcome. Existing
 profile validation and publication approval gates still apply.
 

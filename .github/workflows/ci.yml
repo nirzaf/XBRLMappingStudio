@@ -68,14 +68,14 @@ jobs:
         # Subprocess-supervision tests launch nested workers; avoid host-load timeouts across projects.
         run: dotnet test ${{ env.SOLUTION }} -c Release --no-build -m:1 --filter "Category!=ProcessMemory" --logger "trx;LogFileName=test-results-${{ matrix.os }}.trx"
 
-      - name: Qualify CSV, SQLite and grouped memory separately
+      - name: Qualify CSV, SQLite, grouped and joined memory separately
         shell: bash
         run: |
           set -euo pipefail
           # Heap measurements are process-global. Each 100k-row workload needs
           # a fresh host, without a prior test's in-memory equivalence oracle.
           # These are excluded above but remain mandatory on both platforms.
-          for workload in CsvHundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded GroupHundredThousandRows_PartitionsWithBoundedMemoryAndExactTotals; do
+          for workload in CsvHundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded GroupHundredThousandRows_PartitionsWithBoundedMemoryAndExactTotals JoinHundredThousandRows_PartitionsWithBoundedMemoryAndExactTotals; do
             dotnet test tests/XBRLMappingStudio.Integration.Tests/XBRLMappingStudio.Integration.Tests.csproj \
               -c Release --no-build \
               --filter "FullyQualifiedName=XBRLMappingStudio.Integration.Tests.LargeRunExecutionTests.$workload" \

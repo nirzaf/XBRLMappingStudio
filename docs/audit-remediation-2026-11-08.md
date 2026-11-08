@@ -140,11 +140,34 @@ Verification includes small/large byte and source-path equivalence, independent
 null/numeric oracles, limit/cancellation cleanup and restart, and staged publication
 acceptance/rejection. The additional isolated 100k-row/10k-group fixture measures
 retained managed-heap variation, not process-tree peak memory. Durable spill
-recovery, joins, real-profile acceptance and the existing production gates remain
+recovery, general joins, real-profile acceptance and the existing production gates remain
 open. Local Release build passed with zero warnings/errors; **1,113** ordinary
 solution tests passed with six environment-gated skips. All three isolated 100k-row
 memory fixtures passed, the enabled Arelle selection passed **15/15**, and the
 unchanged worker suite passed **78/78**. Exact-commit CI is required for this increment.
+
+## Disk-partitioned join follow-on
+
+The [bounded join contract](disk-partitioned-joins.md) admits two SQLite/CSV
+CollectRows inputs followed by Join and GroupBy on the same single field.
+Complete key partitions use the existing engine, preserving cardinality, duplicate,
+conflict, missing/nil/zero and field-local provenance behavior. Independent source
+digests and exact first-seen group order match the small path. Expansion and group
+counts are global; source and expanded payload/provenance limits bound each key.
+Broader graph shapes and oversized individual keys remain refused.
+
+Verification covers all cardinalities and policies, both adapters and mixed
+sources, empty sources, invalid keys, numeric field validation, cancellation and
+cleanup, and xBRL-JSON/xBRL-XML staged-publication acceptance/rejection/source
+identity gates. The 100k-input-row join fixture independently verifies 250k joined
+rows reduced to 10k groups, all contributing locators and transformation IDs, and
+bounded retained managed-heap variation. All four isolated resource fixtures,
+78 worker tests, 15 operational-tool tests, 15 enabled Arelle tests, and the
+benchmark self-test passed locally. Release builds had zero warnings/errors;
+67 focused join cases and 1,180 ordinary solution tests passed (six environment-gated
+skips). Exact-commit Windows/Linux CI remains the release
+gate. General joins, within-key/group spill, recovery and real-profile acceptance
+remain open; no production gates were relaxed.
 
 ## Remaining acceptance ledger
 
@@ -158,8 +181,8 @@ or represent these rows as completed to make a release appear ready.
 | P0-03 | Real-profile mandatory rule/plugin completion evidence. Existing synthetic evidence and missing-check refusal do not qualify a real authority. |
 | P0-04 | Authorized reviewer enrollment/revocation, protected host trust configuration, external signing workflow and CLI/Desktop deployment integration. The application API contract is implemented; production identity governance is not. |
 | P0-05 | Clean Windows installer, native/Python dependencies, signing, license clearance and installed upgrade/backup/rollback proof. |
-| P1-01 | Single row-scoped CSV large runs are added alongside SQLite. Multiple large bindings, further file adapters and end-to-end worker resource qualification remain open. |
-| P1-02 | Bounded single-source disk-partitioned grouping is implemented with exact report/source-path parity, fail-closed limits and synthetic qualification. Disk-backed joins, within-group spill, durable recovery and broader provenance/resource qualification remain open; see [the contract](disk-partitioned-grouping.md). |
+| P1-01 | Single row-scoped CSV large runs are added alongside SQLite. Two large SQLite/CSV bindings are admitted only by the same-key Join/GroupBy contract. Other multi-source graphs, further file adapters and end-to-end worker resource qualification remain open. |
+| P1-02 | Bounded single-source disk-partitioned grouping is implemented with exact report/source-path parity, fail-closed limits and synthetic qualification. Bounded two-source same-key disk-partitioned joins are also implemented; see [the join contract](disk-partitioned-joins.md). General joins, within-key/group spill, durable recovery and broader provenance/resource qualification remain open; see [the grouping contract](disk-partitioned-grouping.md). |
 | P1-03 | Selected IFRS profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
 | P1-05 | Remaining derived-record lineage, exact Arelle finding locators, complete input identity and native preview/full-run evidence. |

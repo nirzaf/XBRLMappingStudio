@@ -108,7 +108,8 @@ public sealed class PlanCompiler
 
         return CompilationResult.Ok(
             new ExecutionPlan(rowSteps, setSteps, sinks, iterationSources,
-                sinkSetInputPorts, sinkSetInputSources, PartitionedGroupPlan.TryCreate(graph)),
+                sinkSetInputPorts, sinkSetInputSources, PartitionedGroupPlan.TryCreate(graph),
+                PartitionedJoinPlan.TryCreate(graph)),
             graph);
     }
 

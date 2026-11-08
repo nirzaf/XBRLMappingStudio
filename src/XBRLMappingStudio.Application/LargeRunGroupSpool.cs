@@ -84,7 +84,7 @@ internal sealed partial class LargeRunFactStore
             else groupId = _groupCount + 1L;
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (jsonBytes + (rowCount == 0 ? (long)key.Length : 0) > _maxBytes - _bytes - _sourceBytes - _groupBytes)
+        if (jsonBytes + (rowCount == 0 ? (long)key.Length : 0) > _maxBytes - _bytes - _sourceBytes - _groupBytes - _joinBytes)
             throw new LargeRunBudgetExceededException($"The combined grouping, fact and source spool exceeded its {_maxBytes} byte budget.");
         if (rowCount == 0 && (_groupCount >= budget.MaxGroupCount || _groupCount >= budget.MaxCollectionItems))
             throw new GroupPartitionBudgetExceededException(plan.GroupNodeId,

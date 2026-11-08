@@ -230,7 +230,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         }
         using (var schema = _connection.CreateCommand())
         {
-            schema.CommandText = "CREATE TABLE facts (seq INTEGER PRIMARY KEY AUTOINCREMENT, semantic_key TEXT NOT NULL, semantic_sort_key BLOB NOT NULL, fact_json TEXT NOT NULL); CREATE TABLE source_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, sort_key BLOB NOT NULL, canonical TEXT NOT NULL);";
+            schema.CommandText = "CREATE TABLE facts (seq INTEGER PRIMARY KEY AUTOINCREMENT, semantic_key TEXT NOT NULL, semantic_sort_key BLOB NOT NULL, fact_json TEXT NOT NULL); CREATE TABLE source_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, sort_key BLOB NOT NULL, canonical TEXT NOT NULL, source_id TEXT NOT NULL);";
             schema.ExecuteNonQuery();
         }
         BeginInsertTransaction();
@@ -248,7 +248,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         var semanticKey = fact.SemanticKey();
         if (System.Text.Encoding.UTF8.GetByteCount(semanticKey) > maxFactBytes)
             throw new LargeRunBudgetExceededException($"A fact semantic key exceeded the {maxFactBytes} byte fact budget.");
-        if (bytes > _maxBytes - _bytes - _sourceBytes - _groupBytes)
+        if (bytes > _maxBytes - _bytes - _sourceBytes - _groupBytes - _joinBytes)
             throw new LargeRunBudgetExceededException($"The fact spool exceeded its {_maxBytes} byte budget.");
 
         _insert!.Parameters["$key"].Value = semanticKey;
@@ -260,34 +260,41 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         if (_count % 512 == 0) CommitAndBeginInsertTransaction();
     }
 
-    public void AddSourceDigestRecord(string canonicalRecord, int maxRowBytes)
+    public void AddSourceDigestRecord(string canonicalRecord, int maxRowBytes, string sourceId = "")
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_finished) throw new InvalidOperationException("The fact spool is already finalized.");
         var rowBytes = System.Text.Encoding.UTF8.GetByteCount(canonicalRecord);
+        var retainedBytes = rowBytes + (long)System.Text.Encoding.UTF8.GetByteCount(sourceId);
         if (rowBytes > maxRowBytes)
             throw new LargeRunBudgetExceededException($"A source row exceeded the {maxRowBytes} byte row budget.");
-        if (rowBytes > _maxBytes - _bytes - _sourceBytes - _groupBytes)
+        if (retainedBytes > _maxBytes - _bytes - _sourceBytes - _groupBytes - _joinBytes)
             throw new LargeRunBudgetExceededException($"The combined fact and source spool exceeded its {_maxBytes} byte budget.");
         using var command = _connection.CreateCommand();
         command.Transaction = _transaction;
-        command.CommandText = "INSERT INTO source_rows(sort_key, canonical) VALUES($sortKey, $canonical);";
+        command.CommandText = "INSERT INTO source_rows(sort_key, canonical, source_id) VALUES($sortKey, $canonical, $sourceId);";
         command.Parameters.AddWithValue("$sortKey", Utf16OrdinalKey(canonicalRecord));
         command.Parameters.AddWithValue("$canonical", canonicalRecord);
+        command.Parameters.AddWithValue("$sourceId", sourceId);
         command.ExecuteNonQuery();
         _sourceRows++;
-        _sourceBytes += rowBytes;
+        _sourceBytes += retainedBytes;
         if ((_count + _sourceRows) % 512 == 0) CommitAndBeginInsertTransaction();
     }
 
-    public string ComputeSourceDigest(string table, CancellationToken cancellationToken = default)
+    public string ComputeSourceDigest(string table, CancellationToken cancellationToken = default, string sourceId = "")
     {
         Finish(cancellationToken);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         AppendPart(hash, table);
-        AppendText(hash, _sourceRows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":");
+        using var count = _connection.CreateCommand();
+        count.CommandText = "SELECT COUNT(*) FROM source_rows WHERE source_id=$sourceId;";
+        count.Parameters.AddWithValue("$sourceId", sourceId);
+        var sourceRows = (long)count.ExecuteScalar()!;
+        AppendText(hash, sourceRows.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":");
         using var command = _connection.CreateCommand();
-        command.CommandText = "SELECT canonical FROM source_rows ORDER BY sort_key, seq;";
+        command.CommandText = "SELECT canonical FROM source_rows WHERE source_id=$sourceId ORDER BY sort_key, seq;";
+        command.Parameters.AddWithValue("$sourceId", sourceId);
         cancellationToken.ThrowIfCancellationRequested();
         using var reader = command.ExecuteReader();
         cancellationToken.ThrowIfCancellationRequested();
@@ -357,7 +364,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
             // cancellation as soon as the native SQLite call returns, then skip the
             // remaining index and let the owner discard the private spool.
             cancellationToken.ThrowIfCancellationRequested();
-            index.CommandText = "CREATE INDEX source_rows_order ON source_rows(sort_key, seq);";
+            index.CommandText = "CREATE INDEX source_rows_order ON source_rows(source_id, sort_key, seq);";
             index.ExecuteNonQuery();
             cancellationToken.ThrowIfCancellationRequested();
         }

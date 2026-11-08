@@ -61,7 +61,9 @@ are not global source-row coordinates; fact source locators remain authoritative
   Failure or cancellation disposes the private spool, returns no large artifact
   and skips report validation/publication. A later run starts from verified inputs.
 
-There is no within-group spill, disk-backed join, resumable checkpoint, automatic
+The separately admitted two-source same-key join/group contract is documented in
+[disk-partitioned joins](disk-partitioned-joins.md). There is no within-group spill,
+resumable checkpoint, automatic
 orphan-spool cleanup after process death, retention policy or power-loss recovery
 qualification. SQLite cache size is bounded, but allocator peaks, native working
 set, disk-space exhaustion and Arelle process-tree memory remain separate gates.
