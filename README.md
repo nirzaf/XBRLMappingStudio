@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest implementation CI [42503092027](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42503092027) verified `b131d5f02153c643824f07eae9416a435c2e4600`; each OS matrix passed 1,761 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
+| Tests | xUnit 2.9.3 | Latest implementation CI [42505035743](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42505035743) verified `f3580b7dd4402d1b7d8c7cd5af5f7b20a8f3c5f0`; each OS matrix passed 1,769 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -288,13 +288,13 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest implementation CI [42503092027](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42503092027)
-verified `b131d5f02153c643824f07eae9416a435c2e4600`. Repository hygiene, Windows and
+Latest implementation CI [42505035743](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42505035743)
+verified `f3580b7dd4402d1b7d8c7cd5af5f7b20a8f3c5f0`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, separate CSV/SQLite/group/join memory qualifications, and five repeated
-Windows worker-cancellation checks passed. Each OS matrix passed **1,761 tests**,
+Windows worker-cancellation checks passed. Each OS matrix passed **1,769 tests**,
 skipped **6** environment-gated Arelle subprocess cases, and had **0 failures**. The
-Eight suite counts were Adapters 302, AI 72, Desktop 116, Engine 155, Integration
+The eight suite counts were Adapters 304, AI 72, Desktop 116, Engine 155, Integration
 487 (481 passed, 6 skipped), Ops 412, Project 32, and XBRL 197. The pinned worker
 job passed **82 Python protocol/offline tests**, **15 .NET Arelle execution tests**,
 and **15 dependency inventory tests**. This CI verifies the synthetic/offline implementation; it does

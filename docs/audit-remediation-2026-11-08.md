@@ -224,14 +224,16 @@ release deployed or regulatory sign-off inferred by this increment.
 
 ## Latest pushed implementation evidence
 
-The direct `main` updates `93e45c2` and `b131d5f02153c643824f07eae9416a435c2e4600`
-bound generic JSON and XML source reads. JSON enforces input-byte, row, and string
-budgets while preserving exact numeric lexemes and rejecting ambiguous flattened
-fields. XML scans a bounded byte snapshot for depth, repeated rows, names, and values
-before parsing that same snapshot with external entities disabled. Exact-head CI
-[42503092027](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42503092027)
+The direct `main` updates `93e45c2`, `b131d5f02153c643824f07eae9416a435c2e4600`,
+and `f3580b7dd4402d1b7d8c7cd5af5f7b20a8f3c5f0` bound generic JSON, XML, and XLSX
+source reads. JSON enforces input-byte, row, and string budgets while preserving exact
+numeric lexemes and rejecting ambiguous flattened fields. XML scans a bounded byte
+snapshot for depth, repeated rows, names, and values before parsing that same snapshot
+with external entities disabled. XLSX snapshots compressed bytes, counts package
+entries, and checks declared plus actual expanded ZIP bytes before ClosedXML loads the
+same snapshot. Exact-head CI [42505035743](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42505035743)
 passed repository hygiene, Windows and Ubuntu Release builds/tests, and pinned Arelle
-integration. Each OS passed 1,761 tests with 6 environment-gated Arelle subprocess
+integration. Each OS passed 1,769 tests with 6 environment-gated Arelle subprocess
 skips. The pinned worker passed 82 Python protocol/offline tests, 15 .NET Arelle
 execution tests, and 15 dependency-inventory tests; separate memory qualifications
 and five Windows cancellation repeats passed. The untracked acceptance fixture was
