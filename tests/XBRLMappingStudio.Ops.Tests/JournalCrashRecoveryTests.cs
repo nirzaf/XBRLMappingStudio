@@ -13,7 +13,7 @@ public sealed class JournalCrashRecoveryTests
     public static IEnumerable<object[]> CrashCases()
     {
         foreach (var format in new[] { "json", "xml" })
-        foreach (var stage in new[] { "journal-wait-lock", "journal-before-replace", "journal-after-replace" })
+        foreach (var stage in new[] { "journal-after-stage", "journal-wait-lock", "journal-before-replace", "journal-after-replace" })
         foreach (var prior in new[] { "absent", "different", "identical" })
             yield return new object[] { format, stage, prior };
     }
@@ -60,10 +60,19 @@ public sealed class JournalCrashRecoveryTests
             held = null;
 
             var before = Assert.IsType<JournalEntry>(journal.Load(runId));
-            Assert.Equal(JournalState.Validated, before.State);
-            Assert.Equal(DestinationLock.DigestBytes(intended), before.ValidatedDigest);
-            if (stage == "journal-wait-lock") Assert.Null(before.LockToken);
-            else Assert.False(string.IsNullOrWhiteSpace(before.LockToken));
+            Assert.Equal(stage == "journal-after-stage" ? JournalState.Staged : JournalState.Validated, before.State);
+            if (stage == "journal-after-stage")
+            {
+                Assert.Equal(DestinationLock.DigestBytes(intended), before.StagedDigest);
+                Assert.Null(before.ValidatedDigest);
+                Assert.Null(before.LockToken);
+            }
+            else
+            {
+                Assert.Equal(DestinationLock.DigestBytes(intended), before.ValidatedDigest);
+                if (stage == "journal-wait-lock") Assert.Null(before.LockToken);
+                else Assert.False(string.IsNullOrWhiteSpace(before.LockToken));
+            }
             var staging = destination + ".xbsl-staging-" + runId;
             var backup = destination + ".xbsl-prev-" + runId;
             Assert.Equal(stage != "journal-after-replace", File.Exists(staging));
@@ -75,7 +84,9 @@ public sealed class JournalCrashRecoveryTests
             var action = Assert.Single(reopened.RecoverUnfinalized());
             var confirmed = stage == "journal-after-replace"
                 || stage == "journal-before-replace" && prior == "identical";
-            Assert.Equal(confirmed ? RecoveryDecision.Finalized : RecoveryDecision.RetryNeeded, action.Decision);
+            var safelyAborted = stage == "journal-after-stage";
+            Assert.Equal(confirmed ? RecoveryDecision.Finalized
+                : safelyAborted ? RecoveryDecision.Aborted : RecoveryDecision.RetryNeeded, action.Decision);
             Assert.Equal(runId, action.RunId);
             var after = Assert.IsType<JournalEntry>(reopened.Load(runId));
             Assert.Equal(before.LockToken, after.LockToken);
@@ -98,14 +109,16 @@ public sealed class JournalCrashRecoveryTests
             }
             else
             {
-                Assert.Equal(before, after);
+                Assert.Equal(safelyAborted ? JournalState.Aborted : before.State, after.State);
+                if (!safelyAborted) Assert.Equal(before, after);
                 Assert.Equal(prior != "absent", File.Exists(destination));
                 if (File.Exists(destination)) Assert.Equal(original, await File.ReadAllBytesAsync(destination));
                 Assert.Equal(0L, ReceiptCount(state, runId));
-                Assert.Equal(RecoveryDecision.RetryNeeded, Assert.Single(reopened.RecoverUnfinalized()).Decision);
+                if (safelyAborted) Assert.Empty(reopened.RecoverUnfinalized());
+                else Assert.Equal(RecoveryDecision.RetryNeeded, Assert.Single(reopened.RecoverUnfinalized()).Decision);
             }
-            // Recovery does not delete a possibly active pre-lock publisher's stage.
-            Assert.Equal(stage != "journal-after-replace", File.Exists(staging));
+            // Only a digest-matching stage that never reached destination locking is cleaned.
+            Assert.Equal(stage is not ("journal-after-replace" or "journal-after-stage"), File.Exists(staging));
         }
         finally
         {

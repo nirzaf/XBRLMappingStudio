@@ -29,3 +29,7 @@ The focused Windows Release integration filter `Cli_MixedPublicationPublishesVer
 ## DST-08 mixed journal and atomic-move crash follow-up
 
 `MixedPublicationCoordinatorTests.AbruptProcessTerminationAfterMixedFileMove_ReconcilesFileAndPublishesSqliteOnce` passed **1/1** on Windows Release using an isolated artifact root. The real child process is terminated after a new report is moved into place but before the file and mixed journals confirm it. Restart finalizes the digest-verified file journal, reconciles the mixed file leg as confirmed with SQLite pending, then retries only SQLite and records one fact plus one receipt. This covers the first-time atomic move for a synthetic report. Per-record-adapter mid-write termination and filesystem power-loss durability remain open.
+
+## DST-08 pre-lock staging recovery follow-up
+
+The focused OPS recovery/publication regression filter passed **116/116**, and the CLI recovery command integration tests passed **3/3**. `JournalRecoverySafetyTests` verifies digest-matched staging cleanup for SQLite and legacy journal storage, while mismatched staging bytes remain untouched. `JournalCrashRecoveryTests.AbruptTermination_RecoversOnlyLockedValidatedBytes` passed **6/6** for a real child-process kill immediately after the staged journal write across JSON/XML and absent/different/identical existing destination cases. Recovery records `Aborted`, removes only the matching unpublished sidecar, preserves any existing destination bytes, and writes no publication receipt. Full exact-head CI has not yet been run for this change.

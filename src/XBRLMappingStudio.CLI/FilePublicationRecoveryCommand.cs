@@ -18,10 +18,12 @@ public static class FilePublicationRecoveryCommand
         var actions = journal.RecoverUnfinalized(cancellationToken);
         var finalizedCount = actions.Count(action => action.Decision == RecoveryDecision.Finalized);
         var retryNeededCount = actions.Count(action => action.Decision == RecoveryDecision.RetryNeeded);
+        var abortedCount = actions.Count(action => action.Decision == RecoveryDecision.Aborted);
         var response = new
         {
             checkedCount = actions.Count,
             finalizedCount,
+            abortedCount,
             retryNeededCount,
             actions = actions.Select(action => new
             {

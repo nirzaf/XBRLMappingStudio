@@ -209,14 +209,15 @@ internal static class Program
     private static int CrashAtJournalBoundary(string[] args)
     {
         var stage = args[0];
-        if (stage is not ("journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
+        if (stage is not ("journal-after-stage" or "journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
             return 2;
         var service = new PublicationService(new RunJournal(databasePath: Path.GetFullPath(args[1])));
         service.Publish(Path.GetFullPath(args[2]), CrashPublicationContract.JournalReportBytes(args[4]), args[3],
             beforeReplaceFault: stage == "journal-before-replace" ? _ => KillCurrentProcess() : null,
             lockTimeout: TimeSpan.FromMinutes(2),
             validateStagedArtifactAsync: (path, _) => Task.FromResult(DestinationLock.DigestFile(path)),
-            afterAtomicReplaceForTest: stage == "journal-after-replace" ? _ => KillCurrentProcess() : null);
+            afterAtomicReplaceForTest: stage == "journal-after-replace" ? _ => KillCurrentProcess() : null,
+            afterStagedJournalForTest: stage == "journal-after-stage" ? _ => KillCurrentProcess() : null);
         return 0;
     }
 

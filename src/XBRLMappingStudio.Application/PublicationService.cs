@@ -179,12 +179,13 @@ public sealed class PublicationService
         Func<string, CancellationToken, Task<string>>? validateStagedArtifactAsync = null,
         CancellationToken cancellationToken = default,
         bool refuseDifferentExisting = false,
-        Action<string>? afterAtomicReplaceForTest = null)
+        Action<string>? afterAtomicReplaceForTest = null,
+        Action<string>? afterStagedJournalForTest = null)
         => PublishCoreAsync(destinationPath,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
             RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
             cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting,
-            afterAtomicReplaceForTest).GetAwaiter().GetResult();
+            afterAtomicReplaceForTest, afterStagedJournalForTest: afterStagedJournalForTest).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -198,7 +199,8 @@ public sealed class PublicationService
         TimeSpan? lockTimeout = null,
         bool refuseDifferentExisting = false,
         Action<string>? afterAtomicReplaceForTest = null,
-        Action? authorizeBeforeReplace = null)
+        Action? authorizeBeforeReplace = null,
+        Action<string>? afterStagedJournalForTest = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -238,6 +240,7 @@ public sealed class PublicationService
             throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
                 $"Could not record the staged publication in the run journal: {ex.Message}", runId, full);
         }
+        afterStagedJournalForTest?.Invoke(stagedPath);
 
         // ---- Verify: re-open the staged bytes and confirm the digest matches the intent.
         var stagedBytes = new FileInfo(stagedPath).Length;

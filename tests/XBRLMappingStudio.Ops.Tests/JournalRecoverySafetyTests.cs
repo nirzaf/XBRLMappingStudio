@@ -31,6 +31,48 @@ public sealed class JournalRecoverySafetyTests
     }
 
     [Theory]
+    [InlineData(false, JournalState.Staged)]
+    [InlineData(false, JournalState.Verified)]
+    [InlineData(true, JournalState.Staged)]
+    [InlineData(true, JournalState.Verified)]
+    public void RecoveryAbortsAndRemovesOnlyDigestMatchingPreLockStage(bool sqlite, JournalState state)
+    {
+        using var workspace = new Workspace(sqlite);
+        var entry = workspace.Entry("orphan-stage-" + state, state) with { LockToken = null };
+        workspace.SaveWithBackup(entry);
+        var stagingPath = entry.DestinationPath + ".xbsl-staging-" + entry.RunId;
+        File.WriteAllText(stagingPath, Workspace.LandedBytes);
+
+        var action = Assert.Single(workspace.Journal.RecoverUnfinalized());
+
+        Assert.Equal(RecoveryDecision.Aborted, action.Decision);
+        Assert.Equal(JournalState.Aborted, workspace.Journal.Load(entry.RunId)!.State);
+        Assert.False(File.Exists(stagingPath));
+        Assert.Equal(Workspace.LandedBytes, File.ReadAllText(entry.DestinationPath));
+        workspace.AssertReceipt(entry.RunId, null, null);
+        Assert.Empty(workspace.Journal.RecoverUnfinalized());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecoveryPreservesMismatchedPreLockStage(bool sqlite)
+    {
+        using var workspace = new Workspace(sqlite);
+        var entry = workspace.Entry("mismatched-stage") with { State = JournalState.Staged, LockToken = null };
+        workspace.SaveWithBackup(entry);
+        var stagingPath = entry.DestinationPath + ".xbsl-staging-" + entry.RunId;
+        File.WriteAllText(stagingPath, "not the journaled payload");
+
+        var action = Assert.Single(workspace.Journal.RecoverUnfinalized());
+
+        Assert.Equal(RecoveryDecision.RetryNeeded, action.Decision);
+        Assert.Equal(entry, workspace.Journal.Load(entry.RunId));
+        Assert.True(File.Exists(stagingPath));
+        workspace.AssertReceipt(entry.RunId, null, null);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void MissingOrContradictoryEvidenceRemainsUnconfirmed(bool sqlite)

@@ -392,6 +392,12 @@ public sealed class RunJournal
 
                 if (!HasPublicationEvidence(entry))
                 {
+                    if (TryAbortUnpublishedStage(entry, persistedUpdatedUtc))
+                    {
+                        actions.Add(new RecoveryAction(runId, RecoveryDecision.Aborted,
+                            "Unpublished staging artifact matched its journal digest and was removed."));
+                        continue;
+                    }
                     actions.Add(Retry(runId, "No consistent locked-validation or replacement evidence was recorded."));
                     continue;
                 }
@@ -430,6 +436,57 @@ public sealed class RunJournal
             }
         }
         return actions;
+    }
+
+    private bool TryAbortUnpublishedStage(JournalEntry expected, string? persistedUpdatedUtc)
+    {
+        if (expected.State is not (JournalState.Staged or JournalState.Verified)
+            || expected.LockToken is not null
+            || string.IsNullOrWhiteSpace(expected.StagedDigest)
+            || string.IsNullOrWhiteSpace(expected.RunId)
+            || !expected.RunId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.'))
+            return false;
+
+        var destination = Path.GetFullPath(expected.DestinationPath);
+        var stagingPath = destination + $".xbsl-staging-{expected.RunId}";
+        using var entryLock = DestinationLock.TryAcquire(WriteGuardPath(expected.RunId));
+        if (entryLock is null) return false;
+        var current = Load(expected.RunId, out var currentUpdatedUtc);
+        if (current != expected || !string.Equals(currentUpdatedUtc, persistedUpdatedUtc, StringComparison.Ordinal))
+            return false;
+
+        // Never remove an unknown or modified sidecar. A matching digest proves it is
+        // the complete, unpublished staging payload described by this journal entry.
+        if (!File.Exists(stagingPath)
+            || !StringComparer.Ordinal.Equals(DestinationLock.DigestFile(stagingPath), expected.StagedDigest))
+            return false;
+
+        File.Delete(stagingPath);
+        var aborted = expected with { State = JournalState.Aborted, UpdatedUtc = DateTimeOffset.UtcNow };
+        if (_database is null)
+        {
+            SaveCore(aborted);
+            return true;
+        }
+
+        using var connection = _database.OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE run_journal SET state=$newState,updated_utc=$newUpdated
+            WHERE run_id=$id AND destination_path=$destination AND state=$state
+                AND staged_digest IS $staged AND final_digest IS $final AND lock_token IS $lock
+                AND updated_utc=$updated AND validated_digest IS $validated;
+            """;
+        Bind(command, expected);
+        command.Parameters["$updated"].Value = persistedUpdatedUtc!;
+        command.Parameters.AddWithValue("$newState", (int)JournalState.Aborted);
+        command.Parameters.AddWithValue("$newUpdated", aborted.UpdatedUtc.ToString("O"));
+        if (command.ExecuteNonQuery() != 1) return false;
+        SaveReceipt(connection, transaction, aborted);
+        transaction.Commit();
+        return true;
     }
 
     private bool TryFinalizeRecovery(JournalEntry expected, string? persistedUpdatedUtc, string finalDigest,
@@ -538,7 +595,7 @@ public enum JournalState
     Aborted = 4,
     Validated = 5
 }
-public enum RecoveryDecision { Finalized, RetryNeeded }
+public enum RecoveryDecision { Finalized, RetryNeeded, Aborted }
 
 public sealed record JournalEntry(
     string RunId,
