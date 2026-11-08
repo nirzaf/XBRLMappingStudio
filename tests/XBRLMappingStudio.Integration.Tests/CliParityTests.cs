@@ -923,16 +923,24 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Equal(1, reader.GetInt32(1));
     }
 
-    [Fact]
-    public async Task Cli_MixedProcessLossAfterXmlConfirmationReconcilesAndRetriesWithoutDuplicateRows()
+    [Theory]
+    [InlineData("csv-records-v1", ".csv")]
+    [InlineData("csv-records-v2", ".csv")]
+    [InlineData("xlsx-records-v1", ".xlsx")]
+    [InlineData("xlsx-records-v2", ".xlsx")]
+    [InlineData("json-records-v1", ".json")]
+    [InlineData("xml-records-v1", ".xml")]
+    [InlineData("xbrl-xml", ".xml")]
+    public async Task Cli_MixedProcessLossAfterRecordFileConfirmationReconcilesAndRetriesWithoutDuplicateRows(
+        string outputFormat, string extension)
     {
-        var targetPath = Path.Combine(_dir, "xml-mixed-crash-target.db");
+        var targetPath = Path.Combine(_dir, $"{outputFormat}-mixed-crash-target.db");
         await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
         project.Destination = new DestinationPlan
         {
             Kind = "sqlite",
-            Locator = "xml-mixed-crash-target.db",
+            Locator = Path.GetFileName(targetPath),
             Table = "facts",
             BusinessKey = new List<string> { "fact_key" },
             WriteMode = "upsert"
@@ -945,10 +953,10 @@ public sealed partial class CliParityTests : IAsyncLifetime
             ApprovedUtc = DateTimeOffset.UtcNow,
             ProfileDigest = SyntheticProfile.Build().Digest
         });
-        var projectPath = Path.Combine(_dir, "xml-mixed-crash.xmap");
+        var projectPath = Path.Combine(_dir, $"{outputFormat}-mixed-crash.xmap");
         new ProjectManager(projectPath).Save(project);
-        var outputPath = Path.Combine(_dir, "xml-mixed-crash-report.xml");
-        var manifestPath = Path.Combine(_dir, "xml-mixed-crash-manifest.json");
+        var outputPath = Path.Combine(_dir, $"{outputFormat}-mixed-crash-report{extension}");
+        var manifestPath = Path.Combine(_dir, $"{outputFormat}-mixed-crash-manifest.json");
 
         await using var targetGate = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -961,7 +969,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
         using var writeLock = targetGate.BeginTransaction(deferred: false);
 
         var psi = BuildStartInfo(LocateCli(), "execute", projectPath,
-            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
             "--manifest", manifestPath, "--allow-synthetic-profile");
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException("CLI process failed to start.");
@@ -982,8 +990,9 @@ public sealed partial class CliParityTests : IAsyncLifetime
                 {
                     using var stateConnection = stateDatabase.OpenConnection();
                     using var find = stateConnection.CreateCommand();
-                    find.CommandText = "SELECT operation_key FROM mixed_publication_reconciliation WHERE file_path=$path AND file_kind='xbrl-xml' ORDER BY updated_utc DESC LIMIT 1";
+                    find.CommandText = "SELECT operation_key FROM mixed_publication_reconciliation WHERE file_path=$path AND file_kind=$kind ORDER BY updated_utc DESC LIMIT 1";
                     find.Parameters.AddWithValue("$path", Path.GetFullPath(outputPath));
+                    find.Parameters.AddWithValue("$kind", outputFormat);
                     operationKey = find.ExecuteScalar() as string;
                     if (operationKey is not null)
                     {
@@ -1008,14 +1017,14 @@ public sealed partial class CliParityTests : IAsyncLifetime
                 var stdout = await stdoutTask;
                 var stderr = await stderrTask;
                 Assert.True(operationKey is not null && inProgress is not null,
-                    $"CLI did not reach the durable XML-confirmed/SQLite-in-progress state within 15 seconds. "
+                    $"CLI did not reach the durable {outputFormat}-confirmed/SQLite-in-progress state within 15 seconds. "
                     + $"Exit code: {process.ExitCode}. stdout: {stdout}{Environment.NewLine}stderr: {stderr}");
             }
             operationKey = Assert.IsType<string>(operationKey);
             inProgress = Assert.IsType<MixedPublicationRecord>(inProgress);
             Assert.Equal(DestinationPublicationState.Confirmed, inProgress!.FileState);
             Assert.Equal(DestinationPublicationState.InProgress, inProgress.SqliteState);
-            Assert.True(File.Exists(outputPath), "The XML file leg should be durable before the SQLite leg starts.");
+            Assert.True(File.Exists(outputPath), "The record-file leg should be durable before the SQLite leg starts.");
 
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
@@ -1032,8 +1041,8 @@ public sealed partial class CliParityTests : IAsyncLifetime
         }
 
         writeLock.Rollback();
-        var xmlBytes = await File.ReadAllBytesAsync(outputPath);
-        var xmlDigest = RunManifest.ComputeSha256(xmlBytes);
+        var recordFileBytes = await File.ReadAllBytesAsync(outputPath);
+        var recordFileDigest = RunManifest.ComputeSha256(recordFileBytes);
         await using (var unchangedTarget = new SqliteConnection(
             $"Data Source={targetPath};Pooling=False;Mode=ReadOnly"))
         {
@@ -1055,19 +1064,19 @@ public sealed partial class CliParityTests : IAsyncLifetime
         using (var reconciled = JsonDocument.Parse(reconcileJson))
         {
             var outcomes = reconciled.RootElement.GetProperty("outcomes").EnumerateArray().ToArray();
-            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == outputFormat
                 && outcome.GetProperty("State").GetString() == "Confirmed"
-                && outcome.GetProperty("Digest").GetString() == xmlDigest);
+                && outcome.GetProperty("Digest").GetString() == recordFileDigest);
             Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "sqlite"
                 && outcome.GetProperty("State").GetString() == "Rejected");
         }
 
-        var retryManifestPath = Path.Combine(_dir, "xml-mixed-crash-retry-manifest.json");
+        var retryManifestPath = Path.Combine(_dir, $"{outputFormat}-mixed-crash-retry-manifest.json");
         var (retryExit, _, retryError) = await RunCliAsync(LocateCli(), "execute", projectPath,
-            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
             "--manifest", retryManifestPath, "--allow-synthetic-profile");
         Assert.True(retryExit == 0, $"Retry after process loss failed.\n{retryError}");
-        Assert.Equal(xmlDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
+        Assert.Equal(recordFileDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
         using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
         {
             var root = retryManifest.RootElement;
@@ -1087,16 +1096,24 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Equal(1, finalReader.GetInt32(1));
     }
 
-    [Fact]
-    public async Task Cli_MixedProcessLossAfterSqliteCommitReconcilesAndRetriesWithoutDuplicateRows()
+    [Theory]
+    [InlineData("csv-records-v1", ".csv")]
+    [InlineData("csv-records-v2", ".csv")]
+    [InlineData("xlsx-records-v1", ".xlsx")]
+    [InlineData("xlsx-records-v2", ".xlsx")]
+    [InlineData("json-records-v1", ".json")]
+    [InlineData("xml-records-v1", ".xml")]
+    [InlineData("xbrl-xml", ".xml")]
+    public async Task Cli_MixedProcessLossAfterRecordFileAndSqliteCommitReconcilesWithoutDuplicateRows(
+        string outputFormat, string extension)
     {
-        var targetPath = Path.Combine(_dir, "xml-mixed-commit-crash-target.db");
+        var targetPath = Path.Combine(_dir, $"{outputFormat}-mixed-commit-crash-target.db");
         await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
         project.Destination = new DestinationPlan
         {
             Kind = "sqlite",
-            Locator = "xml-mixed-commit-crash-target.db",
+            Locator = Path.GetFileName(targetPath),
             Table = "facts",
             BusinessKey = new List<string> { "fact_key" },
             WriteMode = "upsert"
@@ -1109,10 +1126,10 @@ public sealed partial class CliParityTests : IAsyncLifetime
             ApprovedUtc = DateTimeOffset.UtcNow,
             ProfileDigest = SyntheticProfile.Build().Digest
         });
-        var projectPath = Path.Combine(_dir, "xml-mixed-commit-crash.xmap");
+        var projectPath = Path.Combine(_dir, $"{outputFormat}-mixed-commit-crash.xmap");
         new ProjectManager(projectPath).Save(project);
-        var outputPath = Path.Combine(_dir, "xml-mixed-commit-crash-report.xml");
-        var manifestPath = Path.Combine(_dir, "xml-mixed-commit-crash-manifest.json");
+        var outputPath = Path.Combine(_dir, $"{outputFormat}-mixed-commit-crash-report{extension}");
+        var manifestPath = Path.Combine(_dir, $"{outputFormat}-mixed-commit-crash-manifest.json");
         var stateDatabase = new LocalApplicationDatabase();
         var mixedStore = new MixedPublicationStore(stateDatabase);
 
@@ -1127,7 +1144,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
         using var targetWriteLock = targetGate.BeginTransaction(deferred: false);
 
         var psi = BuildStartInfo(LocateCli(), "execute", projectPath,
-            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
             "--manifest", manifestPath, "--allow-synthetic-profile");
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException("CLI process failed to start.");
@@ -1146,8 +1163,9 @@ public sealed partial class CliParityTests : IAsyncLifetime
                 {
                     using var stateConnection = stateDatabase.OpenConnection();
                     using var find = stateConnection.CreateCommand();
-                    find.CommandText = "SELECT operation_key FROM mixed_publication_reconciliation WHERE file_path=$path AND file_kind='xbrl-xml' ORDER BY updated_utc DESC LIMIT 1";
+                    find.CommandText = "SELECT operation_key FROM mixed_publication_reconciliation WHERE file_path=$path AND file_kind=$kind ORDER BY updated_utc DESC LIMIT 1";
                     find.Parameters.AddWithValue("$path", Path.GetFullPath(outputPath));
+                    find.Parameters.AddWithValue("$kind", outputFormat);
                     operationKey = find.ExecuteScalar() as string;
                     if (operationKey is not null)
                     {
@@ -1173,7 +1191,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
                 var stdout = await stdoutTask;
                 var stderr = await stderrTask;
                 Assert.True(operationKey is not null && inProgress is not null,
-                    $"CLI did not reach the durable XML-confirmed/SQLite-in-progress state within 15 seconds. "
+                    $"CLI did not reach the durable {outputFormat}-confirmed/SQLite-in-progress state within 15 seconds. "
                     + $"Exit code: {process.ExitCode}. stdout: {stdout}{Environment.NewLine}stderr: {stderr}");
             }
             operationKey = Assert.IsType<string>(operationKey);
@@ -1242,7 +1260,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
             }
         }
 
-        var xmlDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath));
+        var recordFileDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath));
         var interrupted = mixedStore.Find(operationKey!);
         Assert.NotNull(interrupted);
         Assert.Equal(DestinationPublicationState.Confirmed, interrupted!.FileState);
@@ -1255,19 +1273,19 @@ public sealed partial class CliParityTests : IAsyncLifetime
         using (var reconciled = JsonDocument.Parse(reconcileJson))
         {
             var outcomes = reconciled.RootElement.GetProperty("outcomes").EnumerateArray().ToArray();
-            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "xbrl-xml"
+            Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == outputFormat
                 && outcome.GetProperty("State").GetString() == "Confirmed"
-                && outcome.GetProperty("Digest").GetString() == xmlDigest);
+                && outcome.GetProperty("Digest").GetString() == recordFileDigest);
             Assert.Contains(outcomes, outcome => outcome.GetProperty("Kind").GetString() == "sqlite"
                 && outcome.GetProperty("State").GetString() == "Confirmed");
         }
 
-        var retryManifestPath = Path.Combine(_dir, "xml-mixed-commit-crash-retry-manifest.json");
+        var retryManifestPath = Path.Combine(_dir, $"{outputFormat}-mixed-commit-crash-retry-manifest.json");
         var (retryExit, _, retryError) = await RunCliAsync(LocateCli(), "execute", projectPath,
-            "--output", outputPath, "--output-format", "xbrl-xml", "--publish-destination",
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
             "--manifest", retryManifestPath, "--allow-synthetic-profile");
         Assert.True(retryExit == 0, $"Retry after committed-process loss failed.\n{retryError}");
-        Assert.Equal(xmlDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
+        Assert.Equal(recordFileDigest, RunManifest.ComputeSha256(await File.ReadAllBytesAsync(outputPath)));
         using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
         {
             var root = retryManifest.RootElement;
