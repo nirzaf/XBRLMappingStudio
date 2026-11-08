@@ -2,9 +2,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using XBRLMappingStudio.Adapters.Csv;
+using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Json;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters.Sqlite;
+using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Application;
+using XBRLMappingStudio.Engine;
 
 namespace XBRLMappingStudio.PublicationCrashHarness;
 
@@ -14,12 +19,35 @@ public static class CrashPublicationContract
 
     public static byte[] AtomicReportBytes => Encoding.UTF8.GetBytes("accepted atomic-publication report");
 
-    public static byte[] JournalReportBytes(string format) => Encoding.UTF8.GetBytes(format switch
+    public static byte[] JournalReportBytes(string format)
     {
-        "json" => "{\"documentInfo\":{\"documentType\":\"https://xbrl.org/2021/xbrl-json\"},\"facts\":{}}",
-        "xml" => "<?xml version=\"1.0\" encoding=\"utf-8\"?><xbrli:xbrl xmlns:xbrli=\"http://www.xbrl.org/2003/instance\"/>",
-        _ => throw new ArgumentException("Unsupported journal crash fixture format.", nameof(format))
-    });
+        if (format == "json")
+            return Encoding.UTF8.GetBytes("{\"documentInfo\":{\"documentType\":\"https://xbrl.org/2021/xbrl-json\"},\"facts\":{}}");
+        if (format == "xml")
+            return Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"utf-8\"?><xbrli:xbrl xmlns:xbrli=\"http://www.xbrl.org/2003/instance\"/>");
+
+        var record = new DataRecord
+        {
+            RowId = "crash-fixture-row-1",
+            Fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
+            {
+                ["entity"] = DataValue.StringValue("Entity-00123-04"),
+                ["label"] = DataValue.StringValue("staged, escaped\nrecord"),
+                ["amount"] = DataValue.DecimalValue(12.5000m, lexical: "12.5000")
+            }
+        };
+        var records = new[] { record };
+        var headers = new[] { "entity", "label", "amount" };
+        return format switch
+        {
+            "csv-v1" or "csv-v2" => new CsvAdapter(new CsvAdapter.Options(EmitBom: false)).WriteRecords(headers, records),
+            "xlsx-v1" or "xlsx-v2" => new ExcelOutputAdapter().WriteWorkbook(headers,
+                new[] { new object?[] { "Entity-00123-04", "staged, escaped\nrecord", 12.5000m } }),
+            "json-record-v1" => new JsonOutputAdapter().Write(records),
+            "xml-record-v1" => new XmlOutputAdapter().Write(records),
+            _ => throw new ArgumentException("Unsupported journal crash fixture format.", nameof(format))
+        };
+    }
 
     public static string OperationKey(string stage) => "mixed-crash-" + stage;
 
@@ -209,7 +237,7 @@ internal static class Program
     private static int CrashAtJournalBoundary(string[] args)
     {
         var stage = args[0];
-        if (stage is not ("journal-after-stage" or "journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
+        if (stage is not ("journal-mid-write" or "journal-after-stage" or "journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
             return 2;
         var service = new PublicationService(new RunJournal(databasePath: Path.GetFullPath(args[1])));
         service.Publish(Path.GetFullPath(args[2]), CrashPublicationContract.JournalReportBytes(args[4]), args[3],
@@ -217,7 +245,8 @@ internal static class Program
             lockTimeout: TimeSpan.FromMinutes(2),
             validateStagedArtifactAsync: (path, _) => Task.FromResult(DestinationLock.DigestFile(path)),
             afterAtomicReplaceForTest: stage == "journal-after-replace" ? _ => KillCurrentProcess() : null,
-            afterStagedJournalForTest: stage == "journal-after-stage" ? _ => KillCurrentProcess() : null);
+            afterStagedJournalForTest: stage == "journal-after-stage" ? _ => KillCurrentProcess() : null,
+            afterPartialStageWriteForTest: stage == "journal-mid-write" ? KillCurrentProcess : null);
         return 0;
     }
 

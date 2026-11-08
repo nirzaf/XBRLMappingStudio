@@ -75,6 +75,32 @@ public sealed class JournalRecoverySafetyTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void RecoveryLeavesActivePartialWriteUntouched(bool sqlite)
+    {
+        using var workspace = new Workspace(sqlite);
+        var entry = workspace.Entry("active-partial-write") with
+        {
+            State = JournalState.Writing,
+            StagedDigest = null,
+            LockToken = null,
+            ValidatedDigest = null
+        };
+        workspace.SaveWithBackup(entry);
+        var stagingPath = entry.DestinationPath + ".xbsl-staging-" + entry.RunId;
+        File.WriteAllText(stagingPath, "partial bytes owned by live writer");
+        using var writerLock = DestinationLock.Acquire(stagingPath);
+
+        var action = Assert.Single(workspace.Journal.RecoverUnfinalized());
+
+        Assert.Equal(RecoveryDecision.RetryNeeded, action.Decision);
+        Assert.Equal(entry, workspace.Journal.Load(entry.RunId));
+        Assert.Equal("partial bytes owned by live writer", File.ReadAllText(stagingPath));
+        workspace.AssertReceipt(entry.RunId, null, null);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void MissingOrContradictoryEvidenceRemainsUnconfirmed(bool sqlite)
     {
         using var workspace = new Workspace(sqlite);

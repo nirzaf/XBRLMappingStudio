@@ -45,6 +45,27 @@ public class PublicationTests : IDisposable
     }
 
     [Fact]
+    public void Publish_RefusesRunIdentifierReuseWithoutChangingPriorReceiptOrDestination()
+    {
+        var service = new PublicationService(_journal);
+        var firstDestination = Dest("first-run.json");
+        var secondDestination = Dest("second-run.json");
+        var accepted = Encoding.UTF8.GetBytes("accepted first report");
+        var different = Encoding.UTF8.GetBytes("unrelated second report");
+        var receipt = service.Publish(firstDestination, accepted, runId: "run-single-use");
+
+        var error = Assert.Throws<PublicationException>(() =>
+            service.Publish(secondDestination, different, runId: "run-single-use"));
+
+        Assert.Equal(DiagnosticCodes.PubReceiptConflict, error.Code);
+        Assert.Equal(accepted, File.ReadAllBytes(firstDestination));
+        Assert.False(File.Exists(secondDestination));
+        var journal = Assert.IsType<JournalEntry>(_journal.Load("run-single-use"));
+        Assert.Equal(JournalState.Finalized, journal.State);
+        Assert.Equal(receipt.FinalDigest, journal.FinalDigest);
+    }
+
+    [Fact]
     public void MixedPublication_RefusesDifferentExistingFile_AndConfirmsIdenticalRetryWithoutReplacement()
     {
         var svc = new PublicationService(_journal);

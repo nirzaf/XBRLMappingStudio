@@ -440,9 +440,11 @@ public sealed class RunJournal
 
     private bool TryAbortUnpublishedStage(JournalEntry expected, string? persistedUpdatedUtc)
     {
-        if (expected.State is not (JournalState.Staged or JournalState.Verified)
+        if (expected.State is not (JournalState.Writing or JournalState.Staged or JournalState.Verified)
             || expected.LockToken is not null
-            || string.IsNullOrWhiteSpace(expected.StagedDigest)
+            || (expected.State == JournalState.Writing
+                ? expected.StagedDigest is not null
+                : string.IsNullOrWhiteSpace(expected.StagedDigest))
             || string.IsNullOrWhiteSpace(expected.RunId)
             || !expected.RunId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.'))
             return false;
@@ -451,17 +453,28 @@ public sealed class RunJournal
         var stagingPath = destination + $".xbsl-staging-{expected.RunId}";
         using var entryLock = DestinationLock.TryAcquire(WriteGuardPath(expected.RunId));
         if (entryLock is null) return false;
+        // Publication holds this lock from its pre-write journal record through
+        // destination-lock acquisition. A missing lock proves the writer is gone;
+        // while a live writer is still writing or validating, recovery leaves it alone.
+        using var stagingLock = DestinationLock.TryAcquire(stagingPath);
+        if (stagingLock is null) return false;
         var current = Load(expected.RunId, out var currentUpdatedUtc);
         if (current != expected || !string.Equals(currentUpdatedUtc, persistedUpdatedUtc, StringComparison.Ordinal))
             return false;
 
-        // Never remove an unknown or modified sidecar. A matching digest proves it is
-        // the complete, unpublished staging payload described by this journal entry.
-        if (!File.Exists(stagingPath)
-            || !StringComparer.Ordinal.Equals(DestinationLock.DigestFile(stagingPath), expected.StagedDigest))
-            return false;
-
-        File.Delete(stagingPath);
+        if (expected.State is JournalState.Staged or JournalState.Verified)
+        {
+            // Never remove an unknown or modified sidecar. A matching digest proves
+            // it is the complete, unpublished payload recorded by the journal.
+            if (!File.Exists(stagingPath)
+                || !StringComparer.Ordinal.Equals(DestinationLock.DigestFile(stagingPath), expected.StagedDigest))
+                return false;
+        }
+        if (File.Exists(stagingPath))
+        {
+            if ((File.GetAttributes(stagingPath) & FileAttributes.ReparsePoint) != 0) return false;
+            File.Delete(stagingPath);
+        }
         var aborted = expected with { State = JournalState.Aborted, UpdatedUtc = DateTimeOffset.UtcNow };
         if (_database is null)
         {
@@ -593,7 +606,8 @@ public enum JournalState
     Replaced = 2,
     Finalized = 3,
     Aborted = 4,
-    Validated = 5
+    Validated = 5,
+    Writing = 6
 }
 public enum RecoveryDecision { Finalized, RetryNeeded, Aborted }
 

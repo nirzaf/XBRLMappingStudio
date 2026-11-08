@@ -180,12 +180,25 @@ public sealed class PublicationService
         CancellationToken cancellationToken = default,
         bool refuseDifferentExisting = false,
         Action<string>? afterAtomicReplaceForTest = null,
-        Action<string>? afterStagedJournalForTest = null)
+        Action<string>? afterStagedJournalForTest = null,
+        Action? afterPartialStageWriteForTest = null)
         => PublishCoreAsync(destinationPath,
-            async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
+            async (stream, token) =>
+            {
+                if (afterPartialStageWriteForTest is null || payload.Length < 2)
+                {
+                    await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false);
+                    return;
+                }
+                var partialLength = payload.Length / 2;
+                await stream.WriteAsync(payload.AsMemory(0, partialLength), token).ConfigureAwait(false);
+                afterPartialStageWriteForTest();
+                await stream.WriteAsync(payload.AsMemory(partialLength), token).ConfigureAwait(false);
+            },
             RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
             cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting,
-            afterAtomicReplaceForTest, afterStagedJournalForTest: afterStagedJournalForTest).GetAwaiter().GetResult();
+            afterAtomicReplaceForTest, afterStagedJournalForTest: afterStagedJournalForTest,
+            afterPartialStageWriteForTest: afterPartialStageWriteForTest).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -200,32 +213,65 @@ public sealed class PublicationService
         bool refuseDifferentExisting = false,
         Action<string>? afterAtomicReplaceForTest = null,
         Action? authorizeBeforeReplace = null,
-        Action<string>? afterStagedJournalForTest = null)
+        Action<string>? afterStagedJournalForTest = null,
+        Action? afterPartialStageWriteForTest = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
+        if (runId.Length > 128 || runId is "." or ".."
+            || !runId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.'))
+            throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                "The publication run identifier is not a safe staging filename component.", runId, full);
+        if (_journal.Load(runId) is not null)
+            throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                "This run identifier already has a publication journal entry and cannot be reused.", runId, full);
         var stagedPath = full + $".xbsl-staging-{runId}";
 
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        if (File.Exists(stagedPath))
+            throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                "A staging artifact already exists for this run identifier; it was left untouched.", runId, full);
+        using var stagingLock = DestinationLock.TryAcquire(stagedPath)
+            ?? throw new DestinationLockedException(stagedPath,
+                $"Staging artifact '{stagedPath}' is already locked by another writer or recovery process.");
 
-        // ---- Stage: private sidecar write, never the destination itself.
+        // ---- Stage: record ownership before writing, and hold the per-run staging
+        // lock until destination locking begins. Recovery can safely remove a partial
+        // file only after this process has exited and released the lock.
+        try
+        {
+            _journal.Save(new JournalEntry(runId, full, JournalState.Writing,
+                null, null, null, DateTimeOffset.UtcNow));
+        }
+        catch (Exception ex)
+        {
+            throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
+                $"Could not reserve the staged publication in the run journal: {ex.Message}", runId, full);
+        }
+
         string stagedDigest;
+        var ownsStagingFile = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await using (var output = new FileStream(stagedPath, FileMode.Create, FileAccess.Write,
+            await using (var output = new FileStream(stagedPath, FileMode.CreateNew, FileAccess.Write,
                 FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                ownsStagingFile = true;
                 await writePayloadAsync(output, cancellationToken).ConfigureAwait(false);
+            }
             stagedDigest = DestinationLock.DigestFile(stagedPath);
         }
         catch (OperationCanceledException)
         {
-            TryDelete(stagedPath);
+            if (ownsStagingFile) TryDelete(stagedPath);
+            Abort(runId, full, stagedPath, null, null);
             throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            TryDelete(stagedPath);
+            if (ownsStagingFile) TryDelete(stagedPath);
+            Abort(runId, full, stagedPath, null, null);
             throw PublicationFailed(DiagnosticCodes.PubStagingFailed,
                 $"Staging write for run '{runId}' failed: {ex.Message}", runId, full);
         }
