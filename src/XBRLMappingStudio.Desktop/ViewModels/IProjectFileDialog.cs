@@ -46,6 +46,10 @@ public interface IProjectFileDialog
     Task<string?> OpenSourceAsync();
     Task<string?> OpenDestinationDatabaseAsync();
     Task<string?> SaveDestinationFileAsync(string kind);
+    Task<string?> SelectSqliteSnapshotParentDirectoryAsync() => Task.FromResult<string?>(null);
+    Task<string?> OpenSqliteSnapshotMetadataAsync() => Task.FromResult<string?>(null);
+    Task<bool> ConfirmSqliteSnapshotCaptureAsync(string sourcePath, string bundleDirectory)
+        => Task.FromResult(false);
     Task<bool> ConfirmDestinationPublicationAsync(
         string databasePath,
         string table,

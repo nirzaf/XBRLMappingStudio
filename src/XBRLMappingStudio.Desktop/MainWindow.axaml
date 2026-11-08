@@ -76,9 +76,29 @@
                   Command="{Binding RevalidateSourceSchemaCommand}"
                   x:Name="RevalidateSourceSchemaButton"
                   AutomationProperties.Name="Recheck the current source schema against the saved mapping" />
+          <StackPanel DockPanel.Dock="Top" Spacing="3" IsVisible="{Binding IsSelectedSourceSqlite}">
+            <TextBlock Text="{Binding SqliteSourceSnapshotStatus}" TextWrapping="Wrap"
+                       x:Name="SqliteSourceSnapshotStatusText"
+                       AutomationProperties.Name="SQLite source snapshot status" />
+            <StackPanel Spacing="3">
+              <Button Content="Capture snapshot" Command="{Binding CaptureSqliteSourceSnapshotCommand}"
+                      x:Name="CaptureSqliteSourceSnapshotButton"
+                      IsEnabled="{Binding CanCaptureSqliteSourceSnapshot}"
+                      AutomationProperties.Name="Capture a private full-database SQLite source snapshot" />
+              <Button Content="Use snapshot…" Command="{Binding UseSqliteSourceSnapshotCommand}"
+                      x:Name="UseSqliteSourceSnapshotButton"
+                      IsEnabled="{Binding CanUseSqliteSourceSnapshot}"
+                      AutomationProperties.Name="Select a retained SQLite source snapshot for replay" />
+              <Button Content="Use live source" Command="{Binding ClearSqliteSourceSnapshotCommand}"
+                      x:Name="ClearSqliteSourceSnapshotButton"
+                      IsVisible="{Binding IsRetainedSqliteSnapshotSelected}"
+                      AutomationProperties.Name="Clear the retained snapshot and return to the live SQLite source" />
+            </StackPanel>
+          </StackPanel>
           <ComboBox DockPanel.Dock="Top" ItemsSource="{Binding SourceTables}"
                     SelectedItem="{Binding SelectedSourceTable}"
                     IsVisible="{Binding HasSourceTables}"
+                    IsEnabled="{Binding CanChangeSelectedSqliteTable}"
                     AutomationProperties.Name="SQLite table" />
           <ListBox DockPanel.Dock="Top" ItemsSource="{Binding SourceColumns}"
                    SelectedItem="{Binding SelectedSourceColumn}"

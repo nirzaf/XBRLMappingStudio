@@ -455,6 +455,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string? _migrationDraftSnapshot;
     private bool _isBusy;
     private ActiveMappingOperation? _activeMappingOperation;
+    private CancellationTokenSource? _snapshotOperationCancellation;
     private int _mappingOperationGeneration;
     private bool _allowSyntheticProfile;
     private string? _projectPath;
@@ -588,6 +589,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private bool _isSuggestionHistoryMutation;
     private readonly Stack<AcceptedSuggestionUndo> _acceptedSuggestionUndo = new();
     private readonly Dictionary<string, DraftMapping> _unsavedSuggestionDrafts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _sqliteSourceSnapshotMetadataPaths = new(StringComparer.Ordinal);
     private SuggestionRedoState? _suggestionRedoState;
 
     private sealed record AcceptedSuggestionUndo(
@@ -640,6 +642,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 Raise(nameof(CanCancelOperation));
                 Raise(nameof(CancelOperationButtonText));
                 CancelOperationCommand?.NotifyCanExecuteChanged();
+                NotifySqliteSnapshotCommands();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanRevalidateSourceSchema));
@@ -660,10 +663,13 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
     public bool CanCancelOperation => IsBusy
-        && _activeMappingOperation is { } operation
-        && !operation.Cancellation.IsCancellationRequested;
+        && ((_activeMappingOperation is { } operation && !operation.Cancellation.IsCancellationRequested)
+            || (_snapshotOperationCancellation is { } snapshot && !snapshot.IsCancellationRequested));
     public string CancelOperationButtonText =>
-        _activeMappingOperation?.Cancellation.IsCancellationRequested == true ? "Cancelling…" : "Cancel operation";
+        _snapshotOperationCancellation?.IsCancellationRequested == true
+            ? "Cancelling snapshot…"
+            : _snapshotOperationCancellation is not null ? "Cancel snapshot"
+            : _activeMappingOperation?.Cancellation.IsCancellationRequested == true ? "Cancelling…" : "Cancel operation";
     public bool IsSourceLoading
     {
         get => _isSourceLoading;
@@ -680,6 +686,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
                 AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
                 ChooseSourceCommand?.NotifyCanExecuteChanged();
+                NotifySqliteSnapshotCommands();
                 NotifyDestinationCommands();
                 RefreshPdfReviewCommandState();
             }
@@ -724,6 +731,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             IsSourceSchemaDrifted = false;
             Raise(nameof(CanRevalidateSourceSchema));
             RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
+            NotifySqliteSnapshotCommands();
         }
     }
     public IReadOnlyList<AdapterCapabilityOption> SourceCapabilities { get; } = BuildSourceCapabilities();
@@ -805,6 +813,43 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     {
         get => _sourceInspectionSummary;
         private set => Set(ref _sourceInspectionSummary, value);
+    }
+    public bool IsSelectedSourceSqlite => FindSelectedSqliteBinding() is not null;
+    public bool IsRetainedSqliteSnapshotSelected => FindSelectedSqliteBinding() is { } binding
+        && _sqliteSourceSnapshotMetadataPaths.ContainsKey(binding.BindingId);
+    public bool CanCaptureSqliteSourceSnapshot
+    {
+        get
+        {
+            var binding = FindSelectedSqliteBinding();
+            if (IsBusy || IsSourceLoading || ProjectPath is null || _fileDialog is null
+                || binding is null || string.IsNullOrWhiteSpace(binding.Locator)
+                || _sqliteSourceSnapshotMetadataPaths.ContainsKey(binding.BindingId)) return false;
+            try
+            {
+                var root = WorkspaceRoot();
+                var candidate = Path.IsPathRooted(binding.Locator)
+                    ? binding.Locator
+                    : Path.Combine(root, binding.Locator);
+                return File.Exists(PathGuard.EnsureWithin(root, candidate));
+            }
+            catch (Exception) { return false; }
+        }
+    }
+    public bool CanUseSqliteSourceSnapshot => !IsBusy && !IsSourceLoading
+        && _fileDialog is not null && FindSelectedSqliteBinding() is not null;
+    public bool CanChangeSelectedSqliteTable => !IsBusy && !IsSourceLoading && !IsRetainedSqliteSnapshotSelected;
+    public string SqliteSourceSnapshotStatus
+    {
+        get
+        {
+            var binding = FindSelectedSqliteBinding();
+            if (binding is null) return "No SQLite source is selected.";
+            if (_sqliteSourceSnapshotMetadataPaths.TryGetValue(binding.BindingId, out var metadataPath))
+                return $"Using retained snapshot '{Path.GetFileName(Path.GetDirectoryName(metadataPath))}'. "
+                    + "This full-database copy is replayable and is verified before each run.";
+            return "Using the live SQLite source. It is read transactionally but is not replayable; capture or select a retained snapshot for replay.";
+        }
     }
     public bool IsSourceSchemaDrifted
     {
@@ -1529,6 +1574,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public RelayCommand RollbackTaxonomyMigrationCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
     public RelayCommand RevalidateSourceSchemaCommand { get; }
+    public RelayCommand CaptureSqliteSourceSnapshotCommand { get; }
+    public RelayCommand UseSqliteSourceSnapshotCommand { get; }
+    public RelayCommand ClearSqliteSourceSnapshotCommand { get; }
     public RelayCommand ChooseDestinationCommand { get; }
     public RelayCommand SaveDestinationPlanCommand { get; }
     public RelayCommand PreviewDestinationCommand { get; }
@@ -1657,6 +1705,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync(), _ => !IsBusy && !IsSourceLoading);
         RevalidateSourceSchemaCommand = new RelayCommand(async _ => await RevalidateSourceSchemaAsync(),
             _ => CanRevalidateSourceSchema);
+        CaptureSqliteSourceSnapshotCommand = new RelayCommand(async _ => await CaptureSqliteSourceSnapshotAsync(),
+            _ => CanCaptureSqliteSourceSnapshot);
+        UseSqliteSourceSnapshotCommand = new RelayCommand(async _ => await ChooseSqliteSourceSnapshotAsync(),
+            _ => CanUseSqliteSourceSnapshot);
+        ClearSqliteSourceSnapshotCommand = new RelayCommand(async _ => await ClearSqliteSourceSnapshotAsync(),
+            _ => !IsBusy && !IsSourceLoading && IsRetainedSqliteSnapshotSelected);
         ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
             _ => !IsBusy && !IsDestinationLoading);
         SaveDestinationPlanCommand = new RelayCommand(_ => SaveDestinationPlan(), _ => CanSaveDestinationPlan);
@@ -2519,6 +2573,267 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
     }
 
+    private SourceBinding? FindSelectedSqliteBinding()
+    {
+        if (SelectedSourceBindingId is { } selectedId)
+        {
+            var selected = Session.Project.Bindings.FirstOrDefault(binding =>
+                StringComparer.Ordinal.Equals(binding.BindingId, selectedId));
+            return StringComparer.Ordinal.Equals(selected?.Kind, "sqlite") ? selected : null;
+        }
+        return Session.Project.Bindings.FirstOrDefault(binding =>
+            StringComparer.Ordinal.Equals(binding.Kind, "sqlite"));
+    }
+
+    private void NotifySqliteSnapshotCommands()
+    {
+        Raise(nameof(IsSelectedSourceSqlite));
+        Raise(nameof(IsRetainedSqliteSnapshotSelected));
+        Raise(nameof(SqliteSourceSnapshotStatus));
+        Raise(nameof(CanCaptureSqliteSourceSnapshot));
+        Raise(nameof(CanUseSqliteSourceSnapshot));
+        Raise(nameof(CanChangeSelectedSqliteTable));
+        CaptureSqliteSourceSnapshotCommand?.NotifyCanExecuteChanged();
+        UseSqliteSourceSnapshotCommand?.NotifyCanExecuteChanged();
+        ClearSqliteSourceSnapshotCommand?.NotifyCanExecuteChanged();
+    }
+
+    private async Task ChooseSqliteSourceSnapshotAsync()
+    {
+        if (_fileDialog is null) { StatusText = "Snapshot picker is unavailable."; return; }
+        try
+        {
+            var metadataPath = await _fileDialog.OpenSqliteSnapshotMetadataAsync();
+            if (metadataPath is not null) await UseSqliteSourceSnapshotAsync(metadataPath);
+        }
+        catch (Exception exception)
+        {
+            StatusText = $"Retained SQLite snapshot could not be selected: {exception.Message}";
+        }
+    }
+
+    public async Task UseSqliteSourceSnapshotAsync(string metadataPath)
+    {
+        if (IsBusy || IsSourceLoading) return;
+        if (_fileDialog is null) { StatusText = "Snapshot selection is unavailable."; return; }
+        var binding = FindSelectedSqliteBinding();
+        if (binding is null || ProjectPath is null)
+        {
+            StatusText = "Save the project with a SQLite source before selecting a retained snapshot.";
+            return;
+        }
+
+        var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+        InvalidateMappingOperationIfStale();
+        IsBusy = true;
+        IsSourceLoading = true;
+        var cancellation = new CancellationTokenSource();
+        _snapshotOperationCancellation = cancellation;
+        Raise(nameof(CanCancelOperation));
+        Raise(nameof(CancelOperationButtonText));
+        CancelOperationCommand.NotifyCanExecuteChanged();
+        try
+        {
+            var root = WorkspaceRoot();
+            if (!BuildConnections(root).TryGetValue(binding.BindingId, out var expected))
+                throw new InvalidOperationException("The selected SQLite binding could not be resolved.");
+            var fullMetadataPath = Path.GetFullPath(metadataPath);
+            var retained = await SqliteSourceSnapshotStore.OpenAsync(
+                fullMetadataPath, expected, cancellation.Token);
+            var table = expected.Configuration?.GetValueOrDefault("table");
+            if (string.IsNullOrWhiteSpace(table))
+                throw new InvalidOperationException("Select and save the SQLite table before using a retained snapshot.");
+
+            var adapter = new SqliteSourceAdapter();
+            var tables = await adapter.DiscoverTablesAsync(retained, cancellation.Token);
+            if (generation != _sourceLoadGeneration) return;
+            if (!tables.Contains(table, StringComparer.Ordinal))
+                throw new InvalidOperationException($"The retained snapshot does not contain the configured table '{table}'.");
+            var schema = await _sqliteSchemaLoader(retained, cancellation.Token);
+            if (generation != _sourceLoadGeneration) return;
+            if (!StringComparer.Ordinal.Equals(binding.SchemaFingerprint, schema.Fingerprint))
+            {
+                IsSourceSchemaDrifted = true;
+                SourceInspectionSummary = "The retained SQLite snapshot schema differs from the schema pinned in this project. "
+                    + "The saved binding was preserved and preview/execution are blocked until the source is reviewed.";
+                StatusText = "Retained snapshot schema mismatch; the mapping was not changed.";
+                NotifySqliteSnapshotCommands();
+                return;
+            }
+
+            _sqliteSourceSnapshotMetadataPaths[binding.BindingId] = fullMetadataPath;
+            SelectedSourceBindingId = binding.BindingId;
+            _sqliteSourcePath = expected.Path;
+            ReplaceItems(SourceTables, tables);
+            _selectedSourceTable = table;
+            Raise(nameof(SelectedSourceTable));
+            Raise(nameof(HasSourceTables));
+            ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
+            Raise(nameof(SourceColumns));
+            IsSourceSchemaDrifted = false;
+            SourceInspectionSummary = $"SQLite table '{table}' loaded from retained snapshot '{Path.GetFileName(Path.GetDirectoryName(fullMetadataPath))}'. "
+                + $"{schema.Columns.Count} fields match the saved schema; snapshot bytes will be reverified before each run.";
+            StatusText = "Retained SQLite snapshot selected for replay. The project and live source were not changed.";
+            NotifySqliteSnapshotCommands();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (generation == _sourceLoadGeneration)
+                StatusText = "Retained SQLite snapshot selection canceled; the project and previous source selection were preserved.";
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            if (generation == _sourceLoadGeneration)
+            {
+                IsSourceSchemaDrifted = true;
+                SourceInspectionSummary = $"Retained snapshot could not be verified: {exception.Message}";
+                StatusText = "Snapshot selection failed closed; no source data was read for a mapping run.";
+                NotifySqliteSnapshotCommands();
+            }
+        }
+        finally
+        {
+            var ownsSnapshotOperation = ReferenceEquals(_snapshotOperationCancellation, cancellation);
+            if (ownsSnapshotOperation) _snapshotOperationCancellation = null;
+            cancellation.Dispose();
+            if (generation == _sourceLoadGeneration) IsSourceLoading = false;
+            if (ownsSnapshotOperation && _activeMappingOperation is null) IsBusy = false;
+            Raise(nameof(CanCancelOperation));
+            Raise(nameof(CancelOperationButtonText));
+            CancelOperationCommand.NotifyCanExecuteChanged();
+        }
+    }
+
+    public async Task CaptureSqliteSourceSnapshotAsync()
+    {
+        if (!CanCaptureSqliteSourceSnapshot) return;
+        if (_fileDialog is null) { StatusText = "Snapshot picker is unavailable."; return; }
+        var binding = FindSelectedSqliteBinding();
+        if (binding is null) { StatusText = "Select a SQLite source before capturing a snapshot."; return; }
+        var projectPath = ProjectPath;
+        var sourceGeneration = _sourceLoadGeneration;
+        var cancellation = new CancellationTokenSource();
+        _snapshotOperationCancellation = cancellation;
+        IsBusy = true;
+        Raise(nameof(CanCancelOperation));
+        Raise(nameof(CancelOperationButtonText));
+        CancelOperationCommand.NotifyCanExecuteChanged();
+        try
+        {
+            var parent = await _fileDialog.SelectSqliteSnapshotParentDirectoryAsync();
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (parent is null)
+            {
+                StatusText = "Canceled SQLite snapshot capture; the live source was unchanged.";
+                return;
+            }
+            if (sourceGeneration != _sourceLoadGeneration
+                || !StringComparer.Ordinal.Equals(projectPath, ProjectPath)
+                || !Session.Project.Bindings.Any(candidate => StringComparer.Ordinal.Equals(candidate.BindingId, binding.BindingId)))
+                throw new OperationCanceledException("The selected project or SQLite source changed during snapshot capture.", cancellation.Token);
+            var root = WorkspaceRoot();
+            if (!BuildConnections(root).TryGetValue(binding.BindingId, out var source)
+                || string.IsNullOrWhiteSpace(source.Path) || !File.Exists(source.Path))
+                throw new FileNotFoundException("The selected live SQLite source is unavailable.", source?.Path);
+            var safeBindingId = new string(binding.BindingId.Select(character =>
+                char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '_').ToArray());
+            var bundleDirectory = Path.Combine(Path.GetFullPath(parent),
+                $"{safeBindingId}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.xms-snapshot");
+            if (!await _fileDialog.ConfirmSqliteSnapshotCaptureAsync(source.Path, bundleDirectory))
+            {
+                StatusText = "Canceled SQLite snapshot capture; no snapshot was created.";
+                return;
+            }
+            cancellation.Token.ThrowIfCancellationRequested();
+            var metadataPath = await SqliteSourceSnapshotStore.CaptureAsync(
+                source, bundleDirectory, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (sourceGeneration != _sourceLoadGeneration
+                || !StringComparer.Ordinal.Equals(projectPath, ProjectPath)
+                || !StringComparer.Ordinal.Equals(SelectedSourceBindingId, binding.BindingId))
+                throw new OperationCanceledException("The selected project or SQLite source changed before the snapshot could be selected.", cancellation.Token);
+
+            if (ReferenceEquals(_snapshotOperationCancellation, cancellation))
+            {
+                _snapshotOperationCancellation = null;
+                IsBusy = false;
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand.NotifyCanExecuteChanged();
+            }
+            await UseSqliteSourceSnapshotAsync(metadataPath);
+            if (!IsSourceSchemaDrifted
+                && _sqliteSourceSnapshotMetadataPaths.TryGetValue(binding.BindingId, out var selectedMetadataPath)
+                && StringComparer.Ordinal.Equals(selectedMetadataPath, Path.GetFullPath(metadataPath)))
+                StatusText = $"Captured and selected retained SQLite snapshot '{Path.GetFileName(Path.GetDirectoryName(metadataPath))}'.";
+        }
+        catch (OperationCanceledException)
+        {
+            if (sourceGeneration == _sourceLoadGeneration
+                && StringComparer.Ordinal.Equals(projectPath, ProjectPath))
+                StatusText = "SQLite snapshot capture canceled; the live source was unchanged.";
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            if (sourceGeneration == _sourceLoadGeneration
+                && StringComparer.Ordinal.Equals(projectPath, ProjectPath))
+                StatusText = $"SQLite snapshot capture failed: {exception.Message}";
+        }
+        finally
+        {
+            if (ReferenceEquals(_snapshotOperationCancellation, cancellation))
+            {
+                _snapshotOperationCancellation = null;
+                if (_activeMappingOperation is null) IsBusy = false;
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand.NotifyCanExecuteChanged();
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    public async Task ClearSqliteSourceSnapshotAsync()
+    {
+        if (IsBusy || IsSourceLoading) return;
+        var binding = FindSelectedSqliteBinding();
+        if (binding is null || !_sqliteSourceSnapshotMetadataPaths.ContainsKey(binding.BindingId)) return;
+        string? path;
+        try
+        {
+            var root = WorkspaceRoot();
+            path = string.IsNullOrWhiteSpace(binding.Locator) ? null
+                : PathGuard.EnsureWithin(root, Path.IsPathRooted(binding.Locator)
+                    ? binding.Locator : Path.Combine(root, binding.Locator));
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
+        {
+            StatusText = $"The saved live SQLite source path could not be verified: {exception.Message}";
+            return;
+        }
+        _sqliteSourceSnapshotMetadataPaths.Remove(binding.BindingId);
+        InvalidateMappingOperationIfStale();
+        NotifySqliteSnapshotCommands();
+        if (path is not null && File.Exists(path))
+        {
+            await LoadSourceAsync(path);
+            StatusText = "Returned to the live SQLite source. New full runs use its current contents and are not replayable.";
+            return;
+        }
+
+        _sqliteSourcePath = path;
+        SourceTables.Clear();
+        SourceColumns.Clear();
+        _selectedSourceTable = null;
+        IsSourceSchemaDrifted = true;
+        SourceInspectionSummary = "Retained snapshot selection cleared, but the saved live SQLite source is unavailable. Choose a source file before running.";
+        StatusText = "Returned to the live source selection, but the database file is missing.";
+        Raise(nameof(SourceTables));
+        Raise(nameof(SourceColumns));
+        Raise(nameof(HasSourceTables));
+        Raise(nameof(SelectedSourceTable));
+    }
+
     public async Task RevalidateSourceSchemaAsync()
     {
         if (IsBusy || IsSourceLoading) return;
@@ -2537,16 +2852,19 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var root = WorkspaceRoot();
-            var candidatePath = Path.IsPathRooted(binding.Locator)
-                ? binding.Locator
-                : Path.Combine(root, binding.Locator);
-            var safePath = PathGuard.EnsureWithin(root, candidatePath);
-            if (!File.Exists(safePath))
-                throw new FileNotFoundException("The saved source file is no longer available.", safePath);
-
-            var config = binding.Configuration.ToDictionary(kv => kv.Key,
-                kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
-            var connection = new SourceConnection(binding.BindingId, binding.Kind, safePath, config);
+            if (!BuildConnections(root).TryGetValue(binding.BindingId, out var connection))
+                throw new InvalidOperationException("The saved source binding could not be resolved.");
+            var usingRetainedSnapshot = _sqliteSourceSnapshotMetadataPaths.TryGetValue(
+                binding.BindingId, out var snapshotMetadataPath);
+            if (usingRetainedSnapshot)
+            {
+                connection = await SqliteSourceSnapshotStore.OpenAsync(
+                    snapshotMetadataPath!, connection, CancellationToken.None);
+            }
+            else if (connection.Path is null || !File.Exists(connection.Path))
+            {
+                throw new FileNotFoundException("The saved source file is no longer available.", connection.Path);
+            }
             var schema = StringComparer.Ordinal.Equals(binding.Kind, "sqlite")
                 ? await _sqliteSchemaLoader(connection, CancellationToken.None)
                 : await BuildSourceAdapter(connection).InspectSchemaAsync(connection, CancellationToken.None);
@@ -2575,9 +2893,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             }
             else
             {
-                SourceInspectionSummary = $"Source schema recheck passed for {sourceName}: "
+                SourceInspectionSummary = $"Source schema recheck passed for {sourceName}"
+                    + (usingRetainedSnapshot ? " from the retained SQLite snapshot" : string.Empty) + ": "
                     + $"{schema.Columns.Count} field(s) still match the saved mapping revision.";
-                StatusText = $"Source schema is unchanged for {sourceName}.";
+                StatusText = usingRetainedSnapshot
+                    ? $"Retained SQLite snapshot schema is unchanged for {sourceName}."
+                    : $"Source schema is unchanged for {sourceName}.";
             }
         }
         catch (Exception exception) when (exception is not OutOfMemoryException
@@ -2994,7 +3315,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var root = WorkspaceRoot();
-            var connections = BuildConnections(root);
+            var connections = await BuildExecutionConnectionsAsync(root, cancellationToken);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(
@@ -3132,7 +3453,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var root = WorkspaceRoot();
-            var connections = BuildConnections(root);
+            var connections = await BuildExecutionConnectionsAsync(root, cancellationToken);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(project, connections, ReadParameters(),
@@ -3261,6 +3582,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void CancelMappingOperation()
     {
+        if (_snapshotOperationCancellation is { } snapshotCancellation
+            && !snapshotCancellation.IsCancellationRequested)
+        {
+            StatusText = "Snapshot cancellation requested; waiting for the current SQLite step to stop…";
+            snapshotCancellation.Cancel();
+            Raise(nameof(CanCancelOperation));
+            Raise(nameof(CancelOperationButtonText));
+            CancelOperationCommand.NotifyCanExecuteChanged();
+            return;
+        }
         var operation = _activeMappingOperation;
         if (operation is null || operation.Cancellation.IsCancellationRequested) return;
         // Publish the transient state before signaling cancellation. The
@@ -3363,6 +3694,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var binding = Session.Project.Bindings.FirstOrDefault(b => b.BindingId == SelectedSourceBindingId)
                 ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
             if (binding is null) { StatusText = "Add a source binding to the project before choosing a file."; return; }
+            if (_sqliteSourceSnapshotMetadataPaths.Remove(binding.BindingId))
+                NotifySqliteSnapshotCommands();
             var kind = Path.GetExtension(safePath).ToLowerInvariant() switch
             {
                 ".xlsx" => "excel",
@@ -3435,7 +3768,13 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             Raise(nameof(SourceColumns));
             StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
         }
-        catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            if (generation != _sourceLoadGeneration) return;
+            IsSourceSchemaDrifted = true;
+            SourceInspectionSummary = $"Source load failed: {ex.Message} The saved mapping remains pinned and preview/execution are blocked until the source is reviewed.";
+            StatusText = $"Source load failed: {ex.Message}";
+        }
         finally
         {
             if (!sqliteTableLoadPending && generation == _sourceLoadGeneration) IsSourceLoading = false;
@@ -4242,17 +4581,48 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 ?? Session.Project.Bindings.FirstOrDefault(b => b.Kind != "param");
             if (binding is null) return;
             var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
+            var isRetainedSnapshot = _sqliteSourceSnapshotMetadataPaths.TryGetValue(binding.BindingId, out var metadataPath);
+            SourceConnection connection;
+            if (isRetainedSnapshot)
+            {
+                if (!BuildConnections(WorkspaceRoot()).TryGetValue(binding.BindingId, out var expected))
+                    throw new InvalidOperationException("The selected SQLite binding could not be resolved.");
+                connection = await SqliteSourceSnapshotStore.OpenAsync(
+                    metadataPath!, expected, CancellationToken.None);
+                if (!StringComparer.Ordinal.Equals(config.GetValueOrDefault("table"), table))
+                    throw new InvalidOperationException("This retained snapshot is bound to the saved SQLite table selection. Return to the live source before changing tables.");
+            }
+            else
+            {
+                // LoadSourceAsync intentionally does not update the saved binding until
+                // table schema inspection succeeds. Build the pending live SQLite
+                // connection from that validated selection instead of the old binding.
+                connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
+            }
             config["table"] = table;
-            var connection = new SourceConnection(binding.BindingId, "sqlite", _sqliteSourcePath, config);
+            connection = connection with { Configuration = config };
             var schema = await _sqliteSchemaLoader(connection, CancellationToken.None);
-            if (generation != _sourceLoadGeneration || table != SelectedSourceTable || connection.Path != _sqliteSourcePath) return;
+            if (generation != _sourceLoadGeneration || table != SelectedSourceTable
+                || (!isRetainedSnapshot && connection.Path != _sqliteSourcePath)) return;
             var descriptor = SqliteSourceAdapter.Describe(connection, schema);
             SourceColumns.Clear();
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
-            binding = binding with { Kind = "sqlite", Locator = Path.GetRelativePath(WorkspaceRoot(), _sqliteSourcePath),
-                Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
-                SchemaFingerprint = schema.Fingerprint };
-            Session.SetBinding(binding);
+            if (isRetainedSnapshot && !StringComparer.Ordinal.Equals(binding.SchemaFingerprint, schema.Fingerprint))
+            {
+                IsSourceSchemaDrifted = true;
+                SourceInspectionSummary = "The retained SQLite snapshot schema differs from the saved schema. "
+                    + "The project binding was preserved and preview/execution are blocked until the source is reviewed.";
+                StatusText = "Retained snapshot schema mismatch; the mapping was not changed.";
+                Raise(nameof(SourceColumns));
+                return;
+            }
+            if (!isRetainedSnapshot)
+            {
+                binding = binding with { Kind = "sqlite", Locator = Path.GetRelativePath(WorkspaceRoot(), _sqliteSourcePath),
+                    Configuration = config.ToDictionary(kv => kv.Key, kv => (object?)kv.Value, StringComparer.Ordinal),
+                    SchemaFingerprint = schema.Fingerprint };
+                Session.SetBinding(binding);
+            }
             SelectedSourceBindingId = binding.BindingId;
             Raise(nameof(SourceColumns));
             var primaryKeyText = descriptor.PrimaryKeyColumns.Count > 0
@@ -4271,11 +4641,21 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             StatusText = descriptor.HasStableRowIdentity
                 ? $"Loaded {schema.Columns.Count} fields from {table}. Primary key: {string.Join(", ", descriptor.PrimaryKeyColumns)}; stable row identity enabled."
                 : $"Loaded {schema.Columns.Count} fields from {table}. No primary key detected; SQLite does not guarantee row ordering, so positional row provenance may shift between reads.";
+            if (isRetainedSnapshot)
+            {
+                SourceInspectionSummary += $" Retained snapshot: {Path.GetFileName(Path.GetDirectoryName(metadataPath!))}; bytes are reverified before each run.";
+                StatusText = $"Loaded {schema.Columns.Count} fields from retained snapshot '{Path.GetFileName(Path.GetDirectoryName(metadataPath!))}'.";
+            }
+            IsSourceSchemaDrifted = false;
+            NotifySqliteSnapshotCommands();
         }
         catch (Exception ex)
         {
+            if (generation != _sourceLoadGeneration) return;
+            IsSourceSchemaDrifted = true;
             SourceInspectionSummary = $"SQLite source inspection failed: {ex.Message}";
             StatusText = $"SQLite table load failed: {ex.Message}";
+            NotifySqliteSnapshotCommands();
         }
         finally
         {
@@ -5435,8 +5815,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             : Path.GetFullPath(Path.Combine(root, binding.Locator!));
         if (!File.Exists(path))
         {
-            SourceInspectionSummary = $"Saved source is unavailable: {Path.GetFileName(path)}.";
+            SelectedSourceBindingId = binding.BindingId;
+            _sqliteSourcePath = StringComparer.Ordinal.Equals(binding.Kind, "sqlite") ? path : null;
+            IsSourceSchemaDrifted = true;
+            SourceInspectionSummary = StringComparer.Ordinal.Equals(binding.Kind, "sqlite")
+                ? $"Saved SQLite source is unavailable: {Path.GetFileName(path)}. Select a matching retained snapshot to replay it."
+                : $"Saved source is unavailable: {Path.GetFileName(path)}.";
             StatusText = $"Saved source file is missing from the project workspace: {Path.GetFileName(path)}.";
+            NotifySqliteSnapshotCommands();
             return;
         }
 
@@ -5446,10 +5832,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void ClearSourceAndRunResults()
     {
+        Interlocked.Increment(ref _sourceLoadGeneration);
+        if (_snapshotOperationCancellation is { } snapshotCancellation)
+        {
+            snapshotCancellation.Cancel();
+            Raise(nameof(CanCancelOperation));
+            Raise(nameof(CancelOperationButtonText));
+            CancelOperationCommand?.NotifyCanExecuteChanged();
+        }
+        _sqliteSourceSnapshotMetadataPaths.Clear();
         _suggestionSession = null;
         _acceptedSuggestionUndo.Clear();
         _suggestionRedoState = null;
-        Interlocked.Increment(ref _sourceLoadGeneration);
         InvalidateMappingOperationIfStale();
         ClearDestinationSelection();
         IsSourceLoading = false;
@@ -5471,6 +5865,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         Raise(nameof(SourceTables));
         Raise(nameof(HasSourceTables));
         Raise(nameof(SelectedSourceTable));
+        NotifySqliteSnapshotCommands();
         Raise(nameof(AiSuggestions));
         Raise(nameof(FilteredAiSuggestions));
     }
@@ -5661,7 +6056,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var root = WorkspaceRoot();
-            var connections = BuildConnections(root);
+            var connections = await BuildExecutionConnectionsAsync(root, cancellationToken);
             await using var worker = _workerFactory.Create(profile);
             using var result = await new MappingJobService(profile, worker, executionBudget: _executionBudget).RunAsync(
                 project, connections, ReadParameters(), preview: true, cancellationToken,
@@ -5733,7 +6128,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var root = WorkspaceRoot();
-            var connections = BuildConnections(root);
+            var connections = await BuildExecutionConnectionsAsync(root, cancellationToken);
             await using var worker = _workerFactory.Create(profile);
             var service = new MappingJobService(profile, worker, executionBudget: _executionBudget);
             using var result = await service.RunAsync(
@@ -6081,6 +6476,22 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         return result;
     }
 
+    private async Task<Dictionary<string, SourceConnection>> BuildExecutionConnectionsAsync(
+        string root, CancellationToken cancellationToken)
+    {
+        var connections = BuildConnections(root);
+        foreach (var (bindingId, metadataPath) in _sqliteSourceSnapshotMetadataPaths.ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!connections.TryGetValue(bindingId, out var expected)
+                || !StringComparer.Ordinal.Equals(expected.Kind, "sqlite"))
+                throw new InvalidOperationException($"Retained SQLite snapshot selection for '{bindingId}' no longer matches a SQLite source binding.");
+            connections[bindingId] = await SqliteSourceSnapshotStore.OpenAsync(
+                metadataPath, expected, cancellationToken);
+        }
+        return connections;
+    }
+
     private Dictionary<string, string> ReadParameters() => Session.Project.Nodes
         .Where(node => node.NodeType == NodeTypeConstants.RunParameter
                        && node.Parameters.TryGetValue("name", out var name) && name is not null
@@ -6300,6 +6711,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         _isDisposed = true;
         _session.Changed -= OnSessionChanged;
         _session.SelectionChanged -= OnSessionSelectionChanged;
+        _snapshotOperationCancellation?.Cancel();
         _activeMappingOperation?.Cancellation.Cancel();
         _previewLargeArtifact?.Dispose();
         _previewLargeArtifact = null;

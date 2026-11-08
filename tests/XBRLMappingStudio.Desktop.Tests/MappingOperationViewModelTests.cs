@@ -144,6 +144,153 @@ public sealed class MappingOperationViewModelTests
     }
 
     [AvaloniaFact]
+    public async Task SqliteSourceSnapshotControlsCaptureAndReplayMissingLiveSource()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-sqlite-snapshot-" + Guid.NewGuid().ToString("N"));
+        var retainedDirectory = Path.Combine(directory, "retained");
+        Directory.CreateDirectory(retainedDirectory);
+        var sourcePath = Path.Combine(directory, "source.db");
+        var projectPath = Path.Combine(directory, "mapping.xmap");
+        MainWindowViewModel? viewModel = null;
+        MainWindow? window = null;
+        try
+        {
+            await using (var database = new SqliteConnection($"Data Source={sourcePath};Pooling=False"))
+            {
+                await database.OpenAsync();
+                await using var setup = database.CreateCommand();
+                setup.CommandText = "CREATE TABLE financials (Id INTEGER PRIMARY KEY, Line TEXT NOT NULL, "
+                    + "Current TEXT NOT NULL, Prior TEXT NOT NULL); "
+                    + "INSERT INTO financials (Line, Current, Prior) VALUES ('Revenue', '1250', '1100');";
+                await setup.ExecuteNonQueryAsync();
+            }
+
+            var project = TestFixtures.BuildRevenueMappingProject(sourcePath);
+            var binding = project.Bindings.Single();
+            project.Bindings[0] = binding with
+            {
+                Kind = "sqlite",
+                Locator = Path.GetFileName(sourcePath),
+                Configuration = new Dictionary<string, object?>
+                {
+                    ["table"] = "financials",
+                    ["decimalColumns"] = "Current,Prior"
+                }
+            };
+            var dialog = new FixedReportFileDialog(Path.Combine(directory, "unused.json"), retainedDirectory,
+                confirmSqliteSnapshot: true);
+            viewModel = new MainWindowViewModel(project, dialog);
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadSourceAsync(sourcePath);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+
+            window = new MainWindow { DataContext = viewModel };
+            window.Show();
+            var status = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SqliteSourceSnapshotStatusText"));
+            var capture = Assert.IsType<Button>(window.FindControl<Button>("CaptureSqliteSourceSnapshotButton"));
+            var useSnapshot = Assert.IsType<Button>(window.FindControl<Button>("UseSqliteSourceSnapshotButton"));
+            var useLive = Assert.IsType<Button>(window.FindControl<Button>("ClearSqliteSourceSnapshotButton"));
+            Assert.Equal("SQLite source snapshot status", AutomationProperties.GetName(status));
+            Assert.Equal("Capture a private full-database SQLite source snapshot", AutomationProperties.GetName(capture));
+            Assert.Equal("Select a retained SQLite source snapshot for replay", AutomationProperties.GetName(useSnapshot));
+            Assert.Equal("Clear the retained snapshot and return to the live SQLite source", AutomationProperties.GetName(useLive));
+            Assert.True(capture.IsEnabled);
+            Assert.Contains("live SQLite source", status.Text, StringComparison.OrdinalIgnoreCase);
+
+            var captureStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            PropertyChangedEventHandler captureHandler = (_, _) =>
+            {
+                if (!viewModel.IsBusy && viewModel.IsRetainedSqliteSnapshotSelected
+                    && viewModel.StatusText.StartsWith("Captured and selected", StringComparison.Ordinal))
+                    captureStopped.TrySetResult();
+            };
+            viewModel.PropertyChanged += captureHandler;
+            try
+            {
+                capture.Command!.Execute(capture.CommandParameter);
+                await captureStopped.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            }
+            finally { viewModel.PropertyChanged -= captureHandler; }
+
+            Assert.True(viewModel.IsRetainedSqliteSnapshotSelected);
+            Assert.Contains("Captured and selected", viewModel.StatusText, StringComparison.Ordinal);
+            Assert.False(capture.IsEnabled);
+            Assert.True(useLive.IsVisible);
+            Assert.Contains("retained snapshot", status.Text, StringComparison.OrdinalIgnoreCase);
+            var metadataPath = Directory.GetFiles(retainedDirectory, "snapshot.json", SearchOption.AllDirectories).Single();
+
+            File.Delete(sourcePath);
+            var previewStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedBusy = false;
+            PropertyChangedEventHandler handler = (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                if (viewModel.IsBusy) observedBusy = true;
+                else if (observedBusy) previewStopped.TrySetResult();
+            };
+            viewModel.PropertyChanged += handler;
+            try
+            {
+                viewModel.PreviewCommand.Execute(null);
+                await previewStopped.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            finally { viewModel.PropertyChanged -= handler; }
+
+            Assert.Single(viewModel.PreviewFacts);
+            Assert.StartsWith("Preview only", viewModel.PreviewResultSummary, StringComparison.Ordinal);
+
+            useLive.Command!.Execute(useLive.CommandParameter);
+            Assert.False(viewModel.IsRetainedSqliteSnapshotSelected);
+            Assert.True(viewModel.IsSourceSchemaDrifted);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+
+            async Task SelectSnapshotMetadataAsync(string selectedMetadataPath)
+            {
+                dialog.SnapshotMetadataPath = selectedMetadataPath;
+                var selectionStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var observedSelectionBusy = false;
+                PropertyChangedEventHandler selectionHandler = (_, eventArgs) =>
+                {
+                    if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsBusy)) return;
+                    if (viewModel.IsBusy) observedSelectionBusy = true;
+                    else if (observedSelectionBusy) selectionStopped.TrySetResult();
+                };
+                viewModel.PropertyChanged += selectionHandler;
+                try
+                {
+                    useSnapshot.Command!.Execute(useSnapshot.CommandParameter);
+                    await selectionStopped.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                finally { viewModel.PropertyChanged -= selectionHandler; }
+            }
+
+            var invalidSnapshotDirectory = Path.Combine(directory, "invalid-snapshot");
+            Directory.CreateDirectory(invalidSnapshotDirectory);
+            var invalidMetadataPath = Path.Combine(invalidSnapshotDirectory, "snapshot.json");
+            File.WriteAllText(invalidMetadataPath, "{}");
+            await SelectSnapshotMetadataAsync(invalidMetadataPath);
+            Assert.False(viewModel.IsRetainedSqliteSnapshotSelected);
+            Assert.True(viewModel.IsSourceSchemaDrifted);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+
+            await SelectSnapshotMetadataAsync(metadataPath);
+
+            Assert.True(viewModel.IsRetainedSqliteSnapshotSelected);
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.Contains("Retained SQLite snapshot selected", viewModel.StatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            window?.Close();
+            viewModel?.Dispose();
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
+    [AvaloniaFact]
     public async Task PreviewResultLabelsPartialOutputAndExposesFactMappingEvidence()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-preview-evidence-" + Guid.NewGuid().ToString("N"));
@@ -900,8 +1047,13 @@ public sealed class MappingOperationViewModelTests
         return path;
     }
 
-    private sealed class FixedReportFileDialog(string outputPath) : IProjectFileDialog
+    private sealed class FixedReportFileDialog(
+        string outputPath,
+        string? sqliteSnapshotParent = null,
+        string? snapshotMetadataPath = null,
+        bool confirmSqliteSnapshot = false) : IProjectFileDialog
     {
+        public string? SnapshotMetadataPath { get; set; } = snapshotMetadataPath;
         public Task<string?> OpenProjectAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveProjectAsync() => Task.FromResult<string?>(null);
         public Task<LegacyProjectProfileSelection?> SelectLegacyProjectProfileAsync(
@@ -925,6 +1077,10 @@ public sealed class MappingOperationViewModelTests
         public Task<string?> OpenSourceAsync() => Task.FromResult<string?>(null);
         public Task<string?> OpenDestinationDatabaseAsync() => Task.FromResult<string?>(null);
         public Task<string?> SaveDestinationFileAsync(string kind) => Task.FromResult<string?>(null);
+        public Task<string?> SelectSqliteSnapshotParentDirectoryAsync() => Task.FromResult(sqliteSnapshotParent);
+        public Task<string?> OpenSqliteSnapshotMetadataAsync() => Task.FromResult(SnapshotMetadataPath);
+        public Task<bool> ConfirmSqliteSnapshotCaptureAsync(string sourcePath, string bundleDirectory)
+            => Task.FromResult(confirmSqliteSnapshot);
         public Task<bool> ConfirmDestinationPublicationAsync(string databasePath, string table,
             IReadOnlyList<string> businessKey, int factCount, string semanticDigest)
             => Task.FromResult(false);

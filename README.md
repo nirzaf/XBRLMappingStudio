@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest functional-change CI [42429468337](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42429468337) verified `6dc6283af834d53209fa999bc5f15385343c849b`: Windows and Ubuntu each passed 880 tests with 6 environment-gated Arelle subprocess skips; the pinned worker job ran 74 Python tests, 15 .NET Arelle tests, and 15 dependency-inventory tests. |
+| Tests | xUnit 2.9.3 | Latest main-branch CI [42465702106](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42465702106) verified `cee497d8b8b5aa5824d31694acd1b968214c4ce5`; each OS matrix passed 1,182 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -287,21 +287,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest functional-change CI [42435819517](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42435819517)
-verified commit `97524d90c92e0688f9e2a793f03fc577ae45fee2`. Repository hygiene,
-Windows and Ubuntu Release build/test, pinned Arelle integration, dependency-inventory
-tests, and SPDX generation passed. Each .NET OS matrix passed **909 tests, skipped 6
-environment-gated Arelle cases, and had 0 failures**. The eight suite counts were
-Adapters 95, AI 72, Desktop 106, Engine 125, Integration 241, Ops 89, Project 26,
-and XBRL 155. The worker job ran **74 Python protocol/offline tests**, **15 gated
-.NET Arelle execution tests**, and **15 dependency-inventory tests**. This head
-rejects malformed BCP 47 language tags during profile-free JSON and XML import,
-rejects unsupported typed dimensions and inexact numeric values on report import,
-enforces lowercase language tags for xBRL-JSON, blocks duplicate dimensions after
-QName alias resolution, enforces the 64-dimension limit on profile-free reads, and
-checks imported decimals against the supported range while rejecting decimals on
-nil facts. Per-concept supported languages still match case-insensitively. All four
-CI jobs passed.
+Latest main-branch CI [42465702106](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42465702106)
+verified `cee497d8b8b5aa5824d31694acd1b968214c4ce5`. Repository hygiene, Windows and
+Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
+generation, separate CSV/SQLite/group/join memory qualifications, and five repeated
+Windows worker-cancellation checks passed. Each OS matrix passed **1,182 tests**,
+skipped **6** environment-gated Arelle subprocess cases, and had **0 failures**. The
+eight suite counts were Adapters 113, AI 72, Desktop 115, Engine 155, Integration
+396, Ops 102, Project 32, and XBRL 197. The pinned worker job passed **78 Python
+protocol/offline tests**, **15 .NET Arelle execution tests**, and **15 dependency inventory tests**. This CI verifies the synthetic/offline implementation; it does
+not qualify the selected IFRS package, its rights, a regulator filing profile, or
+native desktop accessibility.
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 

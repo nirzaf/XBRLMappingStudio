@@ -95,6 +95,10 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
     {
         Patterns = new[] { "*.db", "*.sqlite", "*.sqlite3" }
     };
+    private static readonly FilePickerFileType SqliteSnapshotMetadataType = new("Retained SQLite source snapshot")
+    {
+        Patterns = new[] { "snapshot.json" }
+    };
     private static readonly IReadOnlyDictionary<string, FilePickerFileType> DestinationFileTypes =
         new Dictionary<string, FilePickerFileType>(StringComparer.Ordinal)
         {
@@ -469,6 +473,68 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
             FileTypeChoices = new[] { fileType }
         });
         return LocalPath(file?.Path);
+    }
+
+    public async Task<string?> SelectSqliteSnapshotParentDirectoryAsync()
+    {
+        var folders = await owner.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Choose where to store the retained SQLite snapshot",
+            AllowMultiple = false
+        });
+        return LocalPath(folders.FirstOrDefault()?.Path);
+    }
+
+    public async Task<string?> OpenSqliteSnapshotMetadataAsync()
+    {
+        var files = await owner.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select retained SQLite source snapshot metadata",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { SqliteSnapshotMetadataType }
+        });
+        return LocalPath(files.FirstOrDefault()?.Path);
+    }
+
+    public async Task<bool> ConfirmSqliteSnapshotCaptureAsync(string sourcePath, string bundleDirectory)
+    {
+        var dialog = new Window
+        {
+            Title = "Confirm SQLite source snapshot",
+            Width = 580,
+            Height = 340,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var confirm = new Button { Content = "Capture full database snapshot", IsDefault = true, MinWidth = 220 };
+        var cancel = new Button { Content = "Cancel", MinWidth = 100 };
+        confirm.Click += (_, _) => dialog.Close(true);
+        cancel.Click += (_, _) => dialog.Close(false);
+
+        var content = new StackPanel { Spacing = 12, Margin = new Avalonia.Thickness(20) };
+        content.Children.Add(new TextBlock
+        {
+            Text = "This copies the entire SQLite database, including tables outside the selected mapping. "
+                + "The snapshot is local and unencrypted; treat it as confidential source data. "
+                + "The existing source is read-only and an existing snapshot folder will never be replaced.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Source database: {sourcePath}\nNew snapshot folder: {bundleDirectory}",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        var actions = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+            Spacing = 8
+        };
+        actions.Children.Add(cancel);
+        actions.Children.Add(confirm);
+        content.Children.Add(actions);
+        dialog.Content = content;
+        return await dialog.ShowDialog<bool>(owner);
     }
 
     public async Task<bool> ConfirmDestinationPublicationAsync(
