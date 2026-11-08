@@ -24,3 +24,36 @@ Library drafts may still have incomplete bodies; execution validates their compl
 graph. No scripts, arbitrary code, or new runtime evaluator is introduced. The
 existing desktop decimal-template editor remains available; generalized signatures
 are represented in the existing project/package schema and library APIs.
+
+
+## Desktop package preservation
+
+Desktop import validates every packaged revision against its actual named ports
+and the complete imported dependency library. An isolated compiler scaffold
+supplies typed input ports, including collection inputs, and an iteration source
+for zero-input functions. This is structural validation, not execution evidence
+for generalized typed functions. Existing marker, wiring, type, dependency,
+recursion, catalog and expansion limits still apply. Compatible single-input,
+single-output Decimal functions additionally retain synthetic runtime validation;
+invalid numeric parameters are not accepted merely because a graph compiles.
+
+Import, export and pinning preserve port names, ordering, shape, cardinality,
+requiredness and descriptions, as well as exact dependency revisions. Import only
+rewrites the requested root identity/name and namespaced dependency identities.
+Import remains one undoable project edit. It does not create or renew approval.
+Project changes during a pending package dialog or validation refuse application
+rather than transferring a package into a different active project.
+
+The visual editor still authors only one Single Decimal input and one Single
+Decimal output. Loading a compatible revision retains its actual public names,
+port metadata and catalog rather than replacing them with the template signature.
+General typed revisions show their signature and remain available for inspection,
+export and exact-revision pinning. Numeric editing, preview and saving are disabled
+for those revisions, including direct command invocation and canvas mutation.
+Starting a new numeric draft restores the authoring controls.
+
+Headless Desktop regression coverage exercises package round trips, malformed
+contracts, immutable revisions, undo/redo and interrupted dialog flows. It is not
+native Windows keyboard, mouse, visual-layout or screen-reader acceptance. General
+visual signature authoring, real-profile validation and release qualification
+remain open.
