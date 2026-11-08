@@ -70,8 +70,8 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio install-profile <profile-id/version-directory> [--catalog <directory>] (offline; installs disabled)");
-    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> [--allow-synthetic-profile]");
-    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
+    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile");
+    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
     Console.Error.WriteLine("  xbrl-studio reconcile-publication <mixed-operation-key>");
     Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]");

@@ -1283,6 +1283,23 @@ public sealed class CliParityTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cli_HelpRequiresSyntheticOptInForArtifactValidationInBothModes()
+    {
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "--help");
+
+        Assert.Equal(0, exit);
+        Assert.Empty(stdout);
+        Assert.Contains(
+            "validate-artifact <file.xbrl.json> --allow-synthetic-profile",
+            stderr,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "validate-artifact <file.xbrl.json> --allow-synthetic-profile --arelle",
+            stderr,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Cli_ValidateWithSubstitutedProfileReturnsIncompleteProfile()
     {
         var source = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
