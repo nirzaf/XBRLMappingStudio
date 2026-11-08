@@ -316,6 +316,56 @@ public sealed class XmlExportTests
         Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(unsupportedPrecision.ToString()));
     }
 
+    [Theory]
+    [InlineData(-30)]
+    [InlineData(30)]
+    public void ReadFacts_UsesSupportedDecimalsRangeBoundaries(int decimals)
+    {
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { Revenue() }));
+        document.Root!.Element(synthetic + "Revenue")!.SetAttributeValue("decimals", decimals);
+
+        var reopened = Assert.Single(XmlSerializer.ReadFacts(document.ToString()));
+
+        Assert.Equal(decimals, reopened.Decimals);
+    }
+
+    [Theory]
+    [InlineData("-31")]
+    [InlineData("31")]
+    [InlineData("")]
+    [InlineData("not-an-integer")]
+    [InlineData("2147483648")]
+    public void ReadFacts_RejectsInvalidOrUnsupportedDecimals(string decimals)
+    {
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { Revenue() }));
+        document.Root!.Element(synthetic + "Revenue")!.SetAttributeValue("decimals", decimals);
+
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(document.ToString()));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("INF")]
+    public void ReadFacts_RejectsDecimalsAttributeOnNilFacts(string decimals)
+    {
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var nil = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Expenses"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = Revenue().Period,
+            Unit = new XbrlUnit("QAR"),
+            IsNil = true
+        };
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { nil }));
+        document.Root!.Element(synthetic + "Expenses")!.SetAttributeValue("decimals", decimals);
+
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(document.ToString()));
+    }
+
     [Fact]
     public void ReadFacts_UsesXmlSchemaBooleanLexicalValuesForNil()
     {

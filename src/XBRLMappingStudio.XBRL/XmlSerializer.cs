@@ -648,7 +648,17 @@ public static class XmlSerializer
         if (isNil && !string.IsNullOrWhiteSpace(el.Value))
             throw Unsupported("A nil fact cannot also carry text content.");
         var decimalsStr = (string?)el.Attribute("decimals");
-        int? decimals = decimalsStr is null || decimalsStr == "INF" ? null : int.Parse(decimalsStr, CultureInfo.InvariantCulture);
+        int? decimals = null;
+        if (decimalsStr is not null && decimalsStr != "INF")
+        {
+            if (!int.TryParse(decimalsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                throw Unsupported("Fact decimals must be INF or an integer in the supported range [-30, 30].");
+            if (parsed is < -30 or > 30)
+                throw Unsupported("Fact decimals are outside the supported range [-30, 30].");
+            decimals = parsed;
+        }
+        if (isNil && decimalsStr is not null)
+            throw Unsupported("Nil XBRL facts cannot carry a decimals attribute.");
         var lang = (string?)el.Attribute(XNamespace.Xml + "lang");
         if (lang is not null && !Bcp47LanguageTagValidator.IsWellFormed(lang))
             throw Unsupported($"Language '{lang}' is not a well-formed BCP 47 language tag.");

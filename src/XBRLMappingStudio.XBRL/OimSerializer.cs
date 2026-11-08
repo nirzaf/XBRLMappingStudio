@@ -400,8 +400,12 @@ public static class OimSerializer
             {
                 if (decimalsNode.ValueKind != JsonValueKind.Number || !decimalsNode.TryGetInt32(out var parsed))
                     throw Unsupported("Fact decimals must be an integer.");
+                if (parsed is < -30 or > 30)
+                    throw Unsupported("Fact decimals are outside the supported range [-30, 30].");
                 decimals = parsed;
             }
+            if (value.ValueKind == JsonValueKind.Null && decimals is not null)
+                throw Unsupported("Nil xBRL-JSON facts cannot carry a decimals property.");
             var isNumeric = conceptMetadata?.IsNumeric
                 ?? (unit.Unit is not null || unit.CompoundUnit is not null || decimals is not null);
             if (isNumeric && unit.Unit is null && unit.CompoundUnit is null)

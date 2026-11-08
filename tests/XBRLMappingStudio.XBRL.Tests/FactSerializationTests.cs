@@ -666,6 +666,51 @@ public sealed class FactSerializationTests
             """));
     }
 
+    [Theory]
+    [InlineData(-30)]
+    [InlineData(30)]
+    public void OimJson_ReadsSupportedDecimalsRangeBoundaries(int decimals)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { GoldenFacts()[0] }))!.AsObject();
+        var fact = root["facts"]!.AsObject().First().Value!.AsObject();
+        fact["decimals"] = decimals;
+
+        var reopened = Assert.Single(OimSerializer.ReadFacts(root.ToJsonString()));
+
+        Assert.Equal(decimals, reopened.Decimals);
+    }
+
+    [Theory]
+    [InlineData(-31)]
+    [InlineData(31)]
+    public void OimJson_RejectsDecimalsOutsideSupportedRange(int decimals)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { GoldenFacts()[0] }))!.AsObject();
+        var fact = root["facts"]!.AsObject().First().Value!.AsObject();
+        fact["decimals"] = decimals;
+
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+    }
+
+    [Fact]
+    public void OimJson_RejectsDecimalsOnNilFacts()
+    {
+        var nil = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Expenses"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            IsNil = true
+        };
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { nil }))!.AsObject();
+        var fact = root["facts"]!.AsObject().First().Value!.AsObject();
+        fact["decimals"] = 0;
+
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+    }
+
     [Fact]
     public void OimJson_ReadsXbrlInternationalExampleIncludingTextFact()
     {
