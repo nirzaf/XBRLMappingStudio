@@ -113,16 +113,20 @@ inheritance and targetRole traversal, role-specific usability, defaults and clos
 cubes. Missing/unsupported metadata and exhausted traversal budgets remain
 incomplete. Conditional dimension findings now gate both in-memory and streamed
 synthetic worker results, carry exact fact locators, and block publication while
-preserving the existing destination. Typed dimensions, scenario placement and
-real IFRS/Qatar conformance remain unqualified.
+preserving the existing destination. Publication rejects unsuccessful or preview
+runs before evaluating profile approval, while publishable runs still require an
+exact matching approval. Typed dimensions, scenario placement and real IFRS or
+jurisdiction-specific acceptance remain unqualified.
 
-Local verification: Release solution build passed with zero warnings/errors;
-1,095 non-memory tests passed with six environment-gated Arelle skips; both
-100,000-row memory cases passed separately, and enabled Arelle selection passed
-15/15. The worker suite passed 78/78, including the independent 20-case shared
-hypercube algorithm oracle. Thirty direct semantic cases and five conditional
-worker/publication cases cover the new contract. Exact-commit CI is required for
-this follow-on independently of the previous increments.
+The upstream feature commit `e0a7062` passed exact-head CI run
+[42459177665](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42459177665),
+including the two separate 100,000-row memory cases and enabled Arelle checks.
+After the local publication outcome-order correction, the Windows Release
+solution suite passed 1,097 tests with six environment-gated Arelle skips, and
+`DimensionalPublicationTests` passed 5/5. The worker suite passed 78/78,
+including the independent 20-case shared hypercube algorithm oracle. Thirty
+direct semantic cases and five conditional worker/publication cases cover the
+new contract. These results do not close any open real-profile acceptance gate.
 
 ## Disk-partitioned grouping follow-on
 

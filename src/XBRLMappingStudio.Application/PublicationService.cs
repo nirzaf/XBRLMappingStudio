@@ -58,6 +58,7 @@ public sealed class PublicationService
     {
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
+        RequirePublishableRun(manifest, destinationPath);
         var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
         if (gate.HasBlockingErrors)
         {
@@ -70,11 +71,9 @@ public sealed class PublicationService
         if (manifest.ProjectId != project.ProjectId
             || manifest.SemanticRevision != project.SemanticRevision
             || manifest.ProjectSemanticDigest != graphDigest
-            || manifest.ProfileDigest != profile.Digest
-            || manifest.IsPreview
-            || manifest.Outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+            || manifest.ProfileDigest != profile.Digest)
             throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
-                "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
+                "Run evidence no longer matches the approved project or profile identity.",
                 manifest.RunId, destinationPath);
 
         if (outputKind is not ("xbrl-json" or "xbrl-xml"))
@@ -123,6 +122,7 @@ public sealed class PublicationService
         ArgumentNullException.ThrowIfNull(artifact);
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
+        RequirePublishableRun(manifest, destinationPath);
         var selectedOutputKind = outputKind ?? artifact.OutputKind;
         if (selectedOutputKind is not ("xbrl-json" or "xbrl-xml")
             || !StringComparer.Ordinal.Equals(selectedOutputKind, artifact.OutputKind))
@@ -140,11 +140,9 @@ public sealed class PublicationService
         if (manifest.ProjectId != project.ProjectId
             || manifest.SemanticRevision != project.SemanticRevision
             || manifest.ProjectSemanticDigest != graphDigest
-            || manifest.ProfileDigest != profile.Digest
-            || manifest.IsPreview
-            || manifest.Outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+            || manifest.ProfileDigest != profile.Digest)
             throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
-                "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
+                "Run evidence no longer matches the approved project or profile identity.",
                 manifest.RunId, destinationPath);
 
         if (!manifest.Outputs.Any(output => output.Kind == selectedOutputKind
@@ -440,6 +438,14 @@ public sealed class PublicationService
             || project.SemanticRevision != manifest.SemanticRevision)
             throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
                 "Approval or executable project identity changed before publication replacement.", manifest.RunId, destination);
+    }
+
+    private static void RequirePublishableRun(RunManifest manifest, string destination)
+    {
+        if (manifest.IsPreview || manifest.Outcome is not (RunOutcome.Success or RunOutcome.SuccessWithWarnings))
+            throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
+                "Run evidence no longer matches the approved project/profile, or the run is not publishable.",
+                manifest.RunId, destination);
     }
 
     private void Abort(string runId, string full, string stagedPath, string? stagedDigest,

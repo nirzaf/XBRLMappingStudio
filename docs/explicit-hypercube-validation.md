@@ -1,8 +1,8 @@
 # Bounded explicit hypercube validation
 
 This increment advances P1-07 for the local fact model. It does **not** qualify
-an IFRS or Qatar filing profile, implement typed dimensions, or replace Arelle's
-DTS/schema and regulator-rule validation.
+a real IFRS profile or any jurisdiction-specific filing profile, implement typed
+dimensions, or replace Arelle's DTS/schema and regulator-rule validation.
 
 ## Supported contract
 
@@ -83,13 +83,14 @@ publish a report after discarding a conditional dimension finding.
   legacy member restrictions and preservation of an existing destination when
   publication is blocked.
 
-Real IFRS/Qatar package rights, metadata completeness, typed/scenario support and
+Official IFRS package rights, metadata completeness, typed/scenario support and
 permitted financial conformance fixtures remain open acceptance work.
 
-Local verification on November 8, 2026: locked restore and Release solution build
-passed (zero warnings/errors); the full non-memory suite passed 1,095 tests with
-six environment-gated Arelle skips. Both 100,000-row memory qualifications passed
-in separate fresh processes, and the enabled Arelle integration selection passed
-15/15. Python worker tests passed 78/78, dependency/performance-tool tests passed
-15/15, and the taxonomy benchmark self-test passed. These local results do not
-replace exact-commit Windows/Ubuntu CI or any open real-profile acceptance gate.
+The upstream feature commit `e0a7062` passed exact-head CI run
+[42459177665](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42459177665),
+including locked restore, separate 100,000-row memory qualifications, enabled
+Arelle integration (15/15), Python worker tests (78/78), dependency/performance
+tool tests (15/15), and the taxonomy benchmark self-test. After the local
+publication outcome-order correction, the Windows Release solution suite passed
+1,097 tests with six environment-gated Arelle skips; `DimensionalPublicationTests`
+passed 5/5. These results do not close any open real-profile acceptance gate.
