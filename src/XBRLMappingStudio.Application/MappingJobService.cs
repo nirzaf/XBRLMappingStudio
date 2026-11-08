@@ -2439,13 +2439,19 @@ public sealed class MappingJobService
 
         try
         {
+            var expectedRecords = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
+            var expectedColumns = XbrlFactRecordMapper.OutputColumns;
+            var hasPresenceMetadata = DestinationPlanValidator.UsesFieldPresenceMetadata(kind, outputFormat);
+            if (hasPresenceMetadata)
+            {
+                expectedRecords = FileOutputPresenceMetadata.Append(expectedRecords, expectedColumns);
+                expectedColumns = FileOutputPresenceMetadata.AppendHeader(expectedColumns);
+            }
             var connection = new SourceConnection("staged-record-output", kind, stagedPath,
                 new Dictionary<string, string>(StringComparer.Ordinal));
             var adapter = BuildAdapter(connection, _executionBudget.MaxRowBytes);
             var schema = await adapter.InspectSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
-            var requiredColumns = XbrlFactRecordMapper.OutputColumns;
-            if (DestinationPlanValidator.UsesFieldPresenceMetadata(kind, outputFormat))
-                requiredColumns = FileOutputPresenceMetadata.AppendHeader(requiredColumns);
+            var requiredColumns = expectedColumns;
             var singleXmlRecordPrefix = kind == DestinationPlanValidator.XmlKind && result.Facts.Count == 1
                 ? "row." : string.Empty;
             if (requiredColumns.Any(column => !schema.Columns.Any(actual =>
@@ -2455,8 +2461,49 @@ public sealed class MappingJobService
             var rows = 0;
             await foreach (var record in adapter.ReadFullAsync(connection, schema, cancellationToken))
             {
+                if (rows >= expectedRecords.Count)
+                    throw new InvalidDataException("Staged record-file output contains more rows than the mapped fact set.");
+
+                var expectedRecord = expectedRecords[rows];
                 if (record.Fields.Count == 0)
-                    throw new InvalidDataException("Staged record-file output contains an empty row.");
+                    throw new InvalidDataException($"Staged record-file output row {rows + 1} is empty.");
+
+                if (hasPresenceMetadata)
+                {
+                    var metadataColumn = singleXmlRecordPrefix + FileOutputPresenceMetadata.ColumnName;
+                    if (!record.Fields.TryGetValue(metadataColumn, out var metadata)
+                        || !StringComparer.Ordinal.Equals(metadata.AsString(),
+                            expectedRecord.Fields[FileOutputPresenceMetadata.ColumnName].AsString()))
+                        throw new InvalidDataException(
+                            $"Staged record-file output row {rows + 1} changed its field-presence metadata.");
+                }
+
+                foreach (var column in XbrlFactRecordMapper.OutputColumns)
+                {
+                    var actualColumn = singleXmlRecordPrefix + column;
+                    if (!expectedRecord.Fields.TryGetValue(column, out var expectedValue)
+                        || !record.Fields.TryGetValue(actualColumn, out var actualValue))
+                        throw new InvalidDataException(
+                            $"Staged record-file output row {rows + 1} is missing expected field '{column}'.");
+
+                    var legacyTabularContract = !hasPresenceMetadata
+                        && kind is DestinationPlanValidator.CsvKind or DestinationPlanValidator.ExcelKind;
+                    var presenceMatches = expectedValue.Presence == actualValue.Presence
+                        || ((hasPresenceMetadata || legacyTabularContract)
+                            && expectedValue.Presence is (ValuePresence.Missing
+                                or ValuePresence.ExplicitNil
+                                or ValuePresence.Blank)
+                            && actualValue.Presence is not ValuePresence.Present);
+                    if (!presenceMatches)
+                        throw new InvalidDataException(
+                            $"Staged record-file output row {rows + 1}, field '{column}', changed value presence.");
+
+                    if (expectedValue.Presence == ValuePresence.Present
+                        && !StringComparer.Ordinal.Equals(
+                            CanonicalRecordCell(expectedValue), CanonicalRecordCell(actualValue)))
+                        throw new InvalidDataException(
+                            $"Staged record-file output row {rows + 1}, field '{column}', changed its value.");
+                }
                 rows++;
             }
             if (rows != result.Facts.Count)
@@ -2480,6 +2527,13 @@ public sealed class MappingJobService
                 manifest.RunId, stagedPath);
         }
     }
+
+    private static string CanonicalRecordCell(DataValue value) => value.Raw switch
+    {
+        bool boolean => boolean ? "true" : "false",
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
+        _ => value.Raw?.ToString() ?? string.Empty
+    };
 
     private static string ComputeDestinationOperationFingerprint(
         MappingProject project,
