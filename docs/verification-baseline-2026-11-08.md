@@ -18,13 +18,16 @@ Verification:
 - `Cli_ArtifactValidationRequiresSyntheticOptInBeforePathAccess` passed both
   local and Arelle-option cases (2/2) in the isolated `CodexTest` build.
 - The first exact-head run on `327bbe3` exposed the Arelle fixture's missing
-  opt-in. The fixture was corrected in `49fe2eb`.
+-  opt-in. The fixture was corrected in `49fe2eb`; `0366dd0` also updated the
+  CLI synopsis to show that the flag is required in both modes.
+- `Cli_HelpRequiresSyntheticOptInForArtifactValidationInBothModes` passed with
+  the two authorization-path cases (3/3 total) in the isolated `CodexTest` build.
 - Exact-head GitHub Actions run
-  [42437874202](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42437874202)
+  [42438666525](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42438666525)
   passed repository hygiene, Windows and Ubuntu Release build/tests, and the
   pinned Arelle worker integration on source
-  `49fe2eb3ffcb6b25026f6c6274dce22781181cd1`. Windows passed 911 tests with 6
-  environment-gated skips; the pinned Arelle job passed 15 tests.
+  `0366dd0ed74b053b0f8867ca842dc887e14dc53f`. Ubuntu passed 912 tests with 6
+  environment-gated skips; Windows and the pinned Arelle job also passed.
 
 The synthetic artifact validator remains an explicitly opted-in development
 path. Real-profile artifact validation requires the profile and rights gates.
