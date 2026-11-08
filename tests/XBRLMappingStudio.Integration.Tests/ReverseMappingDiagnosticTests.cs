@@ -119,6 +119,15 @@ public sealed class ReverseMappingDiagnosticTests
                 Configuration = new Dictionary<string, object?>(),
                 SchemaFingerprint = null
             };
+            var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var field = project.Nodes[fieldIndex];
+            var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+            {
+                ["column"] = "value"
+            };
+            parameters.Remove("rowFilterColumn");
+            parameters.Remove("rowFilterValue");
+            project.Nodes[fieldIndex] = field with { Parameters = parameters };
 
             var result = await new MappingJobService(SyntheticProfile.Build(), new SuccessfulWorker()).RunAsync(
                 project,
