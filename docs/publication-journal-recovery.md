@@ -67,5 +67,8 @@ ordering. Existing atomic and mixed-publication process-loss tests remain requir
   file writers. Process termination tests do not establish filesystem power-loss
   durability, installed Windows recovery, or deployment-specific recovery policy.
 
-No approval, rights, profile, installer, or release gate is relaxed. Exact-commit
-Windows/Linux and Arelle CI remain required before integration is considered green.
+No approval, rights, profile, installer, or release gate is relaxed. Exact-head CI
+[42485407031](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42485407031)
+passed on `62428e554064b16a934cf6a5a25732fd4b63f178` across Windows, Ubuntu,
+pinned Arelle integration and repository hygiene; the Windows Release Ops suite
+passed 263/263. This verifies only the bounded synthetic recovery cases above.

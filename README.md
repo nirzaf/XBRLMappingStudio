@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest implementation CI [42470231660](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42470231660) verified `5a02fcd287bd3c3a8444d9227488be7e48ff4b2f`; each OS matrix passed 1,183 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
+| Tests | xUnit 2.9.3 | Latest implementation CI [42485407031](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42485407031) verified `62428e554064b16a934cf6a5a25732fd4b63f178`; each OS matrix passed 1,352 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -287,14 +287,14 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest implementation CI [42470231660](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42470231660)
-verified `5a02fcd287bd3c3a8444d9227488be7e48ff4b2f`. Repository hygiene, Windows and
+Latest implementation CI [42485407031](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42485407031)
+verified `62428e554064b16a934cf6a5a25732fd4b63f178`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, separate CSV/SQLite/group/join memory qualifications, and five repeated
-Windows worker-cancellation checks passed. Each OS matrix passed **1,183 tests**,
+Windows worker-cancellation checks passed. Each OS matrix passed **1,352 tests**,
 skipped **6** environment-gated Arelle subprocess cases, and had **0 failures**. The
 eight suite counts were Adapters 113, AI 72, Desktop 116, Engine 155, Integration
-396, Ops 102, Project 32, and XBRL 197. The pinned worker job passed **78 Python
+404, Ops 263, Project 32, and XBRL 197. The pinned worker job passed **82 Python
 protocol/offline tests**, **15 .NET Arelle execution tests**, and **15 dependency inventory tests**. This CI verifies the synthetic/offline implementation; it does
 not qualify the selected IFRS package, its rights, a regulator filing profile, or
 native desktop accessibility.
@@ -317,14 +317,14 @@ UX-06 now also offers an explicit source-schema recheck: detected drift stays pi
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 126 | Validation, plan compilation, collections/joins, immutable pinned function revisions, bounded per-node output previews and reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
-| XBRL.Tests | 162 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import and occurrence selection, conjunctive multi-dimension filtering, QName alias normalization, filing rules, conversion resilience, required-check completeness |
+| Engine.Tests | 155 | Validation, plan compilation, collections/joins, immutable pinned function revisions, bounded per-node output previews and reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
+| XBRL.Tests | 197 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import and occurrence selection, conjunctive multi-dimension filtering, QName alias normalization, filing rules, conversion resilience, required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 95 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
-| Ops.Tests | 89 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 248 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 114 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence, typed text-fact language editing, source-schema drift recheck |
-| Project.Tests | 26 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
+| Adapters.Tests | 113 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
+| Ops.Tests | 263 | Destination locking/publication/journal and interrupted-recovery safety, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 404 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 116 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence, typed text-fact language editing, source-schema drift recheck |
+| Project.Tests | 32 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash
 dotnet test XBRLMappingStudio.slnx -c Release
