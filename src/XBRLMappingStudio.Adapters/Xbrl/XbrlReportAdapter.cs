@@ -221,7 +221,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             ["textValue"] = f.TextValue is null
                 ? DataValue.Missing(PortShape.String)
                 : DataValue.StringValue(f.TextValue, src),
-            ["decimals"] = DataValue.StringValue(f.Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF", src),
+            ["decimals"] = f.Value is not null || f.Unit is not null || f.CompoundUnit is not null
+                ? DataValue.StringValue(f.Decimals?.ToString(CultureInfo.InvariantCulture) ?? "INF", src)
+                : DataValue.Missing(PortShape.String),
             ["lang"] = string.IsNullOrEmpty(f.Language)
                 ? DataValue.Missing(PortShape.String)
                 : DataValue.StringValue(f.Language!, src),

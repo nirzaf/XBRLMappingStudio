@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Xml.Linq;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
@@ -13,6 +14,61 @@ namespace XBRLMappingStudio.Integration.Tests;
 
 public sealed class ReverseMappingDiagnosticTests
 {
+    [Fact]
+    public async Task XbrlReportAdapter_DoesNotInventNumericAccuracyForTextFacts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-aspects-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            var reportPath = Path.Combine(directory, "input.json");
+            var facts = new[]
+            {
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+                    EntityScheme = "http://xbrl.org/entity/",
+                    EntityIdentifier = "ABC123",
+                    Period = period,
+                    TextValue = "Example reporting entity",
+                    Language = "en"
+                },
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("Revenue"),
+                    EntityScheme = "http://xbrl.org/entity/",
+                    EntityIdentifier = "ABC123",
+                    Period = period,
+                    Unit = new XbrlUnit("QAR"),
+                    Value = 125m
+                }
+            };
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, facts));
+
+            var adapter = new XbrlReportAdapter();
+            var connection = new SourceConnection("report", adapter.Kind, reportPath);
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var rows = new List<DataRecord>();
+            await foreach (var row in adapter.ReadFullAsync(connection, schema, CancellationToken.None))
+                rows.Add(row);
+
+            var text = Assert.Single(rows, row => row.Fields["textValue"].Raw?.ToString() == "Example reporting entity");
+            Assert.Equal(ValuePresence.Missing, text.Fields["decimals"].Presence);
+            Assert.Equal(ValuePresence.Missing, text.Fields["unit"].Presence);
+            Assert.Equal("en", text.Fields["lang"].Raw);
+
+            var numeric = Assert.Single(rows, row => row.Fields["concept"].Raw?.ToString() == SyntheticProfile.Qualified("Revenue"));
+            Assert.Equal("INF", numeric.Fields["decimals"].Raw);
+            Assert.Equal("QAR", numeric.Fields["unit"].Raw);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void ReportSource_RecordsNonBlockingReconstructionLimitation()
     {
