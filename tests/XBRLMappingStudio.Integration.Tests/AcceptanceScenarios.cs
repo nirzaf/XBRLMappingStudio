@@ -72,7 +72,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
                 new[] { finding with { SourceTransformationPaths = null } }));
         Assert.Equal(RunProvenanceStatus.Incomplete,
             MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
-                new[] { finding with { Source = new SourceReference("other-binding", "row=7") } }));
+                new[] { finding with { Source = null } }));
         Assert.Equal(RunProvenanceStatus.Incomplete,
             MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
                 new[]
@@ -86,17 +86,21 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
                         Message = "A rejected source row has no traceable path."
                     }
                 }));
+        var otherInput = new InputIdentity("other-binding", "file", "sha256:other", false, "other.xlsx");
+        var otherSourceFinding = finding with
+        {
+            SourceTransformationPaths = new[]
+            {
+                new SourceTransformationPath(
+                    new SourceReference("other-binding", "row=7"), new[] { "source", "fact" })
+            }
+        };
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input, otherInput },
+                new[] { otherSourceFinding }));
         Assert.Equal(RunProvenanceStatus.Incomplete,
             MappingJobService.AssessProvenanceStatus(new[] { fact },
-                new[] { input, new InputIdentity("other-binding", "file", null, false, "other.xlsx") },
-                new[] { finding with
-                {
-                    SourceTransformationPaths = new[]
-                    {
-                        new SourceTransformationPath(
-                            new SourceReference("other-binding", "row=7"), new[] { "source", "fact" })
-                    }
-                } }));
+                new[] { input, otherInput with { Digest = null } }, new[] { otherSourceFinding }));
     }
 
     public async Task InitializeAsync()

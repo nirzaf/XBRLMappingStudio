@@ -1390,12 +1390,9 @@ public sealed class MappingJobService
                 || fact.SourceTransformationPaths.Count == 0)
                 continue;
 
-            var source = fact.SourceTransformationPaths.Any(path => path.Source == diagnostic.Source)
-                ? diagnostic.Source
-                : fact.SourceTransformationPaths[0].Source;
             diagnostics[index] = diagnostic with
             {
-                Source = source,
+                Source = diagnostic.Source ?? fact.SourceTransformationPaths[0].Source,
                 SourceTransformationPaths = fact.SourceTransformationPaths
             };
         }
@@ -1441,7 +1438,6 @@ public sealed class MappingJobService
                 if (!factLocators.TryGetValue(diagnostic.FactLocator, out var fact)
                     || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs)
                     || diagnostic.Source is null
-                    || !fact.SourceTransformationPaths.Any(path => path.Source == diagnostic.Source)
                     || diagnostic.SourceTransformationPaths is not { Count: > 0 } diagnosticPaths
                     || !diagnosticPaths.SequenceEqual(fact.SourceTransformationPaths))
                     return RunProvenanceStatus.Incomplete;
