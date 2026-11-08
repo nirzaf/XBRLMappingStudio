@@ -338,16 +338,16 @@ Verification on the local Windows Release build:
   passed the Windows and Ubuntu Release suites, repository hygiene, and pinned
   Arelle integration on commit `b5025e1069d2141fac419f1b48ae475992e0c505`.
 
-## Current main-head verification
+## Latest implementation-head verification
 
-Exact-head CI [42465702106](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42465702106)
-passed on `cee497d8b8b5aa5824d31694acd1b968214c4ce5`. Repository hygiene, Windows
+Exact-head CI [42470231660](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42470231660)
+passed on `5a02fcd287bd3c3a8444d9227488be7e48ff4b2f`. Repository hygiene, Windows
 and Ubuntu Release build/test, pinned Arelle integration, dependency inventory,
 SPDX generation, four separate-process CSV/SQLite/group/join memory qualifications,
 and five repeated Windows worker-cancellation checks passed.
 
-Both OS matrices passed 1,182 tests and skipped 6 environment-gated Arelle
-subprocess cases. Suite counts on each OS were Adapters 113, AI 72, Desktop 115,
+Both OS matrices passed 1,183 tests and skipped 6 environment-gated Arelle
+subprocess cases. Suite counts on each OS were Adapters 113, AI 72, Desktop 116,
 Engine 155, Integration 396, Ops 102, Project 32, and XBRL 197. The pinned worker
 job passed 78 Python protocol/offline tests, 15 .NET Arelle execution tests, and
 15 dependency-inventory tests. These results verify the synthetic/offline code
