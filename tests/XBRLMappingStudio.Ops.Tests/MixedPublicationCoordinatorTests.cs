@@ -66,6 +66,65 @@ public sealed class MixedPublicationCoordinatorTests
             intent.Fingerprint);
     }
 
+    [Theory]
+    [InlineData("snapshot-digest")]
+    [InlineData("snapshot-strategy")]
+    public void TableOnlyRetainedIntentBindsSnapshotDigestAndStrategy(string changedIdentity)
+    {
+        using var workspace = new TemporaryDirectory();
+        const string report = "{\"facts\":[]}";
+        var bytes = Encoding.UTF8.GetBytes(report);
+        var project = new MappingProject
+        {
+            ProjectId = "project-table-only-mix",
+            Name = "Table-only mixed publication",
+            ProfileId = "profile-synthetic",
+            ProfileDigest = "sha256:profile"
+        };
+        var input = new InputIdentity("financial-source", "sqlite", "sha256:logical-input", true,
+            "source.sqlite", SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy)
+        {
+            SnapshotStrategy = SqliteSourceSnapshotStore.Strategy,
+            SnapshotDigest = "sha256:" + new string('a', 64)
+        };
+        var changedInput = changedIdentity == "snapshot-digest"
+            ? input with { SnapshotDigest = "sha256:" + new string('b', 64) }
+            : input with { SnapshotStrategy = SqliteSourceSnapshotStore.LegacyStrategy };
+
+        MixedPublicationIntent CreateIntent(InputIdentity identity)
+        {
+            var manifest = new RunManifest
+            {
+                RunId = "run-table-only-mix",
+                OperationId = "operation-table-only-mix",
+                ProjectId = project.ProjectId,
+                SemanticRevision = project.SemanticRevision,
+                ProjectSemanticDigest = project.ComputeSemanticDigest(),
+                ProfileDigest = "sha256:profile",
+                EngineVersion = "engine-test",
+                StartedUtc = DateTimeOffset.Parse("2026-11-01T00:00:00Z", CultureInfo.InvariantCulture),
+                Inputs = new[] { identity },
+                Outputs = new[]
+                {
+                    new OutputIdentity("<memory>", RunManifest.ComputeSha256(bytes), bytes.LongLength, "xbrl-json")
+                },
+                Outcome = RunOutcome.Success
+            };
+            var result = new JobResult(manifest, Array.Empty<XBRLMappingStudio.XBRL.XbrlFact>(), report,
+                new DiagnosticBag(), Array.Empty<XBRLMappingStudio.Engine.SampledTotal>());
+            return MixedPublicationIntent.Create(project, result, Path.Combine(workspace.Path, "report.json"),
+                bytes.LongLength, Path.Combine(workspace.Path, "destination.db"), "facts");
+        }
+
+        var baseline = CreateIntent(input);
+        var identical = CreateIntent(input);
+        var changed = CreateIntent(changedInput);
+        Assert.Equal(baseline.Fingerprint, identical.Fingerprint);
+        Assert.Equal(baseline.OperationKey, identical.OperationKey);
+        Assert.NotEqual(baseline.Fingerprint, changed.Fingerprint);
+        Assert.NotEqual(baseline.OperationKey, changed.OperationKey);
+    }
+
     [Fact]
     public async Task FileConfirmedSqliteRejected_RetryKeepsFileAndUsesSameSqliteIntent()
     {
