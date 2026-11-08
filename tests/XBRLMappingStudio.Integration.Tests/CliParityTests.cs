@@ -554,12 +554,26 @@ public sealed partial class CliParityTests : IAsyncLifetime
     public async Task Cli_MixedPublicationPublishesVersionedRecordFilesAndRetriesWithoutReplacement(
         string outputFormat, string extension)
     {
+        const string escapedText = "North & <South> \"quoted\"\nsecond line";
         const string entityIdentifier = "Entity-00123-04";
         var targetPath = Path.Combine(_dir, "record-file-mixed-target.db");
         await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
-        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var lexicalWorkbookPath = Path.Combine(_dir, "record-file-mixed-lexical.xlsx");
+        var lexicalWorkbook = new ExcelOutputAdapter().WriteWorkbook(
+            new[] { "Line", "Current", "Prior", "AsOf", "Note" },
+            new IEnumerable<object?>[]
+            {
+                new object?[] { "Revenue", 1250m, 1100m, null, escapedText }
+            });
+        await File.WriteAllBytesAsync(lexicalWorkbookPath, lexicalWorkbook);
+        var project = TestFixtures.BuildRevenueMappingProject(lexicalWorkbookPath, approved: true);
+        project.Bindings[0].Configuration["sheet"] = "Output";
+        project.Bindings[0].Configuration["headerRow"] = "1";
         var entityNode = Assert.Single(project.Nodes, node => node.DisplayName == "Entity");
+        var periodNode = Assert.Single(project.Nodes, node => node.DisplayName == "Period 2025");
+        var bindingId = project.Bindings[0].BindingId;
         entityNode.Parameters["literal"] = entityIdentifier;
+        AddEscapedTextFact(project, bindingId, entityNode, periodNode);
         project.Destination = new DestinationPlan
         {
             Kind = "sqlite",
@@ -590,11 +604,14 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.True(exit == 0, $"Mixed {outputFormat} publication failed ({exit}).\nstderr:\n{stderr}");
         Assert.Contains("Published mixed operation", stderr, StringComparison.Ordinal);
         var firstBytes = await File.ReadAllBytesAsync(outputPath);
-        var reopened = await ReadSingleRecordFileAsync(outputFormat, outputPath);
-        var entityColumn = outputFormat == "xml-records-v1"
-            ? "row.entity_identifier"
-            : "entity_identifier";
-        Assert.Equal(entityIdentifier, reopened[entityColumn].AsString());
+        var reopened = await ReadRecordFileAsync(outputFormat, outputPath);
+        var fieldPrefix = reopened[0].Fields.ContainsKey("row.concept") ? "row." : string.Empty;
+        var revenueRecord = Assert.Single(reopened, record =>
+            record[fieldPrefix + "concept"].AsString() == SyntheticProfile.Qualified("Revenue"));
+        var textRecord = Assert.Single(reopened, record =>
+            record[fieldPrefix + "concept"].AsString() == SyntheticProfile.Qualified("EntityRegistrantName"));
+        Assert.Equal(entityIdentifier, revenueRecord[fieldPrefix + "entity_identifier"].AsString());
+        Assert.Equal(escapedText, textRecord[fieldPrefix + "text_value"].AsString());
         string operationKey;
         using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath)))
         {
@@ -644,7 +661,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
         command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(2, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
     }
 
@@ -2110,7 +2127,65 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);
     }
 
-    private static async Task<DataRecord> ReadSingleRecordFileAsync(string outputFormat, string path)
+    private static void AddEscapedTextFact(
+        MappingProject project,
+        string bindingId,
+        MappingNode entityNode,
+        MappingNode periodNode)
+    {
+        var textNode = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Escaped text acceptance source",
+            Parameters = new()
+            {
+                ["bindingId"] = bindingId,
+                ["column"] = "Note",
+                ["rowFilterColumn"] = "Line",
+                ["rowFilterValue"] = "Revenue"
+            },
+            OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+        };
+        var factNode = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.FactConstruct,
+            DisplayName = "Escaped text acceptance fact",
+            Parameters = new()
+            {
+                ["concept"] = SyntheticProfile.Qualified("EntityRegistrantName"),
+                ["periodType"] = "duration",
+                ["language"] = "fr"
+            },
+            InputPorts = new()
+            {
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single),
+                new PortDefinition("entity", PortShape.String, PortCardinality.Single),
+                new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false)
+            },
+            OutputPorts = new() { new PortDefinition("fact", PortShape.Fact, PortCardinality.Single) }
+        };
+        project.Nodes.Add(textNode);
+        project.Nodes.Add(factNode);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = textNode.NodeId, SourcePortName = "textValue",
+            TargetNodeId = factNode.NodeId, TargetPortName = "textValue"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = entityNode.NodeId, SourcePortName = "value",
+            TargetNodeId = factNode.NodeId, TargetPortName = "entity"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = periodNode.NodeId, SourcePortName = "value",
+            TargetNodeId = factNode.NodeId, TargetPortName = "period"
+        });
+    }
+
+    private static async Task<IReadOnlyList<DataRecord>> ReadRecordFileAsync(string outputFormat, string path)
     {
         var kind = outputFormat switch
         {
@@ -2138,12 +2213,9 @@ public sealed partial class CliParityTests : IAsyncLifetime
             _ => throw new InvalidOperationException("Adapter kind was not resolved.")
         };
         var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
-        DataRecord? result = null;
+        var records = new List<DataRecord>();
         await foreach (var record in adapter.ReadFullAsync(connection, schema, CancellationToken.None))
-        {
-            Assert.Null(result);
-            result = record;
-        }
-        return Assert.IsType<DataRecord>(result);
+            records.Add(record);
+        return records;
     }
 }
