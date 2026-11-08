@@ -353,3 +353,23 @@ job passed 78 Python protocol/offline tests, 15 .NET Arelle execution tests, and
 15 dependency-inventory tests. These results verify the synthetic/offline code
 paths and do not close real-taxonomy rights, regulator, native accessibility, or
 customer-release gates.
+
+## Latest implementation-head verification — atomic publication recovery
+
+Exact-head CI [42488787887](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42488787887)
+passed on `e8cafead4a0dec53b0bb5a9d91dc6b9efab66793`. Repository hygiene,
+Ubuntu and Windows Release build/test, pinned Arelle worker integration,
+dependency inventory, and SPDX generation all passed. Each OS matrix passed
+1,553 tests and skipped 6 environment-gated Arelle subprocess tests. Suite
+counts per OS were Adapters 176, AI 72, Desktop 116, Engine 155, Integration
+412, Ops 393, Project 32, and XBRL 197.
+
+The pinned worker job passed 82 Python protocol/offline tests, 15 .NET Arelle
+execution tests, and 15 dependency-inventory tests. Five separate-process
+100,000-row streaming/snapshot memory qualifications passed on each OS; all
+five repeated Windows worker-cancellation checks passed. This head adds
+read-only SQLite receipt revalidation before mixed-publication retries and an
+explicit file-publication journal recovery command that never retries writes.
+The tests use synthetic fixtures. IFRS package rights/artifact identity,
+jurisdiction-specific acceptance, native Windows accessibility, and
+customer-release qualification remain open.
