@@ -280,20 +280,21 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest functional-change CI [42434445545](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42434445545)
-verified commit `69a1084eb55d80a0f5bd68bd932d4848b727e271`. Repository hygiene,
+Latest functional-change CI [42435819517](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42435819517)
+verified commit `97524d90c92e0688f9e2a793f03fc577ae45fee2`. Repository hygiene,
 Windows and Ubuntu Release build/test, pinned Arelle integration, dependency-inventory
-tests, and SPDX generation passed. Each .NET OS matrix passed **895 tests, skipped 6
+tests, and SPDX generation passed. Each .NET OS matrix passed **909 tests, skipped 6
 environment-gated Arelle cases, and had 0 failures**. The eight suite counts were
 Adapters 95, AI 72, Desktop 106, Engine 125, Integration 241, Ops 89, Project 26,
-and XBRL 141. The worker job ran **74 Python protocol/offline tests**, **15 gated
+and XBRL 155. The worker job ran **74 Python protocol/offline tests**, **15 gated
 .NET Arelle execution tests**, and **15 dependency-inventory tests**. This head
 rejects malformed BCP 47 language tags during profile-free JSON and XML import,
 rejects unsupported typed dimensions and inexact numeric values on report import,
 enforces lowercase language tags for xBRL-JSON, blocks duplicate dimensions after
-QName alias resolution, and enforces the 64-dimension limit on profile-free reads.
-Per-concept supported languages still match case-insensitively. All four CI jobs
-passed.
+QName alias resolution, enforces the 64-dimension limit on profile-free reads, and
+checks imported decimals against the supported range while rejecting decimals on
+nil facts. Per-concept supported languages still match case-insensitively. All four
+CI jobs passed.
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 

@@ -136,19 +136,26 @@ as the [xBRL-JSON 1.0 specification](https://www.xbrl.org/Specification/xbrl-jso
 requires its language dimension to be lowercase. IANA registry membership is not
 checked, and exact language support still depends on the selected profile metadata.
 
+The JSON and XML readers also constrain decimals to the range supported by the
+fact model (`[-30, 30]`), reject decimals on nil facts, and report malformed XML
+decimals through the structured unsupported-construct error rather than leaking a
+numeric parse exception.
+
 Verification:
 
-- The XBRL Release suite passed 141/141, including profile-free JSON/XML import
+- The XBRL Release suite passed 155/155, including profile-free JSON/XML import
   rejection cases for malformed `en--US` and `en_US`, uppercase `EN` and `en-US`
   on xBRL-JSON input, unsupported typed dimensions, duplicate JSON keys, duplicate
   axes after QName alias resolution, the 64-dimension limit, valid lowercase tags,
   profile-language case matching, exact CLR decimal boundaries, and rejection of
-  values requiring rounding or underflow in both JSON and XML.
+  values requiring rounding or underflow in both JSON and XML. Decimal-import
+  cases cover accepted `-30`/`30` boundaries, rejected `-31`/`31` and malformed XML
+  lexemes, and nil facts carrying decimals.
 - The Engine Release suite passed 125/125; the malformed-tag FactConstruct case
   blocks the fact and reports the original source location.
-- Exact-head CI [42434445545](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42434445545)
-  passed on commit `69a1084eb55d80a0f5bd68bd932d4848b727e271`. Windows and Ubuntu
-  each passed 895 tests with 6 environment-gated Arelle skips; the pinned job ran
+- Exact-head CI [42435819517](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42435819517)
+  passed on commit `97524d90c92e0688f9e2a793f03fc577ae45fee2`. Windows and Ubuntu
+  each passed 909 tests with 6 environment-gated Arelle skips; the pinned job ran
   74 Python worker tests, 15 .NET Arelle execution tests, and 15
   dependency-inventory tests. Repository hygiene and SPDX generation passed.
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
