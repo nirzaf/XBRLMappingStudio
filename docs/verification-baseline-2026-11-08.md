@@ -102,3 +102,23 @@ Verification:
   the pinned job passed 72 Python, 15 .NET Arelle, and 15 dependency-inventory tests.
 - `git diff --check` passed. Profile-specific precision and rounding policies
   remain open.
+
+## TAX-07 Arelle relationship extraction
+
+During exact hash-verified profile loading, the worker extracts effective
+presentation, calculation and definition relationships from the loaded Arelle
+model and compares endpoints and supported arc attributes with the profile's
+digest-bound metadata. A mismatch blocks taxonomy load. The pinned fixture uses
+a local synthetic linkbase; it does not qualify a permitted real taxonomy.
+
+Verification:
+
+- The pinned Arelle 2.47.4 Python worker suite passed 74 tests with 1 local
+  Windows symlink-capability skip; `tools/tests` passed 15/15.
+- `py_compile` and `git diff --check` passed.
+- Exact-head CI [42428282683](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42428282683)
+  passed on commit `1a96c01de19dc172b75c89ed67bd0e2d7d3ac1d0`. Windows and Ubuntu
+  each passed 867 tests and skipped 6 environment-gated Arelle cases; the pinned
+  job ran 74 Python worker tests, 15 .NET Arelle execution tests, and 15
+  dependency-inventory tests. Repository hygiene and SPDX generation passed.
+- Real taxonomy rights and qualification remain owner-gated by GAT-01/GAT-02.
