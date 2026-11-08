@@ -1,6 +1,6 @@
 # Verification baseline — 2026-11-08
 
-This records local evidence for the UX-04 function-authoring slice on `main`.
+This records local evidence for verified feature slices on `main`.
 The guide remains incomplete; this update does not close native accessibility,
 broader function signatures, or external profile gates.
 
@@ -266,3 +266,23 @@ Verification on the local Windows Release build:
   passed repository hygiene, Windows/Ubuntu Release matrices, and pinned Arelle
   integration for source `0310ee73141a429609773020f356be9664a17e2f`. Native
   visual/screen-reader and real filing-profile qualification are not claimed.
+
+## OPS-01 SQLite rejection outcome matrix
+
+`SqliteDestinationWorkflowTests.PublishSqliteDestination_RejectsEveryNonSuccessOutcomeBeforeDatabaseMutation`
+publishes a valid synthetic run first, snapshots the accepted database bytes,
+facts and receipt count, then tries every non-success `RunOutcome` and a
+successful preview result. Each attempt is rejected before writing and leaves
+all three accepted-state checks unchanged. The test complements the file
+destination matrix, which covers CSV, XLSX, JSON and XML.
+
+Verification on the local Windows Release build:
+
+- The focused SQLite outcome-matrix test passed 1/1.
+- The full Integration suite passed 247 tests and skipped 6 environment-gated
+  Arelle cases (253 total).
+- The build used the isolated `bin-codex/` output path because the desktop app
+  held shared Release assemblies open.
+- Cross-platform exact-head CI has not yet run for this change. Full
+  cancellation/process-crash coverage and owner-authorized real-profile
+  publication remain open.
