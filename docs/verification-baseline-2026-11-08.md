@@ -283,6 +283,8 @@ Verification on the local Windows Release build:
   Arelle cases (253 total).
 - The build used the isolated `bin-codex/` output path because the desktop app
   held shared Release assemblies open.
-- Cross-platform exact-head CI has not yet run for this change. Full
-  cancellation/process-crash coverage and owner-authorized real-profile
-  publication remain open.
+- Exact-head CI [42449167853](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42449167853)
+  passed repository hygiene, Windows and Ubuntu Release build/tests, and the
+  pinned Arelle worker integration on source
+  `a1b2fb19c2b11ebad73f78e171edf99f9efc6c9b`. Full cancellation/process-crash
+  coverage and owner-authorized real-profile publication remain open.
