@@ -5,6 +5,14 @@ and the engineering changes in this increment. It is not a production release
 certificate. An implemented contract or passing synthetic fixture does not close
 the real-taxonomy, installed-Windows, identity-enrollment or customer-data gates.
 
+The owner's subsequent decision selects IFRS Accounting Taxonomy 2025 for
+standards-based mapping and validation. The priorities and unresolved rights are
+recorded in [OPEN.md](decisions/OPEN.md), preserved from upstream `4a6ab3b`.
+Regulator-specific compliance is deferred until a named customer/authority is
+confirmed. Local evaluation is conditional on the applicable terms; no taxonomy
+bundling, redistribution or commercial distribution is authorized without
+documented rights. Synthetic fixtures and production fail-closed gates remain.
+
 ## Delivered in this increment
 
 - **P0-01:** The PID-file readiness fix was already delivered by `17fa2db`; baseline
@@ -66,18 +74,18 @@ or represent these rows as completed to make a release appear ready.
 | Audit ID | Remaining acceptance |
 |---|---|
 | P0-01 | Final pushed-commit Windows/Ubuntu/Arelle CI must pass, including repeated Windows cancellation. |
-| P0-02 | Owner-selected filing jurisdiction, authorized versioned taxonomy, pinned packages, reference reports, positive/negative financial fixtures and filing-rule sign-off. |
+| P0-02 | IFRS Accounting Taxonomy 2025 is selected for standards mapping/validation. Applicable evaluation rights, exact official artifact/hash/dependency closure, offline resolution and permitted financial fixtures remain open. Regulator certification is deferred, not inferred. |
 | P0-03 | Real-profile mandatory rule/plugin completion evidence. Existing synthetic evidence and missing-check refusal do not qualify a real authority. |
 | P0-04 | Authorized reviewer enrollment/revocation, protected host trust configuration, external signing workflow and CLI/Desktop deployment integration. The application API contract is implemented; production identity governance is not. |
 | P0-05 | Clean Windows installer, native/Python dependencies, signing, license clearance and installed upgrade/backup/rollback proof. |
 | P1-01 | Multiple large bindings and qualified large-file adapters under declared end-to-end resource budgets. |
 | P1-02 | Disk-backed grouping/joins, spill recovery and provenance qualification. |
-| P1-03 | Actual filing-profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
+| P1-03 | Selected IFRS profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
 | P1-05 | Remaining derived-record lineage, exact Arelle finding locators, complete input identity and native preview/full-run evidence. |
 | P1-06 | Retained immutable database extracts and replay from those extracts. Live SQLite content rechecks are not replay. |
 | P1-07 | Typed dimensions, concept-to-hypercube applicability and profile-qualified dimensional validation. |
-| P1-08 | Independent JSON/XML conformance fixtures for the actual target taxonomy. Existing synthetic equivalence is narrower. |
+| P1-08 | Independent JSON/XML conformance fixtures for the selected IFRS taxonomy after the rights/evaluation gate. Existing synthetic equivalence is narrower. |
 | P1-09 | Existing-target-row authorization/update semantics. Aspect and occurrence source selection landed before this increment. |
 | P1-10 | Approved managed/local model provider, endpoint, secure credential deployment and governed desktop workflow. |
 | P1-11 | Permitted held-out financial benchmarks, abstention/quality thresholds, approved model-version rollout and rollback. |
@@ -94,6 +102,6 @@ or represent these rows as completed to make a release appear ready.
 | P2-08 | Dependency redistribution review and installed-release migration/rollback evidence. |
 | EXT01–04 | Native XML preservation, iXBRL, taxonomy extension/anchoring and collector package assembly only after the selected filing authority establishes the required scope. |
 
-Owner decisions remain in [OPEN.md](decisions/OPEN.md). The original architecture
+Selected priorities and unresolved decisions remain in [OPEN.md](decisions/OPEN.md). The original architecture
 guide remains unchanged. No real profile is enabled, model credentials enrolled,
 release deployed or regulatory sign-off inferred by this increment.
