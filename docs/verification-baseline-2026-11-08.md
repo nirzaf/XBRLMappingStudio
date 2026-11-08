@@ -261,6 +261,8 @@ Verification on the local Windows Release build:
   intermediate values returned after the blocking source-identity diagnostic.
 - Each row frame stores its node/port values once in a typed-key map used by
   evaluation and preview collection, avoiding a duplicate per-row value map.
-- These are synthetic fixture and headless UI checks. Exact-head GitHub CI is
-  pending; native visual/screen-reader and real filing-profile qualification are
-  not claimed.
+- These are synthetic fixture and headless UI checks. Exact-head GitHub CI
+  [42446894415](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42446894415)
+  passed repository hygiene, Windows/Ubuntu Release matrices, and pinned Arelle
+  integration for source `d4e89f0a08ec09f619b2e6eb8d72cf9a8595587d`. Native
+  visual/screen-reader and real filing-profile qualification are not claimed.
