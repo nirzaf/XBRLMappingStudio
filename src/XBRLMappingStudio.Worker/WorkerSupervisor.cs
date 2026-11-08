@@ -446,7 +446,7 @@ internal sealed class WorkerProcessTree : IDisposable
 
         try
         {
-            AssignExistingWindowsDescendants(job, process.Id);
+            AssignExistingWindowsDescendants(job, process);
         }
         catch (Exception ex)
         {
@@ -464,8 +464,10 @@ internal sealed class WorkerProcessTree : IDisposable
         _windowsJobAssigned = true;
     }
 
-    private static void AssignExistingWindowsDescendants(SafeFileHandle job, int rootProcessId)
+    private static void AssignExistingWindowsDescendants(SafeFileHandle job, Process rootProcess)
     {
+        var rootProcessId = rootProcess.Id;
+        var rootCreationTime = GetCreationTime(rootProcess.SafeHandle);
         using var snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
         if (snapshot.IsInvalid)
             throw new InvalidOperationException("Could not enumerate worker descendants.",
@@ -495,17 +497,38 @@ internal sealed class WorkerProcessTree : IDisposable
             throw new InvalidOperationException("Could not finish reading the Windows process snapshot.",
                 new Win32Exception(enumerationError));
 
+        // Toolhelp reports parent IDs, which can be reused after a fast worker exits.
+        // Keep each observed process creation time alongside its PID so stale parent
+        // references cannot pull an unrelated (and potentially protected) process
+        // into this worker's job.
+        var creationTimes = new Dictionary<int, long> { [rootProcessId] = rootCreationTime };
         var pending = new Queue<int>();
         var seen = new HashSet<int> { rootProcessId };
         pending.Enqueue(rootProcessId);
         while (pending.TryDequeue(out var parentProcessId))
         {
+            if (!IsCurrentProcessGeneration(parentProcessId, creationTimes[parentProcessId]))
+                continue;
             if (!childrenByParent.TryGetValue(parentProcessId, out var children)) continue;
             foreach (var processId in children)
             {
                 if (!seen.Add(processId)) continue;
+                using var queryProcess = OpenProcess(ProcessQueryLimitedInformation,
+                    inheritHandle: false, (uint)processId);
+                if (queryProcess.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == ErrorInvalidParameter) continue;
+                    throw new InvalidOperationException(
+                        $"Could not open worker descendant process {processId}.", new Win32Exception(error));
+                }
+
+                var creationTime = GetCreationTime(queryProcess);
+                if (creationTime < creationTimes[parentProcessId]) continue;
+
                 // Include descendants of a process that exited between the snapshot
                 // and OpenProcess; its children can still be alive and escaped the job.
+                creationTimes[processId] = creationTime;
                 pending.Enqueue(processId);
                 using var process = OpenProcess(
                     ProcessTerminate | ProcessSetQuota | ProcessQueryLimitedInformation,
@@ -515,8 +538,11 @@ internal sealed class WorkerProcessTree : IDisposable
                     var error = Marshal.GetLastWin32Error();
                     if (error == ErrorInvalidParameter) continue;
                     throw new InvalidOperationException(
-                        $"Could not open worker descendant process {processId}.", new Win32Exception(error));
+                        $"Could not open worker descendant process {processId} for job assignment.",
+                        new Win32Exception(error));
                 }
+
+                if (GetCreationTime(process) != creationTime) continue;
 
                 if (!IsProcessInJob(process, job, out var alreadyAssigned))
                     throw new InvalidOperationException(
@@ -529,6 +555,29 @@ internal sealed class WorkerProcessTree : IDisposable
                         new Win32Exception(Marshal.GetLastWin32Error()));
             }
         }
+    }
+
+    private static bool IsCurrentProcessGeneration(int processId, long expectedCreationTime)
+    {
+        using var process = OpenProcess(ProcessQueryLimitedInformation,
+            inheritHandle: false, (uint)processId);
+        if (process.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorInvalidParameter) return true;
+            throw new InvalidOperationException($"Could not verify worker ancestor process {processId}.",
+                new Win32Exception(error));
+        }
+
+        return GetCreationTime(process) == expectedCreationTime;
+    }
+
+    private static long GetCreationTime(SafeProcessHandle process)
+    {
+        if (!GetProcessTimes(process, out var creationTime, out _, out _, out _))
+            throw new InvalidOperationException("Could not read a worker process creation time.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+        return ((long)creationTime.HighDateTime << 32) | creationTime.LowDateTime;
     }
 
     public void Kill(Process process)
@@ -625,6 +674,13 @@ internal sealed class WorkerProcessTree : IDisposable
         public string? ExecutableFile;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint LowDateTime;
+        public uint HighDateTime;
+    }
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint processId);
 
@@ -641,6 +697,11 @@ internal sealed class WorkerProcessTree : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeProcessHandle OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(SafeProcessHandle process, out FileTime creationTime,
+        out FileTime exitTime, out FileTime kernelTime, out FileTime userTime);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
