@@ -39,9 +39,9 @@ public sealed class FunctionNodePreviewRow
 }
 
 /// <summary>
-/// Headless-testable authoring surface for revision-pinned decimal functions. Draft graph
-/// edits stay isolated until saved; a saved revision is added to the mapping project in one
-/// undoable project edit.
+/// Headless-testable library for typed, revision-pinned functions, with numeric draft
+/// authoring. Draft graph edits stay isolated until saved; a saved revision is added to
+/// the mapping project in one undoable project edit.
 /// </summary>
 public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 {
@@ -50,6 +50,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private const string PreviewBindingId = "function-preview";
     private const int MaximumIntermediatePreviewRows = 64;
     private const int MaximumIntermediatePreviewGraphNodes = 512;
+    private const string InspectionOnlyMessage = "This typed signature is inspection-only. Export or pin the saved revision; numeric authoring requires one Single Decimal input and output.";
 
     private readonly Func<DesignerSession> _projectSession;
     private readonly IProjectFileDialog? _fileDialog;
@@ -68,11 +69,17 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private string? _selectedDraftNodeId;
     private string? _editingFunctionId;
     private string _draftProjectId = "";
+    private DesignerSession? _draftOwnerSession;
+    private List<PortDefinition> _draftInputs = new() { DecimalPort("input") };
+    private List<PortDefinition> _draftOutputs = new() { DecimalPort("value") };
+    private string _draftCatalogVersion = FunctionCatalog.Default.Version;
     private int _expectedLatestRevision;
     private string _importFunctionId = "";
     private string _importFunctionName = "";
     private bool _isPreviewRunning;
     private bool _isSavingFunctionRevision;
+    private bool _isImportingFunctionPackage;
+    private bool _isExportingFunctionPackage;
 
     public ObservableCollection<FunctionRevisionRow> Functions { get; } = new();
     public ObservableCollection<FunctionNodePreviewRow> NodePreviews { get; } = new();
@@ -118,7 +125,13 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     public string DraftRevisionSummary => _editingFunctionId is null
         ? $"New function {DraftFunctionId}@1"
+        : !CanEditDraft ? $"Inspecting {DraftFunctionId}; the saved typed signature is preserved."
         : $"Saving {DraftFunctionId}@{_expectedLatestRevision + 1}; based on project revision {_expectedLatestRevision}";
+
+    public bool CanEditDraft => IsNumericSignature(_draftInputs, _draftOutputs);
+
+    public string DraftSignatureSummary => $"Inputs: {DescribePorts(_draftInputs)}. Outputs: {DescribePorts(_draftOutputs)}. Catalog: {_draftCatalogVersion}."
+        + (CanEditDraft ? " Numeric authoring is available." : " " + InspectionOnlyMessage);
 
     public string DraftGraphSummary
     {
@@ -132,7 +145,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 node.NodeType == NodeTypeConstants.Constant
                 && StringComparer.OrdinalIgnoreCase.Equals(ReadParameter(node, "shape"), "Decimal"));
             var operationsSummary = steps.Length == 0
-                ? "Decimal input passes through to output."
+                ? CanEditDraft ? "Decimal input passes through to output." : "Typed boundary graph."
                 : $"Operations: {string.Join(", ", steps)}.";
             var sideInputsSummary = decimalConstants == 0
                 ? ""
@@ -183,10 +196,10 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     public string SelectedDraftNodeDisplay
         => SelectedDraftNode is { } node ? $"{node.DisplayName} ({node.NodeType})" : "Select a function node to inspect it.";
 
-    public bool CanEditScaleFactor => SelectedDraftNode?.NodeType == NodeTypeConstants.Scale;
-    public bool CanEditConstantValue => SelectedDraftNode?.NodeType == NodeTypeConstants.Constant
+    public bool CanEditScaleFactor => CanEditDraft && SelectedDraftNode?.NodeType == NodeTypeConstants.Scale;
+    public bool CanEditConstantValue => CanEditDraft && SelectedDraftNode?.NodeType == NodeTypeConstants.Constant
         && StringComparer.OrdinalIgnoreCase.Equals(ReadParameter(SelectedDraftNode, "shape"), "Decimal");
-    public bool CanEditRound => SelectedDraftNode?.NodeType == NodeTypeConstants.Round;
+    public bool CanEditRound => CanEditDraft && SelectedDraftNode?.NodeType == NodeTypeConstants.Round;
 
     public string SelectedScaleFactor
     {
@@ -214,17 +227,17 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     public IReadOnlyList<string> RoundModes { get; } = new[] { "HalfEven", "HalfUp", "Truncate" };
 
-    public bool CanAddTransform => FindOutputEdge() is not null;
-    public bool CanSaveFunctionRevision => !_isSavingFunctionRevision
+    public bool CanAddTransform => CanEditDraft && FindOutputEdge() is not null;
+    public bool CanSaveFunctionRevision => CanEditDraft && !_isSavingFunctionRevision
         && !string.IsNullOrWhiteSpace(DraftName)
         && !string.IsNullOrWhiteSpace(DraftFunctionId)
         && _draftSession.Project.Nodes.Count >= 2;
-    public bool CanTestFunction => !_isPreviewRunning && CanParsePreviewInput();
+    public bool CanTestFunction => CanEditDraft && !_isPreviewRunning && CanParsePreviewInput();
     public bool CanPinSelectedFunction => SelectedFunction is not null;
-    public bool CanExportFunctionPackage => SelectedFunction is not null && _fileDialog is not null;
-    public bool CanImportFunctionPackage => !string.IsNullOrWhiteSpace(ImportFunctionId) && _fileDialog is not null;
-    public bool CanUndoDraft => _draftSession.CanUndo;
-    public bool CanRedoDraft => _draftSession.CanRedo;
+    public bool CanExportFunctionPackage => !_isExportingFunctionPackage && SelectedFunction is not null && _fileDialog is not null;
+    public bool CanImportFunctionPackage => !_isImportingFunctionPackage && !string.IsNullOrWhiteSpace(ImportFunctionId) && _fileDialog is not null;
+    public bool CanUndoDraft => CanEditDraft && _draftSession.CanUndo;
+    public bool CanRedoDraft => CanEditDraft && _draftSession.CanRedo;
 
     private MappingNode? SelectedDraftNode => _selectedDraftNodeId is null
         ? null
@@ -269,8 +282,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             _ => CanExportFunctionPackage);
         ImportFunctionPackageCommand = new RelayCommand(async _ => await ImportFunctionPackageAsync(),
             _ => CanImportFunctionPackage);
-        UndoDraftCommand = new RelayCommand(_ => _draftSession.Undo(), _ => CanUndoDraft);
-        RedoDraftCommand = new RelayCommand(_ => _draftSession.Redo(), _ => CanRedoDraft);
+        UndoDraftCommand = new RelayCommand(_ => { if (RequireNumericDraft()) _draftSession.Undo(); }, _ => CanUndoDraft);
+        RedoDraftCommand = new RelayCommand(_ => { if (RequireNumericDraft()) _draftSession.Redo(); }, _ => CanRedoDraft);
 
         RefreshFromProject();
         BeginNewFunction();
@@ -316,7 +329,11 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         Raise(nameof(SelectedFunction));
         _editingFunctionId = null;
         _expectedLatestRevision = 0;
-        _draftProjectId = _projectSession().Project.ProjectId;
+        _draftOwnerSession = _projectSession();
+        _draftProjectId = _draftOwnerSession.Project.ProjectId;
+        _draftInputs = new List<PortDefinition> { DecimalPort("input") };
+        _draftOutputs = new List<PortDefinition> { DecimalPort("value") };
+        _draftCatalogVersion = FunctionCatalog.Default.Version;
         DraftFunctionId = "fn" + Guid.NewGuid().ToString("N")[..12];
         DraftName = "New numeric function";
         SetDraftSession(CreateDraftSession());
@@ -328,7 +345,11 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private void LoadFunction(FunctionRevisionRow row)
     {
-        _draftProjectId = _projectSession().Project.ProjectId;
+        _draftOwnerSession = _projectSession();
+        _draftProjectId = _draftOwnerSession.Project.ProjectId;
+        _draftInputs = row.Definition.Inputs.Select(port => port with { }).ToList();
+        _draftOutputs = row.Definition.Outputs.Select(port => port with { }).ToList();
+        _draftCatalogVersion = row.Definition.CatalogVersion;
         _editingFunctionId = row.FunctionId;
         _expectedLatestRevision = _projectSession().Project.Functions
             .Where(function => function.FunctionId == row.FunctionId)
@@ -339,8 +360,10 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         DraftName = row.Name;
         SetDraftSession(CreateDraftSession(row.Definition));
         NodePreviews.Clear();
-        PreviewStatus = "Run a synthetic numeric preview to inspect this revision draft.";
-        Status = $"Loaded {row.FunctionId}@{row.Revision}. Saving will append revision {_expectedLatestRevision + 1}.";
+        PreviewStatus = CanEditDraft ? "Run a synthetic numeric preview to inspect this revision draft." : InspectionOnlyMessage;
+        Status = CanEditDraft
+            ? $"Loaded {row.FunctionId}@{row.Revision}. Saving will append revision {_expectedLatestRevision + 1}."
+            : $"Loaded {row.FunctionId}@{row.Revision}. {InspectionOnlyMessage}";
         NotifyCommandState();
     }
 
@@ -406,6 +429,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private void AddTransform(string nodeType)
     {
+        if (!RequireNumericDraft()) return;
         var edge = FindOutputEdge();
         if (edge is null)
         {
@@ -450,6 +474,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private void AddBinaryDecimalOperation(string nodeType)
     {
+        if (!RequireNumericDraft()) return;
         var edge = FindOutputEdge();
         if (edge is null)
         {
@@ -519,6 +544,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private void ApplySelectedNodeParameters()
     {
+        if (!RequireNumericDraft()) return;
         var node = SelectedDraftNode;
         if (node is null) return;
         if (node.NodeType == NodeTypeConstants.Scale)
@@ -566,6 +592,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private async Task TestFunctionAsync()
     {
+        if (!RequireNumericDraft()) return;
         if (_isPreviewRunning) return;
         if (!TryParsePreviewInput(out var input))
         {
@@ -576,42 +603,71 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
         _isPreviewRunning = true;
         TestFunctionCommand.NotifyCanExecuteChanged();
-        PreviewStatus = "Running synthetic numeric preview…";
+        var draftSession = _draftSession;
+        var projectSession = _projectSession();
+        var previewInput = PreviewInput;
+        var previewChanged = false;
+        bool IsSamePreviewContext() => ReferenceEquals(_draftSession, draftSession)
+            && ReferenceEquals(_projectSession(), projectSession)
+            && StringComparer.Ordinal.Equals(PreviewInput, previewInput);
         try
         {
+            var draftSnapshot = ProjectSerializer.Serialize(draftSession.Project);
+            var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
+            bool IsCurrentPreview() => IsSamePreviewContext()
+                && StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(draftSession.Project), draftSnapshot)
+                && StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(projectSession.Project), projectSnapshot);
             var function = BuildDraftDefinition();
-            await RefreshIntermediatePreviewsAsync(function, input);
-            var outcome = await PreviewFunctionAsync(function, input);
+            var sourceProject = ProjectSerializer.Deserialize(projectSnapshot);
+            NodePreviews.Clear();
+            PreviewStatus = "Running synthetic numeric preview…";
+            var previews = await BuildIntermediatePreviewsAsync(function, input, sourceProject);
+            if (!IsCurrentPreview())
+            {
+                previewChanged = true;
+                return;
+            }
+            var outcome = await PreviewFunctionAsync(function, input, sourceProject);
+            if (!IsCurrentPreview())
+            {
+                previewChanged = true;
+                return;
+            }
+            foreach (var preview in previews) NodePreviews.Add(preview);
             PreviewStatus = outcome.Success
                 ? $"Synthetic preview output: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. No filing or publication occurred."
                 : $"Preview blocked: {outcome.Error}";
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException)
         {
+            if (!IsSamePreviewContext()) return;
             NodePreviews.Clear();
             PreviewStatus = $"Preview blocked: {ex.Message}";
         }
         finally
         {
             _isPreviewRunning = false;
+            if (ReferenceEquals(_draftSession, draftSession) && (previewChanged || !IsSamePreviewContext()))
+                PreviewStatus = "The project, draft, or preview input changed. Run the preview again to inspect the current draft.";
             TestFunctionCommand.NotifyCanExecuteChanged();
         }
     }
 
-    private async Task RefreshIntermediatePreviewsAsync(FunctionDefinition function, decimal input)
+    private async Task<IReadOnlyList<FunctionNodePreviewRow>> BuildIntermediatePreviewsAsync(
+        FunctionDefinition function, decimal input, MappingProject sourceProject)
     {
-        NodePreviews.Clear();
+        var previews = new List<FunctionNodePreviewRow>();
         var orderedNodes = TopologicallyOrderNodes(function);
         var operations = orderedNodes
             .Where(node => node.NodeType is not (InputMarkerType or OutputMarkerType))
             .ToArray();
-        if (operations.Length == 0) return;
+        if (operations.Length == 0) return previews;
 
         if (function.Nodes.Count > MaximumIntermediatePreviewGraphNodes)
         {
-            NodePreviews.Add(new FunctionNodePreviewRow("", "Intermediate previews",
+            previews.Add(new FunctionNodePreviewRow("", "Intermediate previews",
                 null, $"Per-node preview skipped: function has {function.Nodes.Count} graph nodes; the preview limit is {MaximumIntermediatePreviewGraphNodes}."));
-            return;
+            return previews;
         }
 
         var previewCount = Math.Min(operations.Length, MaximumIntermediatePreviewRows);
@@ -622,7 +678,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 && port.Cardinality == PortCardinality.Single);
             if (decimalOutput is null)
             {
-                NodePreviews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
+                previews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
                     "No single Decimal output is available for a numeric preview."));
                 continue;
             }
@@ -630,8 +686,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             try
             {
                 var prefix = BuildPrefixFunction(function, node, decimalOutput.Name);
-                var outcome = await PreviewFunctionAsync(prefix, input);
-                NodePreviews.Add(outcome.Success
+                var outcome = await PreviewFunctionAsync(prefix, input, sourceProject);
+                previews.Add(outcome.Success
                     ? new FunctionNodePreviewRow(node.NodeId, node.DisplayName, outcome.Value,
                         $"Partial synthetic value: {outcome.Value!.Value.ToString(CultureInfo.InvariantCulture)}. Not a filing result.")
                     : new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
@@ -640,14 +696,15 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException
                                        or KeyNotFoundException or InvalidDataException)
             {
-                NodePreviews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
+                previews.Add(new FunctionNodePreviewRow(node.NodeId, node.DisplayName, null,
                     $"Preview blocked: {ex.Message}"));
             }
         }
 
         if (operations.Length > previewCount)
-            NodePreviews.Add(new FunctionNodePreviewRow("", "Preview limit", null,
+            previews.Add(new FunctionNodePreviewRow("", "Preview limit", null,
                 $"Showing the first {previewCount} of {operations.Length} operation nodes."));
+        return previews;
     }
 
     private static FunctionDefinition BuildPrefixFunction(FunctionDefinition function,
@@ -746,6 +803,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private async Task SaveFunctionRevisionAsync()
     {
+        if (!RequireNumericDraft()) return;
         if (_isSavingFunctionRevision) return;
         if (!CanSaveFunctionRevision)
         {
@@ -756,12 +814,14 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         try
         {
             var projectSession = _projectSession();
-            if (!StringComparer.Ordinal.Equals(_draftProjectId, projectSession.Project.ProjectId))
+            if (!ReferenceEquals(_draftOwnerSession, projectSession)
+                || !StringComparer.Ordinal.Equals(_draftProjectId, projectSession.Project.ProjectId))
             {
                 Status = "This function draft belongs to a different project. Start a new draft or select a function from the active project.";
                 return;
             }
             var definition = BuildDraftDefinition();
+            var draftSession = _draftSession;
             var draftProjectSnapshot = ProjectSerializer.Serialize(_draftSession.Project);
             var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
             var editingFunctionId = _editingFunctionId;
@@ -771,14 +831,9 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             SaveFunctionRevisionCommand.NotifyCanExecuteChanged();
             Status = "Validating the function draft with a synthetic preview…";
 
-            var validation = await PreviewFunctionAsync(definition, 1m);
-            if (!validation.Success)
-            {
-                Status = $"Function revision was not saved because synthetic validation failed: {validation.Error}";
-                return;
-            }
-
+            var validation = await PreviewFunctionAsync(definition, 1m, ProjectSerializer.Deserialize(projectSnapshot));
             if (!ReferenceEquals(_projectSession(), projectSession)
+                || !ReferenceEquals(_draftSession, draftSession)
                 || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(projectSession.Project), projectSnapshot)
                 || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(_draftSession.Project), draftProjectSnapshot)
                 || !StringComparer.Ordinal.Equals(DraftName.Trim(), definition.Name)
@@ -790,11 +845,25 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 return;
             }
 
+            if (!validation.Success)
+            {
+                Status = $"Function revision was not saved because synthetic validation failed: {validation.Error}";
+                return;
+            }
+
             var updated = _editingFunctionId is null
                 ? FunctionLibraryService.CreateFunction(projectSession.Project, definition)
                 : FunctionLibraryService.CreateRevision(projectSession.Project, _editingFunctionId,
                     _expectedLatestRevision, definition.Nodes, definition.Edges, definition.Name,
                     definition.Inputs, definition.Outputs);
+            // CreateRevision bases its catalog on the latest revision. The draft may
+            // instead have been loaded from an earlier, compatible catalog spelling.
+            var savedIndex = updated.Functions.FindIndex(function => function.FunctionId == definition.FunctionId
+                && function.Revision == definition.Revision);
+            updated.Functions[savedIndex] = updated.Functions[savedIndex] with
+            {
+                CatalogVersion = definition.CatalogVersion
+            };
             projectSession.ReplaceProject(updated);
             RefreshFromProject();
             var saved = projectSession.Project.Functions
@@ -820,6 +889,12 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private void PinSelectedFunction()
     {
         if (SelectedFunction is not { } selected) return;
+        var projectSession = _projectSession();
+        if (!projectSession.Project.Functions.Any(function => ReferenceEquals(function, selected.Definition)))
+        {
+            Status = "The selected revision is no longer in the active project. Select a saved revision again.";
+            return;
+        }
         var definition = selected.Definition;
         var signature = FunctionCatalog.Default.Find(NodeTypeConstants.FunctionCall)!;
         var node = new MappingNode
@@ -836,19 +911,26 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             OutputPorts = definition.Outputs.ToList(),
             Layout = new LayoutPosition(520, 180)
         };
-        _projectSession().AddNode(node);
+        projectSession.AddNode(node);
         Status = $"Added a call pinned to {definition.FunctionId}@{definition.Revision}. Connect its typed ports in the Mapping tab.";
     }
 
     private async Task ExportFunctionPackageAsync()
     {
-        if (_fileDialog is null || SelectedFunction is not { } selected) return;
+        if (!CanExportFunctionPackage || _fileDialog is null || SelectedFunction is not { } selected) return;
+        _isExportingFunctionPackage = true;
+        NotifyPackageCommandState();
         try
         {
+            var projectSession = _projectSession();
+            var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
+            // Serialize before the picker so changing selection cannot change the
+            // selected revision or its dependency closure during the await.
+            var package = BuildFunctionPackage(selected, projectSession.Project);
+            var json = FunctionPackageSerializer.Serialize(package);
             var path = await _fileDialog.SaveFunctionPackageAsync();
             if (string.IsNullOrWhiteSpace(path)) return;
-            var package = BuildFunctionPackage(selected);
-            var json = FunctionPackageSerializer.Serialize(package);
+            EnsureProjectUnchanged(projectSession, projectSnapshot, "export");
             await WritePackageAtomicallyAsync(path, json);
             Status = $"Exported {package.RootFunctionId}@{package.RootRevision} with {package.Functions.Count} pinned revision(s).";
         }
@@ -857,57 +939,88 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
         {
             Status = $"Function package export failed: {ex.Message}";
         }
+        finally
+        {
+            _isExportingFunctionPackage = false;
+            NotifyPackageCommandState();
+        }
     }
 
     private async Task ImportFunctionPackageAsync()
     {
-        if (_fileDialog is null || string.IsNullOrWhiteSpace(ImportFunctionId)) return;
+        if (!CanImportFunctionPackage || _fileDialog is null) return;
+        _isImportingFunctionPackage = true;
+        NotifyPackageCommandState();
         try
         {
-            var path = await _fileDialog.OpenFunctionPackageAsync();
-            if (string.IsNullOrWhiteSpace(path)) return;
-            var json = await ReadPackageTextAsync(path);
-            var package = FunctionPackageSerializer.Deserialize(json);
             var projectSession = _projectSession();
             var projectSnapshot = ProjectSerializer.Serialize(projectSession.Project);
-            var imported = FunctionLibraryService.ImportAs(projectSession.Project, package.Functions,
-                package.RootFunctionId, ImportFunctionId.Trim(),
-                string.IsNullOrWhiteSpace(ImportFunctionName) ? null : ImportFunctionName.Trim());
+            var importFunctionId = ImportFunctionId.Trim();
+            var importFunctionName = string.IsNullOrWhiteSpace(ImportFunctionName) ? null : ImportFunctionName.Trim();
+            var path = await _fileDialog.OpenFunctionPackageAsync();
+            if (string.IsNullOrWhiteSpace(path)) return;
+            EnsureProjectUnchanged(projectSession, projectSnapshot, "import");
+            var json = await ReadPackageTextAsync(path);
+            EnsureProjectUnchanged(projectSession, projectSnapshot, "import");
+            var package = FunctionPackageSerializer.Deserialize(json);
+            var imported = FunctionLibraryService.ImportAs(ProjectSerializer.Deserialize(projectSnapshot), package.Functions,
+                package.RootFunctionId, importFunctionId, importFunctionName);
             var importedIds = package.Functions.Select(function => function.FunctionId == package.RootFunctionId
-                    ? ImportFunctionId.Trim()
-                    : ImportFunctionId.Trim() + "__" + function.FunctionId)
+                    ? importFunctionId
+                    : importFunctionId + "__" + function.FunctionId)
                 .ToHashSet(StringComparer.Ordinal);
-            foreach (var function in imported.Functions.Where(function => importedIds.Contains(function.FunctionId))
-                         .OrderBy(function => function.FunctionId, StringComparer.Ordinal)
-                         .ThenBy(function => function.Revision))
+            Status = "Validating imported function signatures and pinned dependencies…";
+            // The candidate is an isolated snapshot. Compilation of a large typed
+            // package must not monopolize the UI thread while the user is navigating.
+            await Task.Run(async () =>
             {
-                var validation = await PreviewFunctionAsync(function, 1m, imported);
-                if (!validation.Success)
-                    throw new InvalidOperationException($"Imported function '{function.FunctionId}@{function.Revision}' "
-                        + $"failed synthetic compile and preview: {validation.Error}");
-            }
+                foreach (var function in imported.Functions.Where(function => importedIds.Contains(function.FunctionId))
+                             .OrderBy(function => function.FunctionId, StringComparer.Ordinal)
+                             .ThenBy(function => function.Revision))
+                {
+                    var structuralError = ValidateFunctionStructure(function, imported);
+                    if (structuralError is not null)
+                        throw new InvalidOperationException($"Imported function '{function.FunctionId}@{function.Revision}' "
+                            + $"failed structural compilation: {structuralError}");
 
-            if (!ReferenceEquals(_projectSession(), projectSession)
-                || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(projectSession.Project), projectSnapshot))
-                throw new InvalidOperationException("The active project changed during package validation; the import was not applied.");
+                    // Preserve runtime refusal for malformed numeric parameters
+                    // without pretending to execute other typed contracts.
+                    if (!IsNumericSignature(function.Inputs, function.Outputs)) continue;
+                    var validation = await PreviewFunctionAsync(function, 1m, imported);
+                    if (!validation.Success)
+                        throw new InvalidOperationException($"Imported function '{function.FunctionId}@{function.Revision}' "
+                            + $"failed synthetic compile and preview: {validation.Error}");
+                }
+            });
+
+            EnsureProjectUnchanged(projectSession, projectSnapshot, "import");
 
             projectSession.ReplaceProject(imported);
             RefreshFromProject();
-            SelectedFunction = Functions.First(row => row.FunctionId == ImportFunctionId.Trim()
+            SelectedFunction = Functions.First(row => row.FunctionId == importFunctionId
                 && row.Revision == package.RootRevision);
-            Status = $"Imported {package.RootFunctionId}@{package.RootRevision} as {ImportFunctionId.Trim()} with namespaced dependencies.";
+            Status = $"Imported {package.RootFunctionId}@{package.RootRevision} as {importFunctionId} with namespaced dependencies."
+                + (CanEditDraft ? "" : " " + InspectionOnlyMessage);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
                                    or InvalidOperationException or KeyNotFoundException)
         {
             Status = $"Function package import failed: {ex.Message}";
         }
+        finally
+        {
+            _isImportingFunctionPackage = false;
+            NotifyPackageCommandState();
+        }
     }
 
-    private FunctionPackageDocument BuildFunctionPackage(FunctionRevisionRow selected)
+    private static FunctionPackageDocument BuildFunctionPackage(FunctionRevisionRow selected, MappingProject project)
     {
-        var definitions = _projectSession().Project.Functions;
+        var definitions = project.Functions;
         var byKey = definitions.ToDictionary(definition => (definition.FunctionId, definition.Revision));
+        if (!byKey.TryGetValue((selected.FunctionId, selected.Revision), out var selectedDefinition)
+            || !ReferenceEquals(selectedDefinition, selected.Definition))
+            throw new InvalidOperationException("The selected revision is no longer in the active project. Select a saved revision again.");
         var pending = new Queue<(string FunctionId, int Revision)>();
         foreach (var revision in definitions.Where(definition => definition.FunctionId == selected.FunctionId
                      && definition.Revision <= selected.Revision).OrderBy(definition => definition.Revision))
@@ -927,7 +1040,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 var functionId = ReadParameter(node, "functionId");
                 var revisionText = ReadParameter(node, "revision") ?? "1";
                 if (string.IsNullOrWhiteSpace(functionId)
-                    || !int.TryParse(revisionText, NumberStyles.None, CultureInfo.InvariantCulture, out var revision)
+                    || !int.TryParse(revisionText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var revision)
                     || revision < 1)
                     throw new InvalidOperationException($"Function call node '{node.NodeId}' has an invalid pinned revision.");
                 pending.Enqueue((functionId, revision));
@@ -990,20 +1103,83 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             FunctionId = DraftFunctionId,
             Name = DraftName.Trim(),
             Revision = definitionRevision,
-            CatalogVersion = FunctionCatalog.Default.Version,
-            Inputs = new List<PortDefinition> { DecimalPort("input") },
-            Outputs = new List<PortDefinition> { DecimalPort("value") },
+            CatalogVersion = _draftCatalogVersion,
+            Inputs = _draftInputs.Select(port => port with { }).ToList(),
+            Outputs = _draftOutputs.Select(port => port with { }).ToList(),
             Nodes = _draftSession.Project.Nodes.Select(node => node.ShallowCopy()).ToList(),
             Edges = _draftSession.Project.Edges.Select(edge => edge with { }).ToList()
         };
     }
 
-    private async Task<FunctionPreviewOutcome> PreviewFunctionAsync(FunctionDefinition function, decimal input,
-        MappingProject? sourceProject = null)
+    private static string? ValidateFunctionStructure(FunctionDefinition function, MappingProject library)
     {
         var profile = SyntheticProfile.Build();
-        var project = sourceProject ?? _projectSession().Project;
-        var functions = project.Functions
+        var call = new MappingNode
+        {
+            NodeId = "validation-call",
+            NodeType = NodeTypeConstants.FunctionCall,
+            DisplayName = "Imported function validation",
+            Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["functionId"] = function.FunctionId,
+                ["revision"] = function.Revision.ToString(CultureInfo.InvariantCulture)
+            },
+            InputPorts = function.Inputs.Select(port => port with { }).ToList(),
+            OutputPorts = function.Outputs.Select(port => port with { }).ToList()
+        };
+        var nodes = new List<MappingNode> { call };
+        var edges = new List<MappingEdge>();
+        // These source declarations only supply typed boundary edges for the ordinary
+        // compiler/expander. This isolated graph is never executed and has no adapter,
+        // destination, or user binding. A source is also needed for zero-input functions.
+        var sourcePorts = function.Inputs.Count == 0
+            ? new[] { DecimalPort("iteration") }
+            : function.Inputs.ToArray();
+        for (var index = 0; index < sourcePorts.Length; index++)
+        {
+            var port = sourcePorts[index];
+            var source = new MappingNode
+            {
+                NodeId = $"validation-source-{index}",
+                NodeType = NodeTypeConstants.ExcelField,
+                DisplayName = $"Compile-only {port.Shape}/{port.Cardinality} input",
+                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["bindingId"] = PreviewBindingId,
+                    ["column"] = port.Name
+                },
+                OutputPorts = new List<PortDefinition> { port with { Name = "value" } }
+            };
+            nodes.Add(source);
+            if (function.Inputs.Count > 0) edges.Add(Link(source, "value", call, port.Name));
+        }
+        var validationProject = new MappingProject
+        {
+            ProjectId = "function-package-validation",
+            Name = "Compile-only typed function validation",
+            ProfileId = profile.ProfileId,
+            ProfileDigest = profile.Digest,
+            FunctionCatalogVersion = library.FunctionCatalogVersion,
+            Nodes = nodes,
+            Edges = edges,
+            Functions = library.Functions.ToList()
+        };
+        var compilation = new PlanCompiler(FunctionCatalog.Default)
+            .Compile(new MappingGraph(validationProject), profile);
+        if (compilation.Success && compilation.Plan is not null) return null;
+        var error = string.Join(" | ", compilation.Diagnostics.Items
+            .Where(diagnostic => diagnostic.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Critical)
+            .Select(diagnostic => diagnostic.Message));
+        return string.IsNullOrWhiteSpace(error) ? "Function compilation failed." : error;
+    }
+
+    private static async Task<FunctionPreviewOutcome> PreviewFunctionAsync(FunctionDefinition function, decimal input,
+        MappingProject sourceProject)
+    {
+        if (!IsNumericSignature(function.Inputs, function.Outputs))
+            return FunctionPreviewOutcome.Blocked(InspectionOnlyMessage);
+        var profile = SyntheticProfile.Build();
+        var functions = sourceProject.Functions
             .Where(existing => existing.FunctionId != function.FunctionId
                 || existing.Revision != function.Revision)
             .Append(function)
@@ -1030,8 +1206,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 ["functionId"] = function.FunctionId,
                 ["revision"] = function.Revision.ToString(CultureInfo.InvariantCulture)
             },
-            InputPorts = new List<PortDefinition> { DecimalPort("input", required: false) },
-            OutputPorts = new List<PortDefinition> { DecimalPort("value") }
+            InputPorts = function.Inputs.Select(port => port with { }).ToList(),
+            OutputPorts = function.Outputs.Select(port => port with { }).ToList()
         };
         var entity = ConstantNode("preview-entity", "Synthetic entity", "ACME", PortShape.String);
         var date = ConstantNode("preview-date", "Synthetic instant", "2025-12-31", PortShape.String);
@@ -1073,8 +1249,8 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             Nodes = new List<MappingNode> { field, call, entity, date, instant, fact },
             Edges = new List<MappingEdge>
             {
-                Link(field, "value", call, "input"),
-                Link(call, "value", fact, "value"),
+                Link(field, "value", call, function.Inputs[0].Name),
+                Link(call, function.Outputs[0].Name, fact, "value"),
                 Link(entity, "value", fact, "entity"),
                 Link(date, "value", instant, "dateText"),
                 Link(instant, "value", fact, "instantDate")
@@ -1169,10 +1345,46 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
     private MappingEdge? FindOutputEdge()
     {
         var output = _draftSession.Project.Nodes.FirstOrDefault(node => node.NodeType == OutputMarkerType);
-        return output is null
+        return output is null || output.InputPorts.Count != 1
             ? null
             : _draftSession.Project.Edges.SingleOrDefault(edge =>
-                edge.TargetNodeId == output.NodeId && edge.TargetPortName == "value");
+                edge.TargetNodeId == output.NodeId && edge.TargetPortName == output.InputPorts[0].Name);
+    }
+
+    private static bool IsNumericSignature(IReadOnlyList<PortDefinition> inputs, IReadOnlyList<PortDefinition> outputs)
+        => inputs.Count == 1 && outputs.Count == 1
+            && inputs[0].Shape == PortShape.Decimal && inputs[0].Cardinality == PortCardinality.Single
+            && outputs[0].Shape == PortShape.Decimal && outputs[0].Cardinality == PortCardinality.Single;
+
+    private static string DescribePorts(IEnumerable<PortDefinition> ports)
+    {
+        var descriptions = ports.Select(port => $"{port.Name} ({port.Shape}, {port.Cardinality}, "
+            + (port.IsRequired ? "required" : "optional") + ")"
+            + (string.IsNullOrWhiteSpace(port.Description) ? "" : $" [{port.Description}]")).ToArray();
+        return descriptions.Length == 0 ? "none" : string.Join("; ", descriptions);
+    }
+
+    private bool RequireNumericDraft()
+    {
+        if (CanEditDraft) return true;
+        Status = InspectionOnlyMessage;
+        PreviewStatus = InspectionOnlyMessage;
+        return false;
+    }
+
+    private void EnsureProjectUnchanged(DesignerSession session, string snapshot, string operation)
+    {
+        if (!ReferenceEquals(_projectSession(), session)
+            || !StringComparer.Ordinal.Equals(ProjectSerializer.Serialize(session.Project), snapshot))
+            throw new InvalidOperationException($"The active project changed during package {operation}; the {operation} was not applied.");
+    }
+
+    private void NotifyPackageCommandState()
+    {
+        Raise(nameof(CanImportFunctionPackage));
+        Raise(nameof(CanExportFunctionPackage));
+        ImportFunctionPackageCommand.NotifyCanExecuteChanged();
+        ExportFunctionPackageCommand.NotifyCanExecuteChanged();
     }
 
     private bool CanParsePreviewInput()
@@ -1183,6 +1395,12 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
 
     private void NotifyCommandState()
     {
+        Raise(nameof(CanEditDraft));
+        Raise(nameof(DraftSignatureSummary));
+        Raise(nameof(DraftRevisionSummary));
+        Raise(nameof(CanTestFunction));
+        Raise(nameof(CanUndoDraft));
+        Raise(nameof(CanRedoDraft));
         Raise(nameof(CanAddTransform));
         Raise(nameof(CanSaveFunctionRevision));
         Raise(nameof(CanPinSelectedFunction));
@@ -1231,7 +1449,7 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
             Name = "Function editor draft",
             ProfileId = SyntheticProfile.ProfileId,
             ProfileDigest = SyntheticProfile.Build().Digest,
-            FunctionCatalogVersion = FunctionCatalog.Default.Version,
+            FunctionCatalogVersion = definition?.CatalogVersion ?? FunctionCatalog.Default.Version,
             Nodes = nodes,
             Edges = edges
         });

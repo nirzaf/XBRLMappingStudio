@@ -382,7 +382,7 @@
         <TabItem Header="Functions">
           <Grid ColumnDefinitions="230,*,280" RowDefinitions="Auto,*">
             <Border Grid.Row="0" Grid.ColumnSpan="3" Background="#EEF3F8" Padding="8">
-              <TextBlock Text="Functions are immutable, revisioned decimal subgraphs. Previews use synthetic input; pin a saved revision to add a call node to the mapping graph."
+              <TextBlock Text="Functions are immutable, revisioned typed subgraphs. Numeric authoring and synthetic previews require one Single Decimal input and output; other signatures can be inspected, exported, and pinned in the mapping graph."
                          TextWrapping="Wrap" AutomationProperties.Name="Function authoring safety and revision summary" />
             </Border>
             <Border Grid.Row="1" Grid.Column="0" BorderBrush="#33000000" BorderThickness="0,0,1,0" Padding="8">
@@ -413,6 +413,7 @@
                   </ListBox>
                   <TextBlock Text="Draft name" />
                   <TextBox Name="FunctionDraftNameTextBox" Text="{Binding FunctionLibrary.DraftName, Mode=TwoWay}"
+                           IsEnabled="{Binding FunctionLibrary.CanEditDraft}"
                            AutomationProperties.Name="Function draft name" />
                   <TextBlock Text="Function ID" />
                   <TextBlock Text="{Binding FunctionLibrary.DraftFunctionId}"
@@ -456,6 +457,7 @@
               </StackPanel>
               <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="1" Margin="6">
                 <controls:GraphCanvas Name="FunctionGraphCanvas" Focusable="True" ClipToBounds="True"
+                                      IsEnabled="{Binding FunctionLibrary.CanEditDraft}"
                                       Session="{Binding FunctionLibrary.Session}"
                                       Nodes="{Binding FunctionLibrary.Nodes}"
                                       Edges="{Binding FunctionLibrary.Edges}"
@@ -466,6 +468,8 @@
               <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="7">
                   <TextBlock Text="Function inspector" FontWeight="Bold" />
+                  <TextBlock Text="{Binding FunctionLibrary.DraftSignatureSummary}"
+                             TextWrapping="Wrap" AutomationProperties.Name="Preserved function signature and authoring availability" />
                   <TextBlock Text="{Binding FunctionLibrary.DraftGraphSummary}"
                              TextWrapping="Wrap" AutomationProperties.Name="Function graph step summary" />
                   <TextBlock Text="{Binding FunctionLibrary.SelectedDraftNodeDisplay}"
@@ -493,6 +497,7 @@
                   <Separator />
                   <TextBlock Text="Synthetic decimal preview" FontWeight="Bold" />
                   <TextBox Name="SyntheticFunctionPreviewInputTextBox" Text="{Binding FunctionLibrary.PreviewInput, Mode=TwoWay}"
+                           IsEnabled="{Binding FunctionLibrary.CanEditDraft}"
                            Watermark="Invariant decimal input"
                            AutomationProperties.Name="Synthetic function preview input" />
                   <Button Name="TestFunctionDraftButton" Content="Test draft" Command="{Binding FunctionLibrary.TestFunctionCommand}"
