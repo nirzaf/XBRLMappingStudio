@@ -298,7 +298,6 @@ static int TaxonomySearch(string[] args)
 static async Task<int> ValidateArtifactAsync(string[] args)
 {
     if (args.Length < 1) { Console.Error.WriteLine("validate-artifact requires <file>"); return ExitCodesLocal.IncompleteProfile; }
-    if (!File.Exists(args[0])) { Console.Error.WriteLine($"Artifact not found: {args[0]}"); return ExitCodesLocal.DataError; }
 
     bool useArelle = false;
     bool allowSyntheticProfile = false;
@@ -322,11 +321,13 @@ static async Task<int> ValidateArtifactAsync(string[] args)
         }
     }
 
-    if (!useArelle && !allowSyntheticProfile)
+    if (!allowSyntheticProfile)
     {
-        Console.Error.WriteLine("Local artifact validation uses the synthetic development profile. Pass --allow-synthetic-profile to continue.");
+        Console.Error.WriteLine("Artifact validation currently uses the synthetic development profile in local and Arelle modes. Pass --allow-synthetic-profile to continue.");
         return ExitCodesLocal.IncompleteProfile;
     }
+
+    if (!File.Exists(args[0])) { Console.Error.WriteLine($"Artifact not found: {args[0]}"); return ExitCodesLocal.DataError; }
 
     if (useArelle)
     {

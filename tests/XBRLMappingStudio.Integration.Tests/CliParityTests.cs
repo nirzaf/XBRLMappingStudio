@@ -1263,6 +1263,25 @@ public sealed class CliParityTests : IAsyncLifetime
         Assert.Contains("--allow-synthetic-profile", stderr, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cli_ArtifactValidationRequiresSyntheticOptInBeforePathAccess(bool useArelle)
+    {
+        var missingArtifactPath = Path.Combine(_dir, "artifact-must-not-be-probed.xbrl.json");
+        var (exit, stdout, stderr) = useArelle
+            ? await RunCliAsync(LocateCli(), "validate-artifact", missingArtifactPath,
+                "--arelle", "--python", "missing-python")
+            : await RunCliAsync(LocateCli(), "validate-artifact", missingArtifactPath);
+
+        Assert.Equal(4, exit);
+        Assert.Empty(stdout);
+        Assert.Contains("synthetic development profile", stderr, StringComparison.Ordinal);
+        Assert.Contains("--allow-synthetic-profile", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("Artifact not found", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("Could not start", stderr, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Cli_ValidateWithSubstitutedProfileReturnsIncompleteProfile()
     {
