@@ -196,6 +196,51 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertTrue(single[0]["message"].endswith("…"))
         self.assertFalse(single[0]["isBlocking"])
 
+    def test_log_diagnostics_preserves_a_bounded_exact_fact_locator(self):
+        locator = "f" + "a" * 64
+
+        diagnostics = arelle_worker.log_diagnostics([{
+            "levelname": "error",
+            "messageCode": "fixture:error",
+            "msg": "fact finding",
+            "factLocator": locator,
+        }], "locator-op")
+        oversized = arelle_worker.log_diagnostics([{
+            "levelname": "error",
+            "messageCode": "fixture:error",
+            "msg": "fact finding",
+            "factLocator": "f" * (arelle_worker.MAX_DIAGNOSTIC_FACT_LOCATOR_CHARS + 1),
+        }], "locator-op")
+
+        self.assertEqual(locator, diagnostics[0]["factLocator"])
+        self.assertNotIn("factLocator", oversized[0])
+
+    def test_arelle_fact_locator_enrichment_requires_one_exact_referenced_item_fact(self):
+        first_locator = "f" + "1" * 64
+        second_locator = "f" + "2" * 64
+        first_fact = SimpleNamespace(isItem=True, id=first_locator)
+        second_fact = SimpleNamespace(isItem=True, id=second_locator)
+        concept = SimpleNamespace(isItem=False, id=first_locator)
+        objects = {
+            "_fact_1": first_fact,
+            "_fact_2": second_fact,
+            "_concept_3": concept,
+        }
+        model = SimpleNamespace(modelObject=lambda object_id: objects.get(object_id))
+        logs = [
+            {"refs": [{"objectId": "_fact_1"}]},
+            {"refs": [{"objectId": "_fact_1"}, {"objectId": "_fact_2"}]},
+            {"refs": [{"objectId": "_concept_3"}]},
+            {"refs": [{"objectId": "_fact_1"}, "<additional-values-omitted>"]},
+            {"refs": [{"objectId": "_unknown_4"}]},
+            {"refs": [{"objectId": "_fact_1"}, {"objectId": "_unknown_4"}]},
+        ]
+
+        arelle_worker.attach_arelle_fact_locators(logs, [model])
+
+        self.assertEqual(first_locator, logs[0]["factLocator"])
+        self.assertTrue(all("factLocator" not in item for item in logs[1:]))
+
     def test_arelle_log_handler_bounds_raw_capture_and_preserves_omitted_severity(self):
         handler = arelle_worker.BoundedArelleLogHandler(max_records=2, max_bytes=16_384)
         for level, message_code in (
@@ -1143,6 +1188,33 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertIsInstance(session.run.call_args.kwargs["logHandler"],
                               arelle_worker.BoundedArelleLogHandler)
 
+    def test_arelle_run_links_single_fact_reference_before_closing_models(self):
+        locator = "f" + "b" * 64
+        fact = SimpleNamespace(isItem=True, id=locator)
+        model = SimpleNamespace(
+            modelObject=lambda object_id: fact if object_id == "_fact_1" else None,
+            qnameConcepts={},
+        )
+        session = mock.MagicMock()
+        session.__enter__.return_value = session
+        session.get_models.return_value = [model]
+
+        def emit_fact_finding(_options, logHandler):
+            record = logging.LogRecord("arelle", logging.ERROR, "worker.py", 10, "fact issue", (), None)
+            record.messageCode = "fixture:factIssue"
+            record.refs = [{"objectId": "_fact_1"}]
+            logHandler.emit(record)
+            return False
+
+        session.run.side_effect = emit_fact_finding
+        with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
+                mock.patch.object(arelle_worker, "Session", return_value=session), \
+                mock.patch.object(arelle_worker, "RuntimeOptions"):
+            _ok, logs, _concept_count, _loaded_plugins = arelle_worker.run_arelle("report.json", self.args)
+
+        self.assertEqual(locator, logs[0]["factLocator"])
+        session._cntlr.modelManager.close.assert_called_once_with(model)
+
     def test_arelle_run_collects_only_modules_from_the_loaded_plugin_registry(self):
         session = mock.MagicMock()
         session.__enter__.return_value = session
@@ -1707,6 +1779,23 @@ print("offline-network-denied")
         self.assertEqual("success", result["status"], result["error"])
         self.assertTrue(result["result"]["completed"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_arelle_fact_value_diagnostic_returns_the_exact_report_fact_locator(self):
+        locator = "f" + "c" * 64
+        value = report("synthetic:Revenue")
+        fact = value["facts"].pop("f1")
+        value["facts"][locator] = fact
+        fact["value"] = "not-a-number"
+        fact["dimensions"]["period"] = "2025-01-01T00:00:00/2026-01-01T00:00:00"
+
+        result = arelle_worker.handle(self.request(value), self.args)
+
+        self.assertEqual("success", result["status"], result["error"])
+        value_finding = next(item for item in result["diagnostics"]
+                             if item["ruleIdentifier"] == "xmlSchema:valueError")
+        self.assertEqual(locator, value_finding["factLocator"])
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")

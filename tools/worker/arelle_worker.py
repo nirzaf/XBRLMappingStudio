@@ -31,11 +31,13 @@ SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5, 6)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_DIAGNOSTICS = 128
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000
+MAX_DIAGNOSTIC_FACT_LOCATOR_CHARS = 512
 MAX_ARELLE_LOG_RECORDS = 512
 MAX_ARELLE_LOG_BYTES = 1024 * 1024
 MAX_ARELLE_LOG_VALUE_ITEMS = 16
 MAX_ARELLE_LOG_VALUE_CHARS = 2_048
 MAX_ARELLE_LOG_VALUE_DEPTH = 4
+APPLICATION_FACT_LOCATOR_PATTERN = re.compile(r"f[0-9a-f]{64}\Z")
 ENGINE_VERSION = "arelle-worker/1.0"
 CAPABILITIES = ["handshake", "load-taxonomy", "validate-report"]
 MAX_PROFILE_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -131,9 +133,9 @@ def response(op_id, status, result=None, diagnostics=None, error=None):
     }
 
 
-def diagnostic(op_id, code, level, message, rule=None):
+def diagnostic(op_id, code, level, message, rule=None, fact_locator=None):
     severity = _diagnostic_severity(level)
-    return {
+    finding = {
         "code": code,
         "subsystem": "XBRL",
         "severity": severity,
@@ -143,6 +145,10 @@ def diagnostic(op_id, code, level, message, rule=None):
         "operationId": op_id,
         "ruleIdentifier": rule,
     }
+    if (isinstance(fact_locator, str) and fact_locator
+            and len(fact_locator) <= MAX_DIAGNOSTIC_FACT_LOCATOR_CHARS):
+        finding["factLocator"] = fact_locator
+    return finding
 
 
 def _diagnostic_severity(level):
@@ -2163,6 +2169,7 @@ def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_cons
             logs = log_handler.messages
             loaded_plugins = loaded_plugin_identifiers()
             models = session.get_models()
+            attach_arelle_fact_locators(logs, models)
             validate_model_numeric_policies(models, getattr(args, "profile_manifest_data", None))
             concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
             if relationship_metadata_consumer is not None:
@@ -2173,6 +2180,67 @@ def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_cons
                 session._cntlr.modelManager.close(model)
     gc.collect()
     return ok, logs, concept_count, loaded_plugins
+
+
+def attach_arelle_fact_locators(logs, models):
+    """Attach the exact application JSON fact key when one referenced item fact is unambiguous."""
+    if not logs or not models:
+        return
+
+    for item in logs:
+        if not isinstance(item, dict) or item.get("factLocator"):
+            continue
+        refs = item.get("refs")
+        if (not isinstance(refs, list)
+                or any(ref == "<additional-values-omitted>" for ref in refs)):
+            continue
+
+        fact_locators = set()
+        ambiguous = False
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                continue
+            if "objectId" not in ref:
+                continue
+            object_id = ref.get("objectId")
+            if not isinstance(object_id, str) or not object_id:
+                ambiguous = True
+                break
+
+            resolved_locators = set()
+            resolved_object = False
+            for model in models:
+                resolve_model_object = getattr(model, "modelObject", None)
+                if not callable(resolve_model_object):
+                    continue
+                try:
+                    model_object = resolve_model_object(object_id)
+                    if model_object is None:
+                        continue
+                    resolved_object = True
+                    if not getattr(model_object, "isItem", False):
+                        continue
+                    locator = getattr(model_object, "id", None)
+                except Exception:
+                    continue
+                if (isinstance(locator, str)
+                        and len(locator) <= MAX_DIAGNOSTIC_FACT_LOCATOR_CHARS
+                        and APPLICATION_FACT_LOCATOR_PATTERN.fullmatch(locator)):
+                    resolved_locators.add(locator)
+
+            if not resolved_object:
+                ambiguous = True
+                break
+            if len(resolved_locators) > 1:
+                ambiguous = True
+                break
+            fact_locators.update(resolved_locators)
+            if len(fact_locators) > 1:
+                ambiguous = True
+                break
+
+        if not ambiguous and len(fact_locators) == 1:
+            item["factLocator"] = next(iter(fact_locators))
 
 
 def loaded_plugin_identifiers():
@@ -2254,7 +2322,11 @@ def log_diagnostics(logs, op_id, temporary_path=None):
             message = message[:MAX_DIAGNOSTIC_MESSAGE_CHARS - 1] + "…"
         if temporary_path:
             message = message.replace(str(temporary_path), "<job>")
-        finding = diagnostic(op_id, "XBR009", raw_level, message, code)
+        fact_locator = item.get("factLocator")
+        if (not isinstance(fact_locator, str) or not fact_locator
+                or len(fact_locator) > MAX_DIAGNOSTIC_FACT_LOCATOR_CHARS):
+            fact_locator = None
+        finding = diagnostic(op_id, "XBR009", raw_level, message, code, fact_locator)
         if len(result) < MAX_RESPONSE_DIAGNOSTICS:
             result.append(finding)
         else:
