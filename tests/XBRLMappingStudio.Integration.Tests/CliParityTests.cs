@@ -541,6 +541,102 @@ public sealed partial class CliParityTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData("csv-records-v1", ".csv")]
+    [InlineData("csv-records-v2", ".csv")]
+    [InlineData("xlsx-records-v1", ".xlsx")]
+    [InlineData("xlsx-records-v2", ".xlsx")]
+    [InlineData("json-records-v1", ".json")]
+    [InlineData("xml-records-v1", ".xml")]
+    public async Task Cli_MixedPublicationPublishesVersionedRecordFilesAndRetriesWithoutReplacement(
+        string outputFormat, string extension)
+    {
+        var targetPath = Path.Combine(_dir, "record-file-mixed-target.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = Path.GetFileName(targetPath),
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        project.Approvals.Clear();
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "record-file-mixed.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var outputPath = Path.Combine(_dir, "record-file-mixed" + extension);
+        var manifestPath = Path.Combine(_dir, "record-file-mixed-manifest.json");
+        var cli = LocateCli();
+
+        var (exit, _, stderr) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
+            "--manifest", manifestPath, "--allow-synthetic-profile");
+
+        Assert.True(exit == 0, $"Mixed {outputFormat} publication failed ({exit}).\nstderr:\n{stderr}");
+        Assert.Contains("Published mixed operation", stderr, StringComparison.Ordinal);
+        var firstBytes = await File.ReadAllBytesAsync(outputPath);
+        string operationKey;
+        using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath)))
+        {
+            var root = manifest.RootElement;
+            operationKey = root.GetProperty("PublicationReconciliationId").GetString()!;
+            var artifact = Assert.Single(root.GetProperty("Outputs").EnumerateArray(),
+                output => output.GetProperty("Kind").GetString() == outputFormat);
+            Assert.Equal(Path.GetFullPath(outputPath), artifact.GetProperty("Path").GetString());
+            Assert.Equal(RunManifest.ComputeSha256(firstBytes), artifact.GetProperty("Digest").GetString());
+            Assert.Contains(root.GetProperty("PublicationOutcomes").EnumerateArray(), outcome =>
+                outcome.GetProperty("Kind").GetString() == outputFormat
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+            Assert.Contains(root.GetProperty("PublicationOutcomes").EnumerateArray(), outcome =>
+                outcome.GetProperty("Kind").GetString() == "sqlite"
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+        }
+
+        var targetAfterFirstPublication = await File.ReadAllBytesAsync(targetPath);
+        var retryManifestPath = Path.Combine(_dir, "record-file-mixed-retry-manifest.json");
+        var (retryExit, _, retryError) = await RunCliAsync(cli, "execute", projectPath,
+            "--output", outputPath, "--output-format", outputFormat, "--publish-destination",
+            "--manifest", retryManifestPath, "--allow-synthetic-profile");
+
+        Assert.True(retryExit == 0, $"Mixed {outputFormat} retry failed ({retryExit}).\nstderr:\n{retryError}");
+        Assert.Equal(firstBytes, await File.ReadAllBytesAsync(outputPath));
+        Assert.Equal(targetAfterFirstPublication, await File.ReadAllBytesAsync(targetPath));
+        using (var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath)))
+        {
+            Assert.Equal(operationKey,
+                retryManifest.RootElement.GetProperty("PublicationReconciliationId").GetString());
+            Assert.Contains(retryManifest.RootElement.GetProperty("PublicationOutcomes").EnumerateArray(), outcome =>
+                outcome.GetProperty("Kind").GetString() == outputFormat
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+        }
+
+        var (reconcileExit, reconcileStdout, reconcileStderr) = await RunCliAsync(cli,
+            "reconcile-publication", operationKey);
+        Assert.True(reconcileExit == 0, $"Mixed {outputFormat} reconciliation failed.\n{reconcileStderr}");
+        using (var reconciled = JsonDocument.Parse(reconcileStdout))
+            Assert.Contains(reconciled.RootElement.GetProperty("outcomes").EnumerateArray(), outcome =>
+                outcome.GetProperty("Kind").GetString() == outputFormat
+                && outcome.GetProperty("State").GetString() == "Confirmed");
+
+        await using var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+        await target.OpenAsync();
+        await using var command = target.CreateCommand();
+        command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+    }
+
+    [Theory]
     [InlineData("xbrl-json", true)]
     [InlineData("xbrl-xml", true)]
     [InlineData("xbrl-json", false)]

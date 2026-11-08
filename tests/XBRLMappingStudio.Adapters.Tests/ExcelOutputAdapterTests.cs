@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using ClosedXML.Excel;
 using XBRLMappingStudio.Adapters.Excel;
 
@@ -8,6 +9,43 @@ namespace XBRLMappingStudio.Adapters.Tests;
 /// workbook is never overwritten.</summary>
 public sealed class ExcelOutputAdapterTests
 {
+    [Fact]
+    public void IdenticalRecordsSerializeToIdenticalWorkbookBytesForSafeRetry()
+    {
+        var headers = new[] { "fact_key", "concept", "value" };
+        IEnumerable<object?>[] rows =
+        {
+            new object?[] { "key-1", "Revenue", 1250m }
+        };
+
+        var first = new ExcelOutputAdapter().WriteWorkbook(headers, rows);
+        var second = new ExcelOutputAdapter().WriteWorkbook(headers, rows);
+
+        var firstEntries = ReadPackageEntries(first);
+        var secondEntries = ReadPackageEntries(second);
+        var changedEntries = firstEntries.Keys.Union(secondEntries.Keys, StringComparer.Ordinal)
+            .Where(path => !firstEntries.TryGetValue(path, out var firstBytes)
+                || !secondEntries.TryGetValue(path, out var secondBytes)
+                || !firstBytes.SequenceEqual(secondBytes))
+            .ToArray();
+        Assert.True(first.SequenceEqual(second),
+            "Identical workbooks must be byte-identical. Changed package parts: "
+            + string.Join(", ", changedEntries));
+
+        static Dictionary<string, byte[]> ReadPackageEntries(byte[] package)
+        {
+            using var stream = new MemoryStream(package);
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+            return archive.Entries.ToDictionary(entry => entry.FullName, entry =>
+            {
+                using var content = entry.Open();
+                using var copy = new MemoryStream();
+                content.CopyTo(copy);
+                return copy.ToArray();
+            }, StringComparer.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task StagePublish_ReopensAndReconciles()
     {

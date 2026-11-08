@@ -77,9 +77,9 @@ public sealed class PublicationService
                 "Run evidence no longer matches the approved project or profile identity.",
                 manifest.RunId, destinationPath);
 
-        if (outputKind is not ("xbrl-json" or "xbrl-xml"))
+        if (!MixedPublicationIntent.SupportedFileKinds.Contains(outputKind))
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
-                $"Publication does not support XBRL artifact kind '{outputKind}'.",
+                $"Publication does not support file artifact kind '{outputKind}'.",
                 manifest.RunId, destinationPath);
 
         var expectedDigest = RunManifest.ComputeSha256(payload);

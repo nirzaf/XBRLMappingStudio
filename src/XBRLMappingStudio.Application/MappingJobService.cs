@@ -2377,6 +2377,110 @@ public sealed class MappingJobService
             _ => value.Raw
         };
 
+    /// <summary>Serialize the run's mapped facts with an existing versioned file-output contract.</summary>
+    public byte[] SerializeFileOutputArtifact(JobResult result, string outputFormat)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (!DestinationPlanValidator.TryResolveFileFormat(outputFormat, out var kind))
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"File output contract '{outputFormat}' is not supported.", DiagnosticStage.Serialization);
+        if (result.LargeArtifact is not null)
+            throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                "Versioned record-file serialization currently requires an in-memory run result.",
+                DiagnosticStage.Serialization);
+
+        var records = XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest);
+        var headers = XbrlFactRecordMapper.OutputColumns;
+        if (DestinationPlanValidator.UsesFieldPresenceMetadata(kind, outputFormat))
+        {
+            records = FileOutputPresenceMetadata.Append(records, headers);
+            headers = FileOutputPresenceMetadata.AppendHeader(headers);
+        }
+        var connection = new SourceConnection("record-output", kind, "record-output",
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        var adapter = BuildTargetAdapter(connection);
+        return adapter switch
+        {
+            CsvAdapter csv => csv.WriteRecords(headers, records),
+            ExcelOutputAdapter excel => excel.WriteWorkbook(headers,
+                records.Select(record => headers.Select(header => ToExcelCell(record.Fields[header])))),
+            JsonOutputAdapter json => json.Write(records),
+            XmlOutputAdapter xml => xml.Write(records),
+            _ => throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                $"No serializer is registered for file output contract '{outputFormat}'.",
+                DiagnosticStage.Serialization)
+        };
+    }
+
+    /// <summary>Reopen and reconcile the exact staged generic record artifact before publication.</summary>
+    public async Task<string> ValidateStagedRecordArtifactAsync(
+        string stagedPath,
+        string outputFormat,
+        JobResult result,
+        CancellationToken cancellationToken = default)
+    {
+        var manifest = result.Manifest;
+        if (!DestinationPlanValidator.TryResolveFileFormat(outputFormat, out var kind))
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                $"Staged file output contract '{outputFormat}' is not supported.", manifest.RunId, stagedPath);
+        var output = manifest.Outputs.SingleOrDefault(identity => identity.Kind == outputFormat);
+        if (output is null || !File.Exists(stagedPath)
+            || new FileInfo(stagedPath).Length != output.Bytes
+            || !StringComparer.Ordinal.Equals(DestinationLock.DigestFile(stagedPath), output.Digest))
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                "Staged record-file bytes do not match the artifact identity recorded by the run.",
+                manifest.RunId, stagedPath);
+
+        var changedFile = await FindChangedFileInputAsync(manifest.Inputs,
+            _executionBudget.MaxInMemorySourceBytes, cancellationToken).ConfigureAwait(false);
+        if (changedFile is not null)
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                SourceIdentityMismatchMessage(changedFile), manifest.RunId, stagedPath);
+
+        try
+        {
+            var connection = new SourceConnection("staged-record-output", kind, stagedPath,
+                new Dictionary<string, string>(StringComparer.Ordinal));
+            var adapter = BuildAdapter(connection, _executionBudget.MaxRowBytes);
+            var schema = await adapter.InspectSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+            var requiredColumns = XbrlFactRecordMapper.OutputColumns;
+            if (DestinationPlanValidator.UsesFieldPresenceMetadata(kind, outputFormat))
+                requiredColumns = FileOutputPresenceMetadata.AppendHeader(requiredColumns);
+            var singleXmlRecordPrefix = kind == DestinationPlanValidator.XmlKind && result.Facts.Count == 1
+                ? "row." : string.Empty;
+            if (requiredColumns.Any(column => !schema.Columns.Any(actual =>
+                    StringComparer.Ordinal.Equals(actual.Name, singleXmlRecordPrefix + column))))
+                throw new InvalidDataException("Staged record-file output is missing one or more required fact columns.");
+
+            var rows = 0;
+            await foreach (var record in adapter.ReadFullAsync(connection, schema, cancellationToken))
+            {
+                if (record.Fields.Count == 0)
+                    throw new InvalidDataException("Staged record-file output contains an empty row.");
+                rows++;
+            }
+            if (rows != result.Facts.Count)
+                throw new InvalidDataException(
+                    $"Staged record-file output reopened with {rows} rows; the run contains {result.Facts.Count} facts.");
+            return output.Digest;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (PublicationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is AdapterException or IOException
+            or UnauthorizedAccessException or NotSupportedException)
+        {
+            throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                $"Staged record-file output could not be reopened and reconciled: {ex.Message}",
+                manifest.RunId, stagedPath);
+        }
+    }
+
     private static string ComputeDestinationOperationFingerprint(
         MappingProject project,
         JobResult result,

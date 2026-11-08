@@ -37,6 +37,17 @@ public static class DestinationPlanValidator
             [XmlKind] = "xml-records-v1"
         };
 
+    private static readonly IReadOnlyDictionary<string, string> FileFormatKinds =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["csv-records-v1"] = CsvKind,
+            ["csv-records-v2"] = CsvKind,
+            ["xlsx-records-v1"] = ExcelKind,
+            ["xlsx-records-v2"] = ExcelKind,
+            ["json-records-v1"] = JsonKind,
+            ["xml-records-v1"] = XmlKind
+        };
+
     public static IReadOnlyList<string> SupportedFileKinds { get; } = Array.AsReadOnly(
         new[] { CsvKind, ExcelKind, JsonKind, XmlKind });
 
@@ -45,6 +56,17 @@ public static class DestinationPlanValidator
     /// <summary>Default contract for newly configured destinations. Existing v1 plans remain supported.</summary>
     public static string? FileFormatFor(string kind)
         => DefaultFileFormats.TryGetValue(kind, out var format) ? format : null;
+
+    public static bool TryResolveFileFormat(string? format, out string kind)
+    {
+        if (format is not null && FileFormatKinds.TryGetValue(format, out var resolvedKind))
+        {
+            kind = resolvedKind;
+            return true;
+        }
+        kind = string.Empty;
+        return false;
+    }
 
     public static bool UsesFieldPresenceMetadata(DestinationPlan plan)
     {

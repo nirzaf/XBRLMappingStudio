@@ -70,7 +70,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
-    Console.Error.WriteLine("                       [--output-format xbrl-json|xbrl-xml] (default: xbrl-json)");
+    Console.Error.WriteLine("                       [--output-format xbrl-json|xbrl-xml|csv-records-v1|csv-records-v2|xlsx-records-v1|xlsx-records-v2|json-records-v1|xml-records-v1] (default: xbrl-json)");
     Console.Error.WriteLine("                       [--source-snapshot <id>=<snapshot.json>] (replay a retained SQLite source without reading the live database)");
     Console.Error.WriteLine("                       [--manifest <path>] (completed run metadata; early failures may have no manifest)");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
@@ -975,7 +975,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                 output = args[++i];
                 break;
             case "--output-format":
-                if (i + 1 >= args.Length) { Console.Error.WriteLine("--output-format requires xbrl-json or xbrl-xml."); return ExitCodesLocal.IncompleteProfile; }
+                if (i + 1 >= args.Length) { Console.Error.WriteLine("--output-format requires a supported XBRL or versioned record-file contract."); return ExitCodesLocal.IncompleteProfile; }
                 outputFormat = args[++i];
                 break;
             case "--manifest":
@@ -1019,14 +1019,16 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
         return ExitCodesLocal.IncompleteProfile;
     }
 
-    if (outputFormat is not ("xbrl-json" or "xbrl-xml"))
+    var isXbrlOutput = outputFormat is "xbrl-json" or "xbrl-xml";
+    var isRecordFileOutput = DestinationPlanValidator.TryResolveFileFormat(outputFormat, out _);
+    if (!isXbrlOutput && !isRecordFileOutput)
     {
-        Console.Error.WriteLine("--output-format must be xbrl-json or xbrl-xml.");
+        Console.Error.WriteLine("--output-format must name a supported XBRL or versioned record-file contract.");
         return ExitCodesLocal.IncompleteProfile;
     }
-    if (outputFormat == "xbrl-xml" && (preview || output is null))
+    if ((outputFormat == "xbrl-xml" || isRecordFileOutput) && (preview || output is null))
     {
-        Console.Error.WriteLine("xBRL-XML output requires execute --output and cannot be combined with preview.");
+        Console.Error.WriteLine("This output format requires execute --output and cannot be combined with preview.");
         return ExitCodesLocal.InvalidMapping;
     }
 
@@ -1234,11 +1236,48 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
         await using var workerLifetime = worker;
         var service = new MappingJobService(profile, worker);
 
+        var runOutputKind = outputFormat == "xbrl-xml" ? "xbrl-xml" : "xbrl-json";
         using var result = await service.RunAsync(p, conns, parameters, preview, cancellationToken,
-            outputKind: outputFormat);
+            outputKind: runOutputKind);
         PrintDiagnostics(result.Diagnostics.Items);
         var selectedOutputKind = outputFormat;
         byte[]? selectedOutputPayload = null;
+
+        if (!preview && isRecordFileOutput && output is not null && result.IsPublishable)
+        {
+            try
+            {
+                selectedOutputPayload = service.SerializeFileOutputArtifact(result, outputFormat);
+                var digest = RunManifest.ComputeSha256(selectedOutputPayload);
+                result.Manifest.Outputs = result.Manifest.Outputs
+                    .Append(new OutputIdentity("<memory>", digest, selectedOutputPayload.LongLength, outputFormat))
+                    .ToArray();
+            }
+            catch (AdapterException ex)
+            {
+                RecordDestinationFailure(ex.ToDiagnostic(operationId: result.Manifest.OperationId),
+                    RunOutcome.IncompleteConfiguration);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or ArgumentException)
+            {
+                RecordDestinationFailure(new Diagnostic
+                {
+                    Code = DiagnosticCodes.IoSchemaMismatch,
+                    Subsystem = DiagnosticSubsystem.Adapter,
+                    Severity = DiagnosticSeverity.Error,
+                    Stage = DiagnosticStage.Serialization,
+                    IsBlocking = true,
+                    Message = $"Could not serialize the selected record-file output: {ex.Message}",
+                    OperationId = result.Manifest.OperationId
+                }, RunOutcome.IncompleteConfiguration);
+            }
+        }
+
+        Func<string, CancellationToken, Task<string>> validateSelectedOutput = isRecordFileOutput
+            ? (stagedPath, token) => service.ValidateStagedRecordArtifactAsync(
+                stagedPath, outputFormat, result, token)
+            : (stagedPath, token) => service.ValidateStagedArtifactAsync(
+                stagedPath, output!, result, token, selectedOutputKind);
 
         void RecordDestinationFailure(Diagnostic diagnostic, RunOutcome outcome)
         {
@@ -1334,14 +1373,12 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                             async token => result.LargeArtifact is { } largeArtifact
                                 ? await publisher.PublishAuthorizedLargeArtifactAsync(
                                     output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
-                                    (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
-                                        stagedPath, output, result, validationToken, selectedOutputKind), token,
+                                    validateSelectedOutput, token,
                                     refuseDifferentExisting: true, outputKind: selectedOutputKind)
                                 : await publisher.PublishAuthorizedAsync(
                                     output, mixedFilePayload, workspaceRoot,
                                     p, profile, allowSyntheticProfile, result,
-                                    (stagedPath, validationToken) => service.ValidateStagedArtifactAsync(
-                                        stagedPath, output, result, validationToken, selectedOutputKind), token,
+                                    validateSelectedOutput, token,
                                     refuseDifferentExisting: true, outputKind: selectedOutputKind),
                             (onIntentPrepared, token) => service.PublishDestinationAsync(
                                 p, result, projectDirectory, allowSyntheticProfile, token, onIntentPrepared),
@@ -1480,8 +1517,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                     {
                         receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
                             output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
-                            (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token, selectedOutputKind), cancellationToken,
+                            validateSelectedOutput, cancellationToken,
                             outputKind: selectedOutputKind);
                         payloadBytes = largeArtifact.Bytes;
                     }
@@ -1491,8 +1527,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                             ?? System.Text.Encoding.UTF8.GetBytes(result.XbrlJson);
                         receipt = await publisher.PublishAuthorizedAsync(
                             output, payload, workspaceRoot, p, profile, allowSyntheticProfile, result,
-                            (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token, selectedOutputKind), cancellationToken,
+                            validateSelectedOutput, cancellationToken,
                             outputKind: selectedOutputKind);
                         payloadBytes = payload.Length;
                     }
