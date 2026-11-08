@@ -709,12 +709,18 @@
                         AutomationProperties.Name="Fact period type" />
               <TextBox Text="{Binding SelectedFactDecimals}" Watermark="Decimals or INF"
                        AutomationProperties.Name="Fact decimals" />
+              <TextBlock Text="Fact language (BCP 47)" FontWeight="SemiBold" />
+              <TextBox x:Name="FactLanguageTextBox" Text="{Binding SelectedFactLanguage}" Watermark="e.g. en or fr"
+                       AutomationProperties.Name="Fact language tag" />
+              <TextBlock Text="You may add a BCP 47 tag to language-sensitive text facts; numeric facts cannot carry one."
+                         TextWrapping="Wrap" />
               <TextBlock Text="Explicit dimensions (one axisQName=memberQName per line)" FontWeight="SemiBold"
                          TextWrapping="Wrap" />
               <TextBox Text="{Binding SelectedFactDimensions}" Watermark="ex:RegionAxis=ex:Domestic"
                        AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
                        AutomationProperties.Name="Fact explicit dimensions" />
-              <Button Content="Apply fact properties" Command="{Binding ApplyFactPropertiesCommand}" />
+              <Button x:Name="ApplyFactPropertiesButton" Content="Apply fact properties"
+                      Command="{Binding ApplyFactPropertiesCommand}" />
             </StackPanel>
             <TextBlock Text="{Binding TargetCapabilitySummary}" TextWrapping="Wrap"
                        MaxHeight="108" Margin="0,4,0,0"

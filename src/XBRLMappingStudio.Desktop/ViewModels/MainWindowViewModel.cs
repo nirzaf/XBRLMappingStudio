@@ -509,6 +509,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string _selectedFactPeriodType = "duration";
     private string _selectedFactDecimals = "0";
     private string _selectedFactDimensions = "";
+    private string _selectedFactLanguage = "";
     private string _selectedFactEntityIdentifier = "";
     private bool _canEditSelectedFactEntity;
     private bool _factInputRebindingProfileAllowed;
@@ -907,6 +908,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public string SelectedFactPeriodType { get => _selectedFactPeriodType; set => Set(ref _selectedFactPeriodType, value); }
     public string SelectedFactDecimals { get => _selectedFactDecimals; set => Set(ref _selectedFactDecimals, value); }
     public string SelectedFactDimensions { get => _selectedFactDimensions; set => Set(ref _selectedFactDimensions, value); }
+    public string SelectedFactLanguage { get => _selectedFactLanguage; set => Set(ref _selectedFactLanguage, value); }
     public string SelectedFactEntityIdentifier { get => _selectedFactEntityIdentifier; set => Set(ref _selectedFactEntityIdentifier, value); }
     public string SelectedStringConstantValue
     {
@@ -1676,6 +1678,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         if (node?.NodeType != NodeTypeConstants.FactConstruct)
         {
             CanEditSelectedFactEntity = false;
+            SelectedFactLanguage = "";
             SelectedFactConceptIdentity = "Select a fact to inspect its taxonomy identity.";
             SelectedFactSourceSummary = "Select a fact to inspect its source mapping.";
             SelectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
@@ -1683,13 +1686,15 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             RefreshFactInputRebindingAvailability();
             return;
         }
-        SelectedFactUnit = node.Parameters.GetValueOrDefault("unit")?.ToString() ?? "";
-        SelectedFactPeriodType = node.Parameters.GetValueOrDefault("periodType")?.ToString() ?? "duration";
-        SelectedFactDecimals = node.Parameters.GetValueOrDefault("decimals")?.ToString() ?? "0";
-        SelectedFactDimensions = node.Parameters.GetValueOrDefault("dimensions")?.ToString() ?? "";
-
         var conceptName = node.Parameters.GetValueOrDefault("concept")?.ToString();
         var concept = conceptName is null ? null : _profile.FindConcept(conceptName);
+        SelectedFactUnit = node.Parameters.GetValueOrDefault("unit")?.ToString() ?? "";
+        SelectedFactPeriodType = node.Parameters.GetValueOrDefault("periodType")?.ToString() ?? "duration";
+        SelectedFactDecimals = node.Parameters.TryGetValue("decimals", out var configuredDecimals)
+            ? configuredDecimals?.ToString() ?? ""
+            : concept is { IsNumeric: false } ? "" : "0";
+        SelectedFactDimensions = node.Parameters.GetValueOrDefault("dimensions")?.ToString() ?? "";
+        SelectedFactLanguage = node.Parameters.GetValueOrDefault("language")?.ToString() ?? "";
         SelectedFactConceptIdentity = concept is null
             ? $"Concept '{conceptName ?? "(unset)"}' is unavailable in profile '{_profile.ProfileId}' ({_profile.Digest})."
             : $"{concept.Label} · {concept.QualifiedName} · {{{concept.Namespace}}}{concept.LocalName} · {concept.DataType}, {concept.PeriodType} · profile {_profile.ProfileId} ({_profile.Digest})";
@@ -4126,27 +4131,54 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         if (profile.FindConcept(SelectedConcept.QualifiedName) is null)
         { StatusText = "The selected concept is not part of this project's filing profile."; return; }
         var concept = profile.FindConcept(SelectedConcept.QualifiedName)!;
-        if (!concept.IsNumeric)
+        var factNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
+        if (factNode is null)
         {
-            StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
+            StatusText = "The selected fact node no longer exists.";
             return;
         }
-        var factNode = Session.Project.Nodes.FirstOrDefault(node => node.NodeId == SelectedNode.NodeId);
-        var graphPeriodType = factNode is null ? null : GetFactGraphPeriodType(factNode);
+        var factNodeId = factNode.NodeId;
+        var hasNumericInput = Session.Project.Edges.Any(edge =>
+            edge.TargetNodeId == factNodeId && edge.TargetPortName is "value" or "values");
+        var hasTextInput = Session.Project.Edges.Any(edge =>
+            edge.TargetNodeId == factNodeId && edge.TargetPortName is "textValue" or "textValues");
+        if (concept.IsNumeric && hasTextInput)
+        {
+            StatusText = $"XBR011: numeric concept '{concept.QualifiedName}' cannot use a textValue or textValues input.";
+            return;
+        }
+        if (!concept.IsNumeric && (hasNumericInput || !hasTextInput))
+        {
+            StatusText = $"XBR011: non-numeric concept '{concept.QualifiedName}' requires a textValue or textValues input and cannot have a numeric value input.";
+            return;
+        }
+        var graphPeriodType = GetFactGraphPeriodType(factNode);
         if (graphPeriodType is not null && !StringComparer.Ordinal.Equals(graphPeriodType, concept.PeriodType))
         {
             StatusText = $"XBR004: the connected {graphPeriodType} period source cannot target a {concept.PeriodType} concept.";
             return;
         }
+        var factUpdates = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["concept"] = SelectedConcept.QualifiedName,
+            ["periodType"] = concept.PeriodType
+        };
+        if (!concept.IsNumeric)
+        {
+            if (factNode.Parameters.GetValueOrDefault("unit") is not null) factUpdates["unit"] = null;
+            if (factNode.Parameters.GetValueOrDefault("decimals") is not null) factUpdates["decimals"] = null;
+        }
+        else if (factNode.Parameters.GetValueOrDefault("language") is not null)
+        {
+            factUpdates["language"] = null;
+        }
         Session.SetNodeParameterValues(new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal)
         {
-            [SelectedNode.NodeId] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["concept"] = SelectedConcept.QualifiedName,
-                ["periodType"] = concept.PeriodType
-            }
+            [SelectedNode.NodeId] = factUpdates
         });
-        StatusText = $"Proposed target {SelectedConcept.QualifiedName} for {SelectedNodeDisplayName}. Review its unit and period before execution.";
+        StatusText = concept.IsNumeric
+            ? $"Proposed target {SelectedConcept.QualifiedName} for {SelectedNodeDisplayName}. Review its unit and period before execution."
+            : $"Proposed text target {SelectedConcept.QualifiedName} for {SelectedNodeDisplayName}. Review its text source, language and period before execution.";
     }
 
     private void ApplySelectedFactProperties()
@@ -4169,24 +4201,72 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             StatusText = $"XBR001: concept '{conceptName ?? "(unset)"}' is unavailable or cannot carry facts in profile '{profile.ProfileId}'.";
             return;
         }
-        if (!concept.IsNumeric)
-        {
-            StatusText = $"XBR011: this fact builder emits numeric values and cannot target '{concept.QualifiedName}' ({concept.DataType}).";
-            return;
-        }
-
         var unit = SelectedFactUnit.Trim();
         var periodType = SelectedFactPeriodType.Trim().ToLowerInvariant();
         var decimals = SelectedFactDecimals.Trim();
-        if (!FactUnitParser.TryParse(unit, profile, out var parsedUnit, out var compoundUnit, out var unitError))
+        var language = SelectedFactLanguage.Trim();
+        string? normalizedDecimals = null;
+        if (concept.IsNumeric)
         {
-            StatusText = $"XBR002: {unitError}";
-            return;
+            if (language.Length > 0)
+            {
+                StatusText = "XBR011: numeric facts cannot carry a language tag.";
+                return;
+            }
+            if (!FactUnitParser.TryParse(unit, profile, out var parsedUnit, out var compoundUnit, out var unitError))
+            {
+                StatusText = $"XBR002: {unitError}";
+                return;
+            }
+            if (!FactUnitParser.TryValidateForConcept(concept, profile, parsedUnit, compoundUnit, out var unitContractError))
+            {
+                StatusText = $"XBR002: {unitContractError}";
+                return;
+            }
+
+            if (StringComparer.OrdinalIgnoreCase.Equals(decimals, "INF"))
+                normalizedDecimals = "INF";
+            else if (int.TryParse(decimals, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedDecimals)
+                     && parsedDecimals is >= -30 and <= 30)
+                normalizedDecimals = parsedDecimals.ToString(CultureInfo.InvariantCulture);
+            else
+            {
+                StatusText = "XBR008: decimals must be INF or an integer in the supported range [-30, 30].";
+                return;
+            }
         }
-        if (!FactUnitParser.TryValidateForConcept(concept, profile, parsedUnit, compoundUnit, out var unitContractError))
+        else
         {
-            StatusText = $"XBR002: {unitContractError}";
-            return;
+            if (unit.Length > 0)
+            {
+                StatusText = "XBR002: non-numeric facts cannot carry a unit.";
+                return;
+            }
+            if (decimals.Length > 0)
+            {
+                StatusText = "XBR008: non-numeric facts cannot carry decimals.";
+                return;
+            }
+            var hasNumericInput = Session.Project.Edges.Any(edge =>
+                edge.TargetNodeId == factNode.NodeId && edge.TargetPortName is "value" or "values");
+            var hasTextInput = Session.Project.Edges.Any(edge =>
+                edge.TargetNodeId == factNode.NodeId && edge.TargetPortName is "textValue" or "textValues");
+            if (hasNumericInput || !hasTextInput)
+            {
+                StatusText = "XBR011: a non-numeric fact requires a textValue or textValues input and cannot have a numeric value input.";
+                return;
+            }
+            if (language.Length > 0 && !Bcp47LanguageTagValidator.IsWellFormed(language))
+            {
+                StatusText = $"XBR011: language '{language}' is not a well-formed BCP 47 tag.";
+                return;
+            }
+            if (language.Length > 0 && concept.SupportedLanguages.Count > 0
+                && !concept.SupportedLanguages.Contains(language, StringComparer.OrdinalIgnoreCase))
+            {
+                StatusText = $"XBR011: language '{language}' is not supported by concept '{concept.QualifiedName}' in the selected profile.";
+                return;
+            }
         }
         if (periodType is not ("instant" or "duration")
             || !StringComparer.Ordinal.Equals(periodType, concept.PeriodType))
@@ -4201,18 +4281,6 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        string normalizedDecimals;
-        if (StringComparer.OrdinalIgnoreCase.Equals(decimals, "INF"))
-            normalizedDecimals = "INF";
-        else if (int.TryParse(decimals, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedDecimals)
-                 && parsedDecimals is >= -30 and <= 30)
-            normalizedDecimals = parsedDecimals.ToString(CultureInfo.InvariantCulture);
-        else
-        {
-            StatusText = "XBR008: decimals must be INF or an integer in the supported range [-30, 30].";
-            return;
-        }
-
         if (!FactDimensionParser.TryParse(SelectedFactDimensions, profile.DimensionDomains,
                 out var dimensions, out var dimensionError))
         {
@@ -4222,10 +4290,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 
         var factUpdates = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["unit"] = unit,
-            ["periodType"] = periodType,
-            ["decimals"] = normalizedDecimals
+            ["periodType"] = periodType
         };
+        if (concept.IsNumeric)
+        {
+            factUpdates["unit"] = unit;
+            factUpdates["decimals"] = normalizedDecimals;
+        }
+        else
+        {
+            if (factNode.Parameters.ContainsKey("unit")) factUpdates["unit"] = null;
+            if (factNode.Parameters.ContainsKey("decimals")) factUpdates["decimals"] = null;
+        }
+        if (language.Length > 0 || factNode.Parameters.ContainsKey("language"))
+            factUpdates["language"] = language.Length > 0 ? language : null;
         if (dimensions.Count > 0 || factNode.Parameters.ContainsKey("dimensions"))
             factUpdates["dimensions"] = FactDimensionParser.Format(dimensions);
 

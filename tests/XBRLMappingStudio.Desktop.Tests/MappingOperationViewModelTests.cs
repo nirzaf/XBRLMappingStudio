@@ -18,6 +18,59 @@ namespace XBRLMappingStudio.Desktop.Tests;
 
 public sealed class MappingOperationViewModelTests
 {
+    [AvaloniaFact]
+    public void FactLanguageInspectorEditsAccessibleTextFieldAndAppliesProfileValidatedValue()
+    {
+        var project = new MainWindowViewModel().Session.Project;
+        var fact = project.Nodes.Single(node => node.NodeId == "sample-fact");
+        fact.Parameters["concept"] = SyntheticProfile.Qualified("EntityRegistrantName");
+        fact.Parameters.Remove("unit");
+        fact.Parameters.Remove("decimals");
+        fact.Parameters["language"] = "en";
+        project.Edges.RemoveAll(edge => edge.TargetNodeId == fact.NodeId
+            && (edge.TargetPortName is "value" or "values"));
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = "sample-value",
+            SourcePortName = "textValue",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "textValue"
+        });
+
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        var window = new MainWindow { DataContext = viewModel };
+        try
+        {
+            window.Show();
+            var languageBox = Assert.IsType<TextBox>(window.FindControl<TextBox>("FactLanguageTextBox"));
+            var applyButton = Assert.IsType<Button>(window.FindControl<Button>("ApplyFactPropertiesButton"));
+
+            // Observe the bound control before editing, including its accessible name.
+            Assert.Equal("en", languageBox.Text);
+            Assert.Equal("Fact language tag", AutomationProperties.GetName(languageBox));
+            Assert.Equal("en", viewModel.SelectedFactLanguage);
+
+            // Edit the text field, move focus to Apply, and invoke its bound command.
+            languageBox.Text = "fr";
+            applyButton.Focus();
+            Assert.NotNull(applyButton.Command);
+            applyButton.Command!.Execute(applyButton.CommandParameter);
+
+            // Verify the editor binding and undoable graph update reached the model.
+            Assert.Equal("fr", viewModel.SelectedFactLanguage);
+            Assert.Equal("fr", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact")
+                .Parameters["language"]?.ToString());
+            Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            window.Close();
+            viewModel.Dispose();
+        }
+    }
+
     [Fact]
     public async Task PreviewResultLabelsPartialOutputAndExposesFactMappingEvidence()
     {

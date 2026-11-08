@@ -65,6 +65,34 @@ public sealed class DesignerSessionTests
         return project;
     }
 
+    private static MappingProject ProjectWithTextFactInput()
+    {
+        var project = new MainWindowViewModel().Session.Project;
+        var fact = project.Nodes.Single(node => node.NodeId == "sample-fact");
+        project.Edges.RemoveAll(edge => edge.TargetNodeId == fact.NodeId
+            && (edge.TargetPortName is "value" or "values"));
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(),
+            SourceNodeId = "sample-value",
+            SourcePortName = "textValue",
+            TargetNodeId = fact.NodeId,
+            TargetPortName = "textValue"
+        });
+        return project;
+    }
+
+    private static MappingProject TextFactProject()
+    {
+        var project = ProjectWithTextFactInput();
+        var fact = project.Nodes.Single(node => node.NodeId == "sample-fact");
+        fact.Parameters["concept"] = SyntheticProfile.Qualified("EntityRegistrantName");
+        fact.Parameters.Remove("unit");
+        fact.Parameters.Remove("decimals");
+        fact.Parameters["language"] = "en";
+        return project;
+    }
+
     private static void UpdateNode(MappingProject project, string nodeId, Func<MappingNode, MappingNode> update)
     {
         var index = project.Nodes.FindIndex(node => node.NodeId == nodeId);
@@ -1629,7 +1657,7 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
-    public void ConceptSelectionRejectsUnsupportedValueTypeBeforeMutation()
+    public void ConceptSelectionRejectsNonNumericConceptUntilTextInputIsBound()
     {
         var viewModel = new MainWindowViewModel();
         viewModel.AllowSyntheticProfile = true;
@@ -1647,7 +1675,38 @@ public sealed class DesignerSessionTests
 
         Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
         Assert.Contains("XBR011", viewModel.StatusText, StringComparison.Ordinal);
-        Assert.Contains("numeric values", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("requires a textValue or textValues input", viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConceptSelectionAndFactInspectorSupportTextTargetWhenTextInputIsBound()
+    {
+        var viewModel = new MainWindowViewModel(ProjectWithTextFactInput());
+        viewModel.AllowSyntheticProfile = true;
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedConcept = new ConceptRow
+        {
+            QualifiedName = SyntheticProfile.Qualified("EntityRegistrantName"),
+            Label = "Entity Registrant Name",
+            DataType = "string",
+            PeriodType = "duration",
+            IsFactTargetable = true
+        };
+
+        viewModel.SetConceptCommand.Execute(null);
+
+        var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        Assert.Equal(SyntheticProfile.Qualified("EntityRegistrantName"), fact.Parameters["concept"]?.ToString());
+        Assert.Null(fact.Parameters["unit"]);
+        Assert.Null(fact.Parameters["decimals"]);
+        Assert.Contains("Review its text source, language and period", viewModel.StatusText, StringComparison.Ordinal);
+
+        viewModel.SelectedFactLanguage = "fr";
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Equal("fr", viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["language"]?.ToString());
     }
 
     [Fact]
@@ -1671,6 +1730,71 @@ public sealed class DesignerSessionTests
         Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
         Assert.Contains("XBR004", viewModel.StatusText, StringComparison.Ordinal);
         Assert.Contains("requires a duration", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TextFactInspectorEditsSupportedLanguageAsOneUndoableChange()
+    {
+        var project = TextFactProject();
+        var before = project.ComputeSemanticDigest();
+        var viewModel = new MainWindowViewModel(project);
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+
+        Assert.Equal("en", viewModel.SelectedFactLanguage);
+        Assert.Equal("", viewModel.SelectedFactUnit);
+        Assert.Equal("", viewModel.SelectedFactDecimals);
+        viewModel.SelectedFactLanguage = "fr";
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        var fact = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact");
+        Assert.Equal("fr", fact.Parameters["language"]?.ToString());
+        Assert.Equal(SyntheticProfile.Qualified("EntityRegistrantName"), fact.Parameters["concept"]?.ToString());
+        Assert.Equal("duration", fact.Parameters["periodType"]?.ToString());
+        Assert.False(fact.Parameters.ContainsKey("unit"));
+        Assert.False(fact.Parameters.ContainsKey("decimals"));
+
+        var reopened = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(viewModel.Session.Project));
+        Assert.Equal("fr", reopened.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["language"]?.ToString());
+
+        viewModel.Session.Undo();
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+    }
+
+    [Theory]
+    [InlineData("en_US", "well-formed BCP 47")]
+    [InlineData("de", "not supported")]
+    public void TextFactInspectorRejectsInvalidOrUnsupportedLanguageWithoutMutation(
+        string language,
+        string expectedMessage)
+    {
+        var viewModel = new MainWindowViewModel(TextFactProject());
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactLanguage = language;
+        var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR011", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains(expectedMessage, viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void NumericFactInspectorRejectsLanguageWithoutMutation()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactLanguage = "en";
+        var before = viewModel.Session.Project.ComputeSemanticDigest();
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Equal(before, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Contains("XBR011", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Contains("numeric facts cannot carry a language tag", viewModel.StatusText, StringComparison.Ordinal);
     }
 
     [Fact]

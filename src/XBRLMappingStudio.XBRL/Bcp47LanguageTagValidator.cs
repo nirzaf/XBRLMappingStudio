@@ -4,7 +4,7 @@ namespace XBRLMappingStudio.XBRL;
 /// Checks the well-formed syntax of a BCP 47 language tag (RFC 5646). IANA registry
 /// membership is not checked; profile-specific support is enforced separately.
 /// </summary>
-internal static class Bcp47LanguageTagValidator
+public static class Bcp47LanguageTagValidator
 {
     private static readonly HashSet<string> GrandfatheredTags = new(StringComparer.OrdinalIgnoreCase)
     {
