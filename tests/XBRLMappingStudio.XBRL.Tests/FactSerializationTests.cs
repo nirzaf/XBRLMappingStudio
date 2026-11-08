@@ -1087,6 +1087,26 @@ public sealed class FactSerializationTests
             XmlSerializer.ReadFacts(document.ToString(SaveOptions.DisableFormatting)));
     }
 
+    [Fact]
+    public void XmlReaderRejectsDimensionAliasesForTheSameAxisWithoutProfile()
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        XNamespace xbrldi = "http://xbrl.org/2006/xbrldi";
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { CreateTextFact("en") }));
+        var root = document.Root!;
+        root.SetAttributeValue(XNamespace.Xmlns + "alternate", root.GetNamespaceOfPrefix("synthetic")!.NamespaceName);
+        root.SetAttributeValue(XNamespace.Xmlns + "xbrldi", xbrldi.NamespaceName);
+        var context = Assert.Single(root.Elements(xbrli + "context"));
+        var entity = context.Element(xbrli + "entity")!;
+        entity.Add(new XElement(xbrli + "segment",
+            new XElement(xbrldi + "explicitMember", new XAttribute("dimension", "synthetic:Region"), "synthetic:EMEA"),
+            new XElement(xbrldi + "explicitMember", new XAttribute("dimension", "alternate:Region"), "alternate:EMEA")));
+
+        var error = Assert.Throws<XbrlExportException>(() =>
+            XmlSerializer.ReadFacts(document.ToString(SaveOptions.DisableFormatting)));
+        Assert.Contains("duplicates another dimension", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static XbrlFact CreateTextFact(string language) => new()
     {
         ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),

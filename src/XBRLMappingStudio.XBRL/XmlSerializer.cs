@@ -506,6 +506,7 @@ public static class XmlSerializer
         if (entityElement.Descendants(Xbrldi + "typedMember").Any())
             throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                 "Typed dimensions are not supported by this report model.");
+        var dimensionNames = new HashSet<ExpandedConceptName>();
         foreach (var segment in entityElement.Elements(Xbrli + "segment"))
         {
             EnsureOnlyAttributes(segment);
@@ -520,6 +521,12 @@ public static class XmlSerializer
                     throw Unsupported("Explicit dimension members cannot contain nested elements.");
                 var dimName = (string?)child.Attribute("dimension") ?? "";
                 var memberName = child.Value;
+                var expandedDimension = ResolveExpandedQName(child, dimName);
+                _ = ResolveExpandedQName(child, memberName);
+                if (dims.Count >= FactDimensionParser.MaximumDimensions)
+                    throw Unsupported($"A fact may have at most {FactDimensionParser.MaximumDimensions} taxonomy-defined dimensions.");
+                if (!dimensionNames.Add(expandedDimension))
+                    throw Unsupported($"Dimension '{dimName}' duplicates another dimension on the fact.");
                 if (profile is not null)
                 {
                     dimName = CanonicalProfileQName(child, dimName, profile);
@@ -803,6 +810,18 @@ public static class XmlSerializer
     private static string CanonicalProfileQName(
         XElement scope, string qname, FilingProfile profile, bool normalizeStandardMeasures = false)
     {
+        var expanded = ResolveExpandedQName(scope, qname);
+        if (normalizeStandardMeasures && (expanded.NamespaceUri == Iso4217.NamespaceName || expanded.NamespaceUri == Xbrli.NamespaceName))
+            return expanded.LocalName;
+
+        var canonicalPrefix = FindProfilePrefix(profile, expanded.NamespaceUri);
+        if (canonicalPrefix is null)
+            throw Unsupported($"QName '{qname}' uses a namespace that is not declared by the selected filing profile.");
+        return $"{canonicalPrefix}:{expanded.LocalName}";
+    }
+
+    private static ExpandedConceptName ResolveExpandedQName(XElement scope, string qname)
+    {
         var value = qname.Trim();
         var separator = value.IndexOf(':');
         if (separator != value.LastIndexOf(':'))
@@ -824,13 +843,7 @@ public static class XmlSerializer
             : scope.GetNamespaceOfPrefix(prefix)?.NamespaceName;
         if (string.IsNullOrEmpty(namespaceUri))
             throw Unsupported($"QName '{qname}' has no namespace declaration in the XML instance.");
-        if (normalizeStandardMeasures && (namespaceUri == Iso4217.NamespaceName || namespaceUri == Xbrli.NamespaceName))
-            return localName;
-
-        var canonicalPrefix = FindProfilePrefix(profile, namespaceUri);
-        if (canonicalPrefix is null)
-            throw Unsupported($"QName '{qname}' uses a namespace that is not declared by the selected filing profile.");
-        return $"{canonicalPrefix}:{localName}";
+        return new ExpandedConceptName(namespaceUri, localName);
     }
 
     private static string? FindProfilePrefix(FilingProfile profile, string namespaceUri)
