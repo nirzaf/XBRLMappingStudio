@@ -18,6 +18,8 @@ The checkout supports mixed file/SQLite publication for xBRL-JSON/XML, CSV v1/v2
 
 A fresh native screenshot on 2026-11-09 showed the Windows lock screen. The app accessibility tree was readable, but the project loaded behind it was a stale `sample-main` mapping with no valid end-to-end publication fixture. No further native interaction was attempted. Prior disposable-fixture native evidence remains applicable only to its recorded narrow journeys; DST-04 native acceptance is not extended by this observation.
 
+After the owner confirmed the desktop was unlocked, the Computer Use session listed three XBRLMappingStudio windows, including the existing `Sample Revenue Mapping` window. Activation of the uniquely titled returned window failed twice, including after refreshing the returned window list. No clicks, typing, or project changes were made. DST-04 native verification remains blocked by desktop input availability; the earlier locked-screen note is superseded only as to the reported lock state, not as to the missing valid fixture or acceptance boundary.
+
 ## External qualification boundaries
 
 No official IFRS package was downloaded or bundled. Package artifact identity, dependency closure, offline resolution, applicable evaluation rights, and redistribution rights remain unverified. No jurisdiction-specific filing profile, signed installer, production database provider, customer hardware floor, or production taxonomy authorization is claimed.
