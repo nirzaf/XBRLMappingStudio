@@ -13,6 +13,13 @@ public static class CrashPublicationContract
 
     public static byte[] AtomicReportBytes => Encoding.UTF8.GetBytes("accepted atomic-publication report");
 
+    public static byte[] JournalReportBytes(string format) => Encoding.UTF8.GetBytes(format switch
+    {
+        "json" => "{\"documentInfo\":{\"documentType\":\"https://xbrl.org/2021/xbrl-json\"},\"facts\":{}}",
+        "xml" => "<?xml version=\"1.0\" encoding=\"utf-8\"?><xbrli:xbrl xmlns:xbrli=\"http://www.xbrl.org/2003/instance\"/>",
+        _ => throw new ArgumentException("Unsupported journal crash fixture format.", nameof(format))
+    });
+
     public static string OperationKey(string stage) => "mixed-crash-" + stage;
 
     public static string SqliteOperationKey(string stage) => "sqlite-crash-" + stage;
@@ -24,6 +31,9 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 5 && args[0].StartsWith("journal-", StringComparison.Ordinal))
+            return CrashAtJournalBoundary(args);
+
         if (args.Length != 4)
             return 2;
 
@@ -80,6 +90,20 @@ internal static class Program
             validateStagedArtifactAsync: (stagedPath, _) =>
                 Task.FromResult(DestinationLock.DigestFile(stagedPath)),
             afterAtomicReplaceForTest: _ => KillCurrentProcess());
+        return 0;
+    }
+
+    private static int CrashAtJournalBoundary(string[] args)
+    {
+        var stage = args[0];
+        if (stage is not ("journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
+            return 2;
+        var service = new PublicationService(new RunJournal(databasePath: Path.GetFullPath(args[1])));
+        service.Publish(Path.GetFullPath(args[2]), CrashPublicationContract.JournalReportBytes(args[4]), args[3],
+            beforeReplaceFault: stage == "journal-before-replace" ? _ => KillCurrentProcess() : null,
+            lockTimeout: TimeSpan.FromMinutes(2),
+            validateStagedArtifactAsync: (path, _) => Task.FromResult(DestinationLock.DigestFile(path)),
+            afterAtomicReplaceForTest: stage == "journal-after-replace" ? _ => KillCurrentProcess() : null);
         return 0;
     }
 
