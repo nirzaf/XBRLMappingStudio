@@ -93,6 +93,8 @@ LINK_NAMESPACE = "http://www.xbrl.org/2003/linkbase"
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 OASIS_CATALOG_NAMESPACE = "urn:oasis:names:tc:entity:xmlns:xml:catalog"
 TAXONOMY_PACKAGE_NAMESPACE = "http://xbrl.org/2016/taxonomy-package"
+PRESENTATION_ARCROLE = "http://www.xbrl.org/2003/arcrole/parent-child"
+CALCULATION_ARCROLE = "http://www.xbrl.org/2003/arcrole/summation-item"
 
 try:
     from arelle import PluginManager
@@ -1414,7 +1416,8 @@ def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root,
     return safe_package_path(entry_point, target_root)
 
 
-def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root, package_files, args):
+def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root, package_files, args,
+                                      relationship_metadata_consumer=None):
     """Keep a verified private dependency snapshot alive for the complete Arelle load."""
     with tempfile.TemporaryDirectory(prefix="xms-taxonomy-") as snapshot_directory:
         os.chmod(snapshot_directory, 0o700)
@@ -1429,7 +1432,10 @@ def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root
             run_args = copy.copy(args)
             run_args.plugin = list(getattr(args, "plugin", []) or [])
             run_args.plugin.append(str(mapping_plugin))
-        return run_arelle(snapshot_entry, run_args)
+        if relationship_metadata_consumer is None:
+            return run_arelle(snapshot_entry, run_args)
+        return run_arelle(snapshot_entry, run_args,
+                          relationship_metadata_consumer=relationship_metadata_consumer)
 
 
 def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None,
@@ -1864,7 +1870,195 @@ def rewrite_large_report_taxonomy(report_path, output_path, taxonomy_root, offli
     return mapping_plugin
 
 
-def run_arelle(entrypoint, args, temporary_path=None):
+def _relationship_decimal(relationship, decimal_attribute, value_attribute, default):
+    value = getattr(relationship, decimal_attribute, None)
+    if value is None:
+        value = getattr(relationship, value_attribute, None)
+    if value is None:
+        value = default
+    if isinstance(value, bool):
+        raise ValueError("Arelle returned a non-numeric taxonomy relationship attribute")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as ex:
+        raise ValueError("Arelle returned an invalid taxonomy relationship attribute") from ex
+    if not result.is_finite() or abs(result) > Decimal("79228162514264337593543950335"):
+        raise ValueError("Arelle returned an out-of-range taxonomy relationship attribute")
+    return result
+
+
+def _relationship_attribute(relationship, name, fallback=None):
+    getter = getattr(relationship, "get", None)
+    if callable(getter):
+        return getter(name)
+    return getattr(relationship, fallback or name, None)
+
+
+def _relationship_boolean_attribute(relationship, name):
+    value = _relationship_attribute(relationship, name)
+    if value is None or isinstance(value, bool):
+        return value
+    if value in ("true", "1"):
+        return True
+    if value in ("false", "0"):
+        return False
+    raise ValueError("Arelle returned an invalid boolean taxonomy relationship attribute")
+
+
+def _relationship_link_type(qname):
+    if getattr(qname, "namespaceURI", None) != LINK_NAMESPACE:
+        return None
+    local_name = getattr(qname, "localName", None)
+    return local_name if local_name in ("presentationLink", "calculationLink", "definitionLink") else None
+
+
+def _profile_concept_names(profile):
+    concepts = profile.get("concepts", []) if isinstance(profile, dict) else []
+    if not isinstance(concepts, list):
+        raise ValueError("Installed profile concepts are unavailable for relationship extraction")
+    result = {}
+    for concept in concepts:
+        if not isinstance(concept, dict):
+            raise ValueError("Installed profile contains an invalid concept for relationship extraction")
+        namespace = concept.get("namespace")
+        local_name = concept.get("localName")
+        qualified_name = concept.get("qualifiedName")
+        if not all(isinstance(value, str) and value for value in (namespace, local_name, qualified_name)):
+            raise ValueError("Installed profile concept identity is incomplete for relationship extraction")
+        key = (namespace, local_name)
+        if key in result and result[key] != qualified_name:
+            raise ValueError("Installed profile has ambiguous qualified names for a relationship endpoint")
+        result[key] = qualified_name
+    return result
+
+
+def _relationship_endpoint_name(model_object, concept_names):
+    qname = getattr(model_object, "qname", None)
+    namespace = getattr(qname, "namespaceURI", None)
+    local_name = getattr(qname, "localName", None)
+    qualified_name = concept_names.get((namespace, local_name))
+    if qualified_name is None:
+        raise ValueError("Arelle relationship endpoint is not present in the installed profile concept index")
+    return qualified_name
+
+
+def _profile_relationship_signature(kind, relationship):
+    if not isinstance(relationship, dict):
+        raise ValueError("Installed profile relationship metadata contains a non-object entry")
+
+    def decimal_field(name, default):
+        value = relationship.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            raise ValueError("Installed profile relationship metadata contains a non-numeric attribute")
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, ValueError) as ex:
+            raise ValueError("Installed profile relationship metadata contains an invalid numeric attribute") from ex
+        if not result.is_finite():
+            raise ValueError("Installed profile relationship metadata contains a non-finite numeric attribute")
+        return result
+
+    if kind == "presentationLinks":
+        return (relationship.get("roleUri"), relationship.get("parentQName"),
+                relationship.get("childQName"), decimal_field("order", 0))
+    if kind == "calculationLinks":
+        return (relationship.get("roleUri"), relationship.get("parentQName"),
+                relationship.get("childQName"), decimal_field("weight", 0),
+                decimal_field("order", 0), relationship.get("targetRoleUri"))
+    return (relationship.get("roleUri"), relationship.get("arcRoleUri"),
+            relationship.get("parentQName"), relationship.get("childQName"),
+            decimal_field("order", 0), relationship.get("targetRoleUri"),
+            relationship.get("usable"), relationship.get("closed"),
+            relationship.get("contextElement"))
+
+
+def _assert_relationship_metadata_matches_profile(extracted, profile):
+    for kind in ("presentationLinks", "calculationLinks", "definitionLinks"):
+        expected = profile.get(kind, []) if isinstance(profile, dict) else []
+        actual = extracted.get(kind, [])
+        if not isinstance(expected, list):
+            raise ValueError("Installed profile relationship metadata is not an array")
+        expected_signatures = {_profile_relationship_signature(kind, row) for row in expected}
+        actual_signatures = {_profile_relationship_signature(kind, row) for row in actual}
+        if expected_signatures != actual_signatures:
+            raise ValueError(
+                "Installed profile " + kind + " do not match Arelle's effective taxonomy relationships")
+
+
+def extract_taxonomy_relationships(models, profile):
+    """Read effective presentation, calculation and definition arcs from loaded Arelle models."""
+    concept_names = _profile_concept_names(profile)
+    found = {"presentationLinks": {}, "calculationLinks": {}, "definitionLinks": {}}
+    link_kinds = {"presentationLink": "presentationLinks",
+                  "calculationLink": "calculationLinks",
+                  "definitionLink": "definitionLinks"}
+    relationship_count = 0
+
+    for model in models:
+        arcroles_by_type = {}
+        for base_set_key in getattr(model, "baseSets", {}) or {}:
+            if not isinstance(base_set_key, tuple) or not base_set_key:
+                continue
+            arcrole = base_set_key[0]
+            if not isinstance(arcrole, str) or not arcrole:
+                continue
+            for candidate in base_set_key[2:]:
+                link_type = _relationship_link_type(candidate)
+                if link_type is not None:
+                    arcroles_by_type.setdefault(link_type, set()).add(arcrole)
+
+        for link_type, kind in link_kinds.items():
+            for arcrole in sorted(arcroles_by_type.get(link_type, ())):
+                relationship_set = model.relationshipSet(arcrole)
+                for relationship in getattr(relationship_set, "modelRelationships", ()) or ():
+                    actual_link_type = _relationship_link_type(getattr(relationship, "linkQname", None))
+                    if actual_link_type != link_type:
+                        continue
+                    relationship_arcrole = getattr(relationship, "arcrole", arcrole)
+                    if link_type == "presentationLink" and relationship_arcrole != PRESENTATION_ARCROLE:
+                        raise ValueError("Arelle found an unsupported arcrole in a presentation link")
+                    if link_type == "calculationLink" and relationship_arcrole != CALCULATION_ARCROLE:
+                        raise ValueError("Arelle found an unsupported arcrole in a calculation link")
+                    role_uri = getattr(relationship, "linkrole", None)
+                    parent = _relationship_endpoint_name(
+                        getattr(relationship, "fromModelObject", None), concept_names)
+                    child = _relationship_endpoint_name(
+                        getattr(relationship, "toModelObject", None), concept_names)
+                    order = _relationship_decimal(relationship, "orderDecimal", "order", Decimal("1"))
+                    if kind == "presentationLinks":
+                        row = {"roleUri": role_uri, "parentQName": parent,
+                               "childQName": child, "order": order}
+                    elif kind == "calculationLinks":
+                        row = {"roleUri": role_uri, "parentQName": parent,
+                               "childQName": child,
+                               "weight": _relationship_decimal(
+                                   relationship, "weightDecimal", "weight", Decimal("1")),
+                               "order": order,
+                               "targetRoleUri": _relationship_attribute(relationship, "targetRole") or None}
+                    else:
+                        row = {"roleUri": role_uri, "arcRoleUri": relationship_arcrole,
+                               "parentQName": parent, "childQName": child, "order": order,
+                               "targetRoleUri": _relationship_attribute(relationship, "targetRole") or None,
+                               "usable": _relationship_boolean_attribute(relationship, "usable"),
+                               "closed": _relationship_boolean_attribute(relationship, "closed"),
+                               "contextElement": _relationship_attribute(relationship, "contextElement")}
+                    signature = _profile_relationship_signature(kind, row)
+                    if signature not in found[kind]:
+                        found[kind][signature] = row
+                        relationship_count += 1
+                        if relationship_count > MAX_PROFILE_RELATIONSHIPS:
+                            raise ValueError("Arelle taxonomy relationships exceed the configured relationship limit")
+
+    return {
+        kind: sorted(rows.values(), key=lambda row: tuple(
+            "" if row.get(field) is None else str(row.get(field))
+            for field in ("roleUri", "arcRoleUri", "parentQName", "childQName", "order",
+                          "weight", "targetRoleUri", "usable", "closed", "contextElement")))
+        for kind, rows in found.items()
+    }
+
+
+def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_consumer=None):
     if not ARELLE_AVAILABLE:
         raise RuntimeError("arelle-release is not installed in this worker environment")
     options = RuntimeOptions(
@@ -1882,13 +2076,19 @@ def run_arelle(entrypoint, args, temporary_path=None):
     )
     log_handler = BoundedArelleLogHandler()
     with Session() as session:
-        ok = session.run(options, logHandler=log_handler)
-        logs = log_handler.messages
-        loaded_plugins = loaded_plugin_identifiers()
-        models = session.get_models()
-        concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
-        for model in models:
-            session._cntlr.modelManager.close(model)
+        models = []
+        try:
+            ok = session.run(options, logHandler=log_handler)
+            logs = log_handler.messages
+            loaded_plugins = loaded_plugin_identifiers()
+            models = session.get_models()
+            concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
+            if relationship_metadata_consumer is not None:
+                relationship_metadata_consumer(
+                    extract_taxonomy_relationships(models, getattr(args, "profile_manifest_data", None)))
+        finally:
+            for model in models:
+                session._cntlr.modelManager.close(model)
     gc.collect()
     return ok, logs, concept_count, loaded_plugins
 
@@ -2087,12 +2287,15 @@ def handle(req, args):
                     profile["packageFiles"],
                     profile.get("offlineReferences", {}),
                 )
+                relationship_metadata = []
                 ok, logs, concept_count, loaded_plugins = run_arelle_with_verified_taxonomy(
-                    relative, dependency_paths, args.taxonomy_root, profile["packageFiles"], args)
+                    relative, dependency_paths, args.taxonomy_root, profile["packageFiles"], args,
+                    relationship_metadata_consumer=relationship_metadata.append)
                 relative_entry_point = relative
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
                 ok, logs, concept_count, loaded_plugins = run_arelle(taxonomy_path, args)
+                relationship_metadata = []
                 relative_entry_point = os.path.relpath(
                     taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
             required_plugins = profile.get("requiredPlugins", []) if profile else []
@@ -2118,6 +2321,8 @@ def handle(req, args):
             if not ok or any(d["isBlocking"] for d in diags):
                 return response(op_id, "domainFailure", {"conceptCount": concept_count}, diags,
                                 "Arelle could not load the filing taxonomy")
+            if profile is not None and relationship_metadata:
+                _assert_relationship_metadata_matches_profile(relationship_metadata[0], profile)
             return response(op_id, "success", {
                 "engine": "Arelle",
                 "engineVersion": ENGINE_VERSION,

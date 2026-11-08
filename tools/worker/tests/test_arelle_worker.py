@@ -471,6 +471,96 @@ class ArelleWorkerTests(unittest.TestCase):
         self.assertEqual("incompleteValidation", result["status"])
         self.assertTrue(any(item["code"] == "XBR010" for item in result["diagnostics"]))
 
+    def test_extract_taxonomy_relationships_preserves_roles_and_arc_attributes(self):
+        namespace = "urn:xms:relationship-fixture"
+        concepts = ["Root", "Shared", "Axis", "Member"]
+        by_name = {name: SimpleNamespace(qname=SimpleNamespace(
+            namespaceURI=namespace, localName=name)) for name in concepts}
+        presentation_role_one = "urn:xms:role:one"
+        presentation_role_two = "urn:xms:role:two"
+        dimension_arcrole = "http://xbrl.org/int/dim/arcrole/domain-member"
+        presentation = [
+            SimpleNamespace(linkQname=SimpleNamespace(namespaceURI=arelle_worker.LINK_NAMESPACE,
+                                                       localName="presentationLink"),
+                            arcrole=arelle_worker.PRESENTATION_ARCROLE,
+                            linkrole=presentation_role_one,
+                            fromModelObject=by_name["Root"], toModelObject=by_name["Shared"],
+                            orderDecimal=Decimal("1")),
+            SimpleNamespace(linkQname=SimpleNamespace(namespaceURI=arelle_worker.LINK_NAMESPACE,
+                                                       localName="presentationLink"),
+                            arcrole=arelle_worker.PRESENTATION_ARCROLE,
+                            linkrole=presentation_role_two,
+                            fromModelObject=by_name["Root"], toModelObject=by_name["Shared"],
+                            orderDecimal=Decimal("2")),
+        ]
+        calculation = [SimpleNamespace(
+            linkQname=SimpleNamespace(namespaceURI=arelle_worker.LINK_NAMESPACE,
+                                      localName="calculationLink"),
+            arcrole=arelle_worker.CALCULATION_ARCROLE,
+            linkrole=presentation_role_one,
+            fromModelObject=by_name["Root"], toModelObject=by_name["Shared"],
+            weightDecimal=Decimal("-1"), orderDecimal=Decimal("3"), targetRole=None)]
+        definition = [SimpleNamespace(
+            linkQname=SimpleNamespace(namespaceURI=arelle_worker.LINK_NAMESPACE,
+                                      localName="definitionLink"),
+            arcrole=dimension_arcrole, linkrole=presentation_role_one,
+            fromModelObject=by_name["Axis"], toModelObject=by_name["Member"],
+            orderDecimal=Decimal("4"), targetRole="urn:xms:role:members",
+            usable=False, closed=True, contextElement="segment")]
+        link_qnames = {
+            name: type("TestQName", (), {"namespaceURI": arelle_worker.LINK_NAMESPACE,
+                                         "localName": name})()
+            for name in ("presentationLink", "calculationLink", "definitionLink")
+        }
+        model = SimpleNamespace(
+            baseSets={
+                (arelle_worker.PRESENTATION_ARCROLE, presentation_role_one, None,
+                 link_qnames["presentationLink"]): [],
+                (arelle_worker.CALCULATION_ARCROLE, presentation_role_one, None,
+                 link_qnames["calculationLink"]): [],
+                (dimension_arcrole, presentation_role_one, None,
+                 link_qnames["definitionLink"]): [],
+            },
+            relationshipSet=lambda arcrole: SimpleNamespace(modelRelationships={
+                arelle_worker.PRESENTATION_ARCROLE: presentation,
+                arelle_worker.CALCULATION_ARCROLE: calculation,
+                dimension_arcrole: definition,
+            }[arcrole]))
+        profile = {
+            "concepts": [{"namespace": namespace, "localName": name,
+                          "qualifiedName": "ex:" + name} for name in concepts],
+            "presentationLinks": [
+                {"roleUri": presentation_role_one, "parentQName": "ex:Root",
+                 "childQName": "ex:Shared", "order": 1},
+                {"roleUri": presentation_role_two, "parentQName": "ex:Root",
+                 "childQName": "ex:Shared", "order": 2},
+            ],
+            "calculationLinks": [{
+                "roleUri": presentation_role_one, "parentQName": "ex:Root",
+                "childQName": "ex:Shared", "weight": -1, "order": 3,
+            }],
+            "definitionLinks": [{
+                "roleUri": presentation_role_one, "arcRoleUri": dimension_arcrole,
+                "parentQName": "ex:Axis", "childQName": "ex:Member", "order": 4,
+                "targetRoleUri": "urn:xms:role:members", "usable": False,
+                "closed": True, "contextElement": "segment",
+            }],
+        }
+
+        extracted = arelle_worker.extract_taxonomy_relationships([model], profile)
+
+        self.assertEqual(2, len(extracted["presentationLinks"]))
+        self.assertEqual({presentation_role_one, presentation_role_two},
+                         {item["roleUri"] for item in extracted["presentationLinks"]})
+        self.assertEqual(Decimal("-1"), extracted["calculationLinks"][0]["weight"])
+        self.assertEqual("urn:xms:role:members",
+                         extracted["definitionLinks"][0]["targetRoleUri"])
+        arelle_worker._assert_relationship_metadata_matches_profile(extracted, profile)
+
+        missing_second_role = {**profile, "presentationLinks": profile["presentationLinks"][:1]}
+        with self.assertRaisesRegex(ValueError, "do not match Arelle's effective taxonomy"):
+            arelle_worker._assert_relationship_metadata_matches_profile(extracted, missing_second_role)
+
     def test_load_taxonomy_returns_versioned_profile_capabilities(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -771,12 +861,15 @@ class ArelleWorkerTests(unittest.TestCase):
             request["payload"] = {"taxonomyPath": "entry.xsd"}
             observed = {}
 
-            def capture_arelle(snapshot_entry, run_args):
+            def capture_arelle(snapshot_entry, run_args, relationship_metadata_consumer=None):
                 observed["entry"] = Path(snapshot_entry)
                 observed["mappings"] = runpy.run_path(run_args.plugin[-1])["MAPPINGS"]
                 observed["mapped_content"] = (
                     Path(observed["mappings"]["https://example.invalid/"]) /
                     "remote.xsd").read_text(encoding="utf-8")
+                if relationship_metadata_consumer is not None:
+                    relationship_metadata_consumer({
+                        "presentationLinks": [], "calculationLinks": [], "definitionLinks": []})
                 return True, [], 1, ()
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -822,13 +915,17 @@ class ArelleWorkerTests(unittest.TestCase):
             request["payload"] = {"taxonomyPath": "entry.xsd"}
             observed = {}
 
-            def mutate_installed_file_then_load(snapshot_entry, _args):
+            def mutate_installed_file_then_load(snapshot_entry, _args,
+                                                relationship_metadata_consumer=None):
                 observed["snapshot_entry"] = Path(snapshot_entry)
                 (root / "dependency.xsd").write_text(
                     '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" id="changed"/>',
                     encoding="utf-8")
                 observed["loaded_dependency"] = (
                     Path(snapshot_entry).parent / "dependency.xsd").read_text(encoding="utf-8")
+                if relationship_metadata_consumer is not None:
+                    relationship_metadata_consumer({
+                        "presentationLinks": [], "calculationLinks": [], "definitionLinks": []})
                 return True, [], 1, ()
 
             with mock.patch.object(arelle_worker, "ARELLE_AVAILABLE", True), \
@@ -1296,6 +1393,74 @@ print("offline-network-denied")
         self.assertEqual(2, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
         self.assertEqual([], requests, "Arelle attempted an HTTP request instead of using its pinned local file.")
+
+    @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
+                         "Arelle integration runtime is not installed; pinned CI installs it.")
+    def test_load_taxonomy_checks_relationships_against_the_installed_profile(self):
+        namespace = "urn:xms:relationship-fixture"
+        role_one = "http://www.xbrl.org/2003/role/link"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_files = write_taxonomy_files(root, {
+                "entry.xsd": (
+                    '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+                    'xmlns:link="http://www.xbrl.org/2003/linkbase" '
+                    'xmlns:xlink="http://www.w3.org/1999/xlink" '
+                    f'targetNamespace="{namespace}" xmlns:ex="{namespace}">'
+                    '<xs:annotation><xs:appinfo>'
+                    '<link:linkbaseRef xlink:type="simple" '
+                    'xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase" '
+                    'xlink:href="relationships.xml"/>'
+                    '</xs:appinfo></xs:annotation>'
+                    '<xs:element name="Root" id="Root" type="xs:string"/>'
+                    '<xs:element name="Shared" id="Shared" type="xs:string"/>'
+                    '</xs:schema>'
+                ),
+                "relationships.xml": (
+                    '<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase" '
+                    'xmlns:xlink="http://www.w3.org/1999/xlink">'
+                    f'<link:presentationLink xlink:type="extended" xlink:role="{role_one}">'
+                    '<link:loc xlink:type="locator" xlink:href="entry.xsd#Root" xlink:label="root"/>'
+                    '<link:loc xlink:type="locator" xlink:href="entry.xsd#Shared" xlink:label="shared"/>'
+                    '<link:presentationArc xlink:type="arc" '
+                    'xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" '
+                    'xlink:from="root" xlink:to="shared" order="1"/>'
+                    '</link:presentationLink></link:linkbase>'
+                ),
+            })
+            profile = {
+                "schemaVersion": 4,
+                "profileId": "fixture-profile",
+                "version": "1.0.0",
+                "profileDigest": "sha256:fixture",
+                "entryPoint": "entry.xsd",
+                "requiredPlugins": [],
+                "packageFiles": package_files,
+                "concepts": [
+                    {"qualifiedName": "ex:Root", "namespace": namespace, "localName": "Root"},
+                    {"qualifiedName": "ex:Shared", "namespace": namespace, "localName": "Shared"},
+                ],
+                "presentationLinks": [
+                    {"roleUri": role_one, "parentQName": "ex:Root", "childQName": "ex:Shared", "order": 1},
+                ],
+                "calculationLinks": [],
+                "definitionLinks": [],
+            }
+            self.args.taxonomy_root = str(root)
+            self.args.profile_manifest_data = profile
+            request = self.handshake_request()
+            request["operation"] = "load-taxonomy"
+            request["profileDigest"] = "sha256:fixture"
+            request["payload"] = {"taxonomyPath": "entry.xsd"}
+
+            matched = arelle_worker.handle(request, self.args)
+            self.assertEqual("success", matched["status"], (matched["error"], matched["diagnostics"]))
+
+            self.args.profile_manifest_data = {**profile, "presentationLinks": []}
+            mismatched = arelle_worker.handle(request, self.args)
+
+        self.assertEqual("domainFailure", mismatched["status"])
+        self.assertIn("presentationLinks do not match", mismatched["error"])
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
                          "Arelle integration runtime is not installed; pinned CI installs it.")
