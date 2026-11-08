@@ -655,8 +655,8 @@ public static class XmlSerializer
             var isNumeric = unitRef is not null || decimalsStr is not null;
             if (isNumeric)
             {
-                if (!decimal.TryParse(el.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
-                    throw Unsupported("Numeric fact lexical value is outside the supported exact decimal range.");
+                if (!XbrlNumericLexicalParser.TryParseExact(el.Value, out var parsed))
+                    throw Unsupported("Numeric fact lexical value is invalid or outside the supported exact decimal range.");
                 value = parsed;
             }
             else

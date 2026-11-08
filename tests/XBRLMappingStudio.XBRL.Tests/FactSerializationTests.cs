@@ -974,6 +974,64 @@ public sealed class FactSerializationTests
     }
 
     [Theory]
+    [InlineData("1.234567890123456789012345678901")]
+    [InlineData("0.00000000000000000000000000001")]
+    public void JsonAndXmlReadersRejectNumericValuesThatRequireRoundingOrUnderflow(string lexical)
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 1m,
+            Decimals = 0
+        };
+
+        var json = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { fact }))!.AsObject();
+        var jsonFact = json["facts"]!.AsObject().Single().Value!.AsObject();
+        jsonFact["value"] = lexical;
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(json.ToJsonString()));
+
+        var xml = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { fact }));
+        var xmlFact = Assert.Single(xml.Descendants(), element => element.Name.LocalName == "Revenue");
+        xmlFact.Value = lexical;
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts(xml.ToString(SaveOptions.DisableFormatting)));
+    }
+
+    [Theory]
+    [InlineData("79228162514264337593543950335")]
+    [InlineData("0.0000000000000000000000000001")]
+    public void JsonAndXmlReadersAcceptExactClrDecimalBoundaries(string lexical)
+    {
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 1m,
+            Decimals = 0
+        };
+
+        var json = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { fact }))!.AsObject();
+        var jsonFact = json["facts"]!.AsObject().Single().Value!.AsObject();
+        jsonFact["value"] = lexical;
+        var parsedJsonFact = Assert.Single(OimSerializer.ReadFacts(json.ToJsonString()));
+        Assert.True(parsedJsonFact.Value.HasValue);
+        Assert.Equal(decimal.Parse(lexical, CultureInfo.InvariantCulture), parsedJsonFact.Value.GetValueOrDefault());
+
+        var xml = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { fact }));
+        var xmlFact = Assert.Single(xml.Descendants(), element => element.Name.LocalName == "Revenue");
+        xmlFact.Value = lexical;
+        var parsedXmlFact = Assert.Single(XmlSerializer.ReadFacts(xml.ToString(SaveOptions.DisableFormatting)));
+        Assert.True(parsedXmlFact.Value.HasValue);
+        Assert.Equal(decimal.Parse(lexical, CultureInfo.InvariantCulture), parsedXmlFact.Value.GetValueOrDefault());
+    }
+
+    [Theory]
     [InlineData("en--US")]
     [InlineData("en_US")]
     public void XmlReaderRejectsMalformedLanguageTagsWithoutProfile(string language)

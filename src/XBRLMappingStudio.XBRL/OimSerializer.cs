@@ -412,8 +412,8 @@ public static class OimSerializer
                 var lexical = value.GetString()!;
                 if (isNumeric)
                 {
-                    if (!decimal.TryParse(lexical, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
-                        throw Unsupported($"Numeric fact value '{lexical}' exceeds the supported exact decimal range.");
+                    if (!XbrlNumericLexicalParser.TryParseExact(lexical, out var parsed))
+                        throw Unsupported($"Numeric fact value '{lexical}' is invalid or outside the supported exact decimal range.");
                     numericValue = parsed;
                 }
                 else textValue = lexical;
