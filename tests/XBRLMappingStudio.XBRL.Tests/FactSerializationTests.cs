@@ -950,6 +950,19 @@ public sealed class FactSerializationTests
     }
 
     [Theory]
+    [InlineData("EN")]
+    [InlineData("en-US")]
+    public void OimJsonReaderRejectsNonLowercaseLanguageTagsWithoutProfile(string language)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") }))!.AsObject();
+        var fact = root["facts"]!.AsObject().Single().Value!.AsObject();
+        fact["dimensions"]!.AsObject()["language"] = language;
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+        Assert.Contains("lowercase", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData("en--US")]
     [InlineData("en_US")]
     public void XmlReaderRejectsMalformedLanguageTagsWithoutProfile(string language)

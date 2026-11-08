@@ -366,7 +366,9 @@ public static class OimSerializer
                         ?? throw Unsupported("Language dimension must be a string.");
                     if (!Bcp47LanguageTagValidator.IsWellFormed(languageTag))
                         throw Unsupported($"Language '{languageTag}' is not a well-formed BCP 47 language tag.");
-                    language = languageTag.ToLowerInvariant();
+                    if (!StringComparer.Ordinal.Equals(languageTag, languageTag.ToLowerInvariant()))
+                        throw Unsupported("The xBRL-JSON language dimension must use lowercase BCP 47 tags.");
+                    language = languageTag;
                     continue;
                 }
                 if (dimension.Name == "noteId")
