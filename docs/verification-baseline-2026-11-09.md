@@ -1,6 +1,6 @@
 # Verification baseline — 2026-11-09
 
-Checkout: `main` at `e74337bd6e46c76cd2250de43c7c0a5f990c54c9` before this evidence-only documentation update.
+Checkout: `main` at `21f4672cffde7f9487c21f710b0c98018889a68c` for the latest code and CI evidence below. Earlier local verification remains labeled by its original checkout where applicable.
 
 ## Release verification
 
@@ -36,4 +36,8 @@ The focused OPS recovery/publication regression filter passed **116/116**, and t
 
 ## DST-08 generic record stage-write crash follow-up
 
-The Windows Release OPS publication/recovery regression filter passed **125/125**, including real child-process termination after half of each CSV v1/v2, XLSX v1/v2, JSON-record v1, and XML-record v1 adapter artifact had been written to the shared staging path. Recovery acquired the run's destination and staging locks, recorded `Aborted`, removed only the abandoned partial sidecar, preserved the prior accepted output byte-for-byte, and created no receipt. Tests also verify recovery leaves a live writer's locked partial file untouched and rejects reuse of a finalized run identifier before modifying either output. The CLI recovery integration suite passed **3/3**. Exact-head CI for this follow-up has not yet run.
+The Windows Release OPS publication/recovery regression filter passed **125/125**, including real child-process termination after half of each CSV v1/v2, XLSX v1/v2, JSON-record v1, and XML-record v1 adapter artifact had been written to the shared staging path. Recovery acquired the run's destination and staging locks, recorded `Aborted`, removed only the abandoned partial sidecar, preserved the prior accepted output byte-for-byte, and created no receipt. Tests also verify recovery leaves a live writer's locked partial file untouched and rejects reuse of a finalized run identifier before modifying either output. The CLI recovery integration suite passed **3/3**.
+
+## DST-08 single-use run identity and exact-head CI follow-up
+
+On `21f4672cffde7f9487c21f710b0c98018889a68c`, the four retained SQLite/table snapshot publication retry cases now assert the documented `PUB006` receipt conflict when a finalized run ID is reused; the existing destination remains byte-for-byte unchanged. The focused Windows integration filter passed **4/4**. Exact-head CI [42535659999](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42535659999) passed all four jobs: Windows and Ubuntu each passed **1,878 tests** with **6 environment-gated Arelle skips**, all five separate memory qualifications passed on both platforms, the Windows worker cancellation regression repeats passed, and Arelle integration, SPDX/dependency inventory, and repository hygiene passed. This does not close adapter-internal serializer interruption or filesystem power-loss qualification.
