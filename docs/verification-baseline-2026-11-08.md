@@ -189,6 +189,25 @@ Verification:
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
   and real-profile language-list qualification remain open.
 
+## UX-06 explicit source-schema recheck
+
+The accessible source panel now offers a user-triggered recheck of the saved
+workspace source. It inspects the current schema, compares the fingerprint with
+the saved mapping revision, and displays current fields when drift is found
+without mutating the saved fingerprint or executable graph. Preview and
+execution are disabled until the user reviews and reloads the source. A failed
+recheck also blocks those operations. This does not monitor file changes in the
+background.
+
+Verification:
+
+- Desktop Release passed 114/114 using isolated `bin-codex` output because the
+  running desktop application held shared Release assemblies open.
+- Tests cover no-drift acceptance, changed CSV headers, preserved semantic and
+  serialized fingerprints, preview/run blocking, explicit source reload, and
+  the actual headless Avalonia button's accessible name and command behavior.
+- Exact-head CI for this implementation is pending.
+
 ## UX-06 text-fact language inspector
 
 The selected-fact inspector now supports a string/text target when a compatible

@@ -71,6 +71,78 @@ public sealed class MappingOperationViewModelTests
         }
     }
 
+    [AvaloniaFact]
+    public async Task SourceInspectorExposesAccessibleSchemaRecheckAndBlocksRunAfterDrift()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-source-schema-ui-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var sourcePath = Path.Combine(directory, "source.csv");
+        File.WriteAllText(sourcePath, "Revenue\n1250\n");
+        var viewModel = new MainWindowViewModel();
+        try
+        {
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
+            await viewModel.LoadSourceAsync(sourcePath);
+            var window = new MainWindow { DataContext = viewModel };
+            try
+            {
+                window.Show();
+                var recheckButton = Assert.IsType<Button>(window.FindControl<Button>("RevalidateSourceSchemaButton"));
+
+                // Observe the actual XAML command control and accessibility name before use.
+                Assert.Equal("Recheck the current source schema against the saved mapping",
+                    AutomationProperties.GetName(recheckButton));
+                Assert.True(recheckButton.IsEnabled);
+                Assert.NotNull(recheckButton.Command);
+
+                async Task ExecuteRecheckAndWaitAsync()
+                {
+                    var operationCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var observedLoading = false;
+                    PropertyChangedEventHandler handler = (_, eventArgs) =>
+                    {
+                        if (eventArgs.PropertyName != nameof(MainWindowViewModel.IsSourceLoading)) return;
+                        if (viewModel.IsSourceLoading) observedLoading = true;
+                        else if (observedLoading) operationCompleted.TrySetResult();
+                    };
+                    viewModel.PropertyChanged += handler;
+                    try
+                    {
+                        recheckButton.Command!.Execute(recheckButton.CommandParameter);
+                        await operationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    finally
+                    {
+                        viewModel.PropertyChanged -= handler;
+                    }
+                }
+
+                // Act through the bound UI command; verify the source remains accepted.
+                await ExecuteRecheckAndWaitAsync();
+                Assert.False(viewModel.IsSourceSchemaDrifted);
+                Assert.Contains("recheck passed", viewModel.SourceInspectionSummary, StringComparison.OrdinalIgnoreCase);
+
+                File.WriteAllText(sourcePath, "Operating Revenue\n1250\n");
+                await ExecuteRecheckAndWaitAsync();
+
+                Assert.True(viewModel.IsSourceSchemaDrifted);
+                Assert.False(viewModel.PreviewCommand.CanExecute(null));
+                Assert.False(viewModel.ExecuteCommand.CanExecute(null));
+                Assert.Contains("schema changed", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                window.Close();
+            }
+        }
+        finally
+        {
+            viewModel.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task PreviewResultLabelsPartialOutputAndExposesFactMappingEvidence()
     {

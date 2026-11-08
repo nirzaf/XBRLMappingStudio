@@ -450,6 +450,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string _sourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
+    private bool _isSourceSchemaDrifted;
     private Task _sqliteTableLoadTask = Task.CompletedTask;
     private PdfDigitalDocument? _pdfDocument;
     private PdfTableTemplate? _pdfTemplate;
@@ -619,6 +620,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                Raise(nameof(CanRevalidateSourceSchema));
+                RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
                 PreviousFactPreviewPageCommand?.NotifyCanExecuteChanged();
                 NextFactPreviewPageCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanPreviousFactPreviewPage));
@@ -648,6 +651,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
+                RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
+                Raise(nameof(CanRevalidateSourceSchema));
                 RefreshFactInputRebindingAvailability();
                 SuggestConnectedMappingsCommand?.NotifyCanExecuteChanged();
                 Raise(nameof(CanAcceptSelectedSuggestionBatch));
@@ -688,7 +693,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public string? ProjectPath { get => _projectPath; private set => Set(ref _projectPath, value); }
     public bool IsProjectDirty => !StringComparer.Ordinal.Equals(
         _savedProjectSnapshot, ProjectSerializer.Serialize(Session.Project));
-    public string? SelectedSourceBindingId { get => _selectedSourceBindingId; private set => Set(ref _selectedSourceBindingId, value); }
+    public string? SelectedSourceBindingId
+    {
+        get => _selectedSourceBindingId;
+        private set
+        {
+            if (!Set(ref _selectedSourceBindingId, value)) return;
+            IsSourceSchemaDrifted = false;
+            Raise(nameof(CanRevalidateSourceSchema));
+            RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
+        }
+    }
     public IReadOnlyList<AdapterCapabilityOption> SourceCapabilities { get; } = BuildSourceCapabilities();
     public IReadOnlyList<AdapterCapabilityOption> TargetCapabilities { get; } = BuildTargetCapabilities();
     public string SourceCapabilitySummary => FormatCapabilitySummary(SourceCapabilities);
@@ -768,6 +783,27 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     {
         get => _sourceInspectionSummary;
         private set => Set(ref _sourceInspectionSummary, value);
+    }
+    public bool IsSourceSchemaDrifted
+    {
+        get => _isSourceSchemaDrifted;
+        private set
+        {
+            if (!Set(ref _isSourceSchemaDrifted, value)) return;
+            PreviewCommand?.NotifyCanExecuteChanged();
+            ExecuteCommand?.NotifyCanExecuteChanged();
+        }
+    }
+    public bool CanRevalidateSourceSchema
+    {
+        get
+        {
+            var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+                StringComparer.Ordinal.Equals(candidate.BindingId, SelectedSourceBindingId));
+            return !IsBusy && !IsSourceLoading
+                && !string.IsNullOrWhiteSpace(binding?.Locator)
+                && !string.IsNullOrWhiteSpace(binding?.SchemaFingerprint);
+        }
     }
     public string? SelectedSourceTable
     {
@@ -1437,6 +1473,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public RelayCommand CreateTaxonomyMigrationDraftCommand { get; }
     public RelayCommand RollbackTaxonomyMigrationCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
+    public RelayCommand RevalidateSourceSchemaCommand { get; }
     public RelayCommand ChooseDestinationCommand { get; }
     public RelayCommand SaveDestinationPlanCommand { get; }
     public RelayCommand PreviewDestinationCommand { get; }
@@ -1549,8 +1586,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 d.MainWindow?.Close();
         });
         ValidateCommand = new RelayCommand(_ => Validate());
-        PreviewCommand = new RelayCommand(async _ => await PreviewAsync(), _ => !IsBusy && !IsSourceLoading);
-        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(), _ => !IsBusy && !IsSourceLoading);
+        PreviewCommand = new RelayCommand(async _ => await PreviewAsync(),
+            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted);
+        ExecuteCommand = new RelayCommand(async _ => await ExecuteAsync(),
+            _ => !IsBusy && !IsSourceLoading && !IsSourceSchemaDrifted);
         CancelOperationCommand = new RelayCommand(_ => CancelMappingOperation(), _ => CanCancelOperation);
         DeleteSelectedCommand = new RelayCommand(_ => DeleteSelected());
         UndoCommand = new RelayCommand(_ => Undo());
@@ -1561,6 +1600,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         CreateTaxonomyMigrationDraftCommand = new RelayCommand(_ => CreateTaxonomyMigrationDraft(), _ => CanApplyTaxonomyMigration);
         RollbackTaxonomyMigrationCommand = new RelayCommand(_ => RollbackTaxonomyMigration(), _ => CanRollbackTaxonomyMigration);
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync(), _ => !IsBusy && !IsSourceLoading);
+        RevalidateSourceSchemaCommand = new RelayCommand(async _ => await RevalidateSourceSchemaAsync(),
+            _ => CanRevalidateSourceSchema);
         ChooseDestinationCommand = new RelayCommand(async _ => await ChooseDestinationAsync(),
             _ => !IsBusy && !IsDestinationLoading);
         SaveDestinationPlanCommand = new RelayCommand(_ => SaveDestinationPlan(), _ => CanSaveDestinationPlan);
@@ -1601,6 +1642,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private void OnSessionChanged()
     {
         InvalidateMappingOperationIfStale();
+        Raise(nameof(CanRevalidateSourceSchema));
+        RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
         if (!_isSuggestionHistoryMutation) _suggestionRedoState = null;
         var currentProjectSnapshot = ProjectSerializer.Serialize(Session.Project);
         var currentSemanticDigest = Session.Project.ComputeSemanticDigest();
@@ -2421,6 +2464,82 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         catch (Exception ex) { StatusText = $"Source load failed: {ex.Message}"; }
     }
 
+    public async Task RevalidateSourceSchemaAsync()
+    {
+        if (IsBusy || IsSourceLoading) return;
+        var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+            StringComparer.Ordinal.Equals(candidate.BindingId, SelectedSourceBindingId));
+        if (binding is null || string.IsNullOrWhiteSpace(binding.Locator)
+            || string.IsNullOrWhiteSpace(binding.SchemaFingerprint))
+        {
+            StatusText = "Load and inspect a source before rechecking its saved schema.";
+            return;
+        }
+
+        var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+        InvalidateMappingOperationIfStale();
+        IsSourceLoading = true;
+        try
+        {
+            var root = WorkspaceRoot();
+            var candidatePath = Path.IsPathRooted(binding.Locator)
+                ? binding.Locator
+                : Path.Combine(root, binding.Locator);
+            var safePath = PathGuard.EnsureWithin(root, candidatePath);
+            if (!File.Exists(safePath))
+                throw new FileNotFoundException("The saved source file is no longer available.", safePath);
+
+            var config = binding.Configuration.ToDictionary(kv => kv.Key,
+                kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
+            var connection = new SourceConnection(binding.BindingId, binding.Kind, safePath, config);
+            var schema = StringComparer.Ordinal.Equals(binding.Kind, "sqlite")
+                ? await _sqliteSchemaLoader(connection, CancellationToken.None)
+                : await BuildSourceAdapter(connection).InspectSchemaAsync(connection, CancellationToken.None);
+            if (generation != _sourceLoadGeneration
+                || !StringComparer.Ordinal.Equals(SelectedSourceBindingId, binding.BindingId))
+                return;
+
+            ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
+            if (SelectedSourceColumn is { } selectedColumn
+                && !schema.Columns.Any(column => StringComparer.Ordinal.Equals(column.Name, selectedColumn)))
+                SelectedSourceColumn = null;
+            Raise(nameof(SourceColumns));
+
+            var drifted = !StringComparer.Ordinal.Equals(binding.SchemaFingerprint, schema.Fingerprint);
+            IsSourceSchemaDrifted = drifted;
+            var sourceName = string.IsNullOrWhiteSpace(binding.DisplayName)
+                ? binding.Kind
+                : binding.DisplayName;
+            if (drifted)
+            {
+                SourceInspectionSummary = $"Schema drift detected for {sourceName}: the source now exposes "
+                    + $"{schema.Columns.Count} field(s) ({string.Join(", ", schema.Columns.Select(column => column.Name))}). "
+                    + "The saved schema fingerprint and executable mappings remain unchanged. Review the field bindings, "
+                    + "then choose this source again to accept the updated schema.";
+                StatusText = $"Source schema changed for {sourceName}. Preview and execution are blocked until the source is reviewed and reloaded.";
+            }
+            else
+            {
+                SourceInspectionSummary = $"Source schema recheck passed for {sourceName}: "
+                    + $"{schema.Columns.Count} field(s) still match the saved mapping revision.";
+                StatusText = $"Source schema is unchanged for {sourceName}.";
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+            and not StackOverflowException and not OperationCanceledException)
+        {
+            if (generation != _sourceLoadGeneration) return;
+            IsSourceSchemaDrifted = true;
+            SourceInspectionSummary = $"Source schema could not be verified: {exception.Message} "
+                + "The saved mapping remains pinned and preview/execution are blocked until the source is reviewed.";
+            StatusText = "Source schema recheck failed; preview and execution are blocked until the source is reviewed.";
+        }
+        finally
+        {
+            if (generation == _sourceLoadGeneration) IsSourceLoading = false;
+        }
+    }
+
     public async Task ChooseDestinationAsync()
     {
         if (ProjectPath is null)
@@ -3179,6 +3298,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
         InvalidateMappingOperationIfStale();
+        IsSourceSchemaDrifted = false;
         IsSourceLoading = true;
         var sqliteTableLoadPending = false;
         try
@@ -5279,6 +5399,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         ClearDestinationSelection();
         IsSourceLoading = false;
         _sqliteSourcePath = null;
+        IsSourceSchemaDrifted = false;
         _selectedSourceTable = null;
         ResetPdfReviewState();
         SelectedSourceBindingId = null;

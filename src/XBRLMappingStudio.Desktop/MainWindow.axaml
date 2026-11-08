@@ -72,6 +72,10 @@
                      AutomationProperties.Name="Source adapter capabilities and unavailable providers" />
           <Button DockPanel.Dock="Top" Content="Choose source file…" Command="{Binding ChooseSourceCommand}"
                   AutomationProperties.Name="Choose source file" />
+          <Button DockPanel.Dock="Top" Content="Recheck source schema"
+                  Command="{Binding RevalidateSourceSchemaCommand}"
+                  x:Name="RevalidateSourceSchemaButton"
+                  AutomationProperties.Name="Recheck the current source schema against the saved mapping" />
           <ComboBox DockPanel.Dock="Top" ItemsSource="{Binding SourceTables}"
                     SelectedItem="{Binding SelectedSourceTable}"
                     IsVisible="{Binding HasSourceTables}"

@@ -2571,6 +2571,62 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task SourceSchemaRecheck_DetectsDriftAndKeepsSavedMappingPinnedUntilReload()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-source-schema-recheck", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var csv = System.IO.Path.Combine(dir, "source.csv");
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        File.WriteAllText(csv, "Revenue\n1250\n");
+        try
+        {
+            var viewModel = new MainWindowViewModel();
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadSourceAsync(csv);
+
+            var originalFingerprint = Assert.Single(viewModel.Session.Project.Bindings,
+                binding => binding.Kind != "param").SchemaFingerprint;
+            Assert.False(string.IsNullOrWhiteSpace(originalFingerprint));
+            Assert.True(viewModel.CanRevalidateSourceSchema);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+            var originalSemanticDigest = viewModel.Session.Project.ComputeSemanticDigest();
+
+            await viewModel.RevalidateSourceSchemaAsync();
+
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+            Assert.Contains("recheck passed", viewModel.SourceInspectionSummary, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(originalFingerprint, viewModel.Session.Project.Bindings.Single(binding => binding.Kind != "param").SchemaFingerprint);
+
+            File.WriteAllText(csv, "Operating Revenue\n1250\n");
+            await viewModel.RevalidateSourceSchemaAsync();
+
+            Assert.True(viewModel.IsSourceSchemaDrifted);
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+            Assert.False(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.Contains("schema changed", viewModel.StatusText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Operating Revenue", viewModel.SourceColumns);
+            Assert.Equal(originalFingerprint, viewModel.Session.Project.Bindings.Single(binding => binding.Kind != "param").SchemaFingerprint);
+            Assert.Equal(originalSemanticDigest, viewModel.Session.Project.ComputeSemanticDigest());
+            Assert.Equal(originalFingerprint, ProjectSerializer.Deserialize(
+                ProjectSerializer.Serialize(viewModel.Session.Project)).Bindings.Single(binding => binding.Kind != "param").SchemaFingerprint);
+
+            await viewModel.LoadSourceAsync(csv);
+
+            Assert.False(viewModel.IsSourceSchemaDrifted);
+            Assert.True(viewModel.PreviewCommand.CanExecute(null));
+            Assert.True(viewModel.ExecuteCommand.CanExecute(null));
+            Assert.NotEqual(originalFingerprint, viewModel.Session.Project.Bindings.Single(binding => binding.Kind != "param").SchemaFingerprint);
+            Assert.Contains("Operating Revenue", viewModel.SourceColumns);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StaleSqliteSchemaLoadCannotReplaceNewerSourceSelection()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-race", Guid.NewGuid().ToString("n"));
