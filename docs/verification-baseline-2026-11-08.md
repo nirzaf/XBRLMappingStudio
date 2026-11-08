@@ -17,9 +17,9 @@ Verification:
 
 - `Cli_ArtifactValidationRequiresSyntheticOptInBeforePathAccess` passed both
   local and Arelle-option cases (2/2) in the isolated `CodexTest` build.
-- The first exact-head run on `327bbe3` exposed the Arelle fixture's missing
--  opt-in. The fixture was corrected in `49fe2eb`; `0366dd0` also updated the
-  CLI synopsis to show that the flag is required in both modes.
+- The first exact-head run on `327bbe3` exposed that the Arelle fixture lacked
+  the explicit opt-in. The fixture was corrected in `49fe2eb`; `0366dd0` also
+  updated the CLI synopsis to show that the flag is required in both modes.
 - `Cli_HelpRequiresSyntheticOptInForArtifactValidationInBothModes` passed with
   the two authorization-path cases (3/3 total) in the isolated `CodexTest` build.
 - Exact-head GitHub Actions run
