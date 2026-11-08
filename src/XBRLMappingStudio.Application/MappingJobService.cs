@@ -1390,9 +1390,12 @@ public sealed class MappingJobService
                 || fact.SourceTransformationPaths.Count == 0)
                 continue;
 
+            var source = fact.SourceTransformationPaths.Any(path => path.Source == diagnostic.Source)
+                ? diagnostic.Source
+                : fact.SourceTransformationPaths[0].Source;
             diagnostics[index] = diagnostic with
             {
-                Source = diagnostic.Source ?? fact.SourceTransformationPaths[0].Source,
+                Source = source,
                 SourceTransformationPaths = fact.SourceTransformationPaths
             };
         }
@@ -1427,15 +1430,47 @@ public sealed class MappingJobService
         }
 
         var factLocators = OimSerializer.GetFactLocatorMap(facts);
-        if (diagnostics.Any(diagnostic =>
-            (diagnostic.Stage == DiagnosticStage.Worker && string.IsNullOrWhiteSpace(diagnostic.FactLocator))
-            || (!string.IsNullOrWhiteSpace(diagnostic.FactLocator)
-                && (!factLocators.TryGetValue(diagnostic.FactLocator, out var fact)
-                    || fact.SourceTransformationPaths.Count == 0))))
-            return RunProvenanceStatus.Incomplete;
+        foreach (var diagnostic in diagnostics)
+        {
+            if (diagnostic.Stage == DiagnosticStage.Worker
+                && string.IsNullOrWhiteSpace(diagnostic.FactLocator))
+                return RunProvenanceStatus.Incomplete;
+
+            if (!string.IsNullOrWhiteSpace(diagnostic.FactLocator))
+            {
+                if (!factLocators.TryGetValue(diagnostic.FactLocator, out var fact)
+                    || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs)
+                    || diagnostic.Source is null
+                    || !fact.SourceTransformationPaths.Any(path => path.Source == diagnostic.Source)
+                    || diagnostic.SourceTransformationPaths is not { Count: > 0 } diagnosticPaths
+                    || !diagnosticPaths.SequenceEqual(fact.SourceTransformationPaths))
+                    return RunProvenanceStatus.Incomplete;
+            }
+
+            if (diagnostic.Stage == DiagnosticStage.Execution
+                && diagnostic.Subsystem == DiagnosticSubsystem.Mapping
+                && !HasVerifiedSourcePaths(diagnostic.SourceTransformationPaths, verifiedInputs))
+                return RunProvenanceStatus.Incomplete;
+
+            if (diagnostic.SourceTransformationPaths is { Count: > 0 } paths
+                && !HasVerifiedSourcePaths(paths, verifiedInputs))
+                return RunProvenanceStatus.Incomplete;
+        }
 
         return RunProvenanceStatus.Complete;
     }
+
+    private static bool HasVerifiedSourcePaths(
+        IReadOnlyList<SourceTransformationPath>? paths,
+        IReadOnlySet<string> verifiedInputs)
+        => paths is { Count: > 0 }
+            && paths.All(path => path is not null
+                && path.Source is not null
+                && !string.IsNullOrWhiteSpace(path.Source.SourceId)
+                && !string.IsNullOrWhiteSpace(path.Source.Locator)
+                && path.TransformationIds is { Count: > 0 }
+                && path.TransformationIds.All(id => !string.IsNullOrWhiteSpace(id))
+                && verifiedInputs.Contains(path.Source.SourceId));
 
     private FilingValidationResult ValidateLargeSyntheticArtifact(
         LargeRunArtifact artifact,

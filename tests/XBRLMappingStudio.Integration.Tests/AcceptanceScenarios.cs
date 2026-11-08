@@ -67,6 +67,36 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(RunProvenanceStatus.Incomplete,
             MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
                 new[] { finding with { Stage = DiagnosticStage.Worker, FactLocator = null } }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
+                new[] { finding with { SourceTransformationPaths = null } }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
+                new[] { finding with { Source = new SourceReference("other-binding", "row=7") } }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
+                new[]
+                {
+                    new Diagnostic
+                    {
+                        Code = "MAP001",
+                        Subsystem = DiagnosticSubsystem.Mapping,
+                        Severity = DiagnosticSeverity.Warning,
+                        Stage = DiagnosticStage.Execution,
+                        Message = "A rejected source row has no traceable path."
+                    }
+                }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact },
+                new[] { input, new InputIdentity("other-binding", "file", null, false, "other.xlsx") },
+                new[] { finding with
+                {
+                    SourceTransformationPaths = new[]
+                    {
+                        new SourceTransformationPath(
+                            new SourceReference("other-binding", "row=7"), new[] { "source", "fact" })
+                    }
+                } }));
     }
 
     public async Task InitializeAsync()
