@@ -308,6 +308,8 @@ The prior exact-head CI run [42409129339](https://github.com/nirzaf/XBRLMappingS
 
 The current XBR-01 CLI guard is in source commit `0366dd0ed74b053b0f8867ca842dc887e14dc53f`; exact-head CI [42438666525](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42438666525) passed Windows and Ubuntu Release build/tests, pinned Arelle integration, and repository hygiene. The Ubuntu matrix logged 912 passed tests and 6 environment-gated Arelle skips; the Windows matrix and pinned Arelle job also passed. `validate-artifact` still supports only the explicitly opted-in synthetic profile; selected-profile artifact validation remains open.
 
+The UX-06 text-fact language inspector is in source commit `e2aac8b588932821fdfb79b2bc83c61b56e05226`; exact-head CI [42441934408](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42441934408) passed repository hygiene, Windows and Ubuntu Release matrices, and pinned Arelle integration. Ubuntu logged 918 passed tests and 6 environment-gated skips; the Desktop and XBRL suites passed 112 and 155 tests respectively. Native visual/screen-reader acceptance and installed filing-profile qualification remain open.
+
 | Suite | Count | Covers |
 |---|---:|---|
 | Engine.Tests | 125 | Validation, plan compilation, collections/joins/functions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
@@ -316,7 +318,7 @@ The current XBR-01 CLI guard is in source commit `0366dd0ed74b053b0f8867ca842dc8
 | Adapters.Tests | 95 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
 | Ops.Tests | 89 | Destination locking/publication/journal, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
 | Integration.Tests | 244 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 106 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence |
+| Desktop.Tests | 112 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence, typed text-fact language editing |
 | Project.Tests | 26 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash

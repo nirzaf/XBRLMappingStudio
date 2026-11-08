@@ -188,3 +188,26 @@ Verification:
   dependency-inventory tests. Repository hygiene and SPDX generation passed.
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
   and real-profile language-list qualification remain open.
+
+## UX-06 text-fact language inspector
+
+The selected-fact inspector now supports a string/text target when a compatible
+text-value input is connected and no numeric-value input is connected. The
+accessible BCP 47 language field validates syntax and the selected concept's
+profile-supported language list before applying one undoable graph edit.
+Numeric facts reject a language; nonnumeric text edits reject unit/decimals, and
+changing fact type clears incompatible unit/decimals aspects. Invalid edits
+preserve the graph. Tests cover apply, malformed and unsupported languages,
+numeric-language rejection, undo, save/reopen, and the bound Avalonia control.
+
+Verification:
+
+- Desktop Release passed 112/112; XBRL Release passed 155/155.
+- Exact-head CI [42441934408](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42441934408)
+  passed all four jobs for source commit
+  `e2aac8b588932821fdfb79b2bc83c61b56e05226`. Ubuntu logged 918 passed tests
+  and 6 environment-gated skips; Windows, repository hygiene, and pinned Arelle
+  integration also passed.
+- Native visual/screen-reader acceptance, deeper nonnumeric lexical validation,
+  inspector source-drift revalidation, and installed filing-profile workflow
+  remain open.
