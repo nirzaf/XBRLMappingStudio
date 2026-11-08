@@ -14,6 +14,7 @@ using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
+[Collection("Process memory qualification")]
 public sealed class LargeRunExecutionTests
 {
     [Fact]
@@ -44,8 +45,15 @@ public sealed class LargeRunExecutionTests
     [Theory]
     [InlineData(false, 9)]
     [InlineData(true, 9)]
-    [InlineData(false, 100_000)]
     public async Task Csv_SmallAndLargeProduceIdenticalReportsAndImmutableDigests(bool mutate, int rowCount)
+        => await VerifyCsvSmallAndLarge(mutate, rowCount);
+
+    [Fact]
+    [Trait("Category", "ProcessMemory")]
+    public async Task CsvHundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded()
+        => await VerifyCsvSmallAndLarge(mutate: false, rowCount: 100_000);
+
+    private static async Task VerifyCsvSmallAndLarge(bool mutate, int rowCount)
     {
         var root = NewDirectory();
         try
@@ -78,13 +86,6 @@ public sealed class LargeRunExecutionTests
                 [project.Bindings[0].BindingId] = new(project.Bindings[0].BindingId, "csv", path)
             };
             var worker = new DigestOnlyArtifactWorker(profile);
-            var smallService = new MappingJobService(profile, worker,
-                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: rowCount,
-                    MaxProbeBytes: 256L * 1024 * 1024));
-            using var small = await smallService.RunAsync(project, connections,
-                new Dictionary<string, string>(), false, default);
-            Assert.True(small.Manifest.Outcome == RunOutcome.Success,
-                string.Join(" | ", small.Manifest.Diagnostics.Select(d => d.Message)));
             var largeService = new MappingJobService(profile, worker,
                 executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: 2, RowBatchSize: 256,
                     MaxInMemorySourceBytes: 128, MaxReportBytes: 256L * 1024 * 1024,
@@ -113,6 +114,21 @@ public sealed class LargeRunExecutionTests
             Assert.True(large.Manifest.Outcome == RunOutcome.Success,
                 string.Join(" | ", large.Manifest.Diagnostics.Select(d => d.Message)));
             var artifact = Assert.IsType<LargeRunArtifact>(large.LargeArtifact);
+            if (rowCount >= 100_000)
+            {
+                Assert.True(memorySamples.Count >= 5);
+                Assert.True(memorySamples.Max() - memorySamples.Min() < 64L * 1024 * 1024,
+                    $"CSV retained heap varied beyond 64 MiB: {string.Join(", ", memorySamples)}");
+            }
+            // Materialize the deliberately unbounded equivalence oracle only AFTER
+            // collecting and asserting the bounded execution's process-wide heap.
+            var smallService = new MappingJobService(profile, worker,
+                executionBudget: new ExecutionBudget(InMemorySourceRecordLimit: rowCount,
+                    MaxProbeBytes: 256L * 1024 * 1024));
+            using var small = await smallService.RunAsync(project, connections,
+                new Dictionary<string, string>(), false, default);
+            Assert.True(small.Manifest.Outcome == RunOutcome.Success,
+                string.Join(" | ", small.Manifest.Diagnostics.Select(d => d.Message)));
             Assert.Null(small.LargeArtifact);
             Assert.Equal(rowCount, artifact.FactCount);
             Assert.Equal(RunManifest.ComputeSha256(small.XbrlJson), artifact.Sha256);
@@ -120,12 +136,6 @@ public sealed class LargeRunExecutionTests
             await File.WriteAllTextAsync(expectedPath, small.XbrlJson, new UTF8Encoding(false));
             using (var expected = File.OpenRead(expectedPath))
             using (var actual = artifact.OpenReportRead()) AssertStreamsEqual(expected, actual);
-            if (rowCount >= 100_000)
-            {
-                Assert.True(memorySamples.Count >= 5);
-                Assert.True(memorySamples.Max() - memorySamples.Min() < 64L * 1024 * 1024,
-                    $"CSV retained heap varied beyond 64 MiB: {memorySamples.Min()}..{memorySamples.Max()}");
-            }
             Assert.Equal(small.Manifest.Inputs.Single().Digest, large.Manifest.Inputs.Single().Digest);
             Assert.True(large.Manifest.Inputs.Single().IsReplayable);
             Assert.DoesNotContain(large.Manifest.Diagnostics, d => d.Code == DiagnosticCodes.IoStableRowIdentityUnavailable);
@@ -495,6 +505,7 @@ public sealed class LargeRunExecutionTests
     }
 
     [Fact]
+    [Trait("Category", "ProcessMemory")]
     public async Task HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded()
     {
         const int rowCount = 100_000;
@@ -526,7 +537,7 @@ public sealed class LargeRunExecutionTests
 
             Assert.True(samples.Count >= 5, "Expected multiple steady-state batch memory samples.");
             Assert.True(samples.Max() - samples.Min() < 64L * 1024 * 1024,
-                $"Retained heap changed by more than the 64 MiB batch budget: {samples.Min()}..{samples.Max()} bytes.");
+                $"Retained heap changed by more than the 64 MiB batch budget: {string.Join(", ", samples)} bytes.");
 
             var smallWorker = new DigestOnlyArtifactWorker(profile);
             using var small = await Run(project, database, profile,

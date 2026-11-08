@@ -33,3 +33,11 @@ Qualification tests compare small and large serialization byte-for-byte and sour
 digests for 100,000 synthetic CSV rows, with a 64 MiB retained-heap variation ceiling
 during steady-state batches. They also exercise source mutation and staged-validation refusal, cancellation,
 malformed/oversized records, encoding, multiline provenance and bounded sampling.
+
+CI runs the CSV and SQLite 100,000-row heap qualifications in separate fresh test
+processes on Windows and Linux, in addition to the remaining full suite. Process-wide
+GC measurements must not include another test's materialized comparison oracle or
+its later release. Both retain the same 64 MiB variation budget and minimum sample
+count. The CSV comparison oracle is created only after the bounded-run measurement;
+a nonparallel xUnit collection also prevents unrelated local tests from allocating
+concurrently. On a failure the ordered heap samples are included in the assertion.

@@ -89,6 +89,15 @@ small/large byte-stream and source-digest oracle with less than 64 MiB steady-st
 retained managed-heap variation. This is synthetic component evidence, not complete
 process-tree/Arelle memory or accepted target-hardware qualification.
 
+The initial CSV follow-on [CI 42455720397](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42455720397)
+passed Ubuntu, Arelle and hygiene, but Windows caught a process-wide retained-heap
+measurement failure. The two 100,000-row memory qualifications now run in separate
+fresh processes on both platforms, while the remaining suite runs in full. The
+CSV in-memory comparison oracle is constructed after measurement, and a nonparallel
+collection prevents unrelated local tests from allocating concurrently. Neither
+row counts, byte-equivalence checks, minimum samples nor the 64 MiB bound is reduced.
+A successful rerun on the subsequent exact commit is required for Windows acceptance.
+
 Qatar-first priorities and current public official-source evidence are recorded in
 [OPEN.md](decisions/OPEN.md). No Qatar technical package, filing-rule catalogue,
 license grant, or Q-Disclosure acceptance is invented. The generic CSV work does
