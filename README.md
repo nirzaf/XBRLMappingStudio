@@ -280,17 +280,17 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest functional-change CI [42431006438](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42431006438)
-verified commit `e76308590696c18624ea109fe2684412a4cec55d`. Repository hygiene,
+Latest functional-change CI [42431859845](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42431859845)
+verified commit `5bbd94dd86b27d8b374de8d56e326ecce91b55cd`. Repository hygiene,
 Windows and Ubuntu Release build/test, pinned Arelle integration, dependency-inventory
-tests, and SPDX generation passed. Each .NET OS matrix passed **884 tests, skipped 6
+tests, and SPDX generation passed. Each .NET OS matrix passed **886 tests, skipped 6
 environment-gated Arelle cases, and had 0 failures**. The eight suite counts were
 Adapters 95, AI 72, Desktop 106, Engine 125, Integration 241, Ops 89, Project 26,
-and XBRL 130. The worker job ran **74 Python protocol/offline tests**, **15 gated
+and XBRL 132. The worker job ran **74 Python protocol/offline tests**, **15 gated
 .NET Arelle execution tests**, and **15 dependency-inventory tests**. This head
 rejects malformed BCP 47 language tags during profile-free JSON and XML import,
-validates language-tag syntax, and matches per-concept supported languages
-case-insensitively. All four CI jobs passed.
+enforces lowercase language tags for xBRL-JSON, and matches per-concept supported
+languages case-insensitively. All four CI jobs passed.
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 

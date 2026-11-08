@@ -131,19 +131,21 @@ empty, malformed, duplicate-variant and duplicate-extension tags. JSON
 `dimensions.language` and XML `xml:lang` are also syntax-checked on import before
 profile selection, so malformed tags cannot enter the report model through a
 profile-free read. Supported language values from concept metadata are matched
-case-insensitively. IANA registry membership is not checked, and exact language
-support still depends on the selected profile metadata.
+case-insensitively. The xBRL-JSON importer rejects well-formed but uppercase tags,
+as the [xBRL-JSON 1.0 specification](https://www.xbrl.org/Specification/xbrl-json/REC-2021-10-13/xbrl-json-REC-2021-10-13.html)
+requires its language dimension to be lowercase. IANA registry membership is not
+checked, and exact language support still depends on the selected profile metadata.
 
 Verification:
 
-- The XBRL Release suite passed 130/130, including profile-free JSON/XML import
-  rejection cases for malformed `en--US` and `en_US`, valid language tags, and
-  profile-language case matching.
+- The XBRL Release suite passed 132/132, including profile-free JSON/XML import
+  rejection cases for malformed `en--US` and `en_US`, uppercase `EN` and `en-US`
+  on xBRL-JSON input, valid lowercase tags, and profile-language case matching.
 - The Engine Release suite passed 125/125; the malformed-tag FactConstruct case
   blocks the fact and reports the original source location.
-- Exact-head CI [42431006438](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42431006438)
-  passed on commit `e76308590696c18624ea109fe2684412a4cec55d`. Windows and Ubuntu
-  each passed 884 tests with 6 environment-gated Arelle skips; the pinned job ran
+- Exact-head CI [42431859845](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42431859845)
+  passed on commit `5bbd94dd86b27d8b374de8d56e326ecce91b55cd`. Windows and Ubuntu
+  each passed 886 tests with 6 environment-gated Arelle skips; the pinned job ran
   74 Python worker tests, 15 .NET Arelle execution tests, and 15
   dependency-inventory tests. Repository hygiene and SPDX generation passed.
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
