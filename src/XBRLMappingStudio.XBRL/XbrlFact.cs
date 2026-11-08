@@ -201,8 +201,13 @@ public sealed class XbrlFact
         {
             return Fail(FactValidationIssue.InvalidValue, $"Non-numeric concept '{ConceptName}' requires a text value.", out reason, out issue);
         }
+        if (Language is not null && !Bcp47LanguageTagValidator.IsWellFormed(Language))
+        {
+            return Fail(FactValidationIssue.InvalidLanguage,
+                $"Language '{Language}' is not a well-formed BCP 47 language tag.", out reason, out issue);
+        }
         if (Language is not null && meta.SupportedLanguages.Count > 0
-            && !meta.SupportedLanguages.Contains(Language.ToLowerInvariant(), StringComparer.Ordinal))
+            && !meta.SupportedLanguages.Contains(Language, StringComparer.OrdinalIgnoreCase))
         {
             return Fail(FactValidationIssue.InvalidLanguage, $"Language '{Language}' is not supported by concept '{ConceptName}'.", out reason, out issue);
         }

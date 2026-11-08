@@ -399,6 +399,32 @@ public class ExecutionPlanTests
     }
 
     [Fact]
+    public async Task FactConstructRejectsMalformedBcp47LanguageWithSource()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-malformed-language-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            ConfigureTextFactProject(project, "en--US");
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrUnsupportedConstruct);
+            Assert.Equal("textValue", diagnostic.PortName);
+            Assert.Contains("well-formed BCP 47", diagnostic.Message, StringComparison.Ordinal);
+            Assert.NotNull(diagnostic.Source);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task FactConstructRejectsDuplicateMalformedAndOverLimitDimensionsBeforeSerialization()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xbrl-invalid-dimensions-" + Guid.NewGuid().ToString("N"));

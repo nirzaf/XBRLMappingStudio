@@ -888,6 +888,65 @@ public sealed class FactSerializationTests
         Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { invalidDecimals }));
     }
 
+    [Theory]
+    [InlineData("EN-us")]
+    [InlineData("zh-cmn-Hans-CN-u-ca-chinese")]
+    [InlineData("x-private")]
+    [InlineData("i-default")]
+    public void FactValidationAcceptsWellFormedBcp47LanguageTags(string language)
+    {
+        var fact = CreateTextFact(language);
+        var concept = Profile.FindConcept(fact.ConceptName)! with
+        {
+            SupportedLanguages = Array.Empty<string>()
+        };
+
+        Assert.True(fact.ValidateAgainst(concept, out var reason), reason);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("en_US")]
+    [InlineData("en--US")]
+    [InlineData("x")]
+    [InlineData("en-u")]
+    [InlineData("en-u-ca-u-nu")]
+    [InlineData("en-1901-1901")]
+    public void FactValidationRejectsMalformedBcp47LanguageTags(string language)
+    {
+        var fact = CreateTextFact(language);
+        var concept = Profile.FindConcept(fact.ConceptName)! with
+        {
+            SupportedLanguages = Array.Empty<string>()
+        };
+
+        Assert.False(fact.ValidateAgainst(concept, out _, out var issue));
+        Assert.Equal(FactValidationIssue.InvalidLanguage, issue);
+        Assert.Throws<XbrlExportException>(() => OimSerializer.Serialize(Profile, new[] { fact }));
+    }
+
+    [Fact]
+    public void FactValidationMatchesProfileLanguageTagsWithoutCaseSensitivity()
+    {
+        var fact = CreateTextFact("EN");
+        var concept = Profile.FindConcept(fact.ConceptName)! with
+        {
+            SupportedLanguages = new[] { "en" }
+        };
+
+        Assert.True(fact.ValidateAgainst(concept, out var reason), reason);
+    }
+
+    private static XbrlFact CreateTextFact(string language) => new()
+    {
+        ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+        EntityScheme = "http://xbrl.org/entity/",
+        EntityIdentifier = "ABC-Corp",
+        Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+        TextValue = "Example",
+        Language = language
+    };
+
     private static void AssertMultisetEquivalent(IReadOnlyList<XbrlFact> expected, IReadOnlyList<XbrlFact> actual)
     {
         Assert.Equal(expected.Count, actual.Count);
