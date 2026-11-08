@@ -169,9 +169,10 @@ public sealed class SqliteTargetPublisher
     }
 
     /// <summary>
-    /// Reconcile a durable destination receipt without writing. A missing receipt means
-    /// the transaction that owns the data changes did not commit, because rows and the
-    /// receipt are committed in the same SQLite transaction.
+    /// Reconcile a durable destination receipt without writing. Rows and their receipt
+    /// commit in the same SQLite transaction, so absence proves no committed receipt only
+    /// for an intact destination. It cannot disprove historical confirmation if the receipt
+    /// or database was subsequently deleted or replaced.
     /// </summary>
     public async Task<(SqliteReceiptReconciliation State, SqlitePublishReceipt? Receipt)> ReconcileReceiptAsync(
         SourceConnection destination,
@@ -179,6 +180,9 @@ public sealed class SqliteTargetPublisher
         string expectedIntentFingerprint,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(operationKey) || string.IsNullOrWhiteSpace(expectedIntentFingerprint))
+            return (SqliteReceiptReconciliation.IntentConflict, null);
         if (string.IsNullOrWhiteSpace(destination.Path) || !File.Exists(destination.Path))
             return (SqliteReceiptReconciliation.TargetUnavailable, null);
 
@@ -191,25 +195,51 @@ public sealed class SqliteTargetPublisher
             ForeignKeys = true
         }.ToString());
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: true);
         await using var table = connection.CreateCommand();
-        table.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts'";
+        table.Transaction = transaction;
+        table.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts' COLLATE NOCASE";
         if (await table.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
-            // Receipt table creation and all published rows commit in one transaction.
-            // Its absence on an available target proves no publication receipt committed.
             return (SqliteReceiptReconciliation.NotFound, null);
 
+        var columns = await ReadColumnsAsync(connection, transaction, "xms_idempotency_receipts", cancellationToken)
+            .ConfigureAwait(false);
+        if (new[] { "operation_key", "intent_fingerprint", "written_rows", "completed_utc" }
+            .Except(columns.Keys, StringComparer.OrdinalIgnoreCase).Any())
+            return (SqliteReceiptReconciliation.IntentConflict, null);
+
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT intent_fingerprint,written_rows,completed_utc FROM xms_idempotency_receipts WHERE operation_key=$key";
+        command.Transaction = transaction;
+        // A damaged/replaced table may have lost its primary key. Never accept one
+        // arbitrarily selected receipt when multiple rows match the operation.
+        command.CommandText = "SELECT operation_key,intent_fingerprint,written_rows,completed_utc FROM xms_idempotency_receipts WHERE operation_key=$key LIMIT 2";
         command.Parameters.AddWithValue("$key", operationKey);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return (SqliteReceiptReconciliation.NotFound, null);
-        var intent = reader.GetString(0);
-        if (!StringComparer.Ordinal.Equals(intent, expectedIntentFingerprint))
+        if (!TryReadReceipt(reader, operationKey, expectedIntentFingerprint, out var receipt)
+            || await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return (SqliteReceiptReconciliation.IntentConflict, null);
-        var receipt = new SqlitePublishReceipt(operationKey, intent, reader.GetInt32(1),
-            DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture));
         return (SqliteReceiptReconciliation.Found, receipt);
+    }
+
+    private static bool TryReadReceipt(SqliteDataReader reader, string operationKey,
+        string expectedIntentFingerprint, out SqlitePublishReceipt? receipt)
+    {
+        receipt = null;
+        // GetValue preserves SQLite's storage classes; typed getters can silently
+        // coerce TEXT/REAL into integers or truncate a 64-bit row count.
+        if (reader.GetValue(0) is not string key || string.IsNullOrWhiteSpace(key)
+            || !StringComparer.Ordinal.Equals(key, operationKey)
+            || reader.GetValue(1) is not string intent || string.IsNullOrWhiteSpace(intent)
+            || !StringComparer.Ordinal.Equals(intent, expectedIntentFingerprint)
+            || reader.GetValue(2) is not long writtenRows || writtenRows is <= 0 or > int.MaxValue
+            || reader.GetValue(3) is not string completedText || string.IsNullOrWhiteSpace(completedText)
+            || !DateTimeOffset.TryParse(completedText, CultureInfo.InvariantCulture, DateTimeStyles.None, out var completed))
+            return false;
+
+        receipt = new SqlitePublishReceipt(key, intent, (int)writtenRows, completed);
+        return true;
     }
 
     /// <summary>

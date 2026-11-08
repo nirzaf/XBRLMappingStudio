@@ -263,6 +263,17 @@ public sealed class MixedPublicationCoordinator
         CancellationToken cancellationToken = default)
     {
         var record = _store.GetOrCreate(intent);
+        // A local confirmation is historical evidence, not proof that the target
+        // receipt still exists. Revalidate before either delegate can write. A
+        // prior conflict remains protected even after a restart or later I/O fault.
+        var requiresReceiptRevalidation = RequiresReceiptRevalidation(record);
+        if (requiresReceiptRevalidation)
+            record = await ReconcileSqliteAsync(record, cancellationToken).ConfigureAwait(false);
+        var sqliteReceiptConfirmed = !requiresReceiptRevalidation
+            || record.SqliteState == DestinationPublicationState.Confirmed;
+
+        // Always inspect the file independently, including when SQLite evidence
+        // failed. The returned outcomes must not hide a changed file destination.
         var fileMatches = TryDigest(intent.FilePath, out var currentDigest)
             && StringComparer.Ordinal.Equals(currentDigest, intent.FileDigest);
         if (fileMatches)
@@ -280,6 +291,8 @@ public sealed class MixedPublicationCoordinator
         }
         else
         {
+            if (!sqliteReceiptConfirmed)
+                return UnconfirmedReceiptAttempt(record);
             record = _store.SetFile(intent.OperationKey, DestinationPublicationState.InProgress);
             try
             {
@@ -298,6 +311,9 @@ public sealed class MixedPublicationCoordinator
             }
         }
 
+        if (!sqliteReceiptConfirmed
+            || (requiresReceiptRevalidation && record.SqliteState != DestinationPublicationState.Confirmed))
+            return UnconfirmedReceiptAttempt(record);
         if (record.SqliteState == DestinationPublicationState.Confirmed)
             return new MixedPublicationAttempt(record, null);
 
@@ -315,7 +331,8 @@ public sealed class MixedPublicationCoordinator
                 },
                 cancellationToken).ConfigureAwait(false);
             if (!StringComparer.Ordinal.Equals(receipt.OperationKey, preparedOperationKey)
-                || !StringComparer.Ordinal.Equals(receipt.IntentFingerprint, preparedIntentFingerprint))
+                || !StringComparer.Ordinal.Equals(receipt.IntentFingerprint, preparedIntentFingerprint)
+                || receipt.WrittenRows <= 0)
                 throw new PublicationException(DiagnosticCodes.PubReceiptConflict,
                     "The SQLite publisher receipt does not match the persisted mixed publication intent.",
                     intent.OperationKey, intent.SqlitePath);
@@ -324,7 +341,13 @@ public sealed class MixedPublicationCoordinator
         }
         catch (Exception ex) when (IsPublicationFailure(ex))
         {
-            record = _store.SetSqlite(intent.OperationKey, Classify(ex), failureCode: Code(ex));
+            var failureCode = Code(ex);
+            // A returned receipt that contradicts the prepared intent is not a
+            // retryable rejection: a write may already have committed elsewhere.
+            record = _store.SetSqlite(intent.OperationKey,
+                failureCode == DiagnosticCodes.PubReceiptConflict ? DestinationPublicationState.Unknown : Classify(ex),
+                rowsWritten: failureCode == DiagnosticCodes.PubReceiptConflict ? record.SqliteRowsWritten : null,
+                failureCode: failureCode);
             return new MixedPublicationAttempt(record, ex);
         }
     }
@@ -341,12 +364,27 @@ public sealed class MixedPublicationCoordinator
             or DestinationPublicationState.Confirmed or DestinationPublicationState.Unknown)
             record = _store.SetFile(operationKey, DestinationPublicationState.Unknown, DiagnosticCodes.PubPartialFailure);
 
-        if (record.SqliteOperationKey is null || record.SqliteIntentFingerprint is null)
+        return await ReconcileSqliteAsync(record, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<MixedPublicationRecord> ReconcileSqliteAsync(
+        MixedPublicationRecord record, CancellationToken cancellationToken)
+    {
+        var protectedReceipt = RequiresReceiptRevalidation(record);
+        if (string.IsNullOrWhiteSpace(record.SqliteOperationKey)
+            || string.IsNullOrWhiteSpace(record.SqliteIntentFingerprint))
         {
+            if (protectedReceipt) return MarkReceiptUnconfirmed(record);
             if (record.SqliteState is DestinationPublicationState.InProgress or DestinationPublicationState.Unknown)
-                record = _store.SetSqlite(operationKey, DestinationPublicationState.Rejected, failureCode: "PUB_NOT_ATTEMPTED");
+                return _store.SetSqlite(record.OperationKey, DestinationPublicationState.Rejected,
+                    failureCode: "PUB_NOT_ATTEMPTED");
             return record;
         }
+
+        // Older local records may omit the count. A valid target receipt can fill
+        // that unknown value, but must never replace a known contradictory count.
+        if (protectedReceipt && record.SqliteRowsWritten is <= 0)
+            return MarkReceiptUnconfirmed(record);
 
         try
         {
@@ -354,24 +392,54 @@ public sealed class MixedPublicationCoordinator
                 new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = record.SqliteTable });
             var (state, receipt) = await new SqliteTargetPublisher().ReconcileReceiptAsync(
                 destination, record.SqliteOperationKey, record.SqliteIntentFingerprint, cancellationToken).ConfigureAwait(false);
-            record = state switch
+            if (state == SqliteReceiptReconciliation.Found)
             {
-                SqliteReceiptReconciliation.Found => _store.SetSqlite(operationKey,
-                    DestinationPublicationState.Confirmed, receipt!.WrittenRows),
-                SqliteReceiptReconciliation.NotFound => _store.SetSqlite(operationKey,
-                    DestinationPublicationState.Rejected, failureCode: "PUB_NOT_COMMITTED"),
-                SqliteReceiptReconciliation.TargetUnavailable => _store.SetSqlite(operationKey,
-                    DestinationPublicationState.Unknown, failureCode: DiagnosticCodes.PubPartialFailure),
-                _ => _store.SetSqlite(operationKey, DestinationPublicationState.Unknown,
-                    failureCode: DiagnosticCodes.PubReceiptConflict)
-            };
+                if (receipt is null || receipt.WrittenRows <= 0
+                    || !StringComparer.Ordinal.Equals(receipt.OperationKey, record.SqliteOperationKey)
+                    || !StringComparer.Ordinal.Equals(receipt.IntentFingerprint, record.SqliteIntentFingerprint)
+                    || (protectedReceipt && record.SqliteRowsWritten is { } expectedRows
+                        && receipt.WrittenRows != expectedRows))
+                    return MarkReceiptUnconfirmed(record);
+                return _store.SetSqlite(record.OperationKey,
+                    DestinationPublicationState.Confirmed, receipt.WrittenRows);
+            }
+
+            // Absence can justify a never-confirmed transaction retry, but cannot
+            // erase prior confirmation or a conflicting durable receipt. Otherwise
+            // deletion/replacement of a target could silently publish a second time.
+            if (protectedReceipt || state == SqliteReceiptReconciliation.IntentConflict)
+                return MarkReceiptUnconfirmed(record);
+            return state == SqliteReceiptReconciliation.NotFound
+                ? _store.SetSqlite(record.OperationKey, DestinationPublicationState.Rejected,
+                    failureCode: "PUB_NOT_COMMITTED")
+                : _store.SetSqlite(record.OperationKey, DestinationPublicationState.Unknown,
+                    failureCode: DiagnosticCodes.PubPartialFailure);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
+        {
+            return MarkReceiptUnconfirmed(record);
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or OperationCanceledException)
         {
-            record = _store.SetSqlite(operationKey, DestinationPublicationState.Unknown, failureCode: DiagnosticCodes.PubPartialFailure);
+            return protectedReceipt ? MarkReceiptUnconfirmed(record)
+                : _store.SetSqlite(record.OperationKey, DestinationPublicationState.Unknown,
+                    failureCode: DiagnosticCodes.PubPartialFailure);
         }
-        return record;
     }
+
+    private static bool RequiresReceiptRevalidation(MixedPublicationRecord record)
+        => record.SqliteState == DestinationPublicationState.Confirmed
+            || (record.SqliteState == DestinationPublicationState.Unknown
+                && record.SqliteFailureCode == DiagnosticCodes.PubReceiptConflict);
+
+    private MixedPublicationRecord MarkReceiptUnconfirmed(MixedPublicationRecord record)
+        => _store.SetSqlite(record.OperationKey, DestinationPublicationState.Unknown,
+            rowsWritten: record.SqliteRowsWritten, failureCode: DiagnosticCodes.PubReceiptConflict);
+
+    private static MixedPublicationAttempt UnconfirmedReceiptAttempt(MixedPublicationRecord record)
+        => new(record, new PublicationException(DiagnosticCodes.PubReceiptConflict,
+            "SQLite receipt evidence is missing or inconsistent. Reconcile the target before retrying.",
+            record.OperationKey, record.SqlitePath));
 
     private static bool TryDigest(string path, out string? digest)
     {

@@ -540,6 +540,218 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Equal(1, reader.GetInt32(1));
     }
 
+    [Theory]
+    [InlineData("xbrl-json", true)]
+    [InlineData("xbrl-xml", true)]
+    [InlineData("xbrl-json", false)]
+    [InlineData("xbrl-xml", false)]
+    public async Task Cli_MixedPublicationRequiresOriginalReceiptAfterConfirmedTargetEvidenceChanges(
+        string outputKind, bool deleteReceipt)
+    {
+        var targetPath = Path.Combine(_dir, "receipt-revalidation.db");
+        await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
+        var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: false);
+        project.Destination = new DestinationPlan
+        {
+            Kind = "sqlite",
+            Locator = Path.GetFileName(targetPath),
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "upsert"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = SyntheticProfile.Build().Digest
+        });
+        var projectPath = Path.Combine(_dir, "receipt-revalidation.xmap");
+        new ProjectManager(projectPath).Save(project);
+        var outputPath = Path.Combine(_dir, outputKind == "xbrl-xml" ? "report.xml" : "report.json");
+        var manifestPath = Path.Combine(_dir, "receipt-revalidation-manifest.json");
+        var cli = LocateCli();
+
+        Task<(int ExitCode, string Stdout, string Stderr)> PublishAsync(string manifestOutputPath)
+            => RunCliAsync(cli, "execute", projectPath,
+                "--output", outputPath, "--output-format", outputKind, "--publish-destination",
+                "--manifest", manifestOutputPath, "--allow-synthetic-profile");
+
+        var (exit, _, stderr) = await PublishAsync(manifestPath);
+        Assert.True(exit == ExitCodes.Success, $"Initial mixed publication failed ({exit}).\n{stderr}");
+        using var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath));
+        var operationKey = manifest.RootElement.GetProperty("PublicationReconciliationId").GetString()!;
+        var original = Assert.IsType<MixedPublicationRecord>(
+            new MixedPublicationStore(new LocalApplicationDatabase()).Find(operationKey));
+        Assert.Equal(DestinationPublicationState.Confirmed, original.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, original.SqliteState);
+        Assert.Equal(1, original.SqliteRowsWritten);
+        AssertOutcome(manifest.RootElement.GetProperty("PublicationOutcomes"), confirmed: true);
+        Assert.Single(manifest.RootElement.GetProperty("Outputs").EnumerateArray(),
+            output => output.GetProperty("Kind").GetString() == "db-receipt");
+
+        var originalOutput = await File.ReadAllBytesAsync(outputPath);
+        // Bytes alone cannot detect an unnecessary rewrite of an identical report.
+        File.SetLastWriteTimeUtc(outputPath, new DateTime(2001, 2, 3, 4, 5, 6, DateTimeKind.Utc));
+        var originalOutputWriteTime = File.GetLastWriteTimeUtc(outputPath);
+        string originalCompletedUtc;
+        await using (var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadWrite"))
+        {
+            await target.OpenAsync();
+            await using (var receipt = target.CreateCommand())
+            {
+                receipt.CommandText = "SELECT operation_key,intent_fingerprint,written_rows,completed_utc FROM xms_idempotency_receipts";
+                await using var reader = await receipt.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(original.SqliteOperationKey, reader.GetString(0));
+                Assert.Equal(original.SqliteIntentFingerprint, reader.GetString(1));
+                Assert.Equal(original.SqliteRowsWritten, reader.GetInt32(2));
+                originalCompletedUtc = reader.GetString(3);
+                Assert.False(await reader.ReadAsync());
+            }
+            await using var corrupt = target.CreateCommand();
+            corrupt.CommandText = deleteReceipt
+                ? "DELETE FROM xms_idempotency_receipts WHERE operation_key=$key"
+                : "UPDATE xms_idempotency_receipts SET intent_fingerprint='sha256:changed-after-commit' WHERE operation_key=$key";
+            corrupt.Parameters.AddWithValue("$key", original.SqliteOperationKey!);
+            Assert.Equal(1, await corrupt.ExecuteNonQueryAsync());
+        }
+        var unchangedTarget = await File.ReadAllBytesAsync(targetPath);
+
+        // Each call starts a separate CLI process. In particular, retrying after
+        // explicit reconciliation must not turn missing evidence into a fresh upsert.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (attempt == 1)
+            {
+                var (reconcileExit, reconcileJson, reconcileError) = await RunCliAsync(cli,
+                    "reconcile-publication", operationKey);
+                Assert.True(reconcileExit == ExitCodes.OperationalFailure,
+                    $"Expected uncertain reconciliation ({reconcileExit}).\n{reconcileJson}\n{reconcileError}");
+                using var reconciled = JsonDocument.Parse(reconcileJson);
+                Assert.Equal(operationKey, reconciled.RootElement.GetProperty("operationKey").GetString());
+                Assert.Equal(original.IntentFingerprint,
+                    reconciled.RootElement.GetProperty("intentFingerprint").GetString());
+                AssertOutcome(reconciled.RootElement.GetProperty("outcomes"), confirmed: false);
+            }
+            else
+            {
+                var retryManifestPath = Path.Combine(_dir, $"receipt-revalidation-retry-{attempt}.json");
+                var (retryExit, _, retryError) = await PublishAsync(retryManifestPath);
+                Assert.True(retryExit == ExitCodes.OperationalFailure,
+                    $"Expected uncertain retry ({retryExit}).\n{retryError}");
+                Assert.Contains(DiagnosticCodes.PubReceiptConflict, retryError, StringComparison.Ordinal);
+                using var retryManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(retryManifestPath));
+                var retryRoot = retryManifest.RootElement;
+                Assert.Equal((int)RunOutcome.Unknown, retryRoot.GetProperty("Outcome").GetInt32());
+                Assert.Equal(operationKey, retryRoot.GetProperty("PublicationReconciliationId").GetString());
+                AssertOutcome(retryRoot.GetProperty("PublicationOutcomes"), confirmed: false);
+                Assert.DoesNotContain(retryRoot.GetProperty("Outputs").EnumerateArray(),
+                    output => output.GetProperty("Kind").GetString() == "db-receipt");
+            }
+            AssertDurableState(confirmed: false);
+            await AssertDestinationsUnchangedAsync(deleteReceipt ? 0 : 1);
+        }
+
+        // Restore exactly the original durable evidence, not a new publication.
+        await using (var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadWrite"))
+        {
+            await target.OpenAsync();
+            await using var restore = target.CreateCommand();
+            restore.CommandText = """
+                INSERT INTO xms_idempotency_receipts(operation_key,intent_fingerprint,written_rows,completed_utc)
+                VALUES($key,$intent,$rows,$completed)
+                ON CONFLICT(operation_key) DO UPDATE SET
+                    intent_fingerprint=excluded.intent_fingerprint,
+                    written_rows=excluded.written_rows,
+                    completed_utc=excluded.completed_utc;
+                """;
+            restore.Parameters.AddWithValue("$key", original.SqliteOperationKey!);
+            restore.Parameters.AddWithValue("$intent", original.SqliteIntentFingerprint!);
+            restore.Parameters.AddWithValue("$rows", original.SqliteRowsWritten!.Value);
+            restore.Parameters.AddWithValue("$completed", originalCompletedUtc);
+            Assert.Equal(1, await restore.ExecuteNonQueryAsync());
+        }
+        unchangedTarget = await File.ReadAllBytesAsync(targetPath);
+
+        var (restoredExit, restoredJson, restoredError) = await RunCliAsync(cli,
+            "reconcile-publication", operationKey);
+        Assert.True(restoredExit == ExitCodes.Success, $"Restored receipt did not reconcile.\n{restoredError}");
+        using (var reconciled = JsonDocument.Parse(restoredJson))
+        {
+            Assert.Equal(operationKey, reconciled.RootElement.GetProperty("operationKey").GetString());
+            AssertOutcome(reconciled.RootElement.GetProperty("outcomes"), confirmed: true);
+        }
+        AssertDurableState(confirmed: true);
+        await AssertDestinationsUnchangedAsync(expectedReceipts: 1);
+
+        var finalManifestPath = Path.Combine(_dir, "receipt-revalidation-restored-manifest.json");
+        var (finalExit, _, finalError) = await PublishAsync(finalManifestPath);
+        Assert.True(finalExit == ExitCodes.Success, $"Retry after receipt restoration failed.\n{finalError}");
+        using (var finalManifest = JsonDocument.Parse(await File.ReadAllBytesAsync(finalManifestPath)))
+        {
+            var finalRoot = finalManifest.RootElement;
+            Assert.Equal(operationKey, finalRoot.GetProperty("PublicationReconciliationId").GetString());
+            AssertOutcome(finalRoot.GetProperty("PublicationOutcomes"), confirmed: true);
+            var receipt = Assert.Single(finalRoot.GetProperty("Outputs").EnumerateArray(),
+                output => output.GetProperty("Kind").GetString() == "db-receipt");
+            Assert.Equal(original.SqliteOperationKey, receipt.GetProperty("OperationKey").GetString());
+            Assert.Equal(original.SqliteRowsWritten, receipt.GetProperty("RowsWritten").GetInt32());
+        }
+        AssertDurableState(confirmed: true);
+        await AssertDestinationsUnchangedAsync(expectedReceipts: 1);
+
+        void AssertOutcome(JsonElement outcomes, bool confirmed)
+        {
+            var entries = outcomes.EnumerateArray().ToArray();
+            Assert.Equal(2, entries.Length);
+            var file = Assert.Single(entries, entry => entry.GetProperty("Kind").GetString() == outputKind);
+            Assert.Equal("Confirmed", file.GetProperty("State").GetString());
+            Assert.Equal(original.FileDigest, file.GetProperty("Digest").GetString());
+            var sqlite = Assert.Single(entries, entry => entry.GetProperty("Kind").GetString() == "sqlite");
+            Assert.Equal(confirmed ? "Confirmed" : "Unknown", sqlite.GetProperty("State").GetString());
+            Assert.Equal(original.SqliteOperationKey, sqlite.GetProperty("OperationKey").GetString());
+            Assert.Equal(original.SqliteIntentFingerprint, sqlite.GetProperty("IntentFingerprint").GetString());
+            Assert.Equal(original.SqliteRowsWritten, sqlite.GetProperty("RowsWritten").GetInt32());
+            Assert.Equal(confirmed ? null : DiagnosticCodes.PubReceiptConflict,
+                sqlite.GetProperty("FailureCode").GetString());
+        }
+
+        void AssertDurableState(bool confirmed)
+        {
+            var record = Assert.IsType<MixedPublicationRecord>(
+                new MixedPublicationStore(new LocalApplicationDatabase()).Find(operationKey));
+            Assert.Equal(original.OperationKey, record.OperationKey);
+            Assert.Equal(original.IntentFingerprint, record.IntentFingerprint);
+            Assert.Equal(original.FileKind, record.FileKind);
+            Assert.Equal(original.FileDigest, record.FileDigest);
+            Assert.Equal(DestinationPublicationState.Confirmed, record.FileState);
+            Assert.Equal(original.SqliteOperationKey, record.SqliteOperationKey);
+            Assert.Equal(original.SqliteIntentFingerprint, record.SqliteIntentFingerprint);
+            Assert.Equal(original.SqliteRowsWritten, record.SqliteRowsWritten);
+            Assert.Equal(confirmed ? DestinationPublicationState.Confirmed : DestinationPublicationState.Unknown,
+                record.SqliteState);
+            Assert.Equal(confirmed ? null : DiagnosticCodes.PubReceiptConflict, record.SqliteFailureCode);
+        }
+
+        async Task AssertDestinationsUnchangedAsync(int expectedReceipts)
+        {
+            Assert.Equal(originalOutput, await File.ReadAllBytesAsync(outputPath));
+            Assert.Equal(originalOutputWriteTime, File.GetLastWriteTimeUtc(outputPath));
+            Assert.Equal(unchangedTarget, await File.ReadAllBytesAsync(targetPath));
+            await using var target = new SqliteConnection($"Data Source={targetPath};Pooling=False;Mode=ReadOnly");
+            await target.OpenAsync();
+            await using var command = target.CreateCommand();
+            command.CommandText = "SELECT (SELECT COUNT(*) FROM facts),(SELECT value FROM facts),(SELECT COUNT(*) FROM xms_idempotency_receipts)";
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(1, reader.GetInt32(0));
+            Assert.Equal("1250000", reader.GetString(1));
+            Assert.Equal(expectedReceipts, reader.GetInt32(2));
+        }
+    }
+
     [Fact]
     public async Task Cli_MixedPublicationRecordsSqliteRefusalAndRetriesSameXmlIntent()
     {
