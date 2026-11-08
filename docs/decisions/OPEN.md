@@ -22,7 +22,10 @@ certification.
   changes invalidate that approval. Production publication requires successful
   validation and explicit confirmation. Unattended publication may proceed only
   when a valid approval matches all current revisions and digests. Preserve
-  existing authorization gates.
+  existing authorization gates. Every non-no-op taxonomy migration creates a
+  new semantic revision and profile digest; an approval for the source revision
+  remains historical evidence and cannot authorize publication of the migrated
+  draft, including a label-only profile update.
 - **Taxonomy evaluation and distribution:** Limit any local technical evaluation
   to uses permitted by the applicable terms. Do not bundle, redistribute, or
   commercially distribute taxonomy materials unless the required written rights

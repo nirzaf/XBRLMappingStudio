@@ -85,7 +85,9 @@ public sealed class TaxonomyMigrationServiceTests
 
         Assert.Contains(proposal.Changes, change => change.Code == "concept-label-changed");
         Assert.False(proposal.HasSemanticIncompatibilities);
-        Assert.False(proposal.RequiresReapproval);
+        Assert.True(proposal.RequiresReapproval);
+        Assert.Contains("new recorded human approval matching its semantic revision, graph digest, and target profile digest",
+            proposal.Summary, StringComparison.Ordinal);
 
         var draft = TaxonomyMigrationService.CreateDraft(proposal, project);
 
@@ -133,6 +135,7 @@ public sealed class TaxonomyMigrationServiceTests
         var proposal = TaxonomyMigrationService.Analyze(project, sourceProfile, targetProfile);
 
         Assert.True(proposal.IsNoOp);
+        Assert.False(proposal.RequiresReapproval);
         Assert.Empty(proposal.Changes);
         Assert.Throws<InvalidOperationException>(() => TaxonomyMigrationService.CreateDraft(proposal, project));
     }

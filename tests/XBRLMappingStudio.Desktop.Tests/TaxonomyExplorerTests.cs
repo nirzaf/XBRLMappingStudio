@@ -158,6 +158,8 @@ public sealed class TaxonomyExplorerTests
             viewModel.PreviewTaxonomyMigrationCommand.Execute(null);
             Assert.True(viewModel.CanApplyTaxonomyMigration);
             Assert.Contains("Profile digest", viewModel.TaxonomyMigrationSummary, StringComparison.Ordinal);
+            Assert.Contains("new recorded human approval", viewModel.TaxonomyMigrationSummary,
+                StringComparison.Ordinal);
 
             viewModel.CreateTaxonomyMigrationDraftCommand.Execute(null);
             Assert.Equal(targetProfile.Digest, viewModel.Session.Project.ProfileDigest);

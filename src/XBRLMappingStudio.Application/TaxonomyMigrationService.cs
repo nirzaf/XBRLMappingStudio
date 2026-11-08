@@ -67,8 +67,9 @@ public sealed class TaxonomyMigrationProposal
     public bool IsNoOp { get; }
     public bool HasSemanticIncompatibilities =>
         Changes.Any(change => change.Severity == TaxonomyMigrationSeverity.Incompatible);
-    public bool RequiresReapproval => HasSemanticIncompatibilities
-        || Changes.Any(change => change.Severity == TaxonomyMigrationSeverity.Review);
+    // Every non-no-op draft advances its semantic revision and changes its pinned
+    // profile digest, so no approval for the source revision can authorize it.
+    public bool RequiresReapproval => !IsNoOp;
     public string Summary { get; }
 
     internal IReadOnlyList<TaxonomyMigrationService.SafeNodeUpdate> SafeNodeUpdates { get; }
@@ -86,7 +87,9 @@ public sealed class TaxonomyMigrationProposal
         var review = changes.Count(change => change.Severity == TaxonomyMigrationSeverity.Review);
         return $"Profile digest {sourceDigest} → {targetProfile.Digest}. "
             + $"{affected} mapped node(s) are affected; {incompatible} incompatible change(s), "
-            + $"{review} change(s) require review. The source revision remains pinned and unchanged.";
+            + $"{review} change(s) require review. The source revision remains pinned and unchanged. "
+            + "Any migration draft requires a new recorded human approval matching its semantic revision, graph digest, "
+            + "and target profile digest before production publication.";
     }
 }
 
