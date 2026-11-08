@@ -251,6 +251,7 @@ public sealed class ArelleExecutionTests
                 cliAssembly,
                 "validate-artifact",
                 reportPath,
+                "--allow-synthetic-profile",
                 "--arelle",
                 "--python",
                 python!,
