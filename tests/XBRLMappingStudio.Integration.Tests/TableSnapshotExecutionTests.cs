@@ -79,7 +79,7 @@ public sealed partial class LargeRunExecutionTests
             var accepted = await File.ReadAllBytesAsync(destination);
             await File.WriteAllTextAsync(replayConnections.Values.Last().Path + "-journal", "changed source evidence");
             var changedError = await Assert.ThrowsAsync<PublicationException>(() => Publish(destination));
-            Assert.Equal(DiagnosticCodes.PubDigestMismatch, changedError.Code);
+            Assert.Equal(DiagnosticCodes.PubReceiptConflict, changedError.Code);
             Assert.Equal(accepted, await File.ReadAllBytesAsync(destination));
         }
         finally { TryDeleteDirectory(root); }

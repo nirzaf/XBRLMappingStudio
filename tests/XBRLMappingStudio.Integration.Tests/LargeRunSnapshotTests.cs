@@ -87,7 +87,7 @@ public sealed partial class LargeRunExecutionTests
                         project, profile, true, replay,
                         (staged, token) => replayService.ValidateStagedArtifactAsync(staged, destination, replay, token), default);
             });
-            Assert.Equal(DiagnosticCodes.PubDigestMismatch, refused.Code);
+            Assert.Equal(DiagnosticCodes.PubReceiptConflict, refused.Code);
             Assert.Equal(accepted, await File.ReadAllBytesAsync(destination));
         }
         finally { TryDeleteDirectory(root); }
