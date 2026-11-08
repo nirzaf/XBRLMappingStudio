@@ -15,10 +15,11 @@ public sealed class LocalApplicationDatabase
     /// the publication journal and durable receipt. v4 adds managed PDF evidence
     /// references, v5 adds append-only PDF review audit events, v6 adds an
     /// integrity-checked offline taxonomy metadata cache, v7 adds durable mixed
-    /// file/SQLite publication reconciliation, and v8 records its file artifact kind.
+    /// file/SQLite publication reconciliation, v8 records its file artifact kind,
+    /// and v9 expands mixed reconciliation to versioned record file contracts.
     /// Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 9;
     public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
@@ -409,6 +410,44 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=8;
                 """;
             migration8.ExecuteNonQuery();
+        }
+        if (version < 9)
+        {
+            using var migration9 = connection.CreateCommand();
+            migration9.Transaction = transaction;
+            migration9.CommandText = """
+                CREATE TABLE mixed_publication_reconciliation_v9 (
+                    operation_key TEXT PRIMARY KEY NOT NULL,
+                    intent_fingerprint TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_digest TEXT NOT NULL,
+                    file_state TEXT NOT NULL CHECK(file_state IN ('Pending','InProgress','Confirmed','Rejected','Unknown')),
+                    file_failure_code TEXT,
+                    sqlite_path TEXT NOT NULL,
+                    sqlite_table TEXT NOT NULL,
+                    sqlite_operation_key TEXT,
+                    sqlite_intent_fingerprint TEXT,
+                    sqlite_state TEXT NOT NULL CHECK(sqlite_state IN ('Pending','InProgress','Confirmed','Rejected','Unknown')),
+                    sqlite_rows_written INTEGER,
+                    sqlite_failure_code TEXT,
+                    updated_utc TEXT NOT NULL,
+                    file_kind TEXT NOT NULL DEFAULT 'xbrl-json'
+                        CHECK(file_kind IN ('xbrl-json','xbrl-xml','csv-records-v1','csv-records-v2',
+                            'xlsx-records-v1','xlsx-records-v2','json-records-v1','xml-records-v1'))
+                );
+                INSERT INTO mixed_publication_reconciliation_v9(
+                    operation_key,intent_fingerprint,file_path,file_digest,file_state,file_failure_code,
+                    sqlite_path,sqlite_table,sqlite_operation_key,sqlite_intent_fingerprint,
+                    sqlite_state,sqlite_rows_written,sqlite_failure_code,updated_utc,file_kind)
+                SELECT operation_key,intent_fingerprint,file_path,file_digest,file_state,file_failure_code,
+                    sqlite_path,sqlite_table,sqlite_operation_key,sqlite_intent_fingerprint,
+                    sqlite_state,sqlite_rows_written,sqlite_failure_code,updated_utc,file_kind
+                FROM mixed_publication_reconciliation;
+                DROP TABLE mixed_publication_reconciliation;
+                ALTER TABLE mixed_publication_reconciliation_v9 RENAME TO mixed_publication_reconciliation;
+                PRAGMA user_version=9;
+                """;
+            migration9.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

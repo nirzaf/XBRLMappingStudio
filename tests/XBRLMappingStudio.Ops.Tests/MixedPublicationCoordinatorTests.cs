@@ -67,6 +67,58 @@ public sealed class MixedPublicationCoordinatorTests
     }
 
     [Theory]
+    [InlineData("xbrl-xml")]
+    [InlineData("csv-records-v1")]
+    [InlineData("csv-records-v2")]
+    [InlineData("xlsx-records-v1")]
+    [InlineData("xlsx-records-v2")]
+    [InlineData("json-records-v1")]
+    [InlineData("xml-records-v1")]
+    public void VersionedRecordFileKindsBindIntentToTheirExactManifestOutput(string fileKind)
+    {
+        using var workspace = new TemporaryDirectory();
+        var bytes = Encoding.UTF8.GetBytes("synthetic published file bytes");
+        var project = new MappingProject
+        {
+            ProjectId = "project-mixed-record-output",
+            Name = "Mixed record output",
+            ProfileId = "profile-synthetic",
+            ProfileDigest = "sha256:profile"
+        };
+        var manifest = new RunManifest
+        {
+            RunId = "run-mixed-record-output",
+            OperationId = "operation-mixed-record-output",
+            ProjectId = project.ProjectId,
+            SemanticRevision = project.SemanticRevision,
+            ProjectSemanticDigest = project.ComputeSemanticDigest(),
+            ProfileDigest = "sha256:profile",
+            EngineVersion = "engine-test",
+            StartedUtc = DateTimeOffset.Parse("2026-11-01T00:00:00Z", CultureInfo.InvariantCulture),
+            Inputs = Array.Empty<InputIdentity>(),
+            Outputs = new[]
+            {
+                new OutputIdentity("<memory>", RunManifest.ComputeSha256(bytes), bytes.LongLength, fileKind)
+            },
+            Outcome = RunOutcome.Success
+        };
+        var result = new JobResult(manifest, Array.Empty<XBRLMappingStudio.XBRL.XbrlFact>(), "",
+            new DiagnosticBag(), Array.Empty<XBRLMappingStudio.Engine.SampledTotal>());
+
+        var intent = MixedPublicationIntent.Create(project, result,
+            Path.Combine(workspace.Path, "records.out"), bytes.LongLength,
+            Path.Combine(workspace.Path, "destination.db"), "facts", fileKind);
+        var persisted = new MixedPublicationStore(new LocalApplicationDatabase(
+            Path.Combine(workspace.Path, "state.db"))).GetOrCreate(intent);
+
+        Assert.Equal(fileKind, intent.FileKind);
+        Assert.Equal(RunManifest.ComputeSha256(bytes), intent.FileDigest);
+        Assert.Contains(fileKind, MixedPublicationIntent.SupportedFileKinds);
+        Assert.Equal(fileKind, persisted.FileKind);
+        Assert.Equal(DestinationPublicationState.Pending, persisted.FileState);
+    }
+
+    [Theory]
     [InlineData("snapshot-digest")]
     [InlineData("snapshot-strategy")]
     public void TableOnlyRetainedIntentBindsSnapshotDigestAndStrategy(string changedIdentity)

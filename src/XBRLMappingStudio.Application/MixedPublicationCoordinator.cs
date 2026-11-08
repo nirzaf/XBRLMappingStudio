@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Frozen;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
@@ -20,6 +21,12 @@ public sealed record MixedPublicationIntent(
     string SqliteTable,
     string FileKind = "xbrl-json")
 {
+    public static IReadOnlySet<string> SupportedFileKinds { get; } = new[]
+    {
+        "xbrl-json", "xbrl-xml", "csv-records-v1", "csv-records-v2",
+        "xlsx-records-v1", "xlsx-records-v2", "json-records-v1", "xml-records-v1"
+    }.ToFrozenSet(StringComparer.Ordinal);
+
     public static MixedPublicationIntent Create(
         MappingProject project,
         JobResult result,
@@ -29,9 +36,9 @@ public sealed record MixedPublicationIntent(
         string sqliteTable,
         string fileKind = "xbrl-json")
     {
-        if (fileKind is not ("xbrl-json" or "xbrl-xml"))
+        if (!SupportedFileKinds.Contains(fileKind))
             throw new ArgumentOutOfRangeException(nameof(fileKind), fileKind,
-                "Mixed publication supports xBRL-JSON and xBRL-XML file artifacts.");
+                "Mixed publication requires a supported XBRL or versioned record file artifact.");
 
         var manifest = result.Manifest;
         var builder = new StringBuilder();
@@ -47,9 +54,9 @@ public sealed record MixedPublicationIntent(
             ?? throw new InvalidDataException($"Run manifest has no unique '{fileKind}' file output.");
         if (report.Bytes != fileBytes)
             throw new InvalidDataException($"The '{fileKind}' output length does not match the mixed publication payload.");
-        // Keep existing xBRL-JSON operation keys stable across the v8 migration so
-        // retries still find their v7 reconciliation row. XML needs a discriminator.
-        if (fileKind == "xbrl-xml") Append(builder, fileKind);
+        // Keep existing xBRL-JSON operation keys stable across schema migrations so
+        // retries still find legacy reconciliation rows. Every other kind needs a discriminator.
+        if (fileKind != "xbrl-json") Append(builder, fileKind);
         Append(builder, report.Digest);
         Append(builder, fileBytes.ToString(CultureInfo.InvariantCulture));
         foreach (var input in manifest.Inputs.OrderBy(input => input.SourceId, StringComparer.Ordinal))
