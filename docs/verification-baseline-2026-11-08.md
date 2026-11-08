@@ -125,22 +125,25 @@ Verification:
 
 ## XBR-04 BCP 47 language aspects
 
-Fact validation now checks the well-formed BCP 47 tag structure, including
+Fact validation checks the well-formed BCP 47 tag structure, including
 extensions, private-use tags and the fixed grandfathered-tag forms. It rejects
-empty, malformed, duplicate-variant and duplicate-extension tags. Supported
-language values from concept metadata are matched case-insensitively. IANA
-registry membership is not checked, and exact language support still depends on
-the selected profile metadata.
+empty, malformed, duplicate-variant and duplicate-extension tags. JSON
+`dimensions.language` and XML `xml:lang` are also syntax-checked on import before
+profile selection, so malformed tags cannot enter the report model through a
+profile-free read. Supported language values from concept metadata are matched
+case-insensitively. IANA registry membership is not checked, and exact language
+support still depends on the selected profile metadata.
 
 Verification:
 
-- The XBRL Release suite passed 126/126, including valid and malformed language
-  tag cases and profile-language case matching.
+- The XBRL Release suite passed 130/130, including profile-free JSON/XML import
+  rejection cases for malformed `en--US` and `en_US`, valid language tags, and
+  profile-language case matching.
 - The Engine Release suite passed 125/125; the malformed-tag FactConstruct case
   blocks the fact and reports the original source location.
-- Exact-head CI [42429468337](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42429468337)
-  passed on commit `6dc6283af834d53209fa999bc5f15385343c849b`. Windows and Ubuntu
-  each passed 880 tests with 6 environment-gated Arelle skips; the pinned job ran
+- Exact-head CI [42431006438](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42431006438)
+  passed on commit `e76308590696c18624ea109fe2684412a4cec55d`. Windows and Ubuntu
+  each passed 884 tests with 6 environment-gated Arelle skips; the pinned job ran
   74 Python worker tests, 15 .NET Arelle execution tests, and 15
   dependency-inventory tests. Repository hygiene and SPDX generation passed.
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
