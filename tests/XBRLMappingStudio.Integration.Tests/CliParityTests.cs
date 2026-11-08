@@ -4,6 +4,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Csv;
+using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Json;
+using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.CLI;
 using XBRLMappingStudio.Diagnostics;
@@ -550,9 +554,12 @@ public sealed partial class CliParityTests : IAsyncLifetime
     public async Task Cli_MixedPublicationPublishesVersionedRecordFilesAndRetriesWithoutReplacement(
         string outputFormat, string extension)
     {
+        const string entityIdentifier = "Entity-00123-04";
         var targetPath = Path.Combine(_dir, "record-file-mixed-target.db");
         await CreateSqliteDatabaseAsync(targetPath, includeFactTable: true);
         var project = TestFixtures.BuildRevenueMappingProject(_workbookPath, approved: true);
+        var entityNode = Assert.Single(project.Nodes, node => node.DisplayName == "Entity");
+        entityNode.Parameters["literal"] = entityIdentifier;
         project.Destination = new DestinationPlan
         {
             Kind = "sqlite",
@@ -583,6 +590,11 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.True(exit == 0, $"Mixed {outputFormat} publication failed ({exit}).\nstderr:\n{stderr}");
         Assert.Contains("Published mixed operation", stderr, StringComparison.Ordinal);
         var firstBytes = await File.ReadAllBytesAsync(outputPath);
+        var reopened = await ReadSingleRecordFileAsync(outputFormat, outputPath);
+        var entityColumn = outputFormat == "xml-records-v1"
+            ? "row.entity_identifier"
+            : "entity_identifier";
+        Assert.Equal(entityIdentifier, reopened[entityColumn].AsString());
         string operationKey;
         using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath)))
         {
@@ -2096,5 +2108,42 @@ public sealed partial class CliParityTests : IAsyncLifetime
 
         Assert.True(exit is 0 or 1, $"Expected preview to run, got exit {exit}.\nstderr:\n{stderr}");
         Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);
+    }
+
+    private static async Task<DataRecord> ReadSingleRecordFileAsync(string outputFormat, string path)
+    {
+        var kind = outputFormat switch
+        {
+            "csv-records-v1" or "csv-records-v2" => "csv",
+            "xlsx-records-v1" or "xlsx-records-v2" => "excel",
+            "json-records-v1" => "json",
+            "xml-records-v1" => "xml",
+            _ => throw new ArgumentOutOfRangeException(nameof(outputFormat), outputFormat,
+                "Unsupported record-file format.")
+        };
+        var configuration = kind == "excel"
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["sheet"] = "Output",
+                ["headerRow"] = "1"
+            }
+            : new Dictionary<string, string>(StringComparer.Ordinal);
+        var connection = new SourceConnection("mixed-output", kind, path, configuration);
+        ISourceAdapter adapter = kind switch
+        {
+            "csv" => new CsvAdapter(),
+            "excel" => new ExcelAdapter(),
+            "json" => new JsonAdapter(),
+            "xml" => new XmlAdapter(),
+            _ => throw new InvalidOperationException("Adapter kind was not resolved.")
+        };
+        var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+        DataRecord? result = null;
+        await foreach (var record in adapter.ReadFullAsync(connection, schema, CancellationToken.None))
+        {
+            Assert.Null(result);
+            result = record;
+        }
+        return Assert.IsType<DataRecord>(result);
     }
 }

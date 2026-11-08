@@ -21,3 +21,7 @@ A fresh native screenshot on 2026-11-09 showed the Windows lock screen. The app 
 ## External qualification boundaries
 
 No official IFRS package was downloaded or bundled. Package artifact identity, dependency closure, offline resolution, applicable evaluation rights, and redistribution rights remain unverified. No jurisdiction-specific filing profile, signed installer, production database provider, customer hardware floor, or production taxonomy authorization is claimed.
+
+## DST-08 lexical identity follow-up
+
+The focused Windows Release integration filter `Cli_MixedPublicationPublishesVersionedRecordFilesAndRetriesWithoutReplacement` passed **6/6** using an isolated artifact root. Each CSV v1/v2, XLSX v1/v2, JSON v1, and XML v1 mixed-publication journey now publishes, reopens through the corresponding source adapter, and asserts exact preservation of the QName-valid entity identifier `Entity-00123-04`. An initial invalid identifier fixture containing whitespace and XML-special characters was rejected by XBRL validation with XBR011; it was replaced with a QName-valid leading-zero component. Escaped-text and decimal-lexeme values remain verified only in adapter-level round trips, not through the mixed CLI journey.
