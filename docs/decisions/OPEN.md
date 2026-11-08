@@ -1,27 +1,76 @@
-# OPEN — Owner-Gated Decisions
+# OPEN — Selected Priorities and Owner-Gated Decisions
 
-Each item below blocks one or more atomic IDs in the architecture guide. None of
-these can be closed by the engineering team alone. The synthetic offline
-development profile unblocks engineering work but confers no production
+The owner has selected the implementation priorities below. They guide
+engineering scope but do not close regulator, customer, licensing, hardware, or
+production-qualification gates. The synthetic offline development profile
+continues to support implementation tests and confers no production
 certification.
+
+## Selected implementation priorities (confirmed 2026-11-08)
+
+- **Standards baseline:** Prioritize IFRS-based financial reporting with the
+  IFRS Accounting Taxonomy 2025. Treat the product as a standards-based mapping
+  and validation tool, not as certified submission software for any regulator.
+  The IFRS Foundation's current guidance says the 2025 taxonomy remains current
+  for 2026 reporting. The initial non-early-application profile uses the Full
+  IFRS Accounting Standards Entry Point (IAS 1); use the separate IFRS 18 early
+  application entry point only when a profile explicitly declares early
+  adoption. See the [official 2025 taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/ifrs-accounting-taxonomy-2025/)
+  and [2026 current-version guidance](https://www.ifrs.org/news-and-events/news/2026/02/ifrs-accounting-taxonomy-2025-to-remain-current-for-2026/).
+- **Approval rule:** Require a recorded human approval for the current semantic
+  revision, graph digest, and taxonomy profile digest. Material graph or profile
+  changes invalidate that approval. Production publication requires successful
+  validation and explicit confirmation. Unattended publication may proceed only
+  when a valid approval matches all current revisions and digests. Preserve
+  existing authorization gates.
+- **Taxonomy evaluation and distribution:** Limit any local technical evaluation
+  to uses permitted by the applicable terms. Do not bundle, redistribute, or
+  commercially distribute taxonomy materials unless the required written rights
+  are documented. If those rights are not confirmed, customers must obtain the
+  package independently where legally permitted.
+
+## Decisions still open
+
+Each item below continues to block one or more atomic IDs in the architecture
+guide. The selected priorities above do not close these gates.
 
 ## Jurisdiction / Filing Profile
 
 - **Blocks:** XBR09, EXT01–04 (conditional), UI07 (installer targets a specific
   regulator packaging contract).
-- **Decision needed:** Name the first customer reporting jurisdiction and its
-  authoritative filing rules (IFRS/ESEF, ACRA, FERC, other).
+- **Selected scope:** IFRS-based standards mapping and validation is the first
+  implementation target; no regulator submission certification is claimed.
+- **Still open:** Name a customer or filing authority, jurisdiction, authoritative
+  filing rules, and any required submission package. Defer jurisdiction-specific
+  filing compliance until that owner is confirmed.
 - **Rationale:** Taxonomy rights, packaging format, iXBRL requirement, and
-  extension-taxonomy rules each depend on the regulator.
+  extension-taxonomy rules each depend on the regulator. The selected IFRS
+  baseline does not identify which jurisdiction adopted IFRS or its local
+  filing rules.
 
 ## Production Taxonomy Package
 
 - **Blocks:** XBR09, EXT03 (extension authoring), PERF04 (real taxonomy size).
-- **Decision needed:** Which versioned taxonomy package is the first target?
-  Are redistribution rights cleared?
+- **Selected target:** IFRS Accounting Taxonomy 2025, using the Full IFRS
+  Accounting Standards (IAS 1) Entry Point as the initial non-early-adoption
+  profile. The official [taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/ifrs-accounting-taxonomy-2025/)
+  identifies the package and entry points; official [2026 guidance](https://www.ifrs.org/news-and-events/news/2026/02/ifrs-accounting-taxonomy-2025-to-remain-current-for-2026/)
+  says the 2025 version remains current for 2026 reporting.
+- **Still open:** Obtain and record the exact package artifact URL/filename and
+  SHA-256 hashes, dependency closure, and offline-resolution evidence after the
+  applicable evaluation rights are confirmed. The official [package download
+  form](https://392942.hs-sites-eu1.com/ifrs-accounting-taxonomy-2025-download-page)
+  requires a form submission. No form was submitted, and no package artifact or
+  hash has been verified in this repository.
+- **Rights gate:** The current [IFRS Taxonomy terms](https://www.ifrs.org/content/dam/ifrs/about-us/legal-and-governance/legal-docs/taxonomy/taxonomy-terms-and-conditions.pdf)
+  restrict use and prohibit commercial use without permission. Engineering will
+  not make a legal determination that product evaluation or distribution is
+  permitted; obtain written clarification or licensing before integrating the
+  package into a product build or distributing it.
 - **Rationale:** The synthetic profile exercises the architecture but does not
-  qualify any real concept set. A relase claim requires the actual package
-  hash, dependency closure, and offline-resolution fixture.
+  qualify any real concept set. A production or conformance claim requires
+  verified package identity, rights, dependency closure, and offline-resolution
+  evidence.
 
 ## Model Provider
 
