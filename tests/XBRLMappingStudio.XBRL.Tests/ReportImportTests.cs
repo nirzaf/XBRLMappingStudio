@@ -191,6 +191,121 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
+    public async Task OccurrenceSelection_SelectsOneRepeatedFactByStableSourceIdentity()
+    {
+        var path = Write("occurrence-selection.json", OimSerializer.Serialize(Profile, new[]
+        {
+            Revenue("QAR", 1_000_000m),
+            Revenue("QAR", 1_000_000m)
+        }));
+        var adapter = new XbrlReportAdapter();
+        var rows = await Drain(adapter, new SourceConnection("report", adapter.Kind, path,
+            new Dictionary<string, string> { ["occurrenceId"] = "report#f2" }));
+
+        var row = Assert.Single(rows);
+        Assert.Equal("report#f2", row.RowId);
+        Assert.Equal("report#f2", row["occurrenceId"].AsString());
+        Assert.True(row.HasStableRowIdentity);
+    }
+
+    [Fact]
+    public async Task MultipleDimensionFilters_MatchConjunctivelyAndPreserveRepeatedOccurrences()
+    {
+        var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        var regionAxis = SyntheticProfile.Qualified("RegionAxis");
+        var north = SyntheticProfile.Qualified("NorthMember");
+        var south = SyntheticProfile.Qualified("SouthMember");
+        var departmentAxis = SyntheticProfile.Qualified("DepartmentAxis");
+        var finance = SyntheticProfile.Qualified("FinanceMember");
+        var operations = SyntheticProfile.Qualified("OperationsMember");
+        static XbrlFact WithDimensions(XbrlFact fact, params Dimension[] dimensions) => new()
+        {
+            ConceptName = fact.ConceptName,
+            EntityScheme = fact.EntityScheme,
+            EntityIdentifier = fact.EntityIdentifier,
+            Period = fact.Period,
+            Unit = fact.Unit,
+            CompoundUnit = fact.CompoundUnit,
+            Value = fact.Value,
+            TextValue = fact.TextValue,
+            IsNil = fact.IsNil,
+            Decimals = fact.Decimals,
+            Language = fact.Language,
+            Dimensions = dimensions
+        };
+
+        var path = Write("multi-dimension-selection.json", OimSerializer.Serialize(Profile, new[]
+        {
+            WithDimensions(Revenue("QAR", 100m), new Dimension(regionAxis, north), new Dimension(departmentAxis, operations)),
+            WithDimensions(Revenue("QAR", 100m), new Dimension(regionAxis, north), new Dimension(departmentAxis, operations)),
+            WithDimensions(Revenue("QAR", 100m), new Dimension(regionAxis, south), new Dimension(departmentAxis, operations)),
+            WithDimensions(Revenue("QAR", 100m), new Dimension(regionAxis, north), new Dimension(departmentAxis, finance))
+        }));
+        var adapter = new XbrlReportAdapter();
+        var rows = await Drain(adapter, new SourceConnection("report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["period"] = period.ToIsoString(),
+                ["dimensionFilters"] = JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    [regionAxis] = north,
+                    [departmentAxis] = operations
+                })
+            }));
+
+        Assert.Equal(new[] { "report#f2", "report#f3" }, rows.Select(row => row.RowId));
+        Assert.All(rows, row => Assert.Equal(period.ToIsoString(), row["period"].AsString()));
+        Assert.All(rows, row =>
+        {
+            using var dimensions = JsonDocument.Parse(row["dimensionsJson"].AsString());
+            Assert.Equal(2, dimensions.RootElement.GetArrayLength());
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), item =>
+                item.GetProperty("Name").GetString() == regionAxis
+                && item.GetProperty("MemberName").GetString() == north);
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), item =>
+                item.GetProperty("Name").GetString() == departmentAxis
+                && item.GetProperty("MemberName").GetString() == operations);
+        });
+    }
+
+    [Theory]
+    [InlineData("{")]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("{\"synthetic:RegionAxis\":\"synthetic:North\",\"synthetic:RegionAxis\":\"synthetic:South\"}")]
+    public async Task InvalidDimensionFilterJson_FailsClosed(string dimensionFilters)
+    {
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, Write("invalid-dimensions.json", "{}"),
+            new Dictionary<string, string> { ["dimensionFilters"] = dimensionFilters });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        Assert.Contains("dimensionFilters", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DimensionFilters_CannotRepeatAxisAcrossSelectorForms()
+    {
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, Write("duplicate-dimension.json", "{}"),
+            new Dictionary<string, string>
+            {
+                ["dimensionAxis"] = "synthetic:RegionAxis",
+                ["dimensionMember"] = "synthetic:North",
+                ["dimensionFilters"] = "{\"synthetic:RegionAxis\":\"synthetic:North\"}"
+            });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        Assert.Contains("cannot repeat an axis", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AspectSelection_NoMatchesAndIncompleteDimensionPairFailClosed()
     {
         var path = Write("no-selection-match.json", OimSerializer.Serialize(Profile, Report()));

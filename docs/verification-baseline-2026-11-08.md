@@ -315,3 +315,23 @@ Verification:
 - Exact-head CI [42450733178](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42450733178)
   passed all four jobs, including Windows, Ubuntu, repository hygiene and pinned
   Arelle worker integration.
+
+## XBR-07 reverse report occurrence selection
+
+`XbrlReportAdapter` now accepts an exact `occurrenceId` selector using the stable
+`sourceId#fN` row identity. It also accepts `dimensionFilters` as a JSON object
+of explicit axis-to-member names and applies every listed dimension together;
+the prior `dimensionAxis`/`dimensionMember` selector remains supported. Repeated
+occurrences retain their original identities. Empty or malformed selectors,
+duplicate dimension axes, unknown keys and selectors with no matching facts
+fail closed. `targetRowId` remains unsupported because the source reader is not
+bound to destination rows, so this increment cannot create or infer ledger rows.
+
+Verification on the local Windows Release build:
+
+- `ReportImportTests`: 17/17 passed.
+- Full XBRL suite: 162/162 passed.
+- `RepeatedReportOccurrences_PublishDistinctExcelAndSqliteRowsAgainstOccurrenceOracle`:
+  1/1 passed with repeated facts, two periods, unit variants and two explicit
+  dimensions preserved through Excel and SQLite output.
+- Exact-head CI is pending for this source change.

@@ -28,7 +28,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static readonly HashSet<string> SupportedSelectionKeys = new(StringComparer.Ordinal)
     {
-        "concept", "period", "unit", "dimensionAxis", "dimensionMember"
+        "occurrenceId", "concept", "period", "unit", "dimensionAxis", "dimensionMember", "dimensionFilters"
     };
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
@@ -78,6 +78,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     {
         var selection = ParseSelection(connection);
         var matched = facts.Select((fact, index) => (Fact: fact, Index: index))
+            .Where(item => selection.OccurrenceId is null
+                || StringComparer.Ordinal.Equals(
+                    $"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId))
             .Where(item => selection.Concept is null
                 || StringComparer.Ordinal.Equals(item.Fact.ConceptName, selection.Concept))
             .Where(item => selection.Period is null
@@ -85,10 +88,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             .Where(item => selection.Unit is null
                 || StringComparer.Ordinal.Equals(item.Fact.Unit?.ToString(), selection.Unit)
                 || StringComparer.Ordinal.Equals(item.Fact.CompoundUnit?.CanonicalKey, selection.Unit))
-            .Where(item => selection.DimensionAxis is null
-                || item.Fact.Dimensions.Any(dimension => dimension.IsExplicit
-                    && StringComparer.Ordinal.Equals(dimension.Name, selection.DimensionAxis)
-                    && StringComparer.Ordinal.Equals(dimension.MemberName, selection.DimensionMember)))
+            .Where(item => selection.Dimensions.All(filter => item.Fact.Dimensions.Any(dimension => dimension.IsExplicit
+                && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
+                && StringComparer.Ordinal.Equals(dimension.MemberName, filter.Value))))
             .ToArray();
 
         if (selection.HasAspectFilters && matched.Length == 0)
@@ -122,13 +124,57 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             return value;
         }
 
+        var dimensions = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (configuration.TryGetValue("dimensionFilters", out var dimensionFilters))
+        {
+            if (string.IsNullOrWhiteSpace(dimensionFilters))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL report selection 'dimensionFilters' must be a non-empty JSON object of explicit axis-to-member names.");
+
+            try
+            {
+                using var document = JsonDocument.Parse(dimensionFilters, new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 8
+                });
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'dimensionFilters' must be a JSON object of explicit axis-to-member names.");
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    var memberValue = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(property.Name) || string.IsNullOrWhiteSpace(memberValue)
+                        || !dimensions.TryAdd(property.Name, memberValue))
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            "XBRL report selection 'dimensionFilters' must contain unique, non-empty explicit axis-to-member names.");
+                }
+                if (dimensions.Count == 0)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'dimensionFilters' must contain at least one explicit axis-to-member filter.");
+            }
+            catch (JsonException ex)
+            {
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"XBRL report selection 'dimensionFilters' is invalid JSON: {ex.Message}");
+            }
+        }
+
         var axis = Get("dimensionAxis");
         var member = Get("dimensionMember");
         if ((axis is null) != (member is null))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report dimension selection requires both 'dimensionAxis' and 'dimensionMember'.");
 
-        return new ReportSelection(Get("concept"), Get("period"), Get("unit"), axis, member);
+        if (axis is not null && !dimensions.TryAdd(axis, member!))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report dimension selection cannot repeat an axis in both 'dimensionFilters' and the 'dimensionAxis'/'dimensionMember' pair.");
+
+        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("period"), Get("unit"), dimensions);
     }
 
     private static IReadOnlyList<XbrlFact> Read(SourceConnection connection)
@@ -199,15 +245,16 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     }
 
     private sealed record ReportSelection(
+        string? OccurrenceId,
         string? Concept,
         string? Period,
         string? Unit,
-        string? DimensionAxis,
-        string? DimensionMember)
+        IReadOnlyDictionary<string, string> Dimensions)
     {
         public bool HasAspectFilters
-            => Concept is not null || Period is not null || Unit is not null || DimensionAxis is not null;
+            => OccurrenceId is not null || Concept is not null || Period is not null || Unit is not null || Dimensions.Count != 0;
 
-        public static ReportSelection Empty { get; } = new(null, null, null, null, null);
+        public static ReportSelection Empty { get; }
+            = new(null, null, null, null, new Dictionary<string, string>(StringComparer.Ordinal));
     }
 }

@@ -697,13 +697,17 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         var axis = SyntheticProfile.Qualified("RegionAxis");
         var north = SyntheticProfile.Qualified("NorthMember");
         var south = SyntheticProfile.Qualified("SouthMember");
+        var departmentAxis = SyntheticProfile.Qualified("DepartmentAxis");
+        var operations = SyntheticProfile.Qualified("OperationsMember");
+        var finance = SyntheticProfile.Qualified("FinanceMember");
         var sourceFacts = new[]
         {
-            ReverseFact(100.00m, selectedPeriod, "QAR", axis, north),
-            ReverseFact(100.00m, selectedPeriod, "QAR", axis, north),
-            ReverseFact(125.00m, nextPeriod, "QAR", axis, north),
-            ReverseFact(100.00m, selectedPeriod, "USD", axis, north),
-            ReverseFact(100.00m, selectedPeriod, "QAR", axis, south)
+            ReverseFact(100.00m, selectedPeriod, "QAR", new Dimension(axis, north), new Dimension(departmentAxis, operations)),
+            ReverseFact(100.00m, selectedPeriod, "QAR", new Dimension(axis, north), new Dimension(departmentAxis, operations)),
+            ReverseFact(125.00m, nextPeriod, "QAR", new Dimension(axis, north), new Dimension(departmentAxis, operations)),
+            ReverseFact(100.00m, selectedPeriod, "USD", new Dimension(axis, north), new Dimension(departmentAxis, operations)),
+            ReverseFact(100.00m, selectedPeriod, "QAR", new Dimension(axis, south), new Dimension(departmentAxis, operations)),
+            ReverseFact(100.00m, selectedPeriod, "QAR", new Dimension(axis, north), new Dimension(departmentAxis, finance))
         };
         var reportPath = Path.Combine(_directory, "repeated-report.xbrl.xml");
         await File.WriteAllTextAsync(reportPath, XmlSerializer.Serialize(_profile, sourceFacts));
@@ -712,16 +716,19 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         // selected aspect; repeats remain two occurrences, never one set member.
         var occurrenceOracle = new[]
         {
-            new { Locator = "report#f1", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Value = "100.00" },
-            new { Locator = "report#f2", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Value = "100.00" }
+            new { Locator = "report#f1", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Department = operations, Value = "100.00" },
+            new { Locator = "report#f2", Period = "2025-01-01/2026-01-01", Unit = "QAR", Member = north, Department = operations, Value = "100.00" }
         };
         var selector = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["concept"] = SyntheticProfile.Qualified("Revenue"),
             ["period"] = selectedPeriod.ToIsoString(),
             ["unit"] = "QAR",
-            ["dimensionAxis"] = axis,
-            ["dimensionMember"] = north
+            ["dimensionFilters"] = JsonSerializer.Serialize(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [axis] = north,
+                [departmentAxis] = operations
+            })
         };
         var reportAdapter = new XbrlReportAdapter();
         var reportConnection = new SourceConnection("report", reportAdapter.Kind, reportPath, selector);
@@ -735,7 +742,16 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal(occurrenceOracle.Select(item => item.Unit), selectedRows.Select(row => row["unit"].AsString()));
         Assert.Equal(occurrenceOracle.Select(item => item.Value), selectedRows.Select(row => row["value"].LexicalSource));
         Assert.Equal(occurrenceOracle.Select(item => item.Locator), selectedRows.Select(row => row["occurrenceId"].AsString()));
-        Assert.All(selectedRows, row => Assert.Contains(north, row["dimensionsJson"].AsString(), StringComparison.Ordinal));
+        Assert.All(selectedRows, row =>
+        {
+            using var dimensions = JsonDocument.Parse(row["dimensionsJson"].AsString());
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                dimension.GetProperty("Name").GetString() == axis
+                && dimension.GetProperty("MemberName").GetString() == north);
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                dimension.GetProperty("Name").GetString() == departmentAxis
+                && dimension.GetProperty("MemberName").GetString() == operations);
+        });
 
         // Exercise adapter rows directly through the existing CSV-like target contracts.
         // The occurrence ID is a selected source row identity, so duplicates are upserted
@@ -758,6 +774,13 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
             directExcelRows.Add(row);
         Assert.Equal(occurrenceOracle.Length, directExcelRows.Count);
         Assert.Equal(occurrenceOracle.Select(item => item.Locator), directExcelRows.Select(row => row["occurrenceId"].AsString()));
+        Assert.All(directExcelRows, row =>
+        {
+            using var dimensions = JsonDocument.Parse(row["dimensionsJson"].AsString());
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                dimension.GetProperty("Name").GetString() == departmentAxis
+                && dimension.GetProperty("MemberName").GetString() == operations);
+        });
 
         var sqliteTarget = new SourceConnection("report-output", "sqlite", _databasePath,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = "report_occurrences" });
@@ -776,7 +799,10 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
                 outputOccurrences.Add(reader.GetString(0));
                 Assert.Equal(selectedPeriod.ToIsoString(), reader.GetString(1));
                 Assert.Equal("QAR", reader.GetString(2));
-                Assert.Contains(north, reader.GetString(3), StringComparison.Ordinal);
+                using var dimensions = JsonDocument.Parse(reader.GetString(3));
+                Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                    dimension.GetProperty("Name").GetString() == departmentAxis
+                    && dimension.GetProperty("MemberName").GetString() == operations);
             }
             Assert.Equal(occurrenceOracle.Select(item => item.Locator), outputOccurrences);
         }
@@ -816,7 +842,7 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         {
             await database.OpenAsync();
             await using var command = database.CreateCommand();
-            command.CommandText = "SELECT fact_key,provenance_json,period_start,period_end FROM facts ORDER BY fact_key";
+            command.CommandText = "SELECT fact_key,provenance_json,period_start,period_end,dimensions_json FROM facts ORDER BY fact_key";
             await using var reader = await command.ExecuteReaderAsync();
             var keys = new HashSet<string>(StringComparer.Ordinal);
             var locators = new List<string>();
@@ -827,6 +853,10 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
                 locators.Add(provenance.RootElement[0].GetProperty("Locator").GetString()!);
                 Assert.Equal("2025-01-01", reader.GetString(2));
                 Assert.Equal("2026-01-01", reader.GetString(3));
+                using var dimensions = JsonDocument.Parse(reader.GetString(4));
+                Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                    dimension.GetProperty("Name").GetString() == departmentAxis
+                    && dimension.GetProperty("MemberName").GetString() == operations);
             }
             Assert.Equal(occurrenceOracle.Length, keys.Count);
             Assert.Equal(occurrenceOracle.Select(item => item.Locator).Order(StringComparer.Ordinal),
@@ -850,6 +880,13 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal(occurrenceOracle.Length, excelRows.Count);
         Assert.Equal(occurrenceOracle.Length,
             excelRows.Select(row => row["fact_key"].AsString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(excelRows, row =>
+        {
+            using var dimensions = JsonDocument.Parse(row["dimensions_json"].AsString());
+            Assert.Contains(dimensions.RootElement.EnumerateArray(), dimension =>
+                dimension.GetProperty("Name").GetString() == departmentAxis
+                && dimension.GetProperty("MemberName").GetString() == operations);
+        });
         var excelLocators = excelRows.SelectMany(row =>
             ReadProvenanceLocators(row["provenance_json"].AsString())).Order(StringComparer.Ordinal);
         Assert.Equal(occurrenceOracle.Select(item => item.Locator).Order(StringComparer.Ordinal), excelLocators);
@@ -1070,7 +1107,7 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         return project;
     }
 
-    private static XbrlFact ReverseFact(decimal value, XbrlPeriod period, string unit, string axis, string member)
+    private static XbrlFact ReverseFact(decimal value, XbrlPeriod period, string unit, params Dimension[] dimensions)
         => new()
         {
             ConceptName = SyntheticProfile.Qualified("Revenue"),
@@ -1080,7 +1117,7 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
             Unit = new XbrlUnit(unit),
             Value = value,
             Decimals = -2,
-            Dimensions = new[] { new Dimension(axis, member) }
+            Dimensions = dimensions
         };
 
     private static object? ToExcelOutputValue(XBRLMappingStudio.Engine.DataValue value)
