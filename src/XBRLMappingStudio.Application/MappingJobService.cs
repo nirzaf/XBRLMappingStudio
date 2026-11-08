@@ -844,6 +844,7 @@ public sealed class MappingJobService
 
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
         manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiags).ToList();
+        manifest.ProvenanceStatus = AssessProvenanceStatus(facts, manifest.Inputs, manifest.Diagnostics);
         manifest.Outputs = new List<OutputIdentity>
         {
             new OutputIdentity(
@@ -1191,6 +1192,8 @@ public sealed class MappingJobService
                 throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
                     "Retained database or CSV input changed during validation. Retry with a stable input.");
             manifest.ValidatedArtifactDigest = artifact.Sha256;
+            manifest.ProvenanceStatus = AssessProvenanceStatus(
+                artifact.Facts, manifest.Inputs, manifest.Diagnostics);
             manifest.Outputs = new[]
             {
                 new OutputIdentity(artifact.ReportPath, artifact.Sha256, artifact.Bytes, artifact.OutputKind)
@@ -1391,6 +1394,45 @@ public sealed class MappingJobService
                 SourceTransformationPaths = fact.SourceTransformationPaths
             };
         }
+    }
+
+    internal static RunProvenanceStatus AssessProvenanceStatus(
+        IReadOnlyList<XbrlFact> facts,
+        IReadOnlyList<InputIdentity> inputs,
+        IReadOnlyList<Diagnostic> diagnostics)
+    {
+        if (facts.Count == 0 || inputs.Count == 0)
+            return RunProvenanceStatus.Incomplete;
+
+        var verifiedInputs = inputs
+            .Where(input => !string.IsNullOrWhiteSpace(input.Digest))
+            .Select(input => input.SourceId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (verifiedInputs.Count == 0)
+            return RunProvenanceStatus.Incomplete;
+
+        foreach (var fact in facts)
+        {
+            if (fact.SourceTransformationPaths.Count == 0
+                || fact.SourceTransformationPaths.Any(path =>
+                    path.Source is null
+                    || string.IsNullOrWhiteSpace(path.Source.SourceId)
+                    || string.IsNullOrWhiteSpace(path.Source.Locator)
+                    || path.TransformationIds.Count == 0
+                    || path.TransformationIds.Any(string.IsNullOrWhiteSpace)
+                    || !verifiedInputs.Contains(path.Source.SourceId)))
+                return RunProvenanceStatus.Incomplete;
+        }
+
+        var factLocators = OimSerializer.GetFactLocatorMap(facts);
+        if (diagnostics.Any(diagnostic =>
+            (diagnostic.Stage == DiagnosticStage.Worker && string.IsNullOrWhiteSpace(diagnostic.FactLocator))
+            || (!string.IsNullOrWhiteSpace(diagnostic.FactLocator)
+                && (!factLocators.TryGetValue(diagnostic.FactLocator, out var fact)
+                    || fact.SourceTransformationPaths.Count == 0))))
+            return RunProvenanceStatus.Incomplete;
+
+        return RunProvenanceStatus.Complete;
     }
 
     private FilingValidationResult ValidateLargeSyntheticArtifact(

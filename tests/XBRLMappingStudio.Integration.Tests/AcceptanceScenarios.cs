@@ -25,6 +25,50 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
     private string _dir = "";
     private string _workbookPath = "";
 
+    [Fact]
+    public void ProvenanceAssessment_CompletesOnlyWithVerifiedSourcePathsAndFactFindings()
+    {
+        var source = new SourceReference("binding-1", "Sheet1!B3");
+        var fact = new XbrlFact
+        {
+            ConceptName = "synthetic:Revenue",
+            EntityScheme = "https://example.com/entity",
+            EntityIdentifier = "ACME",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("USD"),
+            Value = 12m,
+            SourceTransformationPaths = new[]
+            {
+                new SourceTransformationPath(source, new[] { "source", "fact" })
+            }
+        };
+        var input = new InputIdentity("binding-1", "file", "sha256:verified", false, "source.xlsx");
+        var locator = OimSerializer.GetFactLocators(new[] { fact })[0];
+        var finding = new Diagnostic
+        {
+            Code = "XBR001",
+            Subsystem = DiagnosticSubsystem.XBRL,
+            Severity = DiagnosticSeverity.Warning,
+            Stage = DiagnosticStage.Validation,
+            Message = "Synthetic finding",
+            FactLocator = locator,
+            Source = source,
+            SourceTransformationPaths = fact.SourceTransformationPaths
+        };
+
+        Assert.Equal(RunProvenanceStatus.Complete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input }, new[] { finding }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact },
+                new[] { input with { Digest = null } }, new[] { finding }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
+                new[] { finding with { FactLocator = "f-not-in-report" } }));
+        Assert.Equal(RunProvenanceStatus.Incomplete,
+            MappingJobService.AssessProvenanceStatus(new[] { fact }, new[] { input },
+                new[] { finding with { Stage = DiagnosticStage.Worker, FactLocator = null } }));
+    }
+
     public async Task InitializeAsync()
     {
         _dir = Path.Combine(Path.GetTempPath(), "xbrl-g1-int-" + Guid.NewGuid().ToString("N"));
@@ -68,6 +112,7 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
 
         Assert.Equal(RunOutcome.Success, result.Manifest.Outcome);
         Assert.Single(result.Facts);
+        Assert.Equal(RunProvenanceStatus.Complete, result.Manifest.ProvenanceStatus);
 
         var expected = TestFixtures.GoldenRevenueFacts().Single();
         var mappingOracle = IndependentAcceptanceFixtures.ReadFactOracle("workbookMapping");
