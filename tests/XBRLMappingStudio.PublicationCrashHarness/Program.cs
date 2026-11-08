@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Application;
@@ -31,6 +32,9 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 6 && StringComparer.Ordinal.Equals(args[0], "snapshot-capture"))
+            return await PauseSnapshotCaptureAsync(args);
+
         if (args.Length == 5 && args[0].StartsWith("journal-", StringComparison.Ordinal))
             return CrashAtJournalBoundary(args);
 
@@ -78,6 +82,74 @@ internal static class Program
             });
 
         return 0;
+    }
+
+    private static async Task<int> PauseSnapshotCaptureAsync(string[] args)
+    {
+        var boundary = args[3];
+        if (!SnapshotCaptureCrashContract.IsSupportedBoundary(boundary)) return 2;
+
+        var source = SnapshotCaptureCrashContract.CreateSource(args[1]);
+        var destination = Path.GetFullPath(args[2]);
+        var readyFile = Path.GetFullPath(args[4]);
+        var releaseFile = Path.GetFullPath(args[5]);
+        string? stagingDirectory = null;
+        var paused = false;
+        void PauseAtBoundary(string observedBoundary, string currentDirectory)
+        {
+            if (observedBoundary == SnapshotCaptureCrashContract.StagingCreated)
+                stagingDirectory = currentDirectory;
+            if (paused || !StringComparer.Ordinal.Equals(observedBoundary, boundary)) return;
+            paused = true;
+
+            // A same-directory rename makes readiness visible only as a complete
+            // document. The parent, never this child, owns abrupt termination.
+            var readyTemporary = readyFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                var payload = JsonSerializer.SerializeToUtf8Bytes(
+                    new SnapshotCaptureCrashContract.ReadySignal(observedBoundary, currentDirectory),
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                using (var stream = new FileStream(readyTemporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(payload);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(readyTemporary, readyFile);
+            }
+            finally
+            {
+                if (File.Exists(readyTemporary)) File.Delete(readyTemporary);
+            }
+
+            var wait = Stopwatch.StartNew();
+            while (!File.Exists(releaseFile))
+            {
+                if (wait.Elapsed >= TimeSpan.FromSeconds(SnapshotCaptureCrashContract.ReleaseTimeoutSeconds))
+                    throw new TimeoutException($"Snapshot capture was not released at '{observedBoundary}'.");
+                Thread.Sleep(20);
+            }
+        }
+
+        // Progress<T> may dispatch asynchronously. This inline implementation stops
+        // the existing copy loop with its source/target transactions still open.
+        IProgress<long>? copiedRows = boundary == SnapshotCaptureCrashContract.MidCopy
+            ? new InlineProgress(rows =>
+            {
+                if (rows == 1)
+                    PauseAtBoundary(SnapshotCaptureCrashContract.MidCopy,
+                        stagingDirectory ?? throw new InvalidOperationException("Snapshot staging was not observed."));
+            })
+            : null;
+        await SqliteSourceSnapshotStore.CaptureAsync(source, destination, CancellationToken.None,
+            copiedRows, PauseAtBoundary);
+        if (!paused) throw new InvalidOperationException($"Snapshot capture did not reach '{boundary}'.");
+        return 0;
+    }
+
+    private sealed class InlineProgress(Action<long> report) : IProgress<long>
+    {
+        public void Report(long value) => report(value);
     }
 
     private static int CrashAfterAtomicReplace(string[] args)
