@@ -131,6 +131,7 @@ public sealed partial class LargeRunExecutionTests
                 string.Join(" | ", small.Manifest.Diagnostics.Select(d => d.Message)));
             Assert.Null(small.LargeArtifact);
             Assert.Equal(rowCount, artifact.FactCount);
+            Assert.Equal(RunProvenanceStatus.Complete, large.Manifest.ProvenanceStatus);
             Assert.Equal(RunManifest.ComputeSha256(small.XbrlJson), artifact.Sha256);
             var expectedPath = Path.Combine(root, "small-report.json");
             await File.WriteAllTextAsync(expectedPath, small.XbrlJson, new UTF8Encoding(false));
@@ -532,6 +533,7 @@ public sealed partial class LargeRunExecutionTests
                 string.Join(" | ", result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}")));
             var artifact = Assert.IsType<LargeRunArtifact>(result.LargeArtifact);
             Assert.Equal(rowCount, artifact.FactCount);
+            Assert.Equal(RunProvenanceStatus.Complete, result.Manifest.ProvenanceStatus);
             Assert.Equal(artifact.XbrlJsonPath, worker.LastValidationPath);
             Assert.StartsWith("sha256:", artifact.Sha256, StringComparison.Ordinal);
 

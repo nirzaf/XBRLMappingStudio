@@ -1193,10 +1193,9 @@ public sealed class MappingJobService
                 _executionBudget.MaxInMemorySourceBytes, cancellationToken) is not null)
                 throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
                     "Retained database or CSV input changed during validation. Retry with a stable input.");
-            manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.ProvenanceStatus = AssessProvenanceStatus(
-                artifact.InInputOrder(cancellationToken), manifest.Inputs, manifest.Diagnostics,
-                locators => artifact.FindFactsByLocators(locators, cancellationToken));
+                artifact, manifest.Inputs, manifest.Diagnostics, cancellationToken);
+            manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.Outputs = new[]
             {
                 new OutputIdentity(artifact.ReportPath, artifact.Sha256, artifact.Bytes, artifact.OutputKind)
@@ -1402,26 +1401,30 @@ public sealed class MappingJobService
     internal static RunProvenanceStatus AssessProvenanceStatus(
         IReadOnlyList<XbrlFact> facts,
         IReadOnlyList<InputIdentity> inputs,
-        IReadOnlyList<Diagnostic> diagnostics)
+        IReadOnlyList<Diagnostic> diagnostics,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(facts);
-        return AssessProvenanceStatus(facts, inputs, diagnostics, locators =>
-        {
-            var allFacts = OimSerializer.GetFactLocatorMap(facts);
-            return locators.Where(allFacts.ContainsKey)
-                .ToDictionary(locator => locator, locator => allFacts[locator], StringComparer.Ordinal);
-        });
+        return AssessProvenanceStatus(facts, inputs, diagnostics,
+            _ => OimSerializer.GetFactLocatorMap(facts), cancellationToken);
     }
+
+    internal static RunProvenanceStatus AssessProvenanceStatus(
+        LargeRunArtifact artifact,
+        IReadOnlyList<InputIdentity> inputs,
+        IReadOnlyList<Diagnostic> diagnostics,
+        CancellationToken cancellationToken = default)
+        => AssessProvenanceStatus(artifact.InInputOrder(cancellationToken), inputs, diagnostics,
+            locators => artifact.FindFactsByLocators(locators, cancellationToken), cancellationToken);
 
     private static RunProvenanceStatus AssessProvenanceStatus(
         IEnumerable<XbrlFact> facts,
         IReadOnlyList<InputIdentity> inputs,
         IReadOnlyList<Diagnostic> diagnostics,
-        Func<IReadOnlyList<string>, IReadOnlyDictionary<string, XbrlFact>> resolveFactLocators)
+        Func<IEnumerable<string>, IReadOnlyDictionary<string, XbrlFact>> findFacts,
+        CancellationToken cancellationToken)
     {
-        if (inputs.Count == 0)
-            return RunProvenanceStatus.Incomplete;
-
+        cancellationToken.ThrowIfCancellationRequested();
         var verifiedInputs = inputs
             .Where(input => !string.IsNullOrWhiteSpace(input.Digest))
             .Select(input => input.SourceId)
@@ -1429,37 +1432,41 @@ public sealed class MappingJobService
         if (verifiedInputs.Count == 0)
             return RunProvenanceStatus.Incomplete;
 
-        var foundFacts = false;
+        var hasFacts = false;
         foreach (var fact in facts)
         {
-            foundFacts = true;
-            if (fact.SourceTransformationPaths.Count == 0
-                || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs))
+            cancellationToken.ThrowIfCancellationRequested();
+            hasFacts = true;
+            if (!HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs))
                 return RunProvenanceStatus.Incomplete;
         }
-        if (!foundFacts) return RunProvenanceStatus.Incomplete;
+        if (!hasFacts) return RunProvenanceStatus.Incomplete;
 
-        var diagnosticLocators = diagnostics.Select(diagnostic => diagnostic.FactLocator)
+        // Do not materialize or index the disk-backed report. Most runs have no
+        // fact-linked findings; otherwise retain only the requested matches from
+        // the spool's semantic-order stream, including exact duplicate occurrences.
+        var requestedLocators = diagnostics.Select(diagnostic => diagnostic.FactLocator)
             .Where(locator => !string.IsNullOrWhiteSpace(locator))
             .Select(locator => locator!)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        var factsByLocator = diagnosticLocators.Length == 0
-            ? new Dictionary<string, XbrlFact>(StringComparer.Ordinal)
-            : resolveFactLocators(diagnosticLocators);
+        cancellationToken.ThrowIfCancellationRequested();
+        var factLocators = requestedLocators.Length == 0 ? null : findFacts(requestedLocators);
         foreach (var diagnostic in diagnostics)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (diagnostic.Stage == DiagnosticStage.Worker
                 && string.IsNullOrWhiteSpace(diagnostic.FactLocator))
                 return RunProvenanceStatus.Incomplete;
 
             if (!string.IsNullOrWhiteSpace(diagnostic.FactLocator))
             {
-                if (!factsByLocator.TryGetValue(diagnostic.FactLocator, out var fact)
+                if (!factLocators!.TryGetValue(diagnostic.FactLocator, out var fact)
                     || !HasVerifiedSourcePaths(fact.SourceTransformationPaths, verifiedInputs)
                     || diagnostic.Source is null
                     || diagnostic.SourceTransformationPaths is not { Count: > 0 } diagnosticPaths
-                    || !diagnosticPaths.SequenceEqual(fact.SourceTransformationPaths))
+                    || !HasVerifiedSourcePaths(diagnosticPaths, verifiedInputs)
+                    || !SourcePathsMatch(diagnosticPaths, fact.SourceTransformationPaths))
                     return RunProvenanceStatus.Incomplete;
             }
 
@@ -1473,8 +1480,16 @@ public sealed class MappingJobService
                 return RunProvenanceStatus.Incomplete;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return RunProvenanceStatus.Complete;
     }
+
+    private static bool SourcePathsMatch(
+        IReadOnlyList<SourceTransformationPath> actual,
+        IReadOnlyList<SourceTransformationPath> expected)
+        => actual.Count == expected.Count && actual.Zip(expected).All(pair =>
+            pair.First.Source == pair.Second.Source
+            && pair.First.TransformationIds.SequenceEqual(pair.Second.TransformationIds, StringComparer.Ordinal));
 
     private static bool HasVerifiedSourcePaths(
         IReadOnlyList<SourceTransformationPath>? paths,
