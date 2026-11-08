@@ -973,6 +973,48 @@ public sealed class FactSerializationTests
         Assert.Contains("typed dimension", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void OimJsonReaderRejectsDuplicateDimensionPropertiesWithoutProfile()
+    {
+        var json = OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") });
+        const string languageProperty = "\"language\": \"en\"";
+        Assert.Contains(languageProperty, json, StringComparison.Ordinal);
+        json = json.Replace(languageProperty,
+            languageProperty + ",\n          \"language\": \"fr\"", StringComparison.Ordinal);
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(json));
+        Assert.Contains("repeats key 'language'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OimJsonReaderRejectsDimensionAliasesForTheSameAxisWithoutProfile()
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") }))!.AsObject();
+        var namespaces = root["documentInfo"]!["namespaces"]!.AsObject();
+        namespaces["alternate"] = namespaces["synthetic"]!.DeepClone();
+        var dimensions = root["facts"]!.AsObject().Single().Value!["dimensions"]!.AsObject();
+        dimensions["synthetic:Region"] = "synthetic:EMEA";
+        dimensions["alternate:Region"] = "alternate:EMEA";
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+        Assert.Contains("duplicates another dimension", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void OimJsonReaderEnforcesTaxonomyDimensionCountWithoutProfile()
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") }))!.AsObject();
+        var dimensions = root["facts"]!.AsObject().Single().Value!["dimensions"]!.AsObject();
+        for (var index = 0; index <= FactDimensionParser.MaximumDimensions; index++)
+        {
+            var suffix = index.ToString("D2", CultureInfo.InvariantCulture);
+            dimensions[$"synthetic:Axis{suffix}"] = $"synthetic:Member{suffix}";
+        }
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+        Assert.Contains($"at most {FactDimensionParser.MaximumDimensions}", error.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("1.234567890123456789012345678901")]
     [InlineData("0.00000000000000000000000000001")]

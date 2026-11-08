@@ -356,6 +356,7 @@ public static class OimSerializer
                 ? ParseUnit(unitValue.GetString() ?? throw Unsupported("Unit must be a string."), namespaces, profile)
                 : (Unit: (XbrlUnit?)null, CompoundUnit: (CompoundUnit?)null);
             var reportedDimensions = new List<Dimension>();
+            var reportedDimensionNames = new HashSet<ExpandedConceptName>();
             string? language = null;
             foreach (var dimension in dimensions.EnumerateObject())
             {
@@ -374,6 +375,11 @@ public static class OimSerializer
                 if (dimension.Name == "noteId")
                     throw Unsupported("Note facts are not supported by this mapping model.");
                 var expandedDimension = ExpandQName(dimension.Name, namespaces);
+                if (reportedDimensionNames.Count >= FactDimensionParser.MaximumDimensions)
+                    throw Unsupported($"A fact may have at most {FactDimensionParser.MaximumDimensions} taxonomy-defined dimensions.");
+                if (!reportedDimensionNames.Add(new ExpandedConceptName(
+                        expandedDimension.Namespace, expandedDimension.LocalName)))
+                    throw Unsupported($"Dimension '{dimension.Name}' duplicates another dimension on the fact.");
                 var dimensionName = CanonicalProfileQName(expandedDimension, dimension.Name, profile);
                 string member;
                 bool isExplicit;
