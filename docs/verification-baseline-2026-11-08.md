@@ -289,10 +289,29 @@ Verification on the local Windows Release build:
   (254 total).
 - The build used the isolated `bin-codex/` output path because the desktop app
   held shared Release assemblies open.
-- Exact-head CI [42449167853](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42449167853)
+- Exact-head CI [42450733178](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42450733178)
   passed repository hygiene, Windows and Ubuntu Release build/tests, and the
   pinned Arelle worker integration on source
-  `a1b2fb19c2b11ebad73f78e171edf99f9efc6c9b`; the manifest-identity regression
-  was added after that run and needs its own exact-head CI. Full
-  cancellation/process-crash coverage and owner-authorized real-profile
-  publication remain open.
+  `17fa2db95c81e9f5f2343fb2b7682cf349725d32`. Full cancellation/process-crash
+  coverage and owner-authorized real-profile publication remain open.
+
+## OPS-02 Windows worker PID fixture readiness
+
+The first exact-head run after adding the SQLite manifest-identity regression
+([42450080611](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42450080611))
+failed one unrelated Windows Integration test:
+`CancellingArelleRequestKillsTheWorkerProcess` received a transient sharing
+violation while reading its newly replaced `worker.pid` probe. The worker
+fixture now retries transient `IOException`s and waits for the expected number
+of complete lines before parsing process IDs. The same bounded reader is used
+by the malformed-response process-termination fixture.
+
+Verification:
+
+- `CancellingArelleRequestKillsTheWorkerProcess` passed five consecutive focused
+  runs on Windows.
+- The full Integration suite passed 248 tests and skipped 6 environment-gated
+  Arelle cases (254 total).
+- Exact-head CI [42450733178](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42450733178)
+  passed all four jobs, including Windows, Ubuntu, repository hygiene and pinned
+  Arelle worker integration.
