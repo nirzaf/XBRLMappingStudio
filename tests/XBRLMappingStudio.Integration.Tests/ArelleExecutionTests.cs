@@ -553,9 +553,8 @@ public sealed class ArelleExecutionTests
             using var cancellation = new CancellationTokenSource();
             await worker.HandshakeAsync(CancellationToken.None);
             var request = worker.RequestAsync(TestWorkerRequest("cancel", TimeSpan.FromSeconds(30)), cancellation.Token);
-            Assert.True(await WaitForAsync(() => File.Exists(pidPath), TimeSpan.FromSeconds(5)),
-                "The test worker did not start and write its process ID.");
-            var processLines = await File.ReadAllLinesAsync(pidPath);
+            var processLines = await ReadLinesWhenReadyAsync(
+                pidPath, expectedLines: 4, timeout: TimeSpan.FromSeconds(5));
             var processIds = processLines.Take(2)
                 .Select(line => int.Parse(line, CultureInfo.InvariantCulture)).ToArray();
             Assert.Equal(2, processIds.Length);
@@ -698,9 +697,9 @@ public sealed class ArelleExecutionTests
 
                 Assert.Equal(WorkerStatus.Crash, response.Status);
                 Assert.Contains(expectedError, response.Error, StringComparison.OrdinalIgnoreCase);
-                Assert.True(await WaitForAsync(() => File.Exists(pidPath), TimeSpan.FromSeconds(2)),
-                    "The fixture did not record its worker process ID.");
-                var workerPid = int.Parse(await File.ReadAllTextAsync(pidPath), CultureInfo.InvariantCulture);
+                var processLines = await ReadLinesWhenReadyAsync(
+                    pidPath, expectedLines: 1, timeout: TimeSpan.FromSeconds(2));
+                var workerPid = int.Parse(processLines[0], CultureInfo.InvariantCulture);
                 Assert.True(await WaitForAsync(() => !IsProcessAlive(workerPid), TimeSpan.FromSeconds(5)),
                     $"Malformed worker process {workerPid} remained alive after protocol rejection.");
             }
@@ -907,6 +906,33 @@ public sealed class ArelleExecutionTests
             await Task.Delay(50);
         }
         return condition();
+    }
+
+    private static async Task<string[]> ReadLinesWhenReadyAsync(
+        string path,
+        int expectedLines,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        IOException? lastReadError = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(path);
+                if (lines.Length >= expectedLines) return lines;
+            }
+            catch (IOException ex)
+            {
+                lastReadError = ex;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException(
+            $"Fixture file '{Path.GetFileName(path)}' did not yield {expectedLines} readable lines before the timeout.",
+            lastReadError);
     }
 
     private static bool IsProcessAlive(int processId)
