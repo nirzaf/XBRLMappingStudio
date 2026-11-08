@@ -35,8 +35,15 @@ public static class SqliteSourceSnapshotStore
         => StringComparer.Ordinal.Equals(strategy, Strategy)
             || StringComparer.Ordinal.Equals(strategy, LegacyStrategy);
 
-    public static async Task<string> CaptureAsync(SourceConnection source, string bundleDirectory,
+    public static Task<string> CaptureAsync(SourceConnection source, string bundleDirectory,
         CancellationToken cancellationToken, IProgress<long>? copiedRows = null)
+        => CaptureAsync(source, bundleDirectory, cancellationToken, copiedRows, captureBoundaryForTest: null);
+
+    // Synchronous, per-capture observation keeps process-loss qualification on the
+    // production capture path without exposing test controls through the public API.
+    internal static async Task<string> CaptureAsync(SourceConnection source, string bundleDirectory,
+        CancellationToken cancellationToken, IProgress<long>? copiedRows,
+        Action<string, string>? captureBoundaryForTest)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (source.Kind != "sqlite" || source.RetainedSnapshot is not null || string.IsNullOrWhiteSpace(source.Path))
@@ -51,6 +58,7 @@ public static class SqliteSourceSnapshotStore
         LocalApplicationDatabase.CreatePrivateDirectory(staging);
         try
         {
+            captureBoundaryForTest?.Invoke("staging-created", staging);
             var databasePath = Path.Combine(staging, DatabaseFile);
             var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.ReadWrite, Share = FileShare.None };
             if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -58,6 +66,7 @@ public static class SqliteSourceSnapshotStore
 
             var adapter = new SqliteSourceAdapter();
             var sourceSchema = await CopySelectedTableAsync(source, databasePath, cancellationToken, copiedRows);
+            captureBoundaryForTest?.Invoke("after-copy", staging);
 
             var captured = source with { Path = databasePath };
             var schema = await adapter.InspectSchemaAsync(captured, cancellationToken);
@@ -80,16 +89,20 @@ public static class SqliteSourceSnapshotStore
             var metadataPath = Path.Combine(staging, MetadataFile);
             using (var stream = new FileStream(metadataPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
+                captureBoundaryForTest?.Invoke("metadata-created", staging);
                 await stream.WriteAsync(payload, cancellationToken);
                 stream.Flush(flushToDisk: true);
             }
+            captureBoundaryForTest?.Invoke("metadata-flushed", staging);
             if (!OperatingSystem.IsWindows())
             {
                 File.SetUnixFileMode(databasePath, UnixFileMode.UserRead);
                 File.SetUnixFileMode(metadataPath, UnixFileMode.UserRead);
             }
             cancellationToken.ThrowIfCancellationRequested();
+            captureBoundaryForTest?.Invoke("before-publish", staging);
             Directory.Move(staging, destination);
+            captureBoundaryForTest?.Invoke("after-publish", destination);
             return Path.Combine(destination, MetadataFile);
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == raw.SQLITE_TOOBIG)

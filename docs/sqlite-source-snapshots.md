@@ -130,6 +130,16 @@ immutable reads, including callers that construct a retained reference directly.
 Rewriting metadata hashes does not authorize unrelated schema objects. These
 checks provide integrity, not authentication of an owner-supplied bundle.
 
+## Abrupt process termination
+
+A [bounded process-loss matrix](snapshot-process-loss.md) terminates real capture
+children at staging, row-copy, metadata and directory-publication boundaries for
+rollback-journal and WAL sources. It checks final-path absence before publication,
+complete replayable bundles after publication, retained private orphans, safe
+retries, and preservation of a competing accepted bundle. The public capture API
+and retained format are unchanged. Automatic orphan cleanup and power-loss
+qualification are not added.
+
 ## Verification and remaining work
 
 Storage tests cover WAL consistency under a committing writer, restart/move with
@@ -148,7 +158,7 @@ and requires less than 64 MiB retained managed-heap variation. It does not quali
 peak native or process-tree memory.
 
 Still open: automated retention/cleanup/encryption policy; multi-provider
-snapshots; process/power-loss capture qualification; and owner-authorized
+snapshots; broader process/power-loss capture qualification; and owner-authorized
 real-profile and jurisdiction-specific filing acceptance. This feature does not
 establish regulator compatibility.
 
@@ -180,6 +190,6 @@ and all 3 table-snapshot integration cases, including the isolated 100,000-row
 memory case. Exact-head GitHub Actions [42481277509](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42481277509)
 passed all four jobs: repository hygiene, pinned Arelle integration, Ubuntu and
 Windows. This is implementation verification, not release qualification. Native
-desktop acceptance, process/power-loss capture qualification, retention governance,
+desktop acceptance, broader process/power-loss capture qualification, retention governance,
 multi-provider snapshots, and owner-authorized real-profile/regulator acceptance
 remain open.
