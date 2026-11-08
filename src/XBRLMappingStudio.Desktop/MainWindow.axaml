@@ -84,7 +84,7 @@
               <Button Content="Capture snapshot" Command="{Binding CaptureSqliteSourceSnapshotCommand}"
                       x:Name="CaptureSqliteSourceSnapshotButton"
                       IsEnabled="{Binding CanCaptureSqliteSourceSnapshot}"
-                      AutomationProperties.Name="Capture a private full-database SQLite source snapshot" />
+                      AutomationProperties.Name="Capture a private selected-table SQLite source snapshot" />
               <Button Content="Use snapshot…" Command="{Binding UseSqliteSourceSnapshotCommand}"
                       x:Name="UseSqliteSourceSnapshotButton"
                       IsEnabled="{Binding CanUseSqliteSourceSnapshot}"

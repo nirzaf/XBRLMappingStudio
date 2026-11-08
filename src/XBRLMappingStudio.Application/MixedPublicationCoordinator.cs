@@ -60,7 +60,7 @@ public sealed record MixedPublicationIntent(
             Append(builder, input.IsReplayable ? "1" : "0");
             Append(builder, input.RowIdentityStrategy ?? string.Empty);
             Append(builder, input.SnapshotStrategy ?? string.Empty);
-            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            if (SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy))
                 Append(builder, input.SnapshotDigest ?? string.Empty);
         }
         foreach (var parameter in manifest.FrozenParameters.OrderBy(parameter => parameter.Key, StringComparer.Ordinal))

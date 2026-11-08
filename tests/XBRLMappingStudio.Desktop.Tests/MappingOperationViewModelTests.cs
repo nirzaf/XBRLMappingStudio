@@ -193,7 +193,7 @@ public sealed class MappingOperationViewModelTests
             var useSnapshot = Assert.IsType<Button>(window.FindControl<Button>("UseSqliteSourceSnapshotButton"));
             var useLive = Assert.IsType<Button>(window.FindControl<Button>("ClearSqliteSourceSnapshotButton"));
             Assert.Equal("SQLite source snapshot status", AutomationProperties.GetName(status));
-            Assert.Equal("Capture a private full-database SQLite source snapshot", AutomationProperties.GetName(capture));
+            Assert.Equal("Capture a private selected-table SQLite source snapshot", AutomationProperties.GetName(capture));
             Assert.Equal("Select a retained SQLite source snapshot for replay", AutomationProperties.GetName(useSnapshot));
             Assert.Equal("Clear the retained snapshot and return to the live SQLite source", AutomationProperties.GetName(useLive));
             Assert.True(capture.IsEnabled);

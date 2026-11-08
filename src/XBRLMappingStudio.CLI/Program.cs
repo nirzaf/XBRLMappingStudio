@@ -63,7 +63,7 @@ static int PrintUsage()
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio inspect-source <project.xmap> [--binding <id>] (SQLite source schema and capabilities)");
-    Console.Error.WriteLine("  xbrl-studio snapshot-source <project.xmap> --binding <id> --out <new-bundle-directory> [--workspace-root <dir>] (retains the entire database)");
+    Console.Error.WriteLine("  xbrl-studio snapshot-source <project.xmap> --binding <id> --out <new-bundle-directory> [--workspace-root <dir>] (retains only the configured table and its indexes)");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio migrate-project-profile <legacy.xmap> --output <new.xmap> --profile-id <id> --profile-digest <digest> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
@@ -623,10 +623,10 @@ static async Task<int> SnapshotSourceAsync(string[] args, CancellationToken canc
             binding.Configuration.Where(pair => pair.Value is not null)
                 .ToDictionary(pair => pair.Key, pair => pair.Value!.ToString()!, StringComparer.Ordinal));
         var destination = Guard(output);
-        Console.Error.WriteLine("Retaining a confidential copy of the entire SQLite database, including tables outside this binding.");
+        Console.Error.WriteLine("Retaining a confidential copy of only the configured SQLite table and its indexes.");
         var metadataPath = await SqliteSourceSnapshotStore.CaptureAsync(source, destination, cancellationToken);
         Console.WriteLine(JsonSerializer.Serialize(new { snapshot = metadataPath, sourceId = bindingId,
-            strategy = SqliteSourceSnapshotStore.Strategy, entireDatabase = true }));
+            strategy = SqliteSourceSnapshotStore.Strategy, scope = SqliteSourceSnapshotStore.SelectedTableScope }));
         return ExitCodesLocal.Success;
     }
     catch (AdapterException ex)

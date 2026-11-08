@@ -48,7 +48,8 @@ public sealed record SourceConnection(
 
 /// <summary>A verified retained database binding; the file digest is separate from the row-content digest.</summary>
 public sealed record RetainedSqliteSnapshotReference(
-    string DatabaseDigest, string OriginalSourcePath, string ConfigurationDigest, string MetadataPath);
+    string DatabaseDigest, string OriginalSourcePath, string ConfigurationDigest, string MetadataPath,
+    string SnapshotStrategy = "sqlite-retained-backup-v1");
 
 /// <summary>
 /// Result of schema introspection: sheet/table + ordered columns with inferred types.

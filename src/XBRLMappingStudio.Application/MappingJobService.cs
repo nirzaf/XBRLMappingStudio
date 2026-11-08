@@ -807,7 +807,7 @@ public sealed class MappingJobService
             });
         }
 
-        if (manifest.Inputs.Any(input => input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+        if (manifest.Inputs.Any(input => SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy))
             && await FindChangedFileInputAsync(manifest.Inputs,
                 _executionBudget.MaxInMemorySourceBytes, cancellationToken) is { } changedSnapshot)
         {
@@ -1251,7 +1251,7 @@ public sealed class MappingJobService
                     ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
                     : SqliteSourceAdapter.PositionalIdentityStrategy,
                 SnapshotStrategy = connection.RetainedSnapshot is null
-                    ? "sqlite-read-transaction" : SqliteSourceSnapshotStore.Strategy
+                    ? "sqlite-read-transaction" : connection.RetainedSnapshot.SnapshotStrategy
             }
             : input).ToArray();
     }
@@ -2248,7 +2248,7 @@ public sealed class MappingJobService
             AppendIntentPart(builder, input.Digest ?? "");
             AppendIntentPart(builder, input.IsReplayable ? "1" : "0");
             AppendIntentPart(builder, input.RowIdentityStrategy ?? "");
-            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            if (SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy))
                 AppendIntentPart(builder, input.SnapshotDigest ?? "");
         }
 
@@ -2407,7 +2407,7 @@ public sealed class MappingJobService
                     SnapshotDigest = kv.Value.RetainedSnapshot?.DatabaseDigest,
                     SnapshotMetadataPath = kv.Value.RetainedSnapshot?.MetadataPath,
                     OriginalSourcePath = kv.Value.RetainedSnapshot?.OriginalSourcePath,
-                    SnapshotStrategy = kv.Value.RetainedSnapshot is null ? null : SqliteSourceSnapshotStore.Strategy
+                    SnapshotStrategy = kv.Value.RetainedSnapshot?.SnapshotStrategy
                 });
                 continue;
             }
@@ -2497,7 +2497,7 @@ public sealed class MappingJobService
     }
 
     private static string SourceIdentityMismatchMessage(InputIdentity input)
-        => input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy
+        => SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy)
             ? $"Retained SQLite source '{input.SourceId}' changed, is missing, or cannot be verified against its captured digest. Restore the exact retained snapshot before replay or publication."
             : input.Kind is "sqlite-table" or "sqlite-preview"
             ? StringComparer.Ordinal.Equals(input.RowIdentityStrategy, SqliteSourceAdapter.PositionalIdentityStrategy)
@@ -2531,7 +2531,7 @@ public sealed class MappingJobService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            if (SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy))
             {
                 if (!input.IsReplayable || string.IsNullOrWhiteSpace(input.Digest)
                     || !await SqliteSourceSnapshotStore.MatchesAsync(input.OriginalPath,
@@ -2623,7 +2623,7 @@ public sealed class MappingJobService
     {
         foreach (var input in recordedInputs)
         {
-            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            if (SqliteSourceSnapshotStore.IsRetainedStrategy(input.SnapshotStrategy))
             {
                 if (!await SqliteSourceSnapshotStore.MatchesAsync(input.OriginalPath,
                     input.SnapshotDigest, cancellationToken)) return input;

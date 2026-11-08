@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Sqlite;
@@ -35,19 +37,84 @@ public sealed class SqliteSourceSnapshotStoreTests : IDisposable
         Assert.Equal(1234.50m, rows.Single(row => Equals(row.Fields["id"].Raw, 1L)).Fields["amount"].AsDecimal());
         Assert.Equal(source.Path, replay.RetainedSnapshot!.OriginalSourcePath);
         Assert.StartsWith("sha256:", replay.RetainedSnapshot.DatabaseDigest);
+        Assert.Equal(SqliteSourceSnapshotStore.Strategy, replay.RetainedSnapshot.SnapshotStrategy);
         Assert.False(File.Exists(replay.Path + "-wal"));
         Assert.False(File.Exists(replay.Path + "-shm"));
         using var retained = new SqliteConnection($"Data Source={replay.Path};Mode=ReadOnly;Pooling=False");
         retained.Open();
         using var query = retained.CreateCommand();
-        query.CommandText = "SELECT secret FROM other_table";
-        Assert.Equal("whole-database-backup", query.ExecuteScalar());
+        query.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='other_table'";
+        Assert.Equal(0L, Convert.ToInt64(query.ExecuteScalar()));
+        query.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND substr(name,1,7) <> 'sqlite_'";
+        Assert.Equal(1L, Convert.ToInt64(query.ExecuteScalar()));
+        query.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7) <> 'sqlite_'";
+        Assert.Equal("financials", query.ExecuteScalar());
         if (!OperatingSystem.IsWindows())
         {
             Assert.Equal(UnixFileMode.UserRead, File.GetUnixFileMode(replay.Path!));
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
                 File.GetUnixFileMode(Path.GetDirectoryName(metadata)!));
         }
+    }
+
+    [Fact]
+    public async Task OpensLegacyVersionOneFullDatabaseSnapshotWithoutChangingItsMeaning()
+    {
+        var source = await Source(3);
+        var schema = await new SqliteSourceAdapter().InspectSchemaAsync(source, default);
+        var bundle = Path.Combine(_root, "legacy");
+        Directory.CreateDirectory(bundle);
+        var databasePath = Path.Combine(bundle, "source.sqlite");
+        File.Copy(source.Path!, databasePath);
+        var configText = new StringBuilder();
+        foreach (var pair in source.Configuration!.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            configText.Append(pair.Key.Length).Append(':').Append(pair.Key);
+            configText.Append(pair.Value.Length).Append(':').Append(pair.Value);
+        }
+        var databaseBytes = await File.ReadAllBytesAsync(databasePath);
+        var metadata = new JsonObject
+        {
+            ["version"] = 1,
+            ["sourceId"] = source.SourceId,
+            ["originalSourcePath"] = Path.GetFullPath(source.Path!),
+            ["configurationDigest"] = RunManifest.ComputeSha256(configText.ToString()),
+            ["schemaFingerprint"] = schema.Fingerprint,
+            ["databaseDigest"] = "sha256:" + Convert.ToHexString(SHA256.HashData(databaseBytes)).ToLowerInvariant(),
+            ["databaseBytes"] = databaseBytes.LongLength,
+            ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O")
+        };
+        var metadataPath = Path.Combine(bundle, "snapshot.json");
+        await File.WriteAllTextAsync(metadataPath, metadata.ToJsonString());
+
+        var replay = await SqliteSourceSnapshotStore.OpenAsync(metadataPath, source, default);
+
+        Assert.Equal(SqliteSourceSnapshotStore.LegacyStrategy, replay.RetainedSnapshot!.SnapshotStrategy);
+        using var retained = new SqliteConnection($"Data Source={replay.Path};Mode=ReadOnly;Pooling=False");
+        retained.Open();
+        using var query = retained.CreateCommand();
+        query.CommandText = "SELECT secret FROM other_table";
+        Assert.Equal("whole-database-backup", query.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task CaptureResolvesConfiguredTableNameUsingSqliteIdentifierCaseRules()
+    {
+        var source = await Source(3);
+        source = source with
+        {
+            Configuration = new Dictionary<string, string>(source.Configuration!, StringComparer.Ordinal)
+            {
+                ["table"] = "Financials"
+            }
+        };
+
+        var metadata = await SqliteSourceSnapshotStore.CaptureAsync(source, Path.Combine(_root, "case-insensitive"), default);
+        var replay = await SqliteSourceSnapshotStore.OpenAsync(metadata, source, default);
+        var rows = await Rows(replay);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(12.50m, rows.Single(row => Equals(row.Fields["id"].Raw, 1L)).Fields["amount"].AsDecimal());
     }
 
     [Fact]
@@ -95,7 +162,7 @@ public sealed class SqliteSourceSnapshotStoreTests : IDisposable
             case "version":
                 if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(metadata, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 var node = JsonNode.Parse(await File.ReadAllTextAsync(metadata))!;
-                node["version"] = 2;
+                node["version"] = 3;
                 await File.WriteAllTextAsync(metadata, node.ToJsonString());
                 break;
         }

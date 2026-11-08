@@ -15,10 +15,11 @@ The adapter opens source databases read-only. It discovers user tables, inspects
 `SqliteTargetPublisher` writes a batch in one immediate transaction using prepared values and a configured business key. It requires that key to match a non-partial primary or unique index with BINARY collation; expression and other-collation indexes are rejected because they cannot match the emitted conflict target. It rejects missing/null and duplicate batch keys, and accepts exact decimal fields only when the destination column has TEXT affinity. The target database contains `xms_idempotency_receipts`; a replay with the same operation key and effective input intent returns the stored receipt, while changed intent returns `PUB006`. Row writes and the receipt commit together. Cancellation, constraint failures, and process exceptions roll back the transaction. The shared application service wires SQLite destination preview and publication into both CLI and Desktop workflows; provider-wide reconciliation and cross-process mixed-publication crash qualification remain incomplete; the CLI mixed file/SQLite path records independent outcomes and reconciles the exact file digest and SQLite receipt.
 
 Explicit retained source capture/replay is available through `snapshot-source` and
-`execute --source-snapshot`. Unlike the live read transaction, it retains a closed,
-digest-verified SQLite backup and supports replay after the original database changes
-or is removed. The backup includes the entire database, not just the bound table.
-See [retained source snapshots](sqlite-source-snapshots.md) for limits and controls.
+`execute --source-snapshot`. New version 2 captures retain only the configured table
+and its indexes in a closed, digest-verified SQLite image, then support replay after
+the original database changes or is removed. Legacy version 1 full-database backups
+remain readable. See [retained source snapshots](sqlite-source-snapshots.md) for
+scope, limits and controls.
 
 ## Scope
 

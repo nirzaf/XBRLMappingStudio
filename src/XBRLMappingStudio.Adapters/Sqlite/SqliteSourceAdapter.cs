@@ -170,7 +170,12 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
         }
     }
 
-    private long EstimateRowBytesUpperBound(
+    /// <summary>
+    /// Estimates the managed row representation before SQLite cells are materialized.
+    /// Snapshot extraction uses the same guard so it cannot copy an input row that a
+    /// later replay would reject for exceeding the adapter's row budget.
+    /// </summary>
+    public long EstimateRowBytesUpperBound(
         IReadOnlyList<ColumnSchema> columns,
         string sourceId,
         string table,
@@ -301,7 +306,7 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
     private static string GetTable(SourceConnection connection)
         => GetConfiguredTable(connection);
 
-    internal static string GetConfiguredTable(SourceConnection connection)
+    public static string GetConfiguredTable(SourceConnection connection)
     {
         if (connection.Configuration is null
             || !connection.Configuration.TryGetValue("table", out var table)

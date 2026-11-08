@@ -847,7 +847,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             if (binding is null) return "No SQLite source is selected.";
             if (_sqliteSourceSnapshotMetadataPaths.TryGetValue(binding.BindingId, out var metadataPath))
                 return $"Using retained snapshot '{Path.GetFileName(Path.GetDirectoryName(metadataPath))}'. "
-                    + "This full-database copy is replayable and is verified before each run.";
+                    + "This selected-table-only copy is replayable and is verified before each run.";
             return "Using the live SQLite source. It is read transactionally but is not replayable; capture or select a retained snapshot for replay.";
         }
     }

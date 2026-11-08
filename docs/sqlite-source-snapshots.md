@@ -7,24 +7,28 @@ service and CLI. Ordinary live SQLite reads are still non-replayable read
 transactions. Selecting a retained snapshot is a separate, deliberate operation;
 no live source is silently replaced or captured.
 
-A snapshot bundle contains `source.sqlite` and `snapshot.json`. Capture uses
-SQLite's incremental online backup API while holding one source read transaction,
-so committed WAL contents are included and a concurrent WAL writer cannot change
-the captured view. The source is opened read-only. The backup is closed in DELETE
-journal mode and must have no WAL, SHM or rollback-journal sidecars. Replay opens
-the image with SQLite's immutable, read-only mode so no journal can supply alternate
-rows; database file symlinks/reparse points are refused. The selected
-table is scanned through the existing exact-numeric, bounded-row adapter before
-the bundle becomes visible.
+A new snapshot bundle contains `source.sqlite` and `snapshot.json`. Capture holds
+one source read transaction while it copies only the configured table, its table
+definition, and indexes attached to that table. Committed WAL contents visible at
+the transaction boundary are included; a concurrent WAL writer cannot change the
+captured view. The source is opened read-only. Views, triggers, other tables,
+unrelated indexes, and database-level state are excluded. Virtual tables and
+unsupported table shapes fail closed. The target is page-capped during extraction,
+then scanned through the existing exact-numeric, bounded-row adapter before the
+bundle becomes visible. The completed image is closed in DELETE journal mode and
+must have no WAL, SHM or rollback-journal sidecars. Replay opens it with SQLite's
+immutable, read-only mode so no journal can supply alternate rows; database file
+symlinks/reparse points are refused.
 
-**The backup contains the entire database, including tables outside the selected
-binding.** Treat it as confidential source evidence. Do not commit or upload it,
-include it in support bundles, or give it to another recipient without the
-appropriate authorization. This implementation is not a table-only export.
+Version 1 bundles captured before table-only extraction contain the full database
+and remain readable for backward compatibility. Treat both legacy bundles and new
+selected-table bundles as confidential source evidence. Do not commit or upload
+them, include them in support bundles, or give them to another recipient without
+the appropriate authorization. New captures no longer copy unselected tables.
 
-Capture refuses databases larger than 1 GiB, checks cancellation between 128-page
-backup steps and during validation/hashing, and bounds lock retries to five
-seconds. Metadata is capped at 64 KiB. Staging uses a new private directory,
+Capture refuses selected-table images larger than 1 GiB, checks cancellation
+while scanning/copying rows and during validation/hashing, and uses SQLite's
+five-second default lock timeout. Metadata is capped at 64 KiB. Staging uses a new private directory,
 owner-only Unix permissions and an owner-only Windows directory ACL. Completed
 Unix files are owner-read-only. Existing bundle destinations are never replaced.
 Files are flushed before a same-parent directory rename publishes the bundle.
@@ -73,9 +77,14 @@ before the mapping reads it, after execution/worker validation, and at publicati
 validation boundaries. Missing bytes, changed bytes/configuration, unsupported
 versions, and journal-dependent snapshots fail closed.
 
-For a full replayed run the manifest records:
+New version 2 metadata records `strategy = sqlite-retained-table-v2` and
+`scope = selected-table`. Existing version 1 metadata without those fields is
+interpreted as `sqlite-retained-backup-v1` with full-database scope. For a full
+replayed run the manifest records:
 
-- `SnapshotStrategy = sqlite-retained-backup-v1` and `IsReplayable = true`.
+- `SnapshotStrategy = sqlite-retained-table-v2` for new captures and
+  `sqlite-retained-backup-v1` for legacy full-database bundles; both set
+  `IsReplayable = true`.
 - `Digest`: the canonical selected-table content digest, equal to an equivalent
   live run's digest.
 - `SnapshotDigest`: SHA-256 of the retained database file.
@@ -107,10 +116,10 @@ and large report/content digests after live-source deletion, preview restriction
 mutation during worker validation, protected prior file/database outputs,
 keyless retained publication, CLI capture/replay/retry, and approval refusal.
 
-Still open: desktop capture/replay controls; table-only extracts; automated
-retention/cleanup/encryption policy; multi-provider snapshots; process/power-loss
-capture qualification; and owner-authorized real-profile and jurisdiction-specific
-filing acceptance. This feature does not establish regulator compatibility.
+Still open: automated retention/cleanup/encryption policy; multi-provider
+snapshots; process/power-loss capture qualification; and owner-authorized
+real-profile and jurisdiction-specific filing acceptance. This feature does not
+establish regulator compatibility.
 
 Local verification on 2026-11-08 after integration of the process-memory CI fix:
 Release solution build passed with zero warnings/errors. Ordinary solution tests

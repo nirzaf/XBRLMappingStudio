@@ -506,7 +506,7 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
             CanResize = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner
         };
-        var confirm = new Button { Content = "Capture full database snapshot", IsDefault = true, MinWidth = 220 };
+        var confirm = new Button { Content = "Capture selected-table snapshot", IsDefault = true, MinWidth = 220 };
         var cancel = new Button { Content = "Cancel", MinWidth = 100 };
         confirm.Click += (_, _) => dialog.Close(true);
         cancel.Click += (_, _) => dialog.Close(false);
@@ -514,7 +514,7 @@ public sealed class AvaloniaProjectFileDialog(Window owner) : IProjectFileDialog
         var content = new StackPanel { Spacing = 12, Margin = new Avalonia.Thickness(20) };
         content.Children.Add(new TextBlock
         {
-            Text = "This copies the entire SQLite database, including tables outside the selected mapping. "
+            Text = "Only the configured SQLite table and its indexes are copied. Other tables, views, and triggers are excluded. "
                 + "The snapshot is local and unencrypted; treat it as confidential source data. "
                 + "The existing source is read-only and an existing snapshot folder will never be replaced.",
             TextWrapping = Avalonia.Media.TextWrapping.Wrap

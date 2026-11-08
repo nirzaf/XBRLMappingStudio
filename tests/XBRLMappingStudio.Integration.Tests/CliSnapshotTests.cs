@@ -45,7 +45,7 @@ public sealed partial class CliParityTests
             "--binding", project.Bindings[0].BindingId, "--out", bundle);
         Assert.True(captureExit == 0, captureError);
         using var capture = JsonDocument.Parse(captureJson);
-        Assert.True(capture.RootElement.GetProperty("entireDatabase").GetBoolean());
+        Assert.Equal(SqliteSourceSnapshotStore.SelectedTableScope, capture.RootElement.GetProperty("scope").GetString());
         var metadata = capture.RootElement.GetProperty("snapshot").GetString()!;
         File.Delete(sourcePath);
         var originalMetadata = await File.ReadAllBytesAsync(metadata);
