@@ -133,8 +133,7 @@ public sealed class XmlAdapter : ISourceAdapter
         {
             if (prefix.Length == 0) prefix = "_text";
             var nilSource = new SourceReference(sourceId, $"xml#r{rowIdx + 1}:{prefix}");
-            fields[prefix] = DataValue.ExplicitNil(PortShape.String);
-            srcs[prefix] = nilSource;
+            AddField(prefix, DataValue.ExplicitNil(PortShape.String), nilSource, fields, srcs, rowIdx);
             return;
         }
 
@@ -180,14 +179,31 @@ public sealed class XmlAdapter : ISourceAdapter
     {
         if (key.Length == 0) key = "_text";
         var src = new SourceReference(sourceId, $"xml#r{rowIdx + 1}:{key}");
+        DataValue value;
         if (string.IsNullOrWhiteSpace(raw))
-            fields[key] = DataValue.Missing(PortShape.String);
+            value = DataValue.Missing(PortShape.String);
         else if (decimal.TryParse(raw, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
                  CultureInfo.InvariantCulture, out var d))
-            fields[key] = DataValue.DecimalValue(d, src, raw);
+        {
+            // XML is untyped: preserve the existing inference grammar and text fallback
+            // (including overflow-as-text), but never accept rounded/underflowed numbers.
+            if (!ExactDecimalLexicalParser.TryParseExact(raw, allowExponent: false, out var exact) || exact != d)
+                throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                    $"XML number '{raw}' cannot be represented as an exact decimal.");
+            value = DataValue.DecimalValue(d, src, raw);
+        }
         else
-            fields[key] = DataValue.StringValue(raw.Trim(), src);
-        srcs[key] = src;
+            value = DataValue.StringValue(raw.Trim(), src);
+        AddField(key, value, src, fields, srcs, rowIdx);
+    }
+
+    private static void AddField(string key, DataValue value, SourceReference source,
+        Dictionary<string, DataValue> fields, Dictionary<string, SourceReference> srcs, int rowIdx)
+    {
+        if (!fields.TryAdd(key, value))
+            throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
+                $"Multiple XML values resolve to field '{key}' in row {rowIdx + 1}.");
+        srcs.Add(key, source);
     }
 
     private static string Join(string prefix, string name)

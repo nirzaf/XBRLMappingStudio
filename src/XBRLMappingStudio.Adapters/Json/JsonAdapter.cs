@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -68,10 +67,11 @@ public sealed class JsonAdapter : ISourceAdapter
 
     private abstract class JNode { }
 
-    private sealed class JLeaf(string? text, JsonValueKind kind) : JNode
+    private sealed class JLeaf(string? text, JsonValueKind kind, decimal number = 0m) : JNode
     {
         public string? Text { get; } = text;
         public JsonValueKind Kind { get; } = kind;
+        public decimal Number { get; } = number;
     }
 
     private sealed class JObject : JNode
@@ -177,10 +177,14 @@ public sealed class JsonAdapter : ISourceAdapter
             case JsonTokenType.Number:
             {
                 var raw = NumberRaw(r);
-                if (!r.TryGetDecimal(out var dec) || SignificantDigits(raw) > _options.MaxNumberDigits)
+                if (SignificantDigits(raw) > _options.MaxNumberDigits
+                    || !ExactDecimalLexicalParser.TryParseExact(raw, allowExponent: true, out var exact))
                     throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
                         $"JSON number '{raw}' exceeds the exact-decimal budget ({_options.MaxNumberDigits} digits).");
-                return new JLeaf(dec.ToString(CultureInfo.InvariantCulture), JsonValueKind.Number);
+                // Retain the reader's decimal scale where possible, while keeping the
+                // original token (not a formatted decimal) as lexical evidence.
+                var number = r.TryGetDecimal(out var parsed) && parsed == exact ? parsed : exact;
+                return new JLeaf(raw, JsonValueKind.Number, number);
             }
             case JsonTokenType.True:
                 return new JLeaf("true", JsonValueKind.True);
@@ -212,7 +216,7 @@ public sealed class JsonAdapter : ISourceAdapter
         bool leadingDone = false;
         foreach (var ch in raw)
         {
-            if (ch is 'e' or 'E') break; // exponent restarts the budget in practice
+            if (ch is 'e' or 'E') break; // the budget counts mantissa digits, including trailing zeros
             if (char.IsAsciiDigit(ch))
             {
                 if (ch != '0' || leadingDone) { leadingDone = true; count++; }
@@ -255,7 +259,7 @@ public sealed class JsonAdapter : ISourceAdapter
         {
             JLeaf { Kind: JsonValueKind.Null } => DataValue.ExplicitNil(PortShape.String),
             JLeaf { Kind: JsonValueKind.Number } l => DataValue.DecimalValue(
-                decimal.Parse(l.Text!, CultureInfo.InvariantCulture), src, l.Text),
+                l.Number, src, l.Text),
             JLeaf { Kind: JsonValueKind.True or JsonValueKind.False } l
                 => DataValue.BoolValue(l.Kind == JsonValueKind.True),
             JLeaf l => DataValue.StringValue(l.Text ?? "", src),
@@ -263,8 +267,10 @@ public sealed class JsonAdapter : ISourceAdapter
             JObject o => DataValue.Opaque(PortShape.Record, Render(o), src),
             _ => DataValue.Missing()
         };
-        fields[path] = value;
-        srcs[path] = src;
+        if (!fields.TryAdd(path, value))
+            throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
+                $"Multiple JSON values resolve to field '{path}' in row {rowIdx + 1}.");
+        srcs.Add(path, src);
     }
 
     private static string Render(JNode node) => node switch

@@ -203,7 +203,7 @@ or represent these rows as completed to make a release appear ready.
 | P2-01 | Qualified SQL Server/Azure SQL adapter, provider/authentication decision and live-system fixtures. |
 | P2-02 | Qualified PostgreSQL/MySQL/MariaDB/Oracle adapters and provider-specific semantics. |
 | P2-03 | Authorized scanned PDFs, chosen renderer/OCR runtime, language-pack rights and OCR review evidence. |
-| P2-04 | Separately qualified Excel templates and unsupported XML/JSON constructs. |
+| P2-04 | Generic JSON/XML source reads now reject inexact inferred numbers and ambiguous per-record flattened fields while preserving existing text/column conventions; see [source integrity](generic-source-integrity.md). Separately qualified Excel templates and broader unsupported XML/JSON constructs remain open. |
 | P2-05 | Accepted minimum hardware and measured startup/memory/graph results. |
 | P2-06 | Permitted real taxonomy and native UI/validation-under-load measurements. |
 | P2-07 | Installed-Windows recovery and clean-install measurements. |
