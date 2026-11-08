@@ -92,5 +92,5 @@ including locked restore, separate 100,000-row memory qualifications, enabled
 Arelle integration (15/15), Python worker tests (78/78), dependency/performance
 tool tests (15/15), and the taxonomy benchmark self-test. After the local
 publication outcome-order correction, the Windows Release solution suite passed
-1,097 tests with six environment-gated Arelle skips; `DimensionalPublicationTests`
+1,115 tests with six environment-gated Arelle skips; `DimensionalPublicationTests`
 passed 5/5. These results do not close any open real-profile acceptance gate.

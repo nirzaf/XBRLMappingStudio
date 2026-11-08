@@ -81,6 +81,8 @@ fixture partitions 100,000 interleaved SQLite rows into 10,000 groups, compares 
 10,000 totals and entity identities to a separately authored arithmetic oracle,
 checks contributor counts and enforces less than 64 MiB retained managed-heap
 variation across partitioning and group execution samples. CI runs it in a fresh
-process on Windows and Linux alongside the existing isolated CSV/SQLite cases.
-This is synthetic component evidence, not real IFRS/Qatar or installed-product
-acceptance.
+process on Windows and Linux alongside the existing isolated CSV/SQLite cases;
+exact-head CI run [42461116109](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42461116109)
+passed these checks.
+This is synthetic component evidence, not real IFRS, jurisdiction-specific or
+installed-product acceptance.

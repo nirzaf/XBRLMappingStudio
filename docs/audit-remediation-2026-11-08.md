@@ -118,11 +118,13 @@ runs before evaluating profile approval, while publishable runs still require an
 exact matching approval. Typed dimensions, scenario placement and real IFRS or
 jurisdiction-specific acceptance remain unqualified.
 
-The upstream feature commit `e0a7062` passed exact-head CI run
-[42459177665](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42459177665),
-including the two separate 100,000-row memory cases and enabled Arelle checks.
+The upstream feature commits `e0a7062` and `f1a2313` passed exact-head CI runs
+[42459177665](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42459177665)
+and [42461116109](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42461116109),
+including the separate 100,000-row CSV, SQLite and grouped-memory cases and enabled
+Arelle checks.
 After the local publication outcome-order correction, the Windows Release
-solution suite passed 1,097 tests with six environment-gated Arelle skips, and
+solution suite passed 1,115 tests with six environment-gated Arelle skips, and
 `DimensionalPublicationTests` passed 5/5. The worker suite passed 78/78,
 including the independent 20-case shared hypercube algorithm oracle. Thirty
 direct semantic cases and five conditional worker/publication cases cover the
