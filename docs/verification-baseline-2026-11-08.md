@@ -138,16 +138,17 @@ checked, and exact language support still depends on the selected profile metada
 
 Verification:
 
-- The XBRL Release suite passed 137/137, including profile-free JSON/XML import
+- The XBRL Release suite passed 141/141, including profile-free JSON/XML import
   rejection cases for malformed `en--US` and `en_US`, uppercase `EN` and `en-US`
-  on xBRL-JSON input, unsupported typed dimensions, valid lowercase tags,
-  profile-language case matching, exact CLR decimal boundary values, and rejection
-  of values requiring rounding or underflow in both JSON and XML.
+  on xBRL-JSON input, unsupported typed dimensions, duplicate JSON keys, duplicate
+  axes after QName alias resolution, the 64-dimension limit, valid lowercase tags,
+  profile-language case matching, exact CLR decimal boundaries, and rejection of
+  values requiring rounding or underflow in both JSON and XML.
 - The Engine Release suite passed 125/125; the malformed-tag FactConstruct case
   blocks the fact and reports the original source location.
-- Exact-head CI [42433292866](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42433292866)
-  passed on commit `04ca06095cc1854244125ed57988b2b6076141df`. Windows and Ubuntu
-  each passed 891 tests with 6 environment-gated Arelle skips; the pinned job ran
+- Exact-head CI [42434445545](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42434445545)
+  passed on commit `69a1084eb55d80a0f5bd68bd932d4848b727e271`. Windows and Ubuntu
+  each passed 895 tests with 6 environment-gated Arelle skips; the pinned job ran
   74 Python worker tests, 15 .NET Arelle execution tests, and 15
   dependency-inventory tests. Repository hygiene and SPDX generation passed.
 - Typed dimensions, concept-to-hypercube applicability, registry membership,
