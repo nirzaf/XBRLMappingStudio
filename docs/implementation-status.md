@@ -252,3 +252,5 @@ missing-column regression passed 1/1 on Windows. See
 This covers the `ExcelField` source-node contract only; other source-reader
 constructs, customer workbook qualification, licensed IFRS data, regulator
 acceptance, and native accessibility remain open.
+
+Local DST-04 native Windows re-observation (2026-11-08): After the user unlocked the desktop, the current Release app displayed the expected missing `Revenue` source-column diagnostic and kept Preview/Execute disabled. Opening Destination > Choose SQLite database showed no selectable database in the fixture directory; Cancel closed the picker, left the destination unset, and caused no project or destination write. This confirms the current picker-cancel state only. The loaded `sample-main` project is not a valid full-run fixture because its source mapping is stale and its synthetic profile still requires explicit opt-in; prior disposable-fixture round-trip, approval-denial, cancel, and stale-target evidence remains the applicable DST-04 verification.
