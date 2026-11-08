@@ -3,6 +3,11 @@ namespace XBRLMappingStudio.XBRL;
 /// <summary>Standard XBRL Dimensions arcrole identifiers used by profile metadata.</summary>
 public static class XbrlArcRoles
 {
+    public const string All = "http://xbrl.org/int/dim/arcrole/all";
+    public const string NotAll = "http://xbrl.org/int/dim/arcrole/notAll";
+    public const string HypercubeDimension = "http://xbrl.org/int/dim/arcrole/hypercube-dimension";
+    public const string DimensionDomain = "http://xbrl.org/int/dim/arcrole/dimension-domain";
+    public const string DomainMember = "http://xbrl.org/int/dim/arcrole/domain-member";
     public const string DimensionDefault = "http://xbrl.org/int/dim/arcrole/dimension-default";
 }
 

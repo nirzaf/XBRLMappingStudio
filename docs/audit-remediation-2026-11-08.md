@@ -106,6 +106,25 @@ Qatar-first priorities and current public official-source evidence are recorded 
 license grant, or Q-Disclosure acceptance is invented. The generic CSV work does
 not enable a production taxonomy or change publication authorization.
 
+## Explicit dimensional follow-on
+
+The [bounded hypercube contract](explicit-hypercube-validation.md) adds explicit
+segment concept applicability, all/notAll, definition-role alternatives,
+inheritance and targetRole traversal, role-specific usability, defaults and closed
+cubes. Missing/unsupported metadata and exhausted traversal budgets remain
+incomplete. Conditional dimension findings now gate both in-memory and streamed
+synthetic worker results, carry exact fact locators, and block publication while
+preserving the existing destination. Typed dimensions, scenario placement and
+real IFRS/Qatar conformance remain unqualified.
+
+Local verification: Release solution build passed with zero warnings/errors;
+1,095 non-memory tests passed with six environment-gated Arelle skips; both
+100,000-row memory cases passed separately, and enabled Arelle selection passed
+15/15. The worker suite passed 78/78, including the independent 20-case shared
+hypercube algorithm oracle. Thirty direct semantic cases and five conditional
+worker/publication cases cover the new contract. Exact-commit CI is required for
+this follow-on independently of the previous increments.
+
 ## Remaining acceptance ledger
 
 The following items are deliberately open. Do not remove fail-closed restrictions
@@ -124,7 +143,7 @@ or represent these rows as completed to make a release appear ready.
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
 | P1-05 | Remaining derived-record lineage, exact Arelle finding locators, complete input identity and native preview/full-run evidence. |
 | P1-06 | Bounded retained SQLite backups and CLI/shared-service replay are implemented, with independent byte/content digests, WAL consistency, restart/replay and tamper/publication tests. Desktop controls, table-only extraction, retention governance, other providers and capture process/power-loss qualification remain open. Live SQLite content rechecks remain non-replayable. See [snapshot scope](sqlite-source-snapshots.md). |
-| P1-07 | Typed dimensions, concept-to-hypercube applicability and profile-qualified dimensional validation. |
+| P1-07 | Bounded explicit segment hypercube applicability now supports all/notAll, role alternatives, inheritance/targetRole, role-specific usability, defaults and closed cubes, with exact-locator conditional worker findings and publication refusal. Typed/scenario support, complete DTS metadata and real-profile qualification remain open. See [dimensional scope](explicit-hypercube-validation.md). |
 | P1-08 | Independent JSON/XML conformance fixtures for the selected IFRS taxonomy after the rights/evaluation gate. Existing synthetic equivalence is narrower. |
 | P1-09 | Existing-target-row authorization/update semantics. Aspect and occurrence source selection landed before this increment. |
 | P1-10 | Approved managed/local model provider, endpoint, secure credential deployment and governed desktop workflow. |

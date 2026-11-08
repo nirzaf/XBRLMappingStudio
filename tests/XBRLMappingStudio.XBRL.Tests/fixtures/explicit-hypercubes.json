@@ -1,0 +1,905 @@
+[
+  {
+    "scenario": "all_valid",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "all_invalid_member",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "all_missing_axis",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [],
+    "valid": false
+  },
+  {
+    "scenario": "inferred_default",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-default",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [],
+    "valid": true
+  },
+  {
+    "scenario": "default_outside_role",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-default",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:Other"
+      }
+    ],
+    "dimensions": [],
+    "valid": false
+  },
+  {
+    "scenario": "notAll_matching",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/notAll",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "notAll_wrong_member",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/notAll",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "notAll_missing_axis",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/notAll",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [],
+    "valid": true
+  },
+  {
+    "scenario": "open_extra_axis",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      },
+      {
+        "name": "synthetic:ExtraAxis",
+        "memberName": "synthetic:Extra"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "closed_extra_axis",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": true,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      },
+      {
+        "name": "synthetic:ExtraAxis",
+        "memberName": "synthetic:Extra"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "notAll_closed_extra_axis",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/notAll",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": true,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      },
+      {
+        "name": "synthetic:ExtraAxis",
+        "memberName": "synthetic:Extra"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "alternative_roles",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:s",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:OtherCube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:s",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:OtherCube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:s",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:OtherCubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:s",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:OtherCubeDomain",
+        "childQName": "synthetic:Other"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "same_role_conjunction",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis",
+        "targetRoleUri": "urn:test:a"
+      },
+      {
+        "roleUri": "urn:test:a",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:a",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:OtherCube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:OtherCube",
+        "childQName": "synthetic:Axis",
+        "targetRoleUri": "urn:test:b"
+      },
+      {
+        "roleUri": "urn:test:b",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:OtherCubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:b",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:OtherCubeDomain",
+        "childQName": "synthetic:Other"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "usable_descendant_of_unusable",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Member",
+        "childQName": "synthetic:Other",
+        "usable": true
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "unusable_member_with_usable_descendant",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Member",
+        "childQName": "synthetic:Other"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "unusable_overrides_usable",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Other"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Other",
+        "childQName": "synthetic:Member",
+        "usable": false
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "primary_inherits_target_role",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Ancestor",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Ancestor",
+        "childQName": "synthetic:Parent",
+        "targetRoleUri": "urn:test:s"
+      },
+      {
+        "roleUri": "urn:test:s",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Parent",
+        "childQName": "synthetic:Revenue"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": false
+  },
+  {
+    "scenario": "primary_target_role_mismatch",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Ancestor",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Ancestor",
+        "childQName": "synthetic:Parent",
+        "targetRoleUri": "urn:test:s"
+      },
+      {
+        "roleUri": "urn:test:t",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Parent",
+        "childQName": "synthetic:Revenue"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "all_target_role_stages",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Revenue",
+        "childQName": "synthetic:Cube",
+        "targetRoleUri": "urn:test:hc",
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:hc",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis",
+        "targetRoleUri": "urn:test:dim"
+      },
+      {
+        "roleUri": "urn:test:dim",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:Domain",
+        "targetRoleUri": "urn:test:dom",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:dom",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Domain",
+        "childQName": "synthetic:Parent",
+        "targetRoleUri": "urn:test:members",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:members",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:Parent",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Member"
+      }
+    ],
+    "valid": true
+  },
+  {
+    "scenario": "no_applicable_cube",
+    "links": [
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/all",
+        "parentQName": "synthetic:Assets",
+        "childQName": "synthetic:Cube",
+        "closed": false,
+        "contextElement": "segment"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/hypercube-dimension",
+        "parentQName": "synthetic:Cube",
+        "childQName": "synthetic:Axis"
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/dimension-domain",
+        "parentQName": "synthetic:Axis",
+        "childQName": "synthetic:CubeDomain",
+        "usable": false
+      },
+      {
+        "roleUri": "urn:test:r",
+        "arcRoleUri": "http://xbrl.org/int/dim/arcrole/domain-member",
+        "parentQName": "synthetic:CubeDomain",
+        "childQName": "synthetic:Member"
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "synthetic:Axis",
+        "memberName": "synthetic:Other"
+      }
+    ],
+    "valid": true
+  }
+]

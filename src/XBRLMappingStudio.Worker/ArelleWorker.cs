@@ -212,12 +212,25 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             _profile.Digest,
             requiredRules,
             requiredPlugins);
+        var dimensionalValidator = new FilingRuleValidator(_profile);
+        var dimensionsIncomplete = false;
         int i = 0;
         foreach (var entry in factEntries)
         {
             cancellationToken.ThrowIfCancellationRequested();
             i++;
             var fact = entry.Fact;
+            foreach (var outcome in dimensionalValidator.ValidateDimensionalAspects(fact, cancellationToken))
+            {
+                dimensionsIncomplete |= outcome.Status == RuleStatus.Incomplete;
+                if (outcome.Diagnostic is { } diagnostic)
+                    Capture(diagnostic with
+                    {
+                        OperationId = request.OperationId,
+                        RuleIdentifier = outcome.RuleId,
+                        FactLocator = entry.Locator
+                    });
+            }
             var concept = _profile.FindConcept(fact.ConceptName);
             if (concept is null)
             {
@@ -349,8 +362,8 @@ public sealed class LocalSyntheticWorker : IWorkerClient
             });
         }
 
-        var completionFailed = requiredRules.Any(item => item.Status == ValidationCheckStatus.Fail);
-        var completionIncomplete = requiredRules.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable)
+        var completionFailed = filingValidation.HasFailures || requiredRules.Any(item => item.Status == ValidationCheckStatus.Fail);
+        var completionIncomplete = dimensionsIncomplete || filingValidation.HasIncomplete || requiredRules.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable)
             || requiredPlugins.Any(item => item.Status is ValidationCheckStatus.Skipped or ValidationCheckStatus.Unavailable);
         var status = blockingFindingCount > 0 || completionFailed
             ? WorkerStatus.DomainFailure

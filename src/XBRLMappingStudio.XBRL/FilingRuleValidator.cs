@@ -49,11 +49,14 @@ public sealed record FilingValidationResult(IReadOnlyList<RuleOutcome> Outcomes)
 public sealed class FilingRuleValidator
 {
     private readonly FilingProfile _profile;
+    private readonly HypercubeValidator _hypercubes;
     private readonly IReadOnlyDictionary<string, IReadOnlySet<string>> _defaultMembersByDimension;
 
-    public FilingRuleValidator(FilingProfile profile)
+    public FilingRuleValidator(FilingProfile profile, int maximumDimensionalRelationshipVisits = 100_000)
     {
         _profile = profile ?? throw new ArgumentNullException(nameof(profile));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumDimensionalRelationshipVisits);
+        _hypercubes = new HypercubeValidator(profile, maximumDimensionalRelationshipVisits);
         _defaultMembersByDimension = (profile.DefinitionLinks ?? Array.Empty<DefinitionLink>())
             .Where(link => StringComparer.Ordinal.Equals(link.ArcRoleUri, XbrlArcRoles.DimensionDefault))
             .GroupBy(link => link.ParentQName, StringComparer.Ordinal)
@@ -144,8 +147,8 @@ public sealed class FilingRuleValidator
                     $"Fact on '{f.ConceptName}' period kind '{f.Period.Kind}' does not match '{concept.PeriodType}'.", op));
 
             // Rule: dimension-member-valid (incomplete when the member domain is undeclared).
-            foreach (var d in f.Dimensions)
-                Record(DimensionRule(f, d, op));
+            foreach (var outcome in ValidateDimensionalAspects(f, cancellationToken))
+                Record(outcome);
         }
 
         // Rule: no-duplicate-facts across the whole set. Large runs obtain this key
@@ -195,8 +198,53 @@ public sealed class FilingRuleValidator
         return new FilingValidationResult(collapsed);
     }
 
+    /// <summary>
+    /// Validates conditional dimensional rules for one fact. Exposed separately so
+    /// streamed workers can attach each finding to its exact fact occurrence.
+    /// </summary>
+    public IReadOnlyList<RuleOutcome> ValidateDimensionalAspects(
+        XbrlFact fact, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        cancellationToken.ThrowIfCancellationRequested();
+        const string operation = "filing-validation";
+        var outcomes = new List<RuleOutcome>();
+        foreach (var dimension in fact.Dimensions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            outcomes.Add(DimensionRule(fact, dimension, operation));
+        }
+        if (_hypercubes.Validate(fact, cancellationToken) is { } result)
+        {
+            outcomes.Add(result.Status switch
+            {
+                RuleStatus.Pass => Pass(HypercubeValidator.RuleId),
+                RuleStatus.Fail => Fail(HypercubeValidator.RuleId, DiagnosticCodes.XbrDimensionInvalid,
+                    result.Detail!, operation, GetFirstSource(fact), fact.SourceTransformationPaths),
+                _ => new RuleOutcome(HypercubeValidator.RuleId, RuleStatus.Incomplete, result.Detail,
+                    new Diagnostic
+                    {
+                        Code = DiagnosticCodes.XbrRequiredCheckMissing,
+                        Subsystem = DiagnosticSubsystem.XBRL,
+                        Severity = DiagnosticSeverity.Warning,
+                        Stage = DiagnosticStage.Validation,
+                        IsBlocking = false,
+                        Message = result.Detail!,
+                        Source = GetFirstSource(fact),
+                        SourceTransformationPaths = fact.SourceTransformationPaths,
+                        OperationId = operation,
+                        RuleIdentifier = HypercubeValidator.RuleId
+                    })
+            });
+        }
+        return outcomes;
+    }
+
     private RuleOutcome DimensionRule(XbrlFact f, Dimension d, string op)
     {
+        if (!d.IsExplicit)
+            return IncompleteDimension(op, GetFirstSource(f),
+                "Typed dimensions require supported taxonomy domain metadata.", f.SourceTransformationPaths);
         // XBRL Dimensions infers a default member when its axis is omitted and
         // forbids spelling that same member explicitly in an instance.
         if (_defaultMembersByDimension.TryGetValue(d.Name, out var defaultMembers)
