@@ -140,6 +140,9 @@ public sealed class ProvenanceTracker
             ? (IReadOnlyList<SourceReference>)list.ToArray()
             : Array.Empty<SourceReference>();
 
+    public ProvenanceListSample<SourceReference> SampleContributors(string slotKey, int limit)
+        => Sample(_sources, slotKey, limit);
+
     public IReadOnlyList<string> GetTransformationIds(string slotKey)
         => _transformationIds.TryGetValue(slotKey, out var list)
             ? list.ToArray()
@@ -149,6 +152,10 @@ public sealed class ProvenanceTracker
         => _sourceTransformationPaths.TryGetValue(slotKey, out var list)
             ? list.ToArray()
             : Array.Empty<SourceTransformationPath>();
+
+    public ProvenanceListSample<SourceTransformationPath> SampleSourceTransformationPaths(
+        string slotKey, int limit)
+        => Sample(_sourceTransformationPaths, slotKey, limit);
 
     public IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Snapshot()
         => _sources.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<SourceReference>)kv.Value.ToArray());
@@ -167,7 +174,22 @@ public sealed class ProvenanceTracker
             && path.TransformationIds.SequenceEqual(candidate.TransformationIds, StringComparer.Ordinal)))
             paths.Add(candidate);
     }
+
+    private static ProvenanceListSample<T> Sample<T>(
+        ConcurrentDictionary<string, List<T>> values,
+        string slotKey,
+        int limit)
+    {
+        if (limit < 0) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (!values.TryGetValue(slotKey, out var list))
+            return new ProvenanceListSample<T>(Array.Empty<T>(), 0);
+
+        lock (list)
+            return new ProvenanceListSample<T>(list.Take(limit).ToArray(), list.Count);
+    }
 }
+
+public sealed record ProvenanceListSample<T>(IReadOnlyList<T> Items, int TotalCount);
 
 /// <summary>
 /// Runtime context for a plan execution. Carries frozen parameters, sample limits,
@@ -179,6 +201,8 @@ public sealed class ExecutionContext
     public required RunManifest Manifest { get; init; }
     public DiagnosticBag Diagnostics { get; } = new();
     public ProvenanceTracker Provenance { get; } = new();
+    /// <summary>Bounded per-node output counts, value samples and source contribution paths.</summary>
+    public NodeOutputPreviewTracker NodeOutputs { get; } = new();
 
     /// <summary>Parameters frozen at start: locale, fiscal calendar, entity, dates.</summary>
     public required IReadOnlyDictionary<string, string> Parameters { get; init; }

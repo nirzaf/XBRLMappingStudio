@@ -314,7 +314,7 @@ UX-06 now also offers an explicit source-schema recheck: detected drift stays pi
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 125 | Validation, plan compilation, collections/joins, immutable pinned function revisions, preview reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
+| Engine.Tests | 126 | Validation, plan compilation, collections/joins, immutable pinned function revisions, bounded per-node output previews and reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
 | XBRL.Tests | 155 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import, QName alias normalization, filing rules, conversion resilience, required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
 | Adapters.Tests | 95 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |

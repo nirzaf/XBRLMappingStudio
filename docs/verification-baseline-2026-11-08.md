@@ -233,3 +233,29 @@ Verification:
 - Native visual/screen-reader acceptance, deeper nonnumeric lexical validation,
   automatic/background source-drift monitoring, and installed filing-profile workflow
   remain open.
+
+## ENG-06 deterministic intermediate previews
+
+`NodeOutputPreviewTracker` observes row and set outputs and retains at most three
+sample values per node/port. Each sample preserves up to four source contribution
+paths, and displayed values are capped at 160 characters. Exact state counts
+continue across bounded SQLite execution batches without retaining each row frame.
+Preview counts and set totals are labelled partial; full-run counts are labelled
+complete. The Desktop Mapping results pane includes a separate Intermediate
+outputs tab where a reviewer can select an output, sample value, and its source
+contributor/path.
+
+Verification on the local Windows Release build:
+
+- Engine tests passed 126/126. The independent full-run oracle covers 50 rows,
+  exact per-node counts, deterministic first-three values and source locations;
+  a two-row preview is explicitly partial, and a pre-cancelled run returns no
+  intermediate output data.
+- Desktop tests passed 114/114. Headless Avalonia coverage inspects the initial
+  result tabs and accessible list controls, then selects a sampled output and
+  source path. A 501-row full run verifies exact output counts in both the
+  in-memory and forced SQLite-spooled execution paths.
+- Integration tests passed 244 with 6 environment-gated Arelle skips (250 total).
+- These are synthetic fixture and headless UI checks. Exact-head GitHub CI is
+  pending; native visual/screen-reader and real filing-profile qualification are
+  not claimed.

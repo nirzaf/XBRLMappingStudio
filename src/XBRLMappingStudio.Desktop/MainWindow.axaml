@@ -241,7 +241,7 @@
       <!-- Center: mapping workspace and evidence-focused PDF review -->
       <TabControl Name="WorkspaceTabs" Grid.Column="1">
         <TabItem Header="Mapping">
-          <Grid RowDefinitions="*,260">
+          <Grid RowDefinitions="*,310">
             <controls:GraphCanvas x:Name="Canvas"
                                   Grid.Row="0"
                                   Focusable="True"
@@ -251,60 +251,110 @@
                                   Edges="{Binding Edges}"
                                   AutomationProperties.Name="Mapping graph" />
             <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
-              <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+              <Grid RowDefinitions="Auto,Auto,*">
                 <TextBlock Text="Preview facts and run results" FontWeight="Bold" />
                 <TextBlock Name="PreviewResultSummaryText" Grid.Row="1" Text="{Binding PreviewResultSummary}" TextWrapping="Wrap"
                            Margin="0,3"
                            AutomationProperties.Name="Run result status and preview qualification" />
-                <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto" Margin="0,2">
-                  <Button Name="PreviousFactPreviewPageButton" Content="Previous"
-                          Command="{Binding PreviousFactPreviewPageCommand}"
-                          IsEnabled="{Binding CanPreviousFactPreviewPage}"
-                          AutomationProperties.Name="Previous fact results page" />
-                  <TextBlock Name="FactPageSummaryText" Grid.Column="1" Text="{Binding FactPageSummary}"
-                             HorizontalAlignment="Center" VerticalAlignment="Center"
-                             AutomationProperties.Name="Fact results page and total count" />
-                  <Button Name="NextFactPreviewPageButton" Grid.Column="2" Content="Next"
-                          Command="{Binding NextFactPreviewPageCommand}"
-                          IsEnabled="{Binding CanNextFactPreviewPage}"
-                          AutomationProperties.Name="Next fact results page" />
-                </Grid>
-                <ListBox Name="GeneratedFactResultsList" Grid.Row="3" ItemsSource="{Binding PreviewFacts}"
-                         SelectedItem="{Binding SelectedPreviewFact, Mode=TwoWay}"
-                         SelectionMode="Single" AutomationProperties.Name="Generated fact results">
-                  <ListBox.ItemTemplate>
-                    <DataTemplate x:DataType="vm:FactRow">
-                      <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
-                    </DataTemplate>
-                  </ListBox.ItemTemplate>
-                </ListBox>
-                <Grid Grid.Row="4" ColumnDefinitions="*,Auto"
-                      IsVisible="{Binding HasSelectedPreviewFact}">
-                  <StackPanel Spacing="2">
-                    <TextBlock Name="SelectedFactStageText" Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
-                               MaxHeight="38" AutomationProperties.Name="Selected fact mapping stage" />
-                    <ListBox Name="SelectedFactEvidenceList" ItemsSource="{Binding SelectedPreviewFact.Evidence}"
-                             SelectedItem="{Binding SelectedPreviewEvidence, Mode=TwoWay}"
-                             Height="54" SelectionMode="Single"
-                             AutomationProperties.Name="Selected fact contributing source evidence">
-                      <ListBox.ItemTemplate>
-                        <DataTemplate x:DataType="vm:PreviewEvidenceRow">
-                          <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
-                        </DataTemplate>
-                      </ListBox.ItemTemplate>
-                    </ListBox>
-                    <TextBlock Text="Transformation path for selected source" FontWeight="SemiBold" />
-                    <ScrollViewer MaxHeight="88" VerticalScrollBarVisibility="Auto"
-                                  AutomationProperties.Name="Selected source transformation path details">
-                      <TextBlock Name="SelectedFactTransformationPathText" Text="{Binding SelectedPreviewEvidence.TransformationPathDisplay}"
-                                 TextWrapping="Wrap" />
-                    </ScrollViewer>
-                  </StackPanel>
-                  <Button Grid.Column="1" Margin="8,0,0,0" Content="Open PDF evidence"
-                          Command="{Binding OpenSelectedPreviewEvidenceCommand}"
-                          IsEnabled="{Binding CanOpenSelectedPreviewEvidence}"
-                          AutomationProperties.Name="Open selected PDF source evidence" />
-                </Grid>
+                <TabControl Name="RunResultTabs" Grid.Row="2">
+                  <TabItem Header="Fact results">
+                    <Grid RowDefinitions="Auto,*,Auto">
+                      <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,2">
+                        <Button Name="PreviousFactPreviewPageButton" Content="Previous"
+                                Command="{Binding PreviousFactPreviewPageCommand}"
+                                IsEnabled="{Binding CanPreviousFactPreviewPage}"
+                                AutomationProperties.Name="Previous fact results page" />
+                        <TextBlock Name="FactPageSummaryText" Grid.Column="1" Text="{Binding FactPageSummary}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   AutomationProperties.Name="Fact results page and total count" />
+                        <Button Name="NextFactPreviewPageButton" Grid.Column="2" Content="Next"
+                                Command="{Binding NextFactPreviewPageCommand}"
+                                IsEnabled="{Binding CanNextFactPreviewPage}"
+                                AutomationProperties.Name="Next fact results page" />
+                      </Grid>
+                      <ListBox Name="GeneratedFactResultsList" Grid.Row="1" ItemsSource="{Binding PreviewFacts}"
+                               SelectedItem="{Binding SelectedPreviewFact, Mode=TwoWay}"
+                               SelectionMode="Single" AutomationProperties.Name="Generated fact results">
+                        <ListBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:FactRow">
+                            <TextBlock Text="{Binding Display}" Margin="0,2,0,0" />
+                          </DataTemplate>
+                        </ListBox.ItemTemplate>
+                      </ListBox>
+                      <Grid Grid.Row="2" ColumnDefinitions="*,Auto"
+                            IsVisible="{Binding HasSelectedPreviewFact}">
+                        <StackPanel Spacing="2">
+                          <TextBlock Name="SelectedFactStageText" Text="{Binding SelectedPreviewFact.StageSummary}" TextWrapping="Wrap"
+                                     MaxHeight="38" AutomationProperties.Name="Selected fact mapping stage" />
+                          <ListBox Name="SelectedFactEvidenceList" ItemsSource="{Binding SelectedPreviewFact.Evidence}"
+                                   SelectedItem="{Binding SelectedPreviewEvidence, Mode=TwoWay}"
+                                   Height="54" SelectionMode="Single"
+                                   AutomationProperties.Name="Selected fact contributing source evidence">
+                            <ListBox.ItemTemplate>
+                              <DataTemplate x:DataType="vm:PreviewEvidenceRow">
+                                <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                              </DataTemplate>
+                            </ListBox.ItemTemplate>
+                          </ListBox>
+                          <TextBlock Text="Transformation path for selected source" FontWeight="SemiBold" />
+                          <ScrollViewer MaxHeight="88" VerticalScrollBarVisibility="Auto"
+                                        AutomationProperties.Name="Selected source transformation path details">
+                            <TextBlock Name="SelectedFactTransformationPathText" Text="{Binding SelectedPreviewEvidence.TransformationPathDisplay}"
+                                       TextWrapping="Wrap" />
+                          </ScrollViewer>
+                        </StackPanel>
+                        <Button Grid.Column="1" Margin="8,0,0,0" Content="Open PDF evidence"
+                                Command="{Binding OpenSelectedPreviewEvidenceCommand}"
+                                IsEnabled="{Binding CanOpenSelectedPreviewEvidence}"
+                                AutomationProperties.Name="Open selected PDF source evidence" />
+                      </Grid>
+                    </Grid>
+                  </TabItem>
+                  <TabItem Header="Intermediate outputs">
+                    <Grid RowDefinitions="Auto,*,Auto,*">
+                      <TextBlock Name="IntermediateOutputSummaryText" Grid.Row="0" Text="{Binding IntermediateOutputSummary}"
+                                 TextWrapping="Wrap" AutomationProperties.Name="Intermediate output completeness and sample bounds" />
+                      <ListBox Name="IntermediateOutputsList" Grid.Row="1" ItemsSource="{Binding IntermediateOutputs}"
+                               SelectedItem="{Binding SelectedIntermediateOutput, Mode=TwoWay}"
+                               SelectionMode="Single" AutomationProperties.Name="Intermediate node outputs">
+                        <ListBox.ItemTemplate>
+                          <DataTemplate x:DataType="vm:IntermediateOutputRow">
+                            <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                          </DataTemplate>
+                        </ListBox.ItemTemplate>
+                      </ListBox>
+                      <Grid Grid.Row="2" ColumnDefinitions="*,*" Margin="0,2">
+                        <TextBlock Text="Sampled values" FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="1" Text="Contributing sources and paths" FontWeight="SemiBold" />
+                      </Grid>
+                      <Grid Grid.Row="3" ColumnDefinitions="*,*">
+                        <ListBox Name="IntermediateOutputSamplesList" Grid.Column="0"
+                                 ItemsSource="{Binding SelectedIntermediateOutput.Samples}"
+                                 SelectedItem="{Binding SelectedIntermediateSample, Mode=TwoWay}"
+                                 SelectionMode="Single" AutomationProperties.Name="Sampled intermediate values">
+                          <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:IntermediateOutputSampleRow">
+                              <TextBlock Text="{Binding Display}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                            </DataTemplate>
+                          </ListBox.ItemTemplate>
+                        </ListBox>
+                        <ListBox Name="IntermediateOutputEvidenceList" Grid.Column="1"
+                                 ItemsSource="{Binding SelectedIntermediateSample.Evidence}"
+                                 SelectedItem="{Binding SelectedIntermediateEvidence, Mode=TwoWay}"
+                                 SelectionMode="Single" AutomationProperties.Name="Intermediate output contributors">
+                          <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:PreviewEvidenceRow">
+                              <StackPanel Spacing="2">
+                                <TextBlock Text="{Binding Display}" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding TransformationPathDisplay}" TextWrapping="Wrap" />
+                              </StackPanel>
+                            </DataTemplate>
+                          </ListBox.ItemTemplate>
+                        </ListBox>
+                      </Grid>
+                    </Grid>
+                  </TabItem>
+                </TabControl>
               </Grid>
             </Border>
           </Grid>

@@ -35,9 +35,13 @@ public sealed class EvaluationFrame
 {
     public required int RowIndex { get; init; }
     private readonly Dictionary<string, DataValue> _slots = new(StringComparer.Ordinal);
+    private readonly Dictionary<ExecutionOutputKey, DataValue> _outputValues = new();
 
     public void Set(string nodeId, string port, DataValue v)
-        => _slots[ProvenanceTracker.SlotKey(nodeId, port)] = v;
+    {
+        _slots[ProvenanceTracker.SlotKey(nodeId, port)] = v;
+        _outputValues[new ExecutionOutputKey(nodeId, port)] = v;
+    }
 
     public DataValue Get(string nodeId, string port)
         => _slots.TryGetValue(ProvenanceTracker.SlotKey(nodeId, port), out var v)
@@ -48,6 +52,7 @@ public sealed class EvaluationFrame
         => _slots.TryGetValue(ProvenanceTracker.SlotKey(nodeId, port), out v!);
 
     public IReadOnlyDictionary<string, DataValue> Slots => _slots;
+    public IReadOnlyDictionary<ExecutionOutputKey, DataValue> OutputValues => _outputValues;
 }
 
 /// <summary>Compiled deterministic execution plan with optional set-phase.</summary>
@@ -137,6 +142,7 @@ public sealed class ExecutionPlan
                     }
                 }
 
+                context.NodeOutputs.RecordRow(frame, context.Provenance);
                 frames.Add(frame);
             }
 
@@ -155,6 +161,7 @@ public sealed class ExecutionPlan
                         DecimalDomain.ValidateValue(value, context.MaxSignificantDigits, step.NodeId,
                             context.CancellationToken);
                         setSlots[ProvenanceTracker.SlotKey(step.NodeId, port)] = value;
+                        context.NodeOutputs.RecordSetOutput(step.NodeId, port, value, context.Provenance);
                     }
                 }
 
@@ -171,7 +178,8 @@ public sealed class ExecutionPlan
                 RunOutcome.Success,
                 facts,
                 context.Diagnostics.Items,
-                context.Provenance.Snapshot());
+                context.Provenance.Snapshot(),
+                context.NodeOutputs.Snapshot(context.IsPreview));
         }
         catch (OperationCanceledException)
         {
@@ -184,7 +192,8 @@ public sealed class ExecutionPlan
                 RunOutcome.Cancelled,
                 Array.Empty<PendingFact>(),
                 context.Diagnostics.Items,
-                context.Provenance.Snapshot());
+                context.Provenance.Snapshot(),
+                Array.Empty<NodeOutputPreview>());
         }
         catch (NumericOverflowException ex)
         {
@@ -197,7 +206,8 @@ public sealed class ExecutionPlan
                 RunOutcome.InvalidMapping,
                 Array.Empty<PendingFact>(),
                 context.Diagnostics.Items,
-                context.Provenance.Snapshot());
+                context.Provenance.Snapshot(),
+                Array.Empty<NodeOutputPreview>());
         }
     }
 
@@ -293,4 +303,5 @@ public sealed record ExecutionResult(
     RunOutcome Outcome,
     IReadOnlyList<PendingFact> Facts,
     IReadOnlyList<Diagnostic> Diagnostics,
-    IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Provenance);
+    IReadOnlyDictionary<string, IReadOnlyList<SourceReference>> Provenance,
+    IReadOnlyList<NodeOutputPreview> NodeOutputPreviews);

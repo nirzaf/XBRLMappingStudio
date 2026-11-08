@@ -143,11 +143,13 @@ public sealed class MappingOperationViewModelTests
         }
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task PreviewResultLabelsPartialOutputAndExposesFactMappingEvidence()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-preview-evidence-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        MainWindowViewModel? viewModel = null;
+        MainWindow? window = null;
         try
         {
             var workbookPath = IndependentAcceptanceFixtures.Materialize(directory, "revenue.xlsx");
@@ -165,10 +167,22 @@ public sealed class MappingOperationViewModelTests
                 .ToArray();
             project.Nodes.Add(duplicateFactNode);
             project.Edges.AddRange(duplicateEdges);
-            var viewModel = new MainWindowViewModel(project, null,
+            viewModel = new MainWindowViewModel(project, null,
                 (_, _) => throw new NotSupportedException("The fixture uses an Excel source."));
             viewModel.AllowSyntheticProfile = true;
             viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
+            window = new MainWindow { DataContext = viewModel };
+            window.Show();
+            var resultTabs = Assert.IsType<TabControl>(window.FindControl<TabControl>("RunResultTabs"));
+            var outputsList = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputsList"));
+            var samplesList = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputSamplesList"));
+            var contributorsList = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputEvidenceList"));
+            Assert.Equal("Intermediate node outputs", AutomationProperties.GetName(outputsList));
+            Assert.Equal("Sampled intermediate values", AutomationProperties.GetName(samplesList));
+            Assert.Equal("Intermediate output contributors", AutomationProperties.GetName(contributorsList));
+            Assert.Equal(0, resultTabs.SelectedIndex);
+            Assert.Same(viewModel.IntermediateOutputs, outputsList.ItemsSource);
+            Assert.Empty(viewModel.IntermediateOutputs);
 
             var operationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var observedBusy = false;
@@ -224,9 +238,27 @@ public sealed class MappingOperationViewModelTests
             Assert.Contains("Scale to units", evidence.TransformationPathDisplay, StringComparison.Ordinal);
             Assert.NotEmpty(fact.Evidence);
             Assert.Same(fact, viewModel.SelectedPreviewFact);
+
+            Assert.StartsWith("Partial preview", viewModel.IntermediateOutputSummary, StringComparison.Ordinal);
+            resultTabs.SelectedIndex = 1;
+            var sourceNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var sourceOutput = Assert.Single(viewModel.IntermediateOutputs, output =>
+                output.NodeId == sourceNode.NodeId && output.PortName == "value");
+            Assert.Contains("partial sampled value(s)", sourceOutput.Display, StringComparison.Ordinal);
+            Assert.Same(viewModel.IntermediateOutputs, outputsList.ItemsSource);
+            outputsList.SelectedItem = sourceOutput;
+            Assert.Same(sourceOutput, viewModel.SelectedIntermediateOutput);
+            var sampledOutput = sourceOutput.Samples.First();
+            Assert.Same(sampledOutput, samplesList.SelectedItem);
+            var sampleEvidence = Assert.Single(sampledOutput.Evidence);
+            Assert.Equal(mappingOracle.SourceLocator, sampleEvidence.Source.Locator);
+            Assert.Contains(sourceNode.DisplayName, sampleEvidence.TransformationPathDisplay, StringComparison.Ordinal);
+            Assert.Same(sampleEvidence, contributorsList.SelectedItem);
         }
         finally
         {
+            window?.Close();
+            viewModel?.Dispose();
             try { Directory.Delete(directory, recursive: true); } catch { }
         }
     }
@@ -300,14 +332,24 @@ public sealed class MappingOperationViewModelTests
             var stageSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactStageText"));
             var evidenceList = Assert.IsType<ListBox>(window.FindControl<ListBox>("SelectedFactEvidenceList"));
             var evidencePath = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("SelectedFactTransformationPathText"));
+            var intermediateSummary = Assert.IsType<TextBlock>(window.FindControl<TextBlock>("IntermediateOutputSummaryText"));
+            var intermediateList = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputsList"));
+            var intermediateSamples = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputSamplesList"));
+            var intermediateEvidence = Assert.IsType<ListBox>(window.FindControl<ListBox>("IntermediateOutputEvidenceList"));
             Assert.Equal("Previous fact results page", AutomationProperties.GetName(previousButton));
             Assert.Equal("Next fact results page", AutomationProperties.GetName(nextButton));
             Assert.Equal("Generated fact results", AutomationProperties.GetName(resultsList));
             Assert.Equal("Selected fact contributing source evidence", AutomationProperties.GetName(evidenceList));
+            Assert.Equal("Intermediate node outputs", AutomationProperties.GetName(intermediateList));
+            Assert.Equal("Sampled intermediate values", AutomationProperties.GetName(intermediateSamples));
+            Assert.Equal("Intermediate output contributors", AutomationProperties.GetName(intermediateEvidence));
             Assert.Equal("Run a preview or full execution to inspect generated facts and evidence.", resultSummary.Text);
             Assert.Equal("No fact results are available.", pageSummary.Text);
+            Assert.Equal("Run a preview or full execution to inspect intermediate node values.", intermediateSummary.Text);
             Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
             Assert.Empty(activeViewModel.PreviewFacts);
+            Assert.Same(activeViewModel.IntermediateOutputs, intermediateList.ItemsSource);
+            Assert.Empty(activeViewModel.IntermediateOutputs);
             Assert.False(previousButton.IsEnabled);
             Assert.False(nextButton.IsEnabled);
 
@@ -334,6 +376,22 @@ public sealed class MappingOperationViewModelTests
             Assert.Same(activeViewModel.PreviewFacts, resultsList.ItemsSource);
             Assert.Equal("Facts 1–500 of 501", activeViewModel.FactPageSummary);
             Assert.Equal("Facts 1–500 of 501", pageSummary.Text);
+            Assert.StartsWith("Full run:", intermediateSummary.Text, StringComparison.Ordinal);
+            var currentSourceNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField
+                && StringComparer.Ordinal.Equals(node.Parameters.GetValueOrDefault("column")?.ToString(), "Current"));
+            var currentOutput = Assert.Single(activeViewModel.IntermediateOutputs, output =>
+                output.NodeId == currentSourceNode.NodeId && output.PortName == "value");
+            Assert.Contains("501 value(s)", currentOutput.Display, StringComparison.Ordinal);
+            Assert.Contains("501 present", currentOutput.Display, StringComparison.Ordinal);
+            Assert.Same(activeViewModel.IntermediateOutputs, intermediateList.ItemsSource);
+            intermediateList.SelectedItem = currentOutput;
+            Assert.Same(currentOutput, activeViewModel.SelectedIntermediateOutput);
+            var firstSample = currentOutput.Samples[0];
+            Assert.Same(firstSample, intermediateSamples.SelectedItem);
+            Assert.Contains("Row 1:", firstSample.Display, StringComparison.Ordinal);
+            var firstSampleEvidence = Assert.Single(firstSample.Evidence);
+            Assert.Contains("financials.Current", firstSampleEvidence.Source.Locator, StringComparison.Ordinal);
+            Assert.Same(firstSampleEvidence, intermediateEvidence.SelectedItem);
             var firstPageFact = Assert.Single(activeViewModel.PreviewFacts,
                 fact => fact.SemanticFact?.EntityIdentifier == "Entity-0001");
             Assert.Same(firstPageFact, resultsList.SelectedItem);

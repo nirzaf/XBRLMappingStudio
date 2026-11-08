@@ -814,7 +814,8 @@ public sealed class MappingJobService
 
         progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
 
-        return JobResult.FromManifest(manifest, facts, json, context.SampledTotals);
+        return JobResult.FromManifest(manifest, facts, json, context.SampledTotals,
+            nodeOutputPreviews: exec.NodeOutputPreviews);
     }
 
     private async Task<JobResult> RunLargeRowScopedAsync(
@@ -1096,7 +1097,8 @@ public sealed class MappingJobService
             };
             progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
             ownershipTransferred = true;
-            return JobResult.FromManifest(manifest, artifact.Facts, "", context.SampledTotals, artifact);
+            return JobResult.FromManifest(manifest, artifact.Facts, "", context.SampledTotals, artifact,
+                context.NodeOutputs.Snapshot(isPartial: false));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2594,6 +2596,13 @@ public sealed record JobResult(
     public LargeRunArtifact? LargeArtifact { get; init; }
 
     /// <summary>
+    /// Deterministic, bounded per-node output counts and sample values. Full-run counts
+    /// are exact; preview counts describe only the sampled rows and are marked partial.
+    /// </summary>
+    public IReadOnlyList<NodeOutputPreview> NodeOutputPreviews { get; init; }
+        = Array.Empty<NodeOutputPreview>();
+
+    /// <summary>
     /// Transfers cleanup responsibility to a longer-lived consumer while leaving the
     /// artifact accessible through <see cref="LargeArtifact"/> for publication work.
     /// </summary>
@@ -2622,13 +2631,16 @@ public sealed record JobResult(
         && Manifest.Outcome is RunOutcome.Success or RunOutcome.SuccessWithWarnings;
 
     internal static JobResult FromManifest(RunManifest manifest, IReadOnlyList<XbrlFact> facts, string json,
-        IReadOnlyList<SampledTotal>? sampledTotals = null, LargeRunArtifact? largeArtifact = null)
+        IReadOnlyList<SampledTotal>? sampledTotals = null,
+        LargeRunArtifact? largeArtifact = null,
+        IReadOnlyList<NodeOutputPreview>? nodeOutputPreviews = null)
     {
         var bag = new DiagnosticBag();
         foreach (var d in manifest.Diagnostics) bag.Add(d);
         return new JobResult(manifest, facts, json, bag, sampledTotals ?? Array.Empty<SampledTotal>())
         {
-            LargeArtifact = largeArtifact
+            LargeArtifact = largeArtifact,
+            NodeOutputPreviews = nodeOutputPreviews ?? Array.Empty<NodeOutputPreview>()
         };
     }
 }

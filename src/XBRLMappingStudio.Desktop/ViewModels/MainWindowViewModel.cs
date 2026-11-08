@@ -102,6 +102,24 @@ public sealed class FactRow : ViewModelBase
     public IReadOnlyList<PreviewEvidenceRow> Evidence { get; init; } = Array.Empty<PreviewEvidenceRow>();
 }
 
+/// <summary>Bounded execution counts and samples for one mapping node output port.</summary>
+public sealed class IntermediateOutputRow : ViewModelBase
+{
+    public string NodeId { get; init; } = "";
+    public string PortName { get; init; } = "";
+    public string Display { get; init; } = "";
+    public IReadOnlyList<IntermediateOutputSampleRow> Samples { get; init; }
+        = Array.Empty<IntermediateOutputSampleRow>();
+}
+
+/// <summary>A sampled node value with its bounded source contribution paths.</summary>
+public sealed class IntermediateOutputSampleRow : ViewModelBase
+{
+    public string Display { get; init; } = "";
+    public IReadOnlyList<PreviewEvidenceRow> Evidence { get; init; } = Array.Empty<PreviewEvidenceRow>();
+    public int OmittedContributorCount { get; init; }
+}
+
 /// <summary>A source location contributing to a generated fact.</summary>
 public sealed class PreviewEvidenceRow
 {
@@ -535,6 +553,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string _selectedFactPeriodSummary = "Select a fact to inspect its period mapping.";
     private string _selectedFactEntitySourceSummary = "Select a fact to inspect its entity source.";
     private string _previewResultSummary = "Run a preview or full execution to inspect generated facts and evidence.";
+    private string _intermediateOutputSummary = "Run a preview or full execution to inspect intermediate node values.";
     private LargeRunArtifact? _previewLargeArtifact;
     private IReadOnlyList<XbrlFact> _previewInMemoryFacts = Array.Empty<XbrlFact>();
     private IReadOnlyList<MappingNode> _previewMappingNodes = Array.Empty<MappingNode>();
@@ -545,6 +564,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private bool _isDisposed;
     private FactRow? _selectedPreviewFact;
     private PreviewEvidenceRow? _selectedPreviewEvidence;
+    private IntermediateOutputRow? _selectedIntermediateOutput;
+    private IntermediateOutputSampleRow? _selectedIntermediateSample;
+    private PreviewEvidenceRow? _selectedIntermediateEvidence;
     private PdfEvidenceRegion? _selectedPreviewPdfEvidence;
     private bool _isPdfReviewTabSelected;
     private readonly IProjectFileDialog? _fileDialog;
@@ -1084,6 +1106,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         get => _factPageSummary;
         private set => Set(ref _factPageSummary, value);
     }
+    public string IntermediateOutputSummary
+    {
+        get => _intermediateOutputSummary;
+        private set => Set(ref _intermediateOutputSummary, value);
+    }
     public bool CanPreviousFactPreviewPage => !IsBusy && _factPreviewPage > 0;
     public bool CanNextFactPreviewPage => !IsBusy
         && ((_factPreviewPage + 1) * FactPreviewPageSize) < _previewFactCount;
@@ -1100,6 +1127,33 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
     public bool HasSelectedPreviewFact => SelectedPreviewFact is not null;
+    public IntermediateOutputRow? SelectedIntermediateOutput
+    {
+        get => _selectedIntermediateOutput;
+        set
+        {
+            if (!Set(ref _selectedIntermediateOutput, value)) return;
+            SelectedIntermediateSample = value?.Samples.FirstOrDefault();
+            Raise(nameof(HasSelectedIntermediateOutput));
+        }
+    }
+    public bool HasSelectedIntermediateOutput => SelectedIntermediateOutput is not null;
+    public IntermediateOutputSampleRow? SelectedIntermediateSample
+    {
+        get => _selectedIntermediateSample;
+        set
+        {
+            if (!Set(ref _selectedIntermediateSample, value)) return;
+            SelectedIntermediateEvidence = value?.Evidence.FirstOrDefault();
+            Raise(nameof(HasSelectedIntermediateSample));
+        }
+    }
+    public bool HasSelectedIntermediateSample => SelectedIntermediateSample is not null;
+    public PreviewEvidenceRow? SelectedIntermediateEvidence
+    {
+        get => _selectedIntermediateEvidence;
+        set => Set(ref _selectedIntermediateEvidence, value);
+    }
     public PreviewEvidenceRow? SelectedPreviewEvidence
     {
         get => _selectedPreviewEvidence;
@@ -1452,6 +1506,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public ObservableCollection<SuggestionRow> FilteredAiSuggestions { get; } = new();
     public ObservableCollection<DiagnosticRow> Diagnostics { get; } = new();
     public ObservableCollection<FactRow> PreviewFacts { get; } = new();
+    public ObservableCollection<IntermediateOutputRow> IntermediateOutputs { get; } = new();
 
     public RelayCommand NewProjectCommand { get; }
     public RelayCommand OpenProjectCommand { get; }
@@ -6048,12 +6103,61 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         _previewSemanticDigest = Session.Project.ComputeSemanticDigest();
         _factPreviewPage = 0;
         LoadFactPreviewPage();
+        PopulateIntermediateOutputs(result);
         var provenanceStatus = FormatProvenanceStatus(result.Manifest.ProvenanceStatus);
         PreviewResultSummary = result.Manifest.IsPreview
             ? $"Preview only · {resultFactCount} sampled fact(s). "
                 + $"{result.SampledTotals.Count} sampled aggregate(s) are partial. This result is not a final report and cannot be published. {provenanceStatus}"
             : $"Full run · {resultFactCount} fact(s) · {errors} error(s), {warnings} warning(s). See Diagnostics for details. {provenanceStatus}";
         Raise(nameof(Diagnostics));
+    }
+
+    private void PopulateIntermediateOutputs(JobResult result)
+    {
+        var nodesById = _previewMappingNodes
+            .GroupBy(node => node.NodeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var namesById = nodesById.ToDictionary(pair => pair.Key, pair => pair.Value.DisplayName,
+            StringComparer.Ordinal);
+        var rows = result.NodeOutputPreviews.Select(output =>
+        {
+            var nodeName = nodesById.TryGetValue(output.NodeId, out var node)
+                ? node.DisplayName : output.NodeId;
+            var totalKind = output.IsPartial ? "partial sampled value(s)" : "value(s)";
+            var counts = $"{output.ValueCount} {totalKind} · {output.PresentCount} present · "
+                + $"{output.BlankCount} blank · {output.MissingCount} missing · {output.ExplicitNilCount} nil";
+            var samples = output.Samples.Select(sample => new IntermediateOutputSampleRow
+            {
+                Display = $"{sample.Label}: {sample.Value}"
+                    + (sample.Contributors.Count > 0
+                        ? $" · {sample.Contributors.Count} contributor(s)"
+                            + (sample.OmittedContributorCount > 0
+                                ? $" (+{sample.OmittedContributorCount} not shown)" : "")
+                        : " · no source contributor recorded"),
+                Evidence = sample.Contributors.Select(path => new PreviewEvidenceRow(
+                    path.Source, new[] { path }, transformationNames: namesById)).ToArray(),
+                OmittedContributorCount = sample.OmittedContributorCount
+            }).ToArray();
+            var sampleLabel = output.ValueCount > output.Samples.Count
+                ? $"Showing first {output.Samples.Count} of {output.ValueCount}."
+                : $"Showing {output.Samples.Count} value sample(s).";
+            return new IntermediateOutputRow
+            {
+                NodeId = output.NodeId,
+                PortName = output.PortName,
+                Display = $"{nodeName} · {output.PortName} · {counts} · {sampleLabel}",
+                Samples = samples
+            };
+        }).ToArray();
+
+        ReplaceItems(IntermediateOutputs, rows);
+        SelectedIntermediateOutput = rows.FirstOrDefault();
+        IntermediateOutputSummary = rows.Length == 0
+            ? "No intermediate node outputs were recorded for this result."
+            : result.Manifest.IsPreview
+                ? "Partial preview: only a bounded source sample was evaluated. "
+                    + "Counts and values below are partial; each port shows at most three samples."
+                : "Full run: output counts cover the complete execution. Each port shows at most three sample values.";
     }
 
     private void LoadFactPreviewPage()
@@ -6172,14 +6276,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         _previewFactCount = 0;
         _factPreviewPage = 0;
         PreviewFacts.Clear();
+        IntermediateOutputs.Clear();
         SelectedPreviewFact = null;
         SelectedPreviewEvidence = null;
+        SelectedIntermediateOutput = null;
+        SelectedIntermediateSample = null;
+        SelectedIntermediateEvidence = null;
         _selectedPreviewPdfEvidence = null;
         PreviewResultSummary = summary;
+        IntermediateOutputSummary = summary;
         FactPageSummary = "No fact results are available.";
         Diagnostics.Clear();
         Raise(nameof(SelectedPdfEvidence));
         Raise(nameof(PreviewFacts));
+        Raise(nameof(IntermediateOutputs));
         Raise(nameof(Diagnostics));
         RaiseFactPreviewPageState();
     }
