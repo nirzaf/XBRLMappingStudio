@@ -109,8 +109,8 @@ keyless retained publication, CLI capture/replay/retry, and approval refusal.
 
 Still open: desktop capture/replay controls; table-only extracts; automated
 retention/cleanup/encryption policy; multi-provider snapshots; process/power-loss
-capture qualification; and owner-authorized real IFRS/Qatar filing acceptance.
-This feature does not establish Q-Disclosure compatibility.
+capture qualification; and owner-authorized real-profile and jurisdiction-specific
+filing acceptance. This feature does not establish regulator compatibility.
 
 Local verification on 2026-11-08 after integration of the process-memory CI fix:
 Release solution build passed with zero warnings/errors. Ordinary solution tests

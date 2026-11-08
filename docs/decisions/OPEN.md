@@ -17,14 +17,6 @@ certification.
   application entry point only when a profile explicitly declares early
   adoption. See the [official 2025 taxonomy page](https://www.ifrs.org/issued-standards/ifrs-taxonomy/ifrs-accounting-taxonomy-2025/)
   and [2026 current-version guidance](https://www.ifrs.org/news-and-events/news/2026/02/ifrs-accounting-taxonomy-2025-to-remain-current-for-2026/).
-- **First jurisdiction priority:** Qatar, initially general non-financial listed
-  companies, before banking and insurance. Use IFRS Accounting Taxonomy 2025 as
-  the technical foundation for mapping and reporting preparation. This is not
-  Q-Disclosure certification or evidence that the base IFRS entry point is accepted
-  by Qatar. The official QSE sector split distinguishes **Other** (Consumer,
-  Industrials, Telecoms and Transportation) from **Real Estate**; the initial
-  customer/sector template must therefore be confirmed rather than treating all
-  non-financial companies as one official taxonomy category.
 - **Approval rule:** Require a recorded human approval for the current semantic
   revision, graph digest, and taxonomy profile digest. Material graph or profile
   changes invalidate that approval. Production publication requires successful
@@ -47,19 +39,23 @@ guide. The selected priorities above do not close these gates.
 - **Blocks:** XBR09, EXT01–04 (conditional), UI07 (installer targets a specific
   regulator packaging contract).
 - **Selected scope:** IFRS-based standards mapping and validation is the first
-  implementation target, with Qatar/QFMA/QSE Q-Disclosure the first jurisdiction
-  priority; no regulator submission certification is claimed.
-- **Still open:** Identify the first customer and precise QSE sector template,
-  obtain the authorized current Qatar taxonomy, authoritative business/validation
-  rules and submission package contract, then qualify representative filings.
-  Jurisdiction selection does not authorize guessing the technical package or rules.
+  implementation target; no jurisdiction-specific filing profile or regulator
+  submission certification has been selected.
+- **Still open:** Confirm a named customer or filing authority, jurisdiction,
+  authoritative filing rules, and required submission package before implementing
+  jurisdiction-specific filing compliance.
 - **Rationale:** Taxonomy rights, packaging format, iXBRL requirement, and
   extension-taxonomy rules each depend on the regulator. The selected IFRS
-  baseline alone does not establish Qatar's local filing contract.
+  baseline does not establish any local filing contract.
 
-### Qatar source evidence and remaining technical inputs
+### Unselected public-source research example
 
-Verified against public official sources on 2026-11-08:
+The owner has not selected Qatar/Q-Disclosure as a product or compliance target.
+The following public-source notes are research only; they do not authorize
+Qatar-specific functionality or a compliance claim. Reconfirm them if a customer
+or filing authority is later selected.
+
+Sources reviewed on 2026-11-08:
 
 - [QSE Q-Disclosure](https://www.qe.com.qa/q-disclosure) describes a joint QSE/QFMA
   initiative, mandatory for listed companies since 1 October 2020. It lists

@@ -6,14 +6,13 @@ certificate. An implemented contract or passing synthetic fixture does not close
 the real-taxonomy, installed-Windows, identity-enrollment or customer-data gates.
 
 The owner's subsequent decision selects IFRS Accounting Taxonomy 2025 for
-standards-based mapping and validation. The priorities and unresolved rights are
-recorded in [OPEN.md](decisions/OPEN.md), preserved from upstream `4a6ab3b`.
-Qatar/QFMA/QSE Q-Disclosure is subsequently selected as the first jurisdiction
-priority for general non-financial listed companies. Its exact sector package,
-current rules and acceptance remain unverified; base IFRS output must not be
-described as Q-Disclosure compliant. Local evaluation is conditional on the applicable terms; no taxonomy
-bundling, redistribution or commercial distribution is authorized without
-documented rights. Synthetic fixtures and production fail-closed gates remain.
+standards-based mapping and validation. No jurisdiction-specific filing profile
+or compliance target has been selected; public Qatar/QFMA/QSE Q-Disclosure sources
+are retained only as unselected research notes in [OPEN.md](decisions/OPEN.md).
+They do not authorize Qatar-specific functionality or compliance claims. Local
+evaluation is conditional on applicable terms; no taxonomy bundling,
+redistribution or commercial distribution is authorized without documented
+rights. Synthetic fixtures and production fail-closed gates remain.
 
 ## Delivered in this increment
 
@@ -70,7 +69,7 @@ cancellation runs. Later changes require their own CI evidence. Additional check
 - Synthetic taxonomy/graph performance fixture self-test passed. This is not
   target-hardware latency acceptance.
 
-## CSV and Qatar follow-on
+## CSV and jurisdiction follow-on
 
 The [bounded CSV execution contract](csv-streaming-execution.md) adds streaming
 schema/sample/full reads with per-record/file limits and cancellation, preserves
@@ -101,10 +100,10 @@ passed on `8092a8ec5394f06d38d9a5613f8e480bbabf5166`: Windows, Ubuntu, pinned
 Arelle and repository hygiene passed, including both fresh-process memory cases
 on each OS and all five Windows worker-cancellation repeats.
 
-Qatar-first priorities and current public official-source evidence are recorded in
-[OPEN.md](decisions/OPEN.md). No Qatar technical package, filing-rule catalogue,
-license grant, or Q-Disclosure acceptance is invented. The generic CSV work does
-not enable a production taxonomy or change publication authorization.
+Unselected public-source research notes are recorded in [OPEN.md](decisions/OPEN.md).
+No jurisdiction-specific technical package, filing-rule catalogue, license grant,
+or regulator acceptance is inferred. The generic CSV work does not enable a
+production taxonomy or change publication authorization.
 
 ## Explicit dimensional follow-on
 
@@ -177,7 +176,7 @@ or represent these rows as completed to make a release appear ready.
 | Audit ID | Remaining acceptance |
 |---|---|
 | P0-01 | Resolved on `2eb33eb` by exact-commit Windows/Ubuntu/Arelle CI, including repeated Windows cancellation. Later increments must retain these gates. |
-| P0-02 | IFRS Accounting Taxonomy 2025 is selected for standards mapping/validation, with Qatar the first jurisdiction priority. Applicable evaluation rights, exact IFRS/Qatar artifacts and hashes, dependency closure, offline resolution and permitted financial fixtures remain open. Q-Disclosure compliance is unverified. |
+| P0-02 | IFRS Accounting Taxonomy 2025 is selected for standards mapping/validation only. Jurisdiction-specific filing compliance remains open. Applicable evaluation rights, exact authorized IFRS artifacts and hashes, dependency closure, offline resolution and permitted financial fixtures remain open. No regulator compatibility is claimed. |
 | P0-03 | Real-profile mandatory rule/plugin completion evidence. Existing synthetic evidence and missing-check refusal do not qualify a real authority. |
 | P0-04 | Authorized reviewer enrollment/revocation, protected host trust configuration, external signing workflow and CLI/Desktop deployment integration. The application API contract is implemented; production identity governance is not. |
 | P0-05 | Clean Windows installer, native/Python dependencies, signing, license clearance and installed upgrade/backup/rollback proof. |
