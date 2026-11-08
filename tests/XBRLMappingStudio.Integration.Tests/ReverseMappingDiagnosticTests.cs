@@ -1,11 +1,13 @@
+using System.Text.Json;
+using System.Xml.Linq;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Fixtures;
+using XBRLMappingStudio.Project;
 using XBRLMappingStudio.Worker;
 using XBRLMappingStudio.XBRL;
-using System.Text.Json;
 
 namespace XBRLMappingStudio.Integration.Tests;
 
@@ -135,6 +137,165 @@ public sealed class ReverseMappingDiagnosticTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("json", "json-records-v1", "reverse-records.json")]
+    [InlineData("xml", "xml-records-v1", "reverse-records.xml")]
+    public async Task RunAsync_PublishesFilteredRepeatedReportOccurrencesWithSourceLocators(
+        string kind, string format, string fileName)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-output-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            var priorPeriod = XbrlPeriod.OfDuration(new DateOnly(2024, 1, 1), new DateOnly(2025, 1, 1));
+            XbrlFact SourceFact(decimal value, XbrlPeriod factPeriod, string unit) => new()
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "http://xbrl.org/entity/",
+                EntityIdentifier = "ABC123",
+                Period = factPeriod,
+                Unit = new XbrlUnit(unit),
+                Value = value,
+                Decimals = -3
+            };
+            var sourceFacts = new[]
+            {
+                SourceFact(100m, period, "QAR"),
+                SourceFact(100m, period, "QAR"),
+                SourceFact(300m, priorPeriod, "QAR"),
+                SourceFact(500m, period, "USD")
+            };
+            var reportPath = Path.Combine(directory, "input.json");
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, sourceFacts));
+            var expectedLocators = OimSerializer.ReadFacts(await File.ReadAllTextAsync(reportPath))
+                .Select((fact, index) => (fact, index))
+                .Where(item => item.fact.ConceptName == SyntheticProfile.Qualified("Revenue")
+                    && item.fact.Period.ToIsoString() == period.ToIsoString()
+                    && item.fact.Unit?.ToString() == "QAR")
+                .Select(item => $"report#f{item.index + 1}")
+                .ToArray();
+            Assert.Equal(2, expectedLocators.Length);
+
+            var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+            project.Destination = new DestinationPlan
+            {
+                Kind = kind,
+                Locator = fileName,
+                Table = string.Empty,
+                BusinessKey = new List<string>(),
+                Format = format,
+                WriteMode = "replace"
+            };
+            var binding = Assert.Single(project.Bindings);
+            var configuration = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["concept"] = SyntheticProfile.Qualified("Revenue"),
+                ["period"] = period.ToIsoString(),
+                ["unit"] = "QAR"
+            };
+            project.Bindings[0] = binding with
+            {
+                Kind = "xbrl-report",
+                Locator = Path.GetFileName(reportPath),
+                Configuration = configuration,
+                SchemaFingerprint = null
+            };
+            var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var field = project.Nodes[fieldIndex];
+            var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+            {
+                ["column"] = "value"
+            };
+            parameters.Remove("rowFilterColumn");
+            parameters.Remove("rowFilterValue");
+            project.Nodes[fieldIndex] = field with { Parameters = parameters };
+            project.Approvals.Add(new ApprovalRecord
+            {
+                SemanticRevision = project.SemanticRevision,
+                SemanticDigest = project.ComputeSemanticDigest(),
+                ApprovedBy = "reverse-mapping-fixture-reviewer",
+                ApprovedUtc = DateTimeOffset.UtcNow,
+                ProfileDigest = profile.Digest
+            });
+
+            var service = new MappingJobService(profile, new SuccessfulWorker());
+            var result = await service.RunAsync(project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, "xbrl-report", reportPath,
+                        configuration.ToDictionary(pair => pair.Key, pair => pair.Value!.ToString()!, StringComparer.Ordinal))
+                },
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+
+            Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
+            Assert.True(result.IsPublishable, string.Join(Environment.NewLine, result.Diagnostics.Items.Select(item => item.Message)));
+            Assert.Equal(2, result.Facts.Count);
+            Assert.All(result.Facts, fact => Assert.Equal(100_000m, fact.Value));
+            Assert.Equal(expectedLocators, result.Facts.Select(fact => Assert.Single(fact.ContributingSources).Locator));
+            var warning = Assert.Single(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail);
+            Assert.False(warning.IsBlocking);
+            Assert.Equal("source-detail-not-present-in-report", warning.Details!["limitation"]);
+
+            var output = await service.PublishFileDestinationAsync(project, result, directory,
+                allowSyntheticProfile: true, CancellationToken.None);
+            Assert.True(File.Exists(output.Path));
+            Assert.Contains(result.Manifest.Outputs, item => item.Path == output.Path && item.Digest == output.Digest);
+            IReadOnlyList<string> locators;
+            if (kind == "json")
+            {
+                using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(output.Path));
+                var records = document.RootElement.EnumerateArray().ToArray();
+                Assert.Equal(2, records.Length);
+                Assert.All(records, record =>
+                {
+                    Assert.Equal("synthetic:Revenue", record.GetProperty("concept").GetString());
+                    Assert.Equal("ABC-Corp", record.GetProperty("entity_identifier").GetString());
+                    Assert.Equal("2025-01-01", record.GetProperty("period_start").GetString());
+                    Assert.Equal("2026-01-01", record.GetProperty("period_end").GetString());
+                    Assert.Equal("QAR", record.GetProperty("unit").GetString());
+                    Assert.Equal(100_000m, record.GetProperty("value").GetDecimal());
+                });
+                locators = records.SelectMany(ReadRecordLocators).ToArray();
+            }
+            else
+            {
+                var document = XDocument.Load(output.Path);
+                var records = document.Root!.Elements().ToArray();
+                Assert.Equal(2, records.Length);
+                Assert.All(records, record =>
+                {
+                    Assert.Equal("synthetic:Revenue", record.Elements().Single(element => element.Name.LocalName == "concept").Value);
+                    Assert.Equal("ABC-Corp", record.Elements().Single(element => element.Name.LocalName == "entity_identifier").Value);
+                    Assert.Equal("2025-01-01", record.Elements().Single(element => element.Name.LocalName == "period_start").Value);
+                    Assert.Equal("2026-01-01", record.Elements().Single(element => element.Name.LocalName == "period_end").Value);
+                    Assert.Equal("QAR", record.Elements().Single(element => element.Name.LocalName == "unit").Value);
+                    Assert.Equal("100000", record.Elements().Single(element => element.Name.LocalName == "value").Value);
+                });
+                locators = records.SelectMany(record => ReadJsonLocators(
+                    record.Elements().Single(element => element.Name.LocalName == "provenance_json").Value)).ToArray();
+            }
+            Assert.Equal(expectedLocators.Order(StringComparer.Ordinal), locators.Order(StringComparer.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        static IEnumerable<string> ReadRecordLocators(JsonElement record)
+            => ReadJsonLocators(record.GetProperty("provenance_json").GetString()!);
+
+        static IEnumerable<string> ReadJsonLocators(string json)
+        {
+            using var provenance = JsonDocument.Parse(json);
+            return provenance.RootElement.EnumerateArray()
+                .Select(item => item.GetProperty("Locator").GetString()!)
+                .ToArray();
         }
     }
 

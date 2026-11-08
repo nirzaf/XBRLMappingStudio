@@ -171,6 +171,15 @@ memory workloads passed in separate test hosts, each verified to execute exactly
 one test. Enabled Arelle passed 15/15, Python worker tests 82/82, operational tools
 15/15, and the taxonomy benchmark self-test passed. The bundled SQLite 3.54 already
 rejects malformed appended-schema payloads; explicit admission-parser tests also
-exercise the defense independently of that native rejection. These are local
-Linux results, not hosted Windows CI or release qualification. Coordinated
-integration and exact-commit Windows/Linux CI remain required.
+exercise the defense independently of that native rejection. Those were cloud
+worker results and were independently reviewed before the exact commit
+`adc16778cbad862d19f84e8ea83a2be31999e3db` was cherry-picked onto `main` as
+`e3c526a06e3838200b0e0f3d7c5b378755eb539c`. Windows Release verification on that
+integrated head passed 66 integrity/intent tests, 15 existing snapshot-store tests
+and all 3 table-snapshot integration cases, including the isolated 100,000-row
+memory case. Exact-head GitHub Actions [42481277509](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42481277509)
+passed all four jobs: repository hygiene, pinned Arelle integration, Ubuntu and
+Windows. This is implementation verification, not release qualification. Native
+desktop acceptance, process/power-loss capture qualification, retention governance,
+multi-provider snapshots, and owner-authorized real-profile/regulator acceptance
+remain open.
