@@ -2913,7 +2913,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 SourceInspectionSummary = $"Source mapping mismatch for {sourceName}: the schema fingerprint is unchanged, "
                     + $"but mapped source field(s) are missing: {string.Join(", ", missingMappings)}. "
-                    + "Rebind each affected Excel Field node before preview or execution.";
+                    + "Rebind each affected source-field node before preview or execution.";
                 StatusText = $"Source field mappings are incomplete for {sourceName}. Preview and execution are blocked until they are rebound.";
             }
             else
@@ -3799,7 +3799,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                     schema.Columns.Select(column => column.Name));
                 SourceInspectionSummary = $"Source mapping mismatch for {binding.DisplayName ?? binding.Kind}: "
                     + $"mapped source field(s) are missing: {string.Join(", ", missingMappings)}. "
-                    + "Rebind each affected Excel Field node before preview or execution.";
+                    + "Rebind each affected source-field node before preview or execution.";
                 StatusText = $"Source field mappings are incomplete for {binding.DisplayName ?? binding.Kind}. Preview and execution are blocked until they are rebound.";
             }
             else
@@ -4705,9 +4705,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private void BindSelectedSourceColumn()
     {
         if (SelectedSourceColumn is null || SelectedNode is null)
-        { StatusText = "Select a source field and an Excel Field node first."; return; }
+        { StatusText = "Select a source field and a source-field node first."; return; }
         if (SelectedNode.NodeType != NodeTypeConstants.ExcelField)
-        { StatusText = "The selected node is not an Excel Field node."; return; }
+        { StatusText = "The selected node is not a source-field node."; return; }
         Session.SetNodeParameter(SelectedNode.NodeId, "column", SelectedSourceColumn);
         SelectedNode = Session.Nodes.FirstOrDefault(n => n.NodeId == SelectedNode.NodeId);
         RefreshUnresolvedSourceFieldMappings();

@@ -107,7 +107,7 @@
           <TextBlock DockPanel.Dock="Top" Text="{Binding SourceInspectionSummary}"
                      TextWrapping="Wrap" MaxHeight="120" Margin="0,4,0,8"
                      AutomationProperties.Name="Source schema and capabilities" />
-          <Button DockPanel.Dock="Top" Content="Bind field to selected Excel Field node"
+          <Button DockPanel.Dock="Top" Content="Bind field to selected source-field node"
                   Command="{Binding BindSourceColumnCommand}" />
           <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4">
             <Button Content="Suggest selected" Command="{Binding SuggestMappingsCommand}"

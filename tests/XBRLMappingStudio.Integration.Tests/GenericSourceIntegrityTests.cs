@@ -24,6 +24,29 @@ public sealed class GenericSourceIntegrityTests
     private const string Field = "financial.amount";
     private static readonly FilingProfile Profile = SyntheticProfile.Build();
 
+    [Fact]
+    public async Task MissingMappedJsonField_BlocksBeforeWorkerValidation()
+    {
+        using var workspace = new Workspace();
+        var sourcePath = workspace.PathFor("source.json");
+        await File.WriteAllTextAsync(sourcePath, Document("json", "123.45"));
+        var project = BuildProject("json", sourcePath);
+        project.Nodes.Single(node => node.NodeType == NodeTypeConstants.ExcelField)
+            .Parameters["column"] = "financial.otherAmount";
+        var connection = Connection(project);
+
+        await using var worker = new CountingSyntheticWorker();
+        var service = new MappingJobService(Profile, worker);
+        using var result = await Run(service, project, preview: false);
+
+        Assert.Equal(RunOutcome.DataError, result.Manifest.Outcome);
+        Assert.Contains(result.Diagnostics.Items,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoSchemaMismatch
+                && diagnostic.Message.Contains("financial.otherAmount", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+        Assert.Equal(0, worker.ReportValidationCount);
+    }
+
     public static IEnumerable<object[]> ExactNumbers()
     {
         // Expected values are hand-authored, independent of the adapter or XBRL reader.

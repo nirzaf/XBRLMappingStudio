@@ -253,4 +253,11 @@ This covers the `ExcelField` source-node contract only; other source-reader
 constructs, customer workbook qualification, licensed IFRS data, regulator
 acceptance, and native accessibility remain open.
 
+Cross-format source-binding follow-up (2026-11-08): the shared node is also used
+by CSV, JSON, XML and SQLite mappings, so the desktop rebind guidance and action
+now say “source-field node” instead of implying Excel-only use. A JSON fixture
+with a missing mapped field blocks before worker validation and emits no facts;
+the focused Integration and Desktop Release tests passed 1/1 each. Other
+source-reader constructs and installed-profile qualification remain open.
+
 Local DST-04 native Windows re-observation (2026-11-08): After the user unlocked the desktop, the current Release app displayed the expected missing `Revenue` source-column diagnostic and kept Preview/Execute disabled. Opening Destination > Choose SQLite database showed no selectable database in the fixture directory; Cancel closed the picker, left the destination unset, and caused no project or destination write. This confirms the current picker-cancel state only. The loaded `sample-main` project is not a valid full-run fixture because its source mapping is stale and its synthetic profile still requires explicit opt-in; prior disposable-fixture round-trip, approval-denial, cancel, and stale-target evidence remains the applicable DST-04 verification.

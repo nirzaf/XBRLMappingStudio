@@ -2432,6 +2432,7 @@ public sealed class DesignerSessionTests
             Assert.False(viewModel.PreviewCommand.CanExecute(null));
             Assert.False(viewModel.ExecuteCommand.CanExecute(null));
             Assert.Contains("Revenue source field.column='Revenue'", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("Rebind each affected source-field node", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
 
             viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-value");
             viewModel.SelectedSourceColumn = "Current";
@@ -2648,7 +2649,7 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
-    public async Task SourceSchemaRecheck_BlocksMissingMappedFieldUntilExcelFieldIsRebound()
+    public async Task SourceSchemaRecheck_BlocksMissingMappedFieldUntilSourceFieldIsRebound()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-source-column-recheck", Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(dir);
@@ -2668,6 +2669,7 @@ public sealed class DesignerSessionTests
             Assert.False(viewModel.PreviewCommand.CanExecute(null));
             Assert.False(viewModel.ExecuteCommand.CanExecute(null));
             Assert.Contains("Revenue source field.column='Revenue'", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            Assert.Contains("Rebind each affected source-field node", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
 
             await viewModel.RevalidateSourceSchemaAsync();
 
