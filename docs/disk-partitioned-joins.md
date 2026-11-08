@@ -82,4 +82,5 @@ CSV rows per side, joins 10,000 interleaved keys into 250,000 rows, and emits
 independent oracle and asserts less than 64 MiB retained managed-heap variation.
 CI runs it in a fresh host on Windows and Linux. This is component evidence;
 Arelle process-tree memory, native allocation peaks, within-key spill, durable
-recovery and real IFRS/Qatar qualification remain separate open gates.
+recovery, real IFRS qualification and jurisdiction-specific acceptance remain
+separate open gates.
