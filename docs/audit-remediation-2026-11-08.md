@@ -213,3 +213,16 @@ or represent these rows as completed to make a release appear ready.
 Selected priorities and unresolved decisions remain in [OPEN.md](decisions/OPEN.md). The original architecture
 guide remains unchanged. No real profile is enabled, model credentials enrolled,
 release deployed or regulatory sign-off inferred by this increment.
+
+## Latest pushed implementation evidence
+
+The direct `main` update `2a0c15e2a62c0bdc35b6b96ebdff4c4012682815` preserves
+missing XBRL decimals on text facts during reverse mapping; its regression also
+confirms numeric facts retain the `INF` default and unit. Exact-head CI
+[42500204886](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42500204886)
+passed repository hygiene, Windows and Ubuntu Release builds/tests, and pinned
+Arelle integration. Each OS passed 1,753 tests with 6 environment-gated Arelle
+subprocess skips. The source-integrity and reverse-mapping focused selections
+passed locally (122 adapter tests and 63 integration tests). The untracked
+acceptance fixture was not included. These results do not close the owner-gated
+real-taxonomy, redistribution-rights, jurisdiction, or native acceptance items.
