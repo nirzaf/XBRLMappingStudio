@@ -103,6 +103,26 @@ public sealed class MappingJobService
         return CompileOutcome.Ok(result.Plan, graph, diag);
     }
 
+    internal static void AddReverseMappingLossWarning(
+        DiagnosticBag diagnostics,
+        SourceConnection connection,
+        string operationId)
+    {
+        if (!StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "xbrl-report")) return;
+
+        diagnostics.Warn(
+            DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail,
+            DiagnosticSubsystem.Adapter,
+            DiagnosticStage.Introspection,
+            "An XBRL report source exposes reported fact occurrences, not the original transaction rows. Reverse mapping cannot reconstruct source detail absent from the report; review the selected facts and occurrence-level provenance.",
+            source: new SourceReference(connection.SourceId, "fact-occurrences"),
+            operationId: operationId,
+            details: new Dictionary<string, string>
+            {
+                ["limitation"] = "source-detail-not-present-in-report"
+            });
+    }
+
     private static JobResult PreflightFailure(
         RunManifest manifest,
         RunOutcome outcome,
@@ -417,6 +437,8 @@ public sealed class MappingJobService
                 manifest.Diagnostics = context.Diagnostics.Items;
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
+
+            AddReverseMappingLossWarning(context.Diagnostics, conn, opId);
 
             try
             {
