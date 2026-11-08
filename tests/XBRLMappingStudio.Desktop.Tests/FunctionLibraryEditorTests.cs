@@ -25,6 +25,28 @@ public sealed class FunctionLibraryEditorTests
         };
     }
 
+    [Fact]
+    public void PinTypedFunctionCopiesPinnedRevisionSignature()
+    {
+        var project = Project();
+        var definition = new FunctionDefinition
+        {
+            FunctionId = "typed", Name = "Typed", CatalogVersion = FunctionCatalog.Default.Version,
+            Inputs = new() { new("text", PortShape.String, PortCardinality.Single), new("items", PortShape.Record, PortCardinality.Collection) },
+            Outputs = new() { new("label", PortShape.String, PortCardinality.Single), new("ok", PortShape.Boolean, PortCardinality.Single) }
+        };
+        project.Functions.Add(definition);
+        var session = new DesignerSession(project);
+        var editor = new FunctionLibraryEditorViewModel(() => session);
+        editor.SelectedFunction = Assert.Single(editor.Functions);
+        editor.PinSelectedFunctionCommand.Execute(null);
+        var call = Assert.Single(session.Project.Nodes, node => node.NodeType == NodeTypeConstants.FunctionCall);
+        Assert.Equal(definition.Inputs, call.InputPorts);
+        Assert.Equal(definition.Outputs, call.OutputPorts);
+        Assert.NotSame(definition.Inputs, call.InputPorts);
+        Assert.NotSame(definition.Outputs, call.OutputPorts);
+    }
+
     [AvaloniaFact]
     public async Task FunctionAuthoringWindowSupportsDraftUndoRedoPreviewSaveAndPin()
     {

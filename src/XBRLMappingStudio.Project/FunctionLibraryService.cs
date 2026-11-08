@@ -31,6 +31,7 @@ public static class FunctionLibraryService
                 + $"'{definition.CatalogVersion}', which does not match project catalog "
                 + $"'{project.FunctionCatalogVersion}'.");
 
+        FunctionSignatures.Validate(definition);
         var firstRevision = definition with
         {
             Inputs = definition.Inputs.ToList(),
@@ -90,6 +91,7 @@ public static class FunctionLibraryService
             Nodes = nodes.Select(node => node.ShallowCopy()).ToList(),
             Edges = edges.Select(edge => edge with { }).ToList()
         };
+        FunctionSignatures.Validate(next);
         return CopyProject(project, project.Functions.Append(next).ToList());
     }
 
@@ -122,6 +124,7 @@ public static class FunctionLibraryService
         var packageByKey = new Dictionary<(string FunctionId, int Revision), FunctionDefinition>();
         foreach (var definition in definitions)
         {
+            FunctionSignatures.Validate(definition);
             if (string.IsNullOrWhiteSpace(definition.FunctionId) || definition.Revision < 1
                 || !packageByKey.TryAdd((definition.FunctionId, definition.Revision), definition))
                 throw new InvalidOperationException("Function package contains an invalid or duplicate revision.");

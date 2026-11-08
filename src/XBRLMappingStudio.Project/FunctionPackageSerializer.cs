@@ -71,6 +71,7 @@ public static class FunctionPackageSerializer
                 || !revisions.Add((function.FunctionId, function.Revision)))
                 throw new InvalidOperationException("Function package contains an invalid or duplicate revision.");
 
+            FunctionSignatures.Validate(function);
             ValidatePorts(function.Inputs);
             ValidatePorts(function.Outputs);
             var nodeIds = new HashSet<string>(StringComparer.Ordinal);

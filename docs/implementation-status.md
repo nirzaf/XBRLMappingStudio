@@ -10,6 +10,11 @@ verification are recorded in [`verification-baseline-2026-11-04.md`](verificatio
 imply regulator acceptance, production qualification, or a complete end-to-end feature
 where explicitly narrowed below.
 
+The [November 8 audit remediation ledger](audit-remediation-2026-11-08.md) records the
+latest typed-function, numeric-policy, signed-approval and CLI increments. These
+supersede narrower historical scope statements below only where explicitly stated.
+The product remains unqualified for real regulatory filing and customer distribution.
+
 | Guide IDs | Status | Evidence and limitation |
 |---|---|---|
 | BASE01 | Partially implemented | `docs/decisions/BASE01-decision-record.md`; external source-data rights remain open. |

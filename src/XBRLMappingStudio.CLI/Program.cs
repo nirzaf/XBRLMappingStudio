@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Sqlite;
 using Microsoft.Data.Sqlite;
@@ -26,24 +26,27 @@ if (args.Length == 0)
 var command = args[0];
 var rest = args.Skip(1).ToArray();
 
-return command switch
+return await XBRLMappingStudio.CLI.CliLifetime.RunAsync(async cancellationToken =>
 {
-    "inspect" => Inspect(rest),
-    "inspect-source" => await InspectSourceAsync(rest),
-    "validate" => await ValidateAsync(rest),
-    "migrate-project-profile" => MigrateProjectProfile(rest),
-    "configure-destination" => ConfigureDestination(rest),
-    "taxonomy-search" => TaxonomySearch(rest),
-    "install-profile" => await InstallProfileAsync(rest),
-    "validate-artifact" => await ValidateArtifactAsync(rest),
-    "inspect-run-result" => InspectRunResult(rest),
-    "reconcile-publication" => await ReconcilePublicationAsync(rest),
-    "support-bundle" => SupportBundleCommand(rest),
-    "execute" => await ExecuteAsync(rest, preview: false),
-    "preview" => await ExecuteAsync(rest, preview: true),
-    "--help" or "-h" or "help" => PrintUsage(),
-    _ => Unknown(command)
-};
+    return command switch
+    {
+        "inspect" => Inspect(rest),
+        "inspect-source" => await InspectSourceAsync(rest, cancellationToken),
+        "validate" => await ValidateAsync(rest),
+        "migrate-project-profile" => MigrateProjectProfile(rest),
+        "configure-destination" => ConfigureDestination(rest),
+        "taxonomy-search" => TaxonomySearch(rest),
+        "install-profile" => await InstallProfileAsync(rest, cancellationToken),
+        "validate-artifact" => await ValidateArtifactAsync(rest, cancellationToken),
+        "inspect-run-result" => InspectRunResult(rest),
+        "reconcile-publication" => await ReconcilePublicationAsync(rest, cancellationToken),
+        "support-bundle" => SupportBundleCommand(rest),
+        "execute" => await ExecuteAsync(rest, preview: false, cancellationToken),
+        "preview" => await ExecuteAsync(rest, preview: true, cancellationToken),
+        "--help" or "-h" or "help" => PrintUsage(),
+        _ => Unknown(command)
+    };
+});
 
 static int Unknown(string cmd)
 {
@@ -65,6 +68,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("                       [--output-format xbrl-json|xbrl-xml] (default: xbrl-json)");
+    Console.Error.WriteLine("                       [--manifest <path>] (completed run metadata; early failures may have no manifest)");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("                       Combined --output and --publish-destination requires a saved SQLite plan; reconcile partial results by mixed operation key.");
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
@@ -175,7 +179,7 @@ static int MigrateProjectProfile(string[] args)
     }
 }
 
-static async Task<int> InstallProfileAsync(string[] args)
+static async Task<int> InstallProfileAsync(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0)
     {
@@ -210,7 +214,7 @@ static async Task<int> InstallProfileAsync(string[] args)
     try
     {
         var installed = await InstalledFilingProfileCatalog.InstallAsync(
-            args[0], catalogDirectory ?? InstalledFilingProfileCatalog.DefaultDirectory);
+            args[0], catalogDirectory ?? InstalledFilingProfileCatalog.DefaultDirectory, cancellationToken);
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             installed.Profile.ProfileId,
@@ -230,6 +234,7 @@ static async Task<int> InstallProfileAsync(string[] args)
     }
     catch (OperationCanceledException)
     {
+        Console.Error.WriteLine("CLI_CANCELLED: Operation cancelled; inspect publication receipts before retrying.");
         return ExitCodesLocal.Cancelled;
     }
     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
@@ -295,7 +300,7 @@ static int TaxonomySearch(string[] args)
 
 // OPS01 completeness: validate the exact bytes of an exported artifact against the
 // baseline filing rules, independent of any project state.
-static async Task<int> ValidateArtifactAsync(string[] args)
+static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length < 1) { Console.Error.WriteLine("validate-artifact requires <file>"); return ExitCodesLocal.IncompleteProfile; }
 
@@ -348,7 +353,7 @@ static async Task<int> ValidateArtifactAsync(string[] args)
         {
             await using var worker = new BoundedWorkerClient(() =>
                 new ArelleWorker(python ?? (OperatingSystem.IsWindows() ? "python" : "python3"), workerArgs.ToArray()));
-            var handshake = await worker.HandshakeAsync(CancellationToken.None);
+            var handshake = await worker.HandshakeAsync(cancellationToken);
             if (!handshake.Capabilities.Contains(WorkerOperations.ValidateReport, StringComparer.Ordinal))
             {
                 Console.Error.WriteLine("Arelle worker does not support report validation.");
@@ -370,7 +375,9 @@ static async Task<int> ValidateArtifactAsync(string[] args)
                     syntheticProfile.RequiredChecks.Order(StringComparer.Ordinal).ToArray(),
                     Array.Empty<string>())
             };
-            var response = await worker.RequestAsync(request, CancellationToken.None);
+            var response = await worker.RequestAsync(request, cancellationToken);
+            if (response.Status == WorkerStatus.Cancelled)
+                throw new OperationCanceledException("Worker validation cancelled.", cancellationToken);
             var localFacts = OimSerializer.ReadFacts(reportText, syntheticProfile);
             var completion = ValidationCompletionReportValidator.Evaluate(
                 response.Result, syntheticProfile, localFacts);
@@ -395,6 +402,11 @@ static async Task<int> ValidateArtifactAsync(string[] args)
                 _ => ExitCodesLocal.OperationalFailure
             };
         }
+        catch (WorkerStartupException ex) when (ex.Status == WorkerStatus.Cancelled)
+        {
+            throw new OperationCanceledException("Worker handshake cancelled.", ex, cancellationToken);
+        }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Arelle validation could not start or complete: {ex.Message}");
@@ -461,7 +473,7 @@ static int InspectRunResult(string[] args)
     return ExitCodesLocal.Success;
 }
 
-static async Task<int> ReconcilePublicationAsync(string[] args)
+static async Task<int> ReconcilePublicationAsync(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
     {
@@ -473,7 +485,7 @@ static async Task<int> ReconcilePublicationAsync(string[] args)
     {
         var coordinator = new MixedPublicationCoordinator(
             new MixedPublicationStore(new LocalApplicationDatabase()));
-        var record = await coordinator.ReconcileAsync(args[0]);
+        var record = await coordinator.ReconcileAsync(args[0], cancellationToken);
         if (record is null)
         {
             Console.Error.WriteLine($"No mixed publication record for '{args[0]}'.");
@@ -571,7 +583,7 @@ static int Inspect(string[] args)
     return ExitCodesLocal.Success;
 }
 
-static async Task<int> InspectSourceAsync(string[] args)
+static async Task<int> InspectSourceAsync(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length < 1)
     {
@@ -623,7 +635,7 @@ static async Task<int> InspectSourceAsync(string[] args)
             pair => pair.Key, pair => pair.Value?.ToString() ?? string.Empty, StringComparer.Ordinal);
         var connection = new SourceConnection(selected.BindingId, selected.Kind, sourcePath, configuration);
         var adapter = new SqliteSourceAdapter();
-        var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+        var schema = await adapter.InspectSchemaAsync(connection, cancellationToken);
         var descriptor = SqliteSourceAdapter.Describe(connection, schema);
         var output = new
         {
@@ -850,7 +862,7 @@ static async Task<int> ValidateAsync(string[] args)
     }
 }
 
-static async Task<int> ExecuteAsync(string[] args, bool preview)
+static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationToken cancellationToken)
 {
     if (args.Length < 1) { Console.Error.WriteLine("requires <project>"); return ExitCodesLocal.IncompleteProfile; }
     var projectPath = args[0];
@@ -1125,10 +1137,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
         }
         await using var workerLifetime = worker;
         var service = new MappingJobService(profile, worker);
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-        using var result = await service.RunAsync(p, conns, parameters, preview, cts.Token,
+        using var result = await service.RunAsync(p, conns, parameters, preview, cancellationToken,
             outputKind: outputFormat);
         PrintDiagnostics(result.Diagnostics.Items);
         var selectedOutputKind = outputFormat;
@@ -1239,7 +1249,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                                     refuseDifferentExisting: true, outputKind: selectedOutputKind),
                             (onIntentPrepared, token) => service.PublishDestinationAsync(
                                 p, result, projectDirectory, allowSyntheticProfile, token, onIntentPrepared),
-                            cts.Token);
+                            cancellationToken);
                         result.Manifest.PublicationReconciliationId = intent.OperationKey;
                         result.Manifest.PublicationOutcomes = attempt.Record.ToManifestOutcomes();
                         if (attempt.Record.FileState == DestinationPublicationState.Confirmed)
@@ -1305,7 +1315,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                     else if (DestinationPlanValidator.IsFileKind(p.Destination!.Kind))
                     {
                         var outputIdentity = await service.PublishFileDestinationAsync(
-                            p, result, projectDirectory, allowSyntheticProfile, cts.Token);
+                            p, result, projectDirectory, allowSyntheticProfile, cancellationToken);
                         Console.Error.WriteLine(
                             $"Published {outputIdentity.Kind} {outputIdentity.Path} "
                             + $"({outputIdentity.Bytes} bytes, sha256 {outputIdentity.Digest}).");
@@ -1313,7 +1323,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                     else
                     {
                         var receipt = await service.PublishDestinationAsync(
-                            p, result, projectDirectory, allowSyntheticProfile, cts.Token);
+                            p, result, projectDirectory, allowSyntheticProfile, cancellationToken);
                         Console.Error.WriteLine(
                             $"Published SQLite {receipt.OperationKey} ({receipt.WrittenRows} row(s)) "
                             + $"table={p.Destination!.Table} intent={receipt.IntentFingerprint}.");
@@ -1375,7 +1385,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                         receipt = await publisher.PublishAuthorizedLargeArtifactAsync(
                             output, largeArtifact, workspaceRoot, p, profile, allowSyntheticProfile, result,
                             (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token, selectedOutputKind), cts.Token,
+                                stagedPath, output, result, token, selectedOutputKind), cancellationToken,
                             outputKind: selectedOutputKind);
                         payloadBytes = largeArtifact.Bytes;
                     }
@@ -1386,7 +1396,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
                         receipt = await publisher.PublishAuthorizedAsync(
                             output, payload, workspaceRoot, p, profile, allowSyntheticProfile, result,
                             (stagedPath, token) => service.ValidateStagedArtifactAsync(
-                                stagedPath, output, result, token, selectedOutputKind), cts.Token,
+                                stagedPath, output, result, token, selectedOutputKind), cancellationToken,
                             outputKind: selectedOutputKind);
                         payloadBytes = payload.Length;
                     }
@@ -1439,11 +1449,12 @@ static async Task<int> ExecuteAsync(string[] args, bool preview)
     }
     catch (OperationCanceledException)
     {
+        Console.Error.WriteLine("CLI_CANCELLED: Operation cancelled; inspect publication receipts before retrying.");
         return ExitCodesLocal.Cancelled;
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine("Uncaught: " + ex);
+        Console.Error.WriteLine($"CLI_OPERATIONAL_FAILURE: {ex.GetType().Name}: {ex.Message}");
         return ExitCodesLocal.OperationalFailure;
     }
 }

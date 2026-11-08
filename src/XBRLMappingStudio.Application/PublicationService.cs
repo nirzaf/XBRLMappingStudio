@@ -31,7 +31,13 @@ public sealed class PublicationService
 {
     private readonly RunJournal _journal;
 
-    public PublicationService(RunJournal journal) => _journal = journal;
+    private readonly PublicationApprovalTrustPolicy? _approvalTrustPolicy;
+
+    public PublicationService(RunJournal journal, PublicationApprovalTrustPolicy? approvalTrustPolicy = null)
+    {
+        _journal = journal;
+        _approvalTrustPolicy = approvalTrustPolicy;
+    }
 
     /// <summary>
     /// Authorize, validate the exact staged report, and publish it at the final write
@@ -52,7 +58,7 @@ public sealed class PublicationService
     {
         ArgumentNullException.ThrowIfNull(validateStagedArtifactAsync);
         var manifest = result.Manifest;
-        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
+        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
         if (gate.HasBlockingErrors)
         {
             var first = gate.Items.First(d => d.IsBlocking);
@@ -89,7 +95,8 @@ public sealed class PublicationService
         var receipt = await PublishCoreAsync(safeDestination,
             async (stream, token) => await stream.WriteAsync(payload.AsMemory(), token).ConfigureAwait(false),
             payloadDigest, payload.LongLength, manifest.RunId, validateStagedArtifactAsync,
-            cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
+            cancellationToken, refuseDifferentExisting: refuseDifferentExisting,
+            authorizeBeforeReplace: () => RecheckApproval(project, profile, allowSyntheticProfile, manifest, graphDigest, safeDestination)).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs
             .Select(output => output.Kind == outputKind
@@ -122,7 +129,7 @@ public sealed class PublicationService
             throw PublicationFailed(DiagnosticCodes.PubDigestMismatch,
                 $"Large-run artifact kind '{artifact.OutputKind}' does not match requested output kind '{selectedOutputKind}'.",
                 manifest.RunId, destinationPath);
-        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId);
+        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
         if (gate.HasBlockingErrors)
         {
             var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
@@ -150,7 +157,8 @@ public sealed class PublicationService
         var receipt = await PublishCoreAsync(safeDestination,
             (stream, token) => artifact.CopyReportToAsync(stream, token),
             artifact.Sha256, artifact.Bytes, manifest.RunId, validateStagedArtifactAsync,
-            cancellationToken, refuseDifferentExisting: refuseDifferentExisting).ConfigureAwait(false);
+            cancellationToken, refuseDifferentExisting: refuseDifferentExisting,
+            authorizeBeforeReplace: () => RecheckApproval(project, profile, allowSyntheticProfile, manifest, graphDigest, safeDestination)).ConfigureAwait(false);
         manifest.PublishedArtifactDigest = receipt.FinalDigest;
         manifest.Outputs = manifest.Outputs.Select(output => output.Kind == selectedOutputKind
             ? output with { Path = safeDestination } : output).ToArray();
@@ -190,7 +198,8 @@ public sealed class PublicationService
         Action<string>? beforeReplaceFault = null,
         TimeSpan? lockTimeout = null,
         bool refuseDifferentExisting = false,
-        Action<string>? afterAtomicReplaceForTest = null)
+        Action<string>? afterAtomicReplaceForTest = null,
+        Action? authorizeBeforeReplace = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -310,6 +319,12 @@ public sealed class PublicationService
 
         using (lk)
         {
+            try { authorizeBeforeReplace?.Invoke(); }
+            catch
+            {
+                Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                throw;
+            }
             try
             {
                 _journal.Save(new JournalEntry(runId, full,
@@ -415,6 +430,16 @@ public sealed class PublicationService
             { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
             return receipt;
         }
+    }
+
+    private void RecheckApproval(MappingProject project, FilingProfile profile, bool allowSyntheticProfile,
+        RunManifest manifest, string approvedGraphDigest, string destination)
+    {
+        var gate = PublicationGate.Evaluate(project, profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
+        if (gate.HasBlockingErrors || project.ComputeSemanticDigest() != approvedGraphDigest
+            || project.SemanticRevision != manifest.SemanticRevision)
+            throw PublicationFailed(DiagnosticCodes.XbrApprovalRequired,
+                "Approval or executable project identity changed before publication replacement.", manifest.RunId, destination);
     }
 
     private void Abort(string runId, string full, string stagedPath, string? stagedDigest,

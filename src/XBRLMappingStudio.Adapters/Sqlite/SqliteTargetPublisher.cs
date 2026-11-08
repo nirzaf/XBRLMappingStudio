@@ -55,7 +55,8 @@ public sealed class SqliteTargetPublisher
 
     public async Task<SqlitePublishReceipt> PublishAsync(SourceConnection destination,
         IReadOnlyList<DataRecord> records, IReadOnlyList<string> businessKey,
-        string operationKey, string intentFingerprint, CancellationToken cancellationToken = default)
+        string operationKey, string intentFingerprint, CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
     {
         if (records.Count == 0) throw new ArgumentException("At least one record is required.", nameof(records));
         if (businessKey.Count == 0 || businessKey.Any(string.IsNullOrWhiteSpace))
@@ -105,6 +106,7 @@ public sealed class SqliteTargetPublisher
                 var receipt = new SqlitePublishReceipt(operationKey, effectiveIntent, reader.GetInt32(1),
                     DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture));
                 await reader.DisposeAsync();
+                beforeCommit?.Invoke();
                 await transaction.CommitAsync(cancellationToken);
                 return receipt;
             }
@@ -161,6 +163,7 @@ public sealed class SqliteTargetPublisher
             receipt.Parameters.AddWithValue("$time", completed.ToString("O", CultureInfo.InvariantCulture));
             await receipt.ExecuteNonQueryAsync(cancellationToken);
         }
+        beforeCommit?.Invoke();
         await transaction.CommitAsync(cancellationToken);
         return new SqlitePublishReceipt(operationKey, effectiveIntent, records.Count, completed);
     }

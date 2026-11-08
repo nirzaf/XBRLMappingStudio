@@ -43,3 +43,6 @@ venv/
 *.tmp.*
 *.xmap.lock
 *.xmap.bak
+
+# Local Avalonia build-service scratch data (never publish).
+**/.avalonia-build-tasks/

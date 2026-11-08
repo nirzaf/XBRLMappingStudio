@@ -29,6 +29,7 @@ public sealed record MappingJobProgress(string Stage, int? Current = null, int? 
 public sealed class MappingJobService
 {
     private readonly FilingProfile _profile;
+    private readonly PublicationApprovalTrustPolicy? _approvalTrustPolicy;
     private readonly FunctionCatalog _catalog;
     private readonly IWorkerClient _worker;
     private readonly Func<LocalApplicationDatabase> _applicationDatabaseFactory;
@@ -41,8 +42,9 @@ public sealed class MappingJobService
         IWorkerClient worker,
         FunctionCatalog? catalog = null,
         Func<LocalApplicationDatabase>? applicationDatabaseFactory = null,
-        ExecutionBudget? executionBudget = null)
-        : this(profile, worker, catalog, applicationDatabaseFactory, executionBudget, null)
+        ExecutionBudget? executionBudget = null,
+        PublicationApprovalTrustPolicy? approvalTrustPolicy = null)
+        : this(profile, worker, catalog, applicationDatabaseFactory, executionBudget, null, null, approvalTrustPolicy)
     {
     }
 
@@ -55,9 +57,11 @@ public sealed class MappingJobService
         Func<LocalApplicationDatabase>? applicationDatabaseFactory,
         ExecutionBudget? executionBudget,
         Action? afterFileDestinationPublish,
-        Action? afterFileDestinationStage = null)
+        Action? afterFileDestinationStage = null,
+        PublicationApprovalTrustPolicy? approvalTrustPolicy = null)
     {
         _profile = profile;
+        _approvalTrustPolicy = approvalTrustPolicy;
         _worker = worker;
         _catalog = catalog ?? FunctionCatalog.Default;
         _applicationDatabaseFactory = applicationDatabaseFactory ?? (() => new LocalApplicationDatabase());
@@ -1704,7 +1708,7 @@ public sealed class MappingJobService
         var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
         var plan = prepared.Plan;
         var manifest = result.Manifest;
-        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
         if (gate.HasBlockingErrors)
         {
             var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
@@ -1713,6 +1717,8 @@ public sealed class MappingJobService
                 manifest.RunId, plan.Locator);
         }
 
+        var approvedDigest = project.ComputeSemanticDigest();
+        var approvedRevision = project.SemanticRevision;
         var operationFingerprint = ComputeDestinationOperationFingerprint(
             project, result, plan, prepared.Path, prepared.ReportDigest);
         var operationKey = "xms-" + operationFingerprint["sha256:".Length..];
@@ -1735,7 +1741,9 @@ public sealed class MappingJobService
             plan.BusinessKey,
             operationKey,
             operationFingerprint,
-            cancellationToken);
+            cancellationToken,
+            beforeCommit: () => RecheckDestinationApproval(project, manifest, allowSyntheticProfile,
+                approvedDigest, approvedRevision, plan.Locator));
 
         manifest.Outputs = manifest.Outputs
             .Where(output => output.Kind != "db-receipt" || output.Path != prepared.Path)
@@ -1748,6 +1756,17 @@ public sealed class MappingJobService
             .ToArray();
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
         return receipt;
+    }
+
+    private void RecheckDestinationApproval(MappingProject project, RunManifest manifest, bool allowSyntheticProfile,
+        string approvedDigest, int approvedRevision, string destination)
+    {
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
+        if (gate.HasBlockingErrors || project.ComputeSemanticDigest() != approvedDigest
+            || project.SemanticRevision != approvedRevision)
+            throw new PublicationException(DiagnosticCodes.XbrApprovalRequired,
+                "Publication approval expired, was withdrawn, or no longer covers the executable project at the write boundary.",
+                manifest.RunId, destination);
     }
 
     private PreparedSqliteDestination PrepareSqliteDestination(
@@ -1885,6 +1904,7 @@ public sealed class MappingJobService
 
         var manifest = result.Manifest;
         var semanticDigest = project.ComputeSemanticDigest();
+        var approvedRevision = project.SemanticRevision;
         if (manifest.ProjectId != project.ProjectId
             || manifest.SemanticRevision != project.SemanticRevision
             || !StringComparer.Ordinal.Equals(manifest.ProjectSemanticDigest, semanticDigest)
@@ -1895,7 +1915,7 @@ public sealed class MappingJobService
                 manifest.RunId, plan.Locator);
         }
 
-        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId);
+        var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
         if (gate.HasBlockingErrors)
         {
             var first = gate.Items.First(diagnostic => diagnostic.IsBlocking);
@@ -1998,6 +2018,7 @@ public sealed class MappingJobService
                     "The destination changed while the staged artifact was being verified.", manifest.RunId, destinationPath);
 
             await EnsureInputIdentityAsync(project, manifest, destinationPath, cancellationToken);
+            RecheckDestinationApproval(project, manifest, allowSyntheticProfile, semanticDigest, approvedRevision, destinationPath);
             var output = await adapter.PublishAsync(stagedPath, connection, cancellationToken);
             _afterFileDestinationPublish?.Invoke();
             var finalDigest = CurrentFileDigest(destinationPath);

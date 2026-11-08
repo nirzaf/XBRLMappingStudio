@@ -157,6 +157,13 @@ public sealed class XbrlFact
         {
             return Fail(FactValidationIssue.InvalidDecimals, "Decimals are outside the supported range [-30, 30].", out reason, out issue);
         }
+        if (meta.NumericPolicy is { } policy)
+        {
+            if (!meta.IsNumeric || !policy.IsValid(out var policyReason))
+                return Fail(FactValidationIssue.InvalidValue, "Invalid concept numeric policy.", out reason, out issue);
+            if (!IsNil && Value is { } numericValue && !policy.Validate(numericValue, Decimals, out policyReason))
+                return Fail(FactValidationIssue.InvalidValue, policyReason, out reason, out issue);
+        }
         var dataType = GetDataTypeLocalName(meta.DataType);
         if (meta.IsNumeric && TextValue is not null)
         {
@@ -420,6 +427,9 @@ public sealed record ConceptMetadata(
                 or "float" or "double" or "shares" or "pure" or "percent" or "percentage";
         }
     }
+
+    /// <summary>Optional collector-declared numeric constraints; absent preserves legacy validation.</summary>
+    public ConceptNumericPolicy? NumericPolicy { get; init; }
 
     public IReadOnlyList<string> SupportedLanguages { get; init; } = new[] { "en" };
     public IReadOnlyDictionary<string, string> LabelsByLanguage { get; init; }

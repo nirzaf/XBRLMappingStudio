@@ -1,0 +1,16 @@
+[
+  {"scenario":"Revenue in thousands", "value":"1250000", "decimals":-3,"policy":{"maximumSignificantDigits":4,"roundingDecimals":-3,"minimumDecimals":-3,"maximumDecimals":-3,"allowInfiniteAccuracy":false},"valid":true},
+  {"scenario":"Unrounded revenue rejected", "value":"1250500", "decimals":-3,"policy":{"roundingDecimals":-3},"valid":false},
+  {"scenario":"Loss exactly on grid", "value":"-1250000", "decimals":-3,"policy":{"roundingDecimals":-3},"valid":true},
+  {"scenario":"Earnings per share", "value":"1.25", "decimals":2,"policy":{"maximumSignificantDigits":3,"roundingDecimals":2,"minimumDecimals":2,"maximumDecimals":2},"valid":true},
+  {"scenario":"Midpoint is not silently rounded", "value":"1.255", "decimals":2,"policy":{"roundingDecimals":2},"valid":false},
+  {"scenario":"Negative midpoint rejected", "value":"-1.255", "decimals":2,"policy":{"roundingDecimals":2},"valid":false},
+  {"scenario":"Zero significant precision", "value":"0.000", "decimals":0,"policy":{"maximumSignificantDigits":1},"valid":true},
+  {"scenario":"Decimal trailing zeros", "value":"0.0012300", "decimals":7,"policy":{"maximumSignificantDigits":3},"valid":true},
+  {"scenario":"Too many significant digits", "value":"1234.5", "decimals":1,"policy":{"maximumSignificantDigits":4},"valid":false},
+  {"scenario":"Infinite accuracy forbidden", "value":"100", "decimals":null,"policy":{"allowInfiniteAccuracy":false},"valid":false},
+  {"scenario":"Infinite accuracy explicit allowance", "value":"100", "decimals":null,"policy":{"allowInfiniteAccuracy":true,"maximumDecimals":2},"valid":true},
+  {"scenario":"Overstated finite accuracy rejected", "value":"100", "decimals":3,"policy":{"maximumDecimals":2},"valid":false},
+  {"scenario":"Insufficient finite accuracy rejected", "value":"100", "decimals":-3,"policy":{"minimumDecimals":0},"valid":false},
+  {"scenario":"Largest decimal magnitude", "value":"79228162514264337593543950335", "decimals":0,"policy":{"maximumSignificantDigits":29,"roundingDecimals":0},"valid":true}
+]

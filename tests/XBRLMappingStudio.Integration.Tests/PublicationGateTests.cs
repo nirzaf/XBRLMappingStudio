@@ -137,6 +137,45 @@ public sealed class PublicationGateTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    [Fact]
+    public async Task FinalPublisherRejectsGraphChangedDuringStagedValidation()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xms-publish-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var project = Project();
+            const string json = "{}";
+            var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+            var manifest = new RunManifest
+            {
+                RunId = "run-test",
+                OperationId = "op-test",
+                ProjectId = project.ProjectId,
+                SemanticRevision = project.SemanticRevision,
+                ProjectSemanticDigest = project.ComputeSemanticDigest(),
+                ProfileDigest = Synthetic.Digest,
+                EngineVersion = "test",
+                Outcome = RunOutcome.Success,
+                Outputs = new[] { new OutputIdentity("<memory>", RunManifest.ComputeSha256(bytes), bytes.Length, "xbrl-json") }
+            };
+            var result = new JobResult(manifest, Array.Empty<XbrlFact>(), json,
+                new DiagnosticBag(), Array.Empty<SampledTotal>());
+
+
+            await Assert.ThrowsAsync<PublicationException>(() =>
+                new PublicationService(new RunJournal(root)).PublishAuthorizedAsync(
+                    "report.json", bytes, root, project, Synthetic, true, result,
+                    (_, _) =>
+                    {
+                        project.Nodes[0].Parameters["changed-during-validation"] = true;
+                        return Task.FromResult(RunManifest.ComputeSha256(bytes));
+                    }));
+            Assert.False(File.Exists(Path.Combine(root, "report.json")));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     private static MappingProject CloneWithApprovals(MappingProject source, ApprovalRecord approval)
         => new()
         {

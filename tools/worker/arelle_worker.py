@@ -27,7 +27,7 @@ from xml.parsers import expat
 from xml.etree import ElementTree
 
 PROTOCOL_VERSION = 2
-SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5)
+SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5, 6)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_DIAGNOSTICS = 128
 MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000
@@ -351,6 +351,72 @@ def is_linklike(path):
     return path.is_symlink() or (is_junction is not None and is_junction())
 
 
+def validate_numeric_policy(policy):
+    if not isinstance(policy, dict) or set(policy) - {
+            "maximumSignificantDigits", "roundingDecimals", "roundingMode",
+            "minimumDecimals", "maximumDecimals", "allowInfiniteAccuracy"}:
+        raise ValueError("Unsupported concept numeric policy")
+    for key, lower, upper in (("maximumSignificantDigits", 1, 29),
+                               ("roundingDecimals", -28, 28),
+                               ("minimumDecimals", -30, 30), ("maximumDecimals", -30, 30)):
+        value = policy.get(key)
+        if value is not None and (type(value) is not int or not lower <= value <= upper):
+            raise ValueError("Invalid concept numeric policy constraint: " + key)
+    if policy.get("roundingMode", "reject") != "reject" \
+            or type(policy.get("allowInfiniteAccuracy", True)) is not bool:
+        raise ValueError("Unsupported concept numeric rounding or accuracy policy")
+    if policy.get("minimumDecimals") is not None and policy.get("maximumDecimals") is not None \
+            and policy["minimumDecimals"] > policy["maximumDecimals"]:
+        raise ValueError("Inverted numeric accuracy bounds")
+
+
+def validate_numeric_policy_value(policy, value, decimals):
+    from decimal import Decimal
+    validate_numeric_policy(policy)
+    value = Decimal(str(value))
+    if not value.is_finite():
+        raise ValueError("Numeric policy requires a finite decimal value")
+    if decimals is None or decimals == "INF":
+        if not policy.get("allowInfiniteAccuracy", True):
+            raise ValueError("Infinite accuracy is forbidden by concept policy")
+    else:
+        try:
+            accuracy = int(decimals)
+        except (ValueError, TypeError) as ex:
+            raise ValueError("Numeric policy requires a decimals accuracy assertion") from ex
+        if str(accuracy) != str(decimals) or not -30 <= accuracy <= 30 \
+                or (policy.get("minimumDecimals") is not None and accuracy < policy["minimumDecimals"]) \
+                or (policy.get("maximumDecimals") is not None and accuracy > policy["maximumDecimals"]):
+            raise ValueError("Numeric fact accuracy is outside the concept policy")
+    digits = ''.join(str(digit) for digit in value.as_tuple().digits).strip('0')
+    if policy.get("maximumSignificantDigits") is not None \
+            and max(1, len(digits)) > policy["maximumSignificantDigits"]:
+        raise ValueError("Numeric value exceeds the concept significant-digit limit")
+    places = policy.get("roundingDecimals")
+    if places is not None and value != 0:
+        parts = value.as_tuple()
+        trailing = len(parts.digits) - len(''.join(map(str, parts.digits)).rstrip('0'))
+        if parts.exponent + trailing < -places:
+            raise ValueError("Numeric value requires rounding forbidden by the concept policy")
+
+
+def validate_model_numeric_policies(models, profile):
+    if not profile:
+        return
+    policies = {(concept["namespace"], concept["localName"]): concept["numericPolicy"]
+                for concept in profile.get("concepts", []) if concept.get("numericPolicy") is not None}
+    if not policies:
+        return
+    for model in models:
+        for fact in getattr(model, "factsInInstance", []):
+            name = getattr(fact, "qname", None)
+            policy = policies.get((getattr(name, "namespaceURI", None), getattr(name, "localName", None)))
+            if policy is not None and not getattr(fact, "isNil", False):
+                if getattr(fact, "precision", None) is not None:
+                    raise ValueError("Concept numeric policies require decimals, not precision assertions")
+                validate_numeric_policy_value(policy, getattr(fact, "value", None), getattr(fact, "decimals", None))
+
+
 def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=None):
     if taxonomy_root is None:
         raise ValueError("A taxonomy root is required for a profile manifest")
@@ -382,6 +448,21 @@ def load_profile_manifest(manifest_path, taxonomy_root, expected_file_digest=Non
     schema_version = manifest.get("schemaVersion")
     if type(schema_version) is not int or schema_version not in SUPPORTED_PROFILE_SCHEMA_VERSIONS:
         raise ValueError("Profile manifest uses an unsupported schema version")
+    policy_concepts = manifest.get("concepts", [])
+    if not isinstance(policy_concepts, list) or len(policy_concepts) > 250_000:
+        raise ValueError("Profile concepts must be an array within the 250000-concept limit")
+    for concept in policy_concepts:
+        policy = concept.get("numericPolicy") if isinstance(concept, dict) else None
+        if policy is not None:
+            if schema_version < 6:
+                raise ValueError("Concept numeric policies require manifest schema version 6")
+            data_type = concept.get("dataType", "").split(":")[-1].lower().removesuffix("itemtype")
+            if data_type not in {"monetary", "decimal", "integer", "positiveinteger", "negativeinteger",
+                                 "nonpositiveinteger", "nonnegativeinteger", "long", "int", "short",
+                                 "byte", "unsignedlong", "unsignedint", "unsignedshort", "unsignedbyte",
+                                 "float", "double", "shares", "pure", "percent", "percentage"}:
+                raise ValueError("Numeric policy requires a numeric concept")
+            validate_numeric_policy(policy)
     dimension_domains = manifest.get("dimensionDomains", {})
     if not isinstance(dimension_domains, dict):
         raise ValueError("Profile dimensionDomains must be an object")
@@ -2082,6 +2163,7 @@ def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_cons
             logs = log_handler.messages
             loaded_plugins = loaded_plugin_identifiers()
             models = session.get_models()
+            validate_model_numeric_policies(models, getattr(args, "profile_manifest_data", None))
             concept_count = sum(len(getattr(model, "qnameConcepts", {})) for model in models)
             if relationship_metadata_consumer is not None:
                 relationship_metadata_consumer(

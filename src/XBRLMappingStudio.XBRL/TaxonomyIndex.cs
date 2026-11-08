@@ -171,6 +171,9 @@ public sealed class TaxonomyIndex
             .OrderBy(concept => concept.Namespace, StringComparer.Ordinal)
             .ThenBy(concept => concept.LocalName, StringComparer.Ordinal)
             .ToArray();
+        foreach (var concept in concepts)
+            if (concept.NumericPolicy is { } policy && (!concept.IsNumeric || !policy.IsValid(out _)))
+                throw new ArgumentException("Numeric policies require numeric concepts and supported constraints.", nameof(profile));
         try
         {
             _byExpandedName = concepts.ToDictionary(concept => concept.ExpandedName);

@@ -12,7 +12,7 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
     public const int MaximumRelationships = TaxonomyIndex.MaximumRelationships;
     public const int MaximumPresentationRelationships = MaximumRelationships;
 
@@ -493,6 +493,9 @@ public static class InstalledFilingProfileCatalog
                 || concept.LabelsByLanguage is null || !concepts.Add((concept.Namespace, concept.LocalName))
                 || !qualifiedNames.Add(concept.QualifiedName))
                 throw new InvalidDataException("Profile concepts must have unique expanded names and complete metadata.");
+            if (concept.NumericPolicy is { } policy
+                && (manifest.SchemaVersion < 6 || !concept.IsNumeric || !policy.IsValid(out _)))
+                throw new InvalidDataException("Numeric policies require schema version 6, a numeric concept, and supported constraints.");
             var colon = concept.QualifiedName.IndexOf(':');
             if (colon <= 0 || colon != concept.QualifiedName.LastIndexOf(':')
                 || !StringComparer.Ordinal.Equals(concept.QualifiedName[(colon + 1)..], concept.LocalName)
@@ -794,7 +797,8 @@ internal static class FilingProfileManifestDigest
         string PeriodType,
         bool IsAbstract,
         IReadOnlyList<string> SupportedLanguages,
-        IReadOnlyDictionary<string, string> LabelsByLanguage);
+        IReadOnlyDictionary<string, string> LabelsByLanguage,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ConceptNumericPolicy? NumericPolicy);
 
     public static string Compute(FilingProfileManifest manifest)
     {
@@ -808,7 +812,7 @@ internal static class FilingProfileManifestDigest
                 concept.PeriodType,
                 concept.IsAbstract,
                 concept.SupportedLanguages.Order(StringComparer.Ordinal).ToArray(),
-                Sorted(concept.LabelsByLanguage)))
+                Sorted(concept.LabelsByLanguage), concept.NumericPolicy))
             .ToArray();
         object canonical = manifest.SchemaVersion switch
         {

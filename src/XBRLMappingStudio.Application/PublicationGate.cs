@@ -30,7 +30,8 @@ public static class PublicationGate
         MappingProject project,
         FilingProfile profile,
         bool allowSyntheticProfile,
-        string? operationId = null)
+        string? operationId = null,
+        PublicationApprovalTrustPolicy? approvalTrustPolicy = null)
     {
         var diagnostics = EvaluateProfileIdentity(project, profile, DiagnosticStage.Publication, operationId);
         if (diagnostics.HasBlockingErrors)
@@ -53,7 +54,10 @@ public static class PublicationGate
         var approval = project.Approvals.FirstOrDefault(a =>
             a.SemanticRevision == project.SemanticRevision
             && string.Equals(a.SemanticDigest, semanticDigest, StringComparison.Ordinal)
-            && string.Equals(a.ProfileDigest, profile.Digest, StringComparison.Ordinal));
+            && string.Equals(a.ProfileDigest, profile.Digest, StringComparison.Ordinal)
+            && (approvalTrustPolicy is not null
+                ? approvalTrustPolicy.IsTrusted(project, profile, a)
+                : isSynthetic && allowSyntheticProfile));
 
         if (approval is null)
         {
@@ -63,7 +67,7 @@ public static class PublicationGate
                 DiagnosticStage.Publication,
                 $"No approval record covers semantic revision {project.SemanticRevision}, graph digest "
                 + $"{semanticDigest} and profile digest {profile.Digest}. An unattended publication "
-                + "requires approval of the exact executable graph and profile being run.",
+                + "requires approval of the exact executable graph and profile being run. Non-synthetic publication requires a host-enrolled reviewer signature; a supplied trust policy also applies to synthetic runs.",
                 operationId: operationId);
         }
 

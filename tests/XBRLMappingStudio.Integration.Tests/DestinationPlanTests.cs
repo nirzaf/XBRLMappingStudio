@@ -21,6 +21,53 @@ public sealed class DestinationPlanTests
 {
     private static readonly FilingProfile Synthetic = SyntheticProfile.Build();
 
+    [Theory]
+    [InlineData("expiry")]
+    [InlineData("mutation")]
+    [InlineData("withdrawal")]
+    public async Task FilePublicationRechecksApprovalAfterStaging(string change)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-late-approval-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var workbook = TestFixtures.MaterializeWorkbook(directory);
+            var project = TestFixtures.BuildRevenueMappingProject(workbook);
+            project.Destination = new DestinationPlan
+            {
+                Kind = "csv", Locator = "report.csv", Table = string.Empty,
+                BusinessKey = new(), Format = "csv-records-v1", WriteMode = "replace"
+            };
+            using var trust = new LateApprovalTestContext();
+            trust.Sign(project, Synthetic);
+            var service = new MappingJobService(Synthetic, new LocalSyntheticWorker(Synthetic), null, null, null, null,
+                afterFileDestinationStage: () =>
+                {
+                    if (change == "expiry") trust.Expire();
+                    else if (change == "withdrawal") project.Approvals.Clear();
+                    else { project.SemanticRevision++; trust.Sign(project, Synthetic); }
+                }, approvalTrustPolicy: trust.Policy);
+            var binding = project.Bindings.Single();
+            var configuration = binding.Configuration.ToDictionary(pair => pair.Key, pair => pair.Value?.ToString() ?? "");
+            var result = await service.RunAsync(project, new Dictionary<string, SourceConnection>
+            {
+                [binding.BindingId] = new(binding.BindingId, binding.Kind, workbook, configuration)
+            }, new Dictionary<string, string>(), preview: false, CancellationToken.None);
+            Assert.True(result.IsPublishable);
+            var path = Path.Combine(directory, "report.csv");
+            var prior = Encoding.UTF8.GetBytes("previous accepted bytes");
+            await File.WriteAllBytesAsync(path, prior);
+            var outputs = result.Manifest.Outputs.ToArray();
+            var completed = result.Manifest.CompletedUtc;
+            await Assert.ThrowsAsync<PublicationException>(() => service.PublishFileDestinationAsync(project, result, directory, true));
+            Assert.Equal(prior, await File.ReadAllBytesAsync(path));
+            Assert.Equal(outputs, result.Manifest.Outputs);
+            Assert.Equal(completed, result.Manifest.CompletedUtc);
+            Assert.False(File.Exists(path + ".xms-rollback-" + result.Manifest.RunId));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public void ValidateProject_AcceptsSupportedVersionedSqlitePlan()
     {

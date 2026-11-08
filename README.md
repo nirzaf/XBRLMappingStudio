@@ -190,6 +190,7 @@ tools/worker/
 ```bash
 git clone https://github.com/nirzaf/XBRLMappingStudio.git
 cd XBRLMappingStudio
+export AVALONIA_TELEMETRY_OPTOUT=1
 dotnet build XBRLMappingStudio.slnx -c Release
 ```
 
@@ -208,6 +209,10 @@ dotnet run --project src/XBRLMappingStudio.CLI -- --help
 ---
 
 ## Building and testing
+
+Disable build telemetry before local builds: set `AVALONIA_TELEMETRY_OPTOUT=1`
+in your shell (`$env:AVALONIA_TELEMETRY_OPTOUT='1'` in PowerShell). CI and the
+release workflow set this explicitly.
 
 ```bash
 # Full solution, Release
@@ -355,6 +360,13 @@ git tag v1.0.0 && git push origin v1.0.0
 ---
 
 ## Implementation status
+
+The [November 8 audit remediation ledger](docs/audit-remediation-2026-11-08.md)
+separates completed engineering increments from remaining engineering and owner-gated
+release qualification. New contracts cover [typed reusable functions](docs/decisions/MAP07-typed-function-signatures.md),
+[concept numeric policies](docs/concept-numeric-policies.md),
+[trusted publication approvals](docs/trusted-publication-approvals.md), and
+[unattended operations](docs/unattended-operations.md).
 
 Capabilities are tracked by stable guide IDs and delivery gates in
 [`docs/implementation-status.md`](./docs/implementation-status.md). This summary

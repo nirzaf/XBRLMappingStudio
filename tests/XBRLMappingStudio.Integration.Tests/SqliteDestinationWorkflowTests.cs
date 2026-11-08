@@ -909,6 +909,46 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal(before, after);
     }
 
+    [Theory]
+    [InlineData("expiry", false)]
+    [InlineData("mutation", false)]
+    [InlineData("withdrawal", false)]
+    [InlineData("expiry", true)]
+    [InlineData("mutation", true)]
+    [InlineData("withdrawal", true)]
+    public async Task LateApprovalChangeRollsBackRowsAndReceipts(string change, bool replay)
+    {
+        var project = ConfiguredProject(_workbookPath);
+        using var trust = new LateApprovalTestContext();
+        trust.Sign(project, _profile);
+        var service = new MappingJobService(_profile, new LocalSyntheticWorker(_profile), approvalTrustPolicy: trust.Policy);
+        var result = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        // First establish an accepted output and receipt that a failed new attempt must preserve.
+        await service.PublishDestinationAsync(project, result, _directory, true);
+        if (!replay)
+        {
+            project.SemanticRevision++;
+            trust.Sign(project, _profile);
+            result = await service.RunAsync(project, Connections(project, _workbookPath),
+                new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        }
+        var outputs = result.Manifest.Outputs.ToArray();
+        var completed = result.Manifest.CompletedUtc;
+        var databaseBytes = await File.ReadAllBytesAsync(_databasePath);
+        await Assert.ThrowsAsync<PublicationException>(() => service.PublishDestinationAsync(project, result, _directory, true,
+            onIntentPrepared: (_, _) =>
+            {
+                if (change == "expiry") trust.Expire();
+                else if (change == "withdrawal") project.Approvals.Clear();
+                else { project.SemanticRevision++; trust.Sign(project, _profile); }
+            }));
+        Assert.Equal(databaseBytes, await File.ReadAllBytesAsync(_databasePath));
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+        Assert.Equal(outputs, result.Manifest.Outputs);
+        Assert.Equal(completed, result.Manifest.CompletedUtc);
+    }
+
     private MappingProject ConfiguredProject(string workbookPath)
     {
         var project = TestFixtures.BuildRevenueMappingProject(workbookPath);

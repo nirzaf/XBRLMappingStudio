@@ -20,7 +20,7 @@ namespace XBRLMappingStudio.Integration.Tests;
 /// emitted xBRL-JSON matches the in-process execution byte-for-byte (modulo
 /// per-run fact identifiers). Also verifies exit-code contract.
 /// </summary>
-public sealed class CliParityTests : IAsyncLifetime
+public sealed partial class CliParityTests : IAsyncLifetime
 {
     private string _dir = "";
     private string _workbookPath = "";

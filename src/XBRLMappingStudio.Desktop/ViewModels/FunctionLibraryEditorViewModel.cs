@@ -832,12 +832,12 @@ public sealed class FunctionLibraryEditorViewModel : ViewModelBase
                 ["functionId"] = definition.FunctionId,
                 ["revision"] = definition.Revision.ToString(CultureInfo.InvariantCulture)
             },
-            InputPorts = signature.Inputs.ToList(),
-            OutputPorts = signature.Outputs.ToList(),
+            InputPorts = definition.Inputs.ToList(),
+            OutputPorts = definition.Outputs.ToList(),
             Layout = new LayoutPosition(520, 180)
         };
         _projectSession().AddNode(node);
-        Status = $"Added a call pinned to {definition.FunctionId}@{definition.Revision}. Connect its decimal ports in the Mapping tab.";
+        Status = $"Added a call pinned to {definition.FunctionId}@{definition.Revision}. Connect its typed ports in the Mapping tab.";
     }
 
     private async Task ExportFunctionPackageAsync()

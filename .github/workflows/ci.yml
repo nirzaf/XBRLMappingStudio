@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  AVALONIA_TELEMETRY_OPTOUT: '1'
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   SOLUTION: XBRLMappingStudio.slnx
@@ -66,6 +67,20 @@ jobs:
       - name: Test (Release)
         # Subprocess-supervision tests launch nested workers; avoid host-load timeouts across projects.
         run: dotnet test ${{ env.SOLUTION }} -c Release --no-build -m:1 --logger "trx;LogFileName=test-results-${{ matrix.os }}.trx"
+
+      - name: Repeat Windows worker cancellation regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Existence of worker.pid does not guarantee its writer has released it
+          # on Windows. Keep the readiness/cancellation fix under repeated load.
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            dotnet test tests/XBRLMappingStudio.Integration.Tests/XBRLMappingStudio.Integration.Tests.csproj `
+              -c Release --no-build `
+              --filter FullyQualifiedName~CancellingArelleRequestKillsTheWorkerProcess `
+              --logger "trx;LogFileName=worker-cancellation-$attempt.trx"
+            if ($LASTEXITCODE -ne 0) { throw "Worker cancellation regression failed on attempt $attempt." }
+          }
 
       - name: Upload test results
         if: always()

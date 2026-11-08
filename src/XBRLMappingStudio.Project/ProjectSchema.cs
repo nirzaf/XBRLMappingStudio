@@ -151,6 +151,10 @@ public sealed record ApprovalRecord
     public required string ProfileDigest { get; init; }
     public string? Authority { get; init; }
     public string? Notes { get; init; }
+    public string? SigningKeyId { get; init; }
+    public string? SignatureAlgorithm { get; init; }
+    public string? SignatureBase64 { get; init; }
+    public DateTimeOffset? ExpiresUtc { get; init; }
 }
 
 /// <summary>

@@ -4,7 +4,8 @@ namespace XBRLMappingStudio.CLI;
 
 /// <summary>
 /// Stable CLI exit codes (section 9 "CLI contract"). Chosen to be scheduler-friendly:
-/// success and succeeded-with-warnings are distinguished but both retryable-clean.
+/// success and succeeded-with-warnings are distinguished; neither requires retry.
+/// Failure codes alone do not prove that no destination committed.
 /// </summary>
 public static class ExitCodes
 {
