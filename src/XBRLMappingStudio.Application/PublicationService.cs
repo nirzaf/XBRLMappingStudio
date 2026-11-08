@@ -24,8 +24,9 @@ public sealed record PublicationReceipt(
 /// digest-checked, adjudicated by the selected profile worker, and rechecked under a
 /// <see cref="DestinationLock"/> before an atomic replacement via <see cref="File.Replace"/>.
 /// The journal persists the validated digest and final receipt.
-/// A failure injected at any phase leaves the previously accepted destination intact;
-/// a crash between phases is adjudicated by <see cref="RunJournal.RecoverUnfinalized"/>.
+/// Failures before atomic replacement leave the previously accepted destination intact.
+/// After replacement, preserve the prior copy until the final receipt is durable;
+/// an interrupted outcome is adjudicated by <see cref="RunJournal.RecoverUnfinalized"/>.
 /// </summary>
 public sealed class PublicationService
 {
@@ -417,7 +418,6 @@ public sealed class PublicationService
                     $"Post-replace digest {finalDigest} diverges from validated {validatedDigest}.",
                     runId, full);
             }
-            TryDelete(backupPath); // prior accepted copy no longer needed
             var receipt = new PublicationReceipt(runId, full, stagedDigest, finalDigest,
                 lk.Token, DateTimeOffset.UtcNow)
             {
@@ -426,6 +426,7 @@ public sealed class PublicationService
             _journal.Save(new JournalEntry(runId, full, JournalState.Finalized,
                 stagedDigest, finalDigest, lk.Token, DateTimeOffset.UtcNow)
             { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
+            TryDelete(backupPath); // discard prior bytes only after the receipt is durable
             return receipt;
         }
     }

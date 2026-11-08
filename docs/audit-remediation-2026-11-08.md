@@ -198,7 +198,7 @@ or represent these rows as completed to make a release appear ready.
 | P1-10 | Approved managed/local model provider, endpoint, secure credential deployment and governed desktop workflow. |
 | P1-11 | Permitted held-out financial benchmarks, abstention/quality thresholds, approved model-version rollout and rollback. |
 | P1-12 | Native Windows keyboard/mouse/screen-reader journeys. Headless Avalonia tests are not native acceptance. |
-| P1-13 | Exhaustive interrupted/ambiguous publication reconciliation for every supported destination. Late approval denial and rollback cases are now covered. |
+| P1-13 | Atomic journal recovery now requires locked publication evidence, rechecks under the destination lock, isolates uncertain entries, and persists receipts before backup cleanup; synthetic process-loss and both-store fault tests cover this contract. Exhaustive reconciliation for every destination, durable file-adapter journals, production recovery entry points and retention cleanup remain open. See [journal recovery scope](publication-journal-recovery.md). |
 | P1-14 | Deployment-specific scheduler/recovery drills and any durable queued-job/replay requirement. CLI lifetime and scheduler guidance are implemented. |
 | P2-01 | Qualified SQL Server/Azure SQL adapter, provider/authentication decision and live-system fixtures. |
 | P2-02 | Qualified PostgreSQL/MySQL/MariaDB/Oracle adapters and provider-specific semantics. |
