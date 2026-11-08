@@ -4,6 +4,31 @@ This records local evidence for the UX-04 function-authoring slice on `main`.
 The guide remains incomplete; this update does not close native accessibility,
 broader function signatures, or external profile gates.
 
+## XBR-01 CLI synthetic-profile opt-in
+
+`validate-artifact` now requires `--allow-synthetic-profile` in both local and
+Arelle modes. The check runs before artifact-path existence inspection, so an
+unapproved call cannot probe the target path or start the worker. The existing
+Arelle end-to-end fixture now passes the explicit opt-in when testing the
+synthetic profile. Selected-profile artifact validation remains open; this
+change does not qualify a real filing profile or taxonomy package.
+
+Verification:
+
+- `Cli_ArtifactValidationRequiresSyntheticOptInBeforePathAccess` passed both
+  local and Arelle-option cases (2/2) in the isolated `CodexTest` build.
+- The first exact-head run on `327bbe3` exposed the Arelle fixture's missing
+  opt-in. The fixture was corrected in `49fe2eb`.
+- Exact-head GitHub Actions run
+  [42437874202](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42437874202)
+  passed repository hygiene, Windows and Ubuntu Release build/tests, and the
+  pinned Arelle worker integration on source
+  `49fe2eb3ffcb6b25026f6c6274dce22781181cd1`. Windows passed 911 tests with 6
+  environment-gated skips; the pinned Arelle job passed 15 tests.
+
+The synthetic artifact validator remains an explicitly opted-in development
+path. Real-profile artifact validation requires the profile and rights gates.
+
 ## UX-04 / MAP07 function authoring and revision selection
 
 The Functions tab exposes Undo/Redo for the isolated draft graph. Synthetic
