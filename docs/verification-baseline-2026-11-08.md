@@ -276,15 +276,23 @@ successful preview result. Each attempt is rejected before writing and leaves
 all three accepted-state checks unchanged. The test complements the file
 destination matrix, which covers CSV, XLSX, JSON and XML.
 
+`SqliteDestinationWorkflowTests.PublishSqliteDestination_RejectsTamperedOrContradictoryReportIdentity`
+also verifies that a tampered xBRL-JSON output digest and a contradictory
+duplicate report identity are rejected before SQLite publication, preserving
+the accepted database bytes, facts and receipt count.
+
 Verification on the local Windows Release build:
 
 - The focused SQLite outcome-matrix test passed 1/1.
-- The full Integration suite passed 247 tests and skipped 6 environment-gated
-  Arelle cases (253 total).
+- The focused manifest-identity regression passed 1/1. The full Integration
+  suite passed 248 tests and skipped 6 environment-gated Arelle cases
+  (254 total).
 - The build used the isolated `bin-codex/` output path because the desktop app
   held shared Release assemblies open.
 - Exact-head CI [42449167853](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42449167853)
   passed repository hygiene, Windows and Ubuntu Release build/tests, and the
   pinned Arelle worker integration on source
-  `a1b2fb19c2b11ebad73f78e171edf99f9efc6c9b`. Full cancellation/process-crash
-  coverage and owner-authorized real-profile publication remain open.
+  `a1b2fb19c2b11ebad73f78e171edf99f9efc6c9b`; the manifest-identity regression
+  was added after that run and needs its own exact-head CI. Full
+  cancellation/process-crash coverage and owner-authorized real-profile
+  publication remain open.

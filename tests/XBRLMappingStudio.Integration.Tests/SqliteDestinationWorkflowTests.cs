@@ -177,6 +177,53 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PublishSqliteDestination_RejectsTamperedOrContradictoryReportIdentity()
+    {
+        var project = ConfiguredProject(_workbookPath);
+        var service = NewService();
+        using var acceptedRun = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.Success, acceptedRun.Manifest.Outcome);
+        await service.PublishDestinationAsync(project, acceptedRun, _directory,
+            allowSyntheticProfile: true);
+
+        var acceptedFacts = await ReadFactsAsync(_databasePath);
+        var acceptedReceiptCount = await ReadReceiptCountAsync(_databasePath);
+        var acceptedBytes = await File.ReadAllBytesAsync(_databasePath);
+
+        using var candidate = await service.RunAsync(project, Connections(project, _workbookPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(candidate.IsPublishable);
+        var originalOutputs = candidate.Manifest.Outputs;
+        var reportArtifact = Assert.Single(originalOutputs, output => output.Kind == "xbrl-json");
+        var tamperedArtifact = reportArtifact with { Digest = reportArtifact.Digest + "-tampered" };
+        candidate.Manifest.Outputs = originalOutputs
+            .Select(output => output == reportArtifact ? tamperedArtifact : output)
+            .ToArray();
+
+        var tamperedError = await Assert.ThrowsAsync<PublicationException>(() =>
+            service.PublishDestinationAsync(project, candidate, _directory,
+                allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, tamperedError.Code);
+        Assert.Equal(acceptedFacts, await ReadFactsAsync(_databasePath));
+        Assert.Equal(acceptedReceiptCount, await ReadReceiptCountAsync(_databasePath));
+        Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(_databasePath));
+        Assert.DoesNotContain(candidate.Manifest.Outputs, output => output.Kind == "db-receipt");
+
+        candidate.Manifest.Outputs = originalOutputs.Append(tamperedArtifact).ToArray();
+        var duplicateError = await Assert.ThrowsAsync<PublicationException>(() =>
+            service.PublishDestinationAsync(project, candidate, _directory,
+                allowSyntheticProfile: true));
+
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, duplicateError.Code);
+        Assert.Equal(acceptedFacts, await ReadFactsAsync(_databasePath));
+        Assert.Equal(acceptedReceiptCount, await ReadReceiptCountAsync(_databasePath));
+        Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(_databasePath));
+        Assert.DoesNotContain(candidate.Manifest.Outputs, output => output.Kind == "db-receipt");
+    }
+
+    [Fact]
     public async Task CancelledSqlitePublicationPreservesPriorFactsAndReceipt()
     {
         var project = ConfiguredProject(_workbookPath);
