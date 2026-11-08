@@ -11,5 +11,7 @@
     <LangVersion>14.0</LangVersion>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
+    <!-- Custom artifact roots are not covered by the SDK's default bin/obj excludes. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/bin-codex/**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

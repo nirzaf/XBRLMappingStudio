@@ -224,6 +224,21 @@ release deployed or regulatory sign-off inferred by this increment.
 
 ## Latest pushed implementation evidence
 
+### Record-output lexical acceptance follow-up (2026-11-09)
+
+Four new adapter round trips publish and reopen CSV, JSON, XML, and XLSX records.
+They verify exact preservation of embedded quotes, multiline text, XML/JSON escape
+characters, leading-zero identifiers, and invariant decimal lexemes; the XML case
+also preserves a namespace-qualified field. The focused Release tests passed 4/4.
+The isolated full Release solution run passed 1,856 tests with six environment-gated
+Arelle skips. The benchmark harness self-test passed and the Python support suite
+passed 15/15.
+This is adapter-level acceptance only: the lexical fixtures are not yet carried
+through the mixed-publication CLI/retry journey. During verification, a build also
+showed that ignored custom `bin-codex` artifact directories can be picked up by
+SDK default source globs; `Directory.Build.props` now excludes that output tree.
+Approval, taxonomy-rights, real-profile, and publication gates are unchanged.
+
 The direct `main` updates `93e45c2`, `b131d5f02153c643824f07eae9416a435c2e4600`,
 and `f3580b7dd4402d1b7d8c7cd5af5f7b20a8f3c5f0` bound generic JSON, XML, and XLSX
 source reads. JSON enforces input-byte, row, and string budgets while preserving exact
