@@ -643,6 +643,8 @@ public static class XmlSerializer
         var decimalsStr = (string?)el.Attribute("decimals");
         int? decimals = decimalsStr is null || decimalsStr == "INF" ? null : int.Parse(decimalsStr, CultureInfo.InvariantCulture);
         var lang = (string?)el.Attribute(XNamespace.Xml + "lang");
+        if (lang is not null && !Bcp47LanguageTagValidator.IsWellFormed(lang))
+            throw Unsupported($"Language '{lang}' is not a well-formed BCP 47 language tag.");
         decimal? value = null;
         string? textValue = null;
         if (!isNil)

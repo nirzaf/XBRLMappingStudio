@@ -362,8 +362,11 @@ public static class OimSerializer
                 if (dimension.Name is "concept" or "entity" or "period" or "unit") continue;
                 if (dimension.Name == "language")
                 {
-                    language = dimension.Value.GetString()?.ToLowerInvariant()
+                    var languageTag = dimension.Value.GetString()
                         ?? throw Unsupported("Language dimension must be a string.");
+                    if (!Bcp47LanguageTagValidator.IsWellFormed(languageTag))
+                        throw Unsupported($"Language '{languageTag}' is not a well-formed BCP 47 language tag.");
+                    language = languageTag.ToLowerInvariant();
                     continue;
                 }
                 if (dimension.Name == "noteId")

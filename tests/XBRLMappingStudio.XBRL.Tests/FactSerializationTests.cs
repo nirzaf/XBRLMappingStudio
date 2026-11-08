@@ -937,6 +937,32 @@ public sealed class FactSerializationTests
         Assert.True(fact.ValidateAgainst(concept, out var reason), reason);
     }
 
+    [Theory]
+    [InlineData("en--US")]
+    [InlineData("en_US")]
+    public void OimJsonReaderRejectsMalformedLanguageTagsWithoutProfile(string language)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") }))!.AsObject();
+        var fact = root["facts"]!.AsObject().Single().Value!.AsObject();
+        fact["dimensions"]!.AsObject()["language"] = language;
+
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+    }
+
+    [Theory]
+    [InlineData("en--US")]
+    [InlineData("en_US")]
+    public void XmlReaderRejectsMalformedLanguageTagsWithoutProfile(string language)
+    {
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { CreateTextFact("en") }));
+        var fact = Assert.Single(document.Descendants(),
+            element => element.Attribute(XNamespace.Xml + "lang") is not null);
+        fact.SetAttributeValue(XNamespace.Xml + "lang", language);
+
+        Assert.Throws<XbrlExportException>(() =>
+            XmlSerializer.ReadFacts(document.ToString(SaveOptions.DisableFormatting)));
+    }
+
     private static XbrlFact CreateTextFact(string language) => new()
     {
         ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
