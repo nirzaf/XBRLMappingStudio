@@ -513,6 +513,20 @@ public sealed class MappingOperationViewModelTests
             Assert.DoesNotContain(viewModel.PreviewFacts,
                 fact => fact.SemanticFact?.EntityIdentifier == "Missing amount");
 
+            var groupNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.GroupBy);
+            var sampledGroupValues = Assert.Single(viewModel.IntermediateOutputs, output =>
+                output.NodeId == groupNode.NodeId && output.PortName == "values");
+            var revenueOutput = Assert.Single(sampledGroupValues.Samples,
+                sample => sample.Display.Contains(": 20 ·", StringComparison.Ordinal));
+            Assert.Equal(new[] { "Financials!A4", "Financials!A5", "Financials!B4", "Financials!B5" },
+                revenueOutput.Evidence.Select(evidence => evidence.Source.Locator)
+                    .OrderBy(locator => locator, StringComparer.Ordinal));
+            Assert.All(revenueOutput.Evidence, evidence =>
+            {
+                Assert.Contains("Collect financial rows", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+                Assert.Contains("Sum by statement line", evidence.TransformationPathDisplay, StringComparison.Ordinal);
+            });
+
             foreach (var evidence in revenueFact.Evidence)
             {
                 Assert.Contains("Collect financial rows", evidence.TransformationPathDisplay, StringComparison.Ordinal);

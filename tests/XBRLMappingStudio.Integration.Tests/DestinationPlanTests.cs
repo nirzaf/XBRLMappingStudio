@@ -809,8 +809,10 @@ public sealed class DestinationPlanTests
         }
     }
 
-    [Fact]
-    public async Task Run_RejectsFileChangedAfterSourceMaterialization()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Run_RejectsFileChangedAfterSourceMaterialization(bool preview)
     {
         var dir = Path.Combine(Path.GetTempPath(), "xms-run-stale-source-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -838,14 +840,16 @@ public sealed class DestinationPlanTests
                 new Dictionary<string, SourceConnection>
                 {
                     [binding.BindingId] = new SourceConnection(binding.BindingId, binding.Kind, workbook, config)
-                }, new Dictionary<string, string>(), preview: false, CancellationToken.None, progress);
+                }, new Dictionary<string, string>(), preview, CancellationToken.None, progress);
 
             Assert.True(sourceChanged);
+            Assert.Equal(preview, result.Manifest.IsPreview);
             Assert.Equal(RunOutcome.DataError, result.Manifest.Outcome);
             var diagnostic = Assert.Single(result.Manifest.Diagnostics,
                 item => item.Code == DiagnosticCodes.IoInputIdentityChanged && item.IsBlocking);
             Assert.Equal(binding.BindingId, diagnostic.Source?.SourceId);
             Assert.Empty(result.Facts);
+            Assert.Empty(result.NodeOutputPreviews);
         }
         finally
         {

@@ -253,9 +253,14 @@ Verification on the local Windows Release build:
   intermediate output data.
 - Desktop tests passed 114/114. Headless Avalonia coverage inspects the initial
   result tabs and accessible list controls, then selects a sampled output and
-  source path. A 501-row full run verifies exact output counts in both the
-  in-memory and forced SQLite-spooled execution paths.
-- Integration tests passed 244 with 6 environment-gated Arelle skips (250 total).
+  source path. GroupBy output samples retain all four source contribution paths.
+  A 501-row full run verifies exact output counts in both the in-memory and
+  forced SQLite-spooled execution paths.
+- Integration tests passed 245 with 6 environment-gated Arelle skips (251 total).
+  Changed-source rejection is covered for both preview and full runs, with no
+  intermediate values returned after the blocking source-identity diagnostic.
+- Each row frame stores its node/port values once in a typed-key map used by
+  evaluation and preview collection, avoiding a duplicate per-row value map.
 - These are synthetic fixture and headless UI checks. Exact-head GitHub CI is
   pending; native visual/screen-reader and real filing-profile qualification are
   not claimed.

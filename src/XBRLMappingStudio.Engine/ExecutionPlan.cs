@@ -34,24 +34,19 @@ public sealed class RowSnapshot
 public sealed class EvaluationFrame
 {
     public required int RowIndex { get; init; }
-    private readonly Dictionary<string, DataValue> _slots = new(StringComparer.Ordinal);
     private readonly Dictionary<ExecutionOutputKey, DataValue> _outputValues = new();
 
     public void Set(string nodeId, string port, DataValue v)
-    {
-        _slots[ProvenanceTracker.SlotKey(nodeId, port)] = v;
-        _outputValues[new ExecutionOutputKey(nodeId, port)] = v;
-    }
+        => _outputValues[new ExecutionOutputKey(nodeId, port)] = v;
 
     public DataValue Get(string nodeId, string port)
-        => _slots.TryGetValue(ProvenanceTracker.SlotKey(nodeId, port), out var v)
+        => _outputValues.TryGetValue(new ExecutionOutputKey(nodeId, port), out var v)
             ? v
             : DataValue.Missing();
 
     public bool TryGet(string nodeId, string port, out DataValue v)
-        => _slots.TryGetValue(ProvenanceTracker.SlotKey(nodeId, port), out v!);
+        => _outputValues.TryGetValue(new ExecutionOutputKey(nodeId, port), out v!);
 
-    public IReadOnlyDictionary<string, DataValue> Slots => _slots;
     public IReadOnlyDictionary<ExecutionOutputKey, DataValue> OutputValues => _outputValues;
 }
 
@@ -246,12 +241,10 @@ public sealed class ExecutionPlan
             context.CancellationToken.ThrowIfCancellationRequested();
             var frame = new EvaluationFrame { RowIndex = 10_000 + idx };
             // Copy template scalar slots.
-            foreach (var slot in template.Slots)
+            foreach (var (slot, value) in template.OutputValues)
             {
                 context.CancellationToken.ThrowIfCancellationRequested();
-                var dot = slot.Key.IndexOf('.');
-                if (dot < 0) continue;
-                frame.Set(slot.Key.Substring(0, dot), slot.Key.Substring(dot + 1), slot.Value);
+                frame.Set(slot.NodeId, slot.PortName, value);
             }
             // Overlay set-port values (scalar or collection slice at idx) onto the frame
             // under the SOURCE (node, port) so the row-phase sink evaluator, which reads
