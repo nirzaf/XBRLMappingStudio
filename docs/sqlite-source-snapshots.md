@@ -56,9 +56,9 @@ not qualify or approve a filing profile.
 
 `preview` also accepts `--source-snapshot`; its manifest remains a partial,
 non-publishable, non-replayable preview even though the retained source itself is
-complete. Full runs in both the small-input and qualified large row-scoped paths
-can replay the snapshot. The normal restrictions on large multiple-binding,
-set-phase and saved-destination execution still apply.
+complete. Full runs in the small-input, qualified large row-scoped, bounded
+partitioned-group and same-key two-source join paths can replay snapshots. The
+normal graph, key/group, source-count and saved-destination limits still apply.
 
 Keep the whole bundle together. It can be moved and reopened in a new process;
 the database filename is fixed relative to its metadata, not taken from an
@@ -89,7 +89,8 @@ replayed run the manifest records:
   live run's digest.
 - `SnapshotDigest`: SHA-256 of the retained database file.
 - `OriginalPath`: the actual retained database used for execution.
-- `OriginalSourcePath`: the original live source location.
+- `OriginalSourcePath`: the recorded original live source location. This unsigned
+  metadata field is descriptive, not independently authenticated proof of origin.
 - `SnapshotMetadataPath`: the capture metadata file, protected from destination overwrite.
 - `RowIdentityStrategy`: declared-primary-key identity or positional identity.
 
@@ -106,6 +107,29 @@ storage, WORM storage, an adversarial filesystem boundary, or retention governan
 Do not edit snapshot files or add sidecars. A successful earlier run does not
 exempt later publication from rechecking its recorded digest.
 
+## Capture integrity checks
+
+Stored SQLite schema text is untrusted input. Capture admits only one bounded
+CREATE TABLE statement for the selected table and one CREATE INDEX statement for
+each of its indexes. Quoted delimiters and SQL comments remain supported, but a
+second statement or a different target is refused before executing schema text.
+Schema-size checks precede managed schema materialization. Existing v2 metadata,
+CLI/Desktop workflows and legacy-v1 replay behavior are unchanged.
+
+The target preserves the source database encoding. Capture independently verifies
+storage types and raw cell content, then verifies the exact ordered values read by
+the adapter. Malformed text, affinity changes, injected rows or a different scan
+order cannot silently produce a replayable bundle. Planner statistics are not
+copied: if their absence changes the observed row order, capture fails closed.
+Hidden SQL rowids are not independently promised; public identities remain declared
+primary keys or exact captured scan positions. Validation holds the source read
+transaction until these comparisons finish.
+
+Direct retained-connection verification also checks selected-table scope using
+immutable reads, including callers that construct a retained reference directly.
+Rewriting metadata hashes does not authorize unrelated schema objects. These
+checks provide integrity, not authentication of an owner-supplied bundle.
+
 ## Verification and remaining work
 
 Storage tests cover WAL consistency under a committing writer, restart/move with
@@ -115,18 +139,38 @@ bytes, binding/configuration or sidecars. Integration tests cover identical smal
 and large report/content digests after live-source deletion, preview restrictions,
 mutation during worker validation, protected prior file/database outputs,
 keyless retained publication, CLI capture/replay/retry, and approval refusal.
+Additional regressions cover stored-DDL statement injection, malformed text,
+UTF-16 and planner-dependent order, safe table/index layouts, and direct scope
+verification. Grouped/joined replay tests compare complete facts, provenance,
+input/report digests and late-publication tamper refusal. The isolated 100,000-row
+capture fixture checks every row and locator, excludes an unrelated 8 MiB table,
+and requires less than 64 MiB retained managed-heap variation. It does not qualify
+peak native or process-tree memory.
 
 Still open: automated retention/cleanup/encryption policy; multi-provider
 snapshots; process/power-loss capture qualification; and owner-authorized
 real-profile and jurisdiction-specific filing acceptance. This feature does not
 establish regulator compatibility.
 
-Local verification on 2026-11-08 after integration of the process-memory CI fix:
+Historical verification of the earlier snapshot increment on 2026-11-08
+(before the capture-integrity checks above):
 Release solution build passed with zero warnings/errors. Ordinary solution tests
 passed 1,059 cases with six environment-gated Arelle skips; the two 100,000-row
 SQLite/CSV memory cases each passed in a separate test process. Enabling the
-pinned Arelle runtime passed all 15 Arelle integration cases. The new snapshot
-coverage comprises 13 storage and 10 integration/CLI cases. A focused independent
+pinned Arelle runtime passed all 15 Arelle integration cases. That increment
+comprised 13 storage and 10 integration/CLI cases. A focused independent
 review's symlink/WAL, metadata-overwrite and null-configuration findings were fixed
 and covered by these tests. These are local Linux results; exact-commit hosted CI
 is the Windows verification gate.
+
+Capture-integrity patch verification on 2026-11-08, based on `a4e897c`:
+Release build passed with zero warnings/errors; 1,258 ordinary solution tests
+passed with six environment-gated skips. The focused storage/intent selection
+passed 83 cases, including 66 new integrity regressions. All five 100,000-row
+memory workloads passed in separate test hosts, each verified to execute exactly
+one test. Enabled Arelle passed 15/15, Python worker tests 82/82, operational tools
+15/15, and the taxonomy benchmark self-test passed. The bundled SQLite 3.54 already
+rejects malformed appended-schema payloads; explicit admission-parser tests also
+exercise the defense independently of that native rejection. These are local
+Linux results, not hosted Windows CI or release qualification. Coordinated
+integration and exact-commit Windows/Linux CI remain required.

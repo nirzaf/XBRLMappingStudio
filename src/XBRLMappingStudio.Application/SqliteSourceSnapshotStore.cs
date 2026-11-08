@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Sqlite;
 using XBRLMappingStudio.Diagnostics;
@@ -56,8 +57,7 @@ public static class SqliteSourceSnapshotStore
             using (new FileStream(databasePath, options)) { }
 
             var adapter = new SqliteSourceAdapter();
-            var sourceSchema = await adapter.InspectSchemaAsync(source, cancellationToken);
-            await CopySelectedTableAsync(source, sourceSchema, databasePath, cancellationToken, copiedRows);
+            var sourceSchema = await CopySelectedTableAsync(source, databasePath, cancellationToken, copiedRows);
 
             var captured = source with { Path = databasePath };
             var schema = await adapter.InspectSchemaAsync(captured, cancellationToken);
@@ -91,6 +91,12 @@ public static class SqliteSourceSnapshotStore
             cancellationToken.ThrowIfCancellationRequested();
             Directory.Move(staging, destination);
             return Path.Combine(destination, MetadataFile);
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == raw.SQLITE_TOOBIG)
+        {
+            throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                "SQLite snapshot schema, row, or index expression exceeded its byte budget; no bundle was published.",
+                isInputBudgetExceeded: true);
         }
         finally
         {
@@ -136,8 +142,6 @@ public static class SqliteSourceSnapshotStore
         if (!File.Exists(databasePath) || new FileInfo(databasePath).Length != metadata.DatabaseBytes)
             throw Invalid("Retained source database length differs from its capture metadata.");
         await VerifyConnectionAsync(connection, cancellationToken);
-        if (isSelectedTable)
-            await VerifySelectedTableOnlyAsync(databasePath, SqliteSourceAdapter.GetConfiguredTable(expected), cancellationToken);
         var schema = await new SqliteSourceAdapter().InspectSchemaAsync(connection, cancellationToken);
         if (schema.Fingerprint != metadata.SchemaFingerprint)
             throw Invalid("Retained source schema differs from its capture metadata.");
@@ -153,6 +157,8 @@ public static class SqliteSourceSnapshotStore
             throw Invalid("The retained source connection does not match its captured configuration.");
         if (!await MatchesAsync(connection.Path, snapshot.DatabaseDigest, cancellationToken))
             throw Invalid("Retained source bytes are missing, changed, journal-dependent or unverifiable.");
+        if (StringComparer.Ordinal.Equals(snapshot.SnapshotStrategy, Strategy))
+            await VerifySelectedTableOnlyAsync(connection.Path, SqliteSourceAdapter.GetConfiguredTable(connection), cancellationToken);
     }
 
     internal static async Task<bool> MatchesAsync(string? path, string? digest, CancellationToken cancellationToken)
@@ -190,29 +196,42 @@ public static class SqliteSourceSnapshotStore
         return "sha256:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
-    private static async Task CopySelectedTableAsync(SourceConnection source, ISourceSchema schema,
+    private static async Task<ISourceSchema> CopySelectedTableAsync(SourceConnection source,
         string databasePath, CancellationToken cancellationToken, IProgress<long>? copiedRows)
     {
         var table = SqliteSourceAdapter.GetConfiguredTable(source);
-        var columns = schema.Columns.OrderBy(column => column.Ordinal).ToArray();
-        if (columns.Length == 0) throw Invalid("The configured SQLite source table has no readable columns.");
-
         await using var original = Open(source.Path!, SqliteOpenMode.ReadOnly);
         await using var target = Open(databasePath, SqliteOpenMode.ReadWrite);
         await original.OpenAsync(cancellationToken);
         await target.OpenAsync(cancellationToken);
-        // The first schema read and every copied row use this same SQLite read
-        // transaction, including committed WAL pages visible at its start.
+        await ConfigureCaptureConnectionAsync(original, cancellationToken);
+        await ConfigureCaptureConnectionAsync(target, cancellationToken);
+        // Schema admission, copying, and both verification scans all observe this
+        // same source snapshot, including committed WAL pages visible at its start.
         await using var sourceTransaction = original.BeginTransaction(deferred: true);
         var createTableSql = await ReadSelectedTableSqlAsync(original, sourceTransaction, table, cancellationToken);
-        if (!createTableSql.TrimStart().StartsWith("CREATE TABLE", StringComparison.OrdinalIgnoreCase)
-            || createTableSql.TrimStart().StartsWith("CREATE VIRTUAL TABLE", StringComparison.OrdinalIgnoreCase))
-            throw Invalid("Virtual or unsupported SQLite table definitions cannot be retained as a table-only snapshot.");
+        AdmitSchemaStatement(createTableSql, table, null, cancellationToken);
         var indexSql = await ReadSelectedIndexSqlAsync(original, sourceTransaction, table, cancellationToken);
-
+        string encodingName;
+        await using (var encoding = original.CreateCommand())
+        {
+            encoding.Transaction = sourceTransaction;
+            encoding.CommandText = "PRAGMA encoding";
+            encodingName = Convert.ToString(await encoding.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture) ?? "";
+        }
+        var textEncoding = encodingName switch
+        {
+            "UTF-8" => new UTF8Encoding(false, true),
+            "UTF-16le" => (Encoding)new UnicodeEncoding(false, false, true),
+            "UTF-16be" => new UnicodeEncoding(true, false, true),
+            _ => throw Invalid("The SQLite source uses an unsupported text encoding.")
+        };
         await using (var pragma = target.CreateCommand())
         {
-            pragma.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON";
+            // Encoding affects BINARY text-key ordering, not just text decoding.
+            // These values are chosen above, never interpolated from arbitrary SQL.
+            pragma.CommandText = $"PRAGMA encoding='{encodingName}'; PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON";
             await pragma.ExecuteNonQueryAsync(cancellationToken);
         }
         long targetPageSize;
@@ -232,48 +251,43 @@ public static class SqliteSourceSnapshotStore
             if (effective <= 0 || effective > maximumPages)
                 throw Invalid("SQLite could not enforce the retained snapshot page limit.");
         }
-        await using var targetTransaction = target.BeginTransaction();
         await using (var create = target.CreateCommand())
         {
-            create.Transaction = targetTransaction;
             create.CommandText = createTableSql;
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
-
+        // Inspect only the admitted, size-bounded schema in our private staging
+        // image. Inspecting the live source before admission would materialize
+        // arbitrary schema names before their schema-byte budget was checked.
+        var schema = await new SqliteSourceAdapter().InspectSchemaAsync(source with { Path = databasePath }, cancellationToken);
+        var columns = schema.Columns.OrderBy(column => column.Ordinal).ToArray();
+        if (columns.Length == 0) throw Invalid("The configured SQLite source table has no readable columns.");
+        // DDL needs a separate schema budget; value/expression work is restricted
+        // to the much smaller row budget, including during index construction.
+        raw.sqlite3_limit(original.Handle, raw.SQLITE_LIMIT_LENGTH, SqliteSourceAdapter.DefaultMaximumRowBytes);
+        raw.sqlite3_limit(target.Handle, raw.SQLITE_LIMIT_LENGTH, SqliteSourceAdapter.DefaultMaximumRowBytes);
+        await using var targetTransaction = target.BeginTransaction();
         var quotedTable = Quote(table);
         var cellBytes = CombineSqlExpressions(columns.Select(column =>
             $"COALESCE(length(CAST({Quote(column.Name)} AS BLOB)), 0)"), "+");
         var containsBlob = CombineSqlExpressions(columns.Select(column =>
             $"typeof({Quote(column.Name)}) = 'blob'"), "OR");
-        await using var select = original.CreateCommand();
-        select.Transaction = sourceTransaction;
-        select.CommandText = $"SELECT *, CASE WHEN {containsBlob} THEN -1 ELSE {cellBytes} END FROM {quotedTable}";
-        await using var reader = await select.ExecuteReaderAsync(cancellationToken);
-        if (reader.FieldCount != columns.Length + 1
-            || Enumerable.Range(0, columns.Length).Any(index => !StringComparer.Ordinal.Equals(reader.GetName(index), columns[index].Name)))
-            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
-                $"SQLite table '{table}' has columns that the bounded source adapter cannot replay.");
-
-        var insertColumns = string.Join(", ", columns.Select(column => Quote(column.Name)));
-        var parameters = string.Join(", ", Enumerable.Range(0, columns.Length).Select(index => $"$p{index}"));
+        var budgetSql = $"CASE WHEN {containsBlob} THEN -1 ELSE {cellBytes} END";
+        // CASE maps only TEXT to raw database-encoding bytes. The final budget
+        // sentinel rejects source BLOBs before any cells are materialized, so a
+        // byte[] payload unambiguously represents original TEXT storage.
+        var rawColumns = string.Join(", ", columns.Select(column =>
+            $"CASE WHEN typeof({Quote(column.Name)})='text' THEN CAST({Quote(column.Name)} AS BLOB) ELSE {Quote(column.Name)} END AS {Quote(column.Name)}"));
+        var rawSelectSql = $"SELECT {rawColumns}, {budgetSql} FROM {quotedTable}";
+        var adapterSelectSql = $"SELECT *, {budgetSql} FROM {quotedTable}";
         var rowBudgetAdapter = new SqliteSourceAdapter();
-        await using var insert = target.CreateCommand();
-        insert.Transaction = targetTransaction;
-        insert.CommandText = $"INSERT INTO {quotedTable} ({insertColumns}) VALUES ({parameters})";
-        for (var index = 0; index < columns.Length; index++)
-            insert.Parameters.Add(new SqliteParameter($"$p{index}", DBNull.Value));
-        insert.Prepare();
-
-        long rowNumber = 0;
-        while (await reader.ReadAsync(cancellationToken))
+        void CheckRowBudget(SqliteDataReader row, long rowNumber)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var totalCellBytes = reader.GetInt64(columns.Length);
+            var totalCellBytes = row.GetInt64(columns.Length);
             if (totalCellBytes < 0)
                 throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
                     $"SQLite table '{table}' contains a BLOB value; BLOB source values are unsupported.");
-            var hasPrimaryKey = columns.Any(column => column.PrimaryKeyOrdinal > 0);
-            var rowId = hasPrimaryKey
+            var rowId = columns.Any(column => column.PrimaryKeyOrdinal > 0)
                 ? "pk:sha256:" + new string('0', 64)
                 : $"pos:{rowNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
             if (rowBudgetAdapter.EstimateRowBytesUpperBound(
@@ -281,20 +295,67 @@ public static class SqliteSourceSnapshotStore
                 throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
                     $"A SQLite source row exceeded the {SqliteSourceAdapter.DefaultMaximumRowBytes} byte row budget before its cells were materialized.",
                     isInputBudgetExceeded: true);
-
-            for (var index = 0; index < columns.Length; index++)
-                insert.Parameters[index].Value = reader.GetValue(index);
-            await insert.ExecuteNonQueryAsync(cancellationToken);
-            rowNumber++;
-            copiedRows?.Report(rowNumber);
-            if ((rowNumber & 127) == 0)
-                await EnsurePageBudgetAsync(target, targetTransaction, cancellationToken);
         }
-        await reader.DisposeAsync();
-        await EnsurePageBudgetAsync(target, targetTransaction, cancellationToken);
-
-        // Triggers and views can contain executable or unrelated database logic and
-        // are not required by a read-only table binding. Preserve only its indexes.
+        void CheckColumns(SqliteDataReader row)
+        {
+            if (row.FieldCount != columns.Length + 1
+                || Enumerable.Range(0, columns.Length).Any(index => !StringComparer.Ordinal.Equals(row.GetName(index), columns[index].Name)))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"SQLite table '{table}' has columns that the bounded source adapter cannot replay.");
+        }
+        // SELECT * additionally rejects generated/hidden column layouts that the
+        // ordinary source adapter cannot replay, without silently dropping them.
+        await using (var check = original.CreateCommand())
+        {
+            check.Transaction = sourceTransaction;
+            check.CommandText = adapterSelectSql;
+            await using var shape = await check.ExecuteReaderAsync(cancellationToken);
+            CheckColumns(shape);
+        }
+        await using (var select = original.CreateCommand())
+        {
+            select.Transaction = sourceTransaction;
+            select.CommandText = rawSelectSql;
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            CheckColumns(reader);
+            var insertColumns = string.Join(", ", columns.Select(column => Quote(column.Name)));
+            var parameters = string.Join(", ", Enumerable.Range(0, columns.Length).Select(index => $"$p{index}"));
+            await using var insert = target.CreateCommand();
+            insert.Transaction = targetTransaction;
+            insert.CommandText = $"INSERT INTO {quotedTable} ({insertColumns}) VALUES ({parameters})";
+            for (var index = 0; index < columns.Length; index++)
+                insert.Parameters.Add(new SqliteParameter($"$p{index}", DBNull.Value));
+            insert.Prepare();
+            long rowNumber = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                CheckRowBudget(reader, rowNumber);
+                for (var index = 0; index < columns.Length; index++)
+                {
+                    var value = reader.GetValue(index);
+                    if (value is byte[] bytes)
+                    {
+                        try { value = textEncoding.GetString(bytes); }
+                        catch (DecoderFallbackException)
+                        {
+                            throw Invalid("SQLite source TEXT contains invalid encoding bytes; no snapshot was published.");
+                        }
+                    }
+                    if (value is double or float)
+                        throw new AdapterException(DiagnosticCodes.IoNumberOutOfBudget,
+                            "SQLite binary floating-point data cannot be retained for exact numeric ingestion.");
+                    insert.Parameters[index].Value = value;
+                }
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+                rowNumber++;
+                copiedRows?.Report(rowNumber);
+                if ((rowNumber & 127) == 0)
+                    await EnsurePageBudgetAsync(target, targetTransaction, cancellationToken);
+            }
+        }
+        // Triggers and views are deliberately not copied. Indexes preserve supported
+        // scan layouts, but are admitted as single statements before any execution.
         foreach (var sql in indexSql)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -303,6 +364,12 @@ public static class SqliteSourceSnapshotStore
             index.CommandText = sql;
             await index.ExecuteNonQueryAsync(cancellationToken);
         }
+        await EnsurePageBudgetAsync(target, targetTransaction, cancellationToken);
+        // Never canonicalize with ORDER BY rowid: that would hide a changed adapter
+        // scan order. Check raw cells and also the exact ordinary-adapter projection,
+        // whose query plan can differ when the source has planner statistics.
+        await VerifyRowsAsync(rawSelectSql);
+        await VerifyRowsAsync(adapterSelectSql);
         cancellationToken.ThrowIfCancellationRequested();
         await targetTransaction.CommitAsync(cancellationToken);
         await using var journalMode = target.CreateCommand();
@@ -310,6 +377,53 @@ public static class SqliteSourceSnapshotStore
         if (!StringComparer.OrdinalIgnoreCase.Equals(Convert.ToString(
                 await journalMode.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture), "delete"))
             throw Invalid("Retained source could not be made independent of journal sidecars.");
+        return schema;
+
+        async Task VerifyRowsAsync(string sql)
+        {
+            await using var sourceRead = original.CreateCommand();
+            sourceRead.Transaction = sourceTransaction;
+            sourceRead.CommandText = sql;
+            await using var targetRead = target.CreateCommand();
+            targetRead.Transaction = targetTransaction;
+            targetRead.CommandText = sql;
+            await using var sourceRows = await sourceRead.ExecuteReaderAsync(cancellationToken);
+            await using var targetRows = await targetRead.ExecuteReaderAsync(cancellationToken);
+            CheckColumns(sourceRows);
+            CheckColumns(targetRows);
+            long rowNumber = 0;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var sourceHasRow = await sourceRows.ReadAsync(cancellationToken);
+                var targetHasRow = await targetRows.ReadAsync(cancellationToken);
+                if (sourceHasRow != targetHasRow)
+                    throw Invalid("Retained SQLite row count differs from the captured source transaction.");
+                if (!sourceHasRow) return;
+                CheckRowBudget(sourceRows, rowNumber);
+                CheckRowBudget(targetRows, rowNumber);
+                for (var index = 0; index < columns.Length; index++)
+                {
+                    var left = sourceRows.GetValue(index);
+                    var right = targetRows.GetValue(index);
+                    var equal = left.GetType() == right.GetType() && (left is byte[] leftBytes
+                        ? leftBytes.AsSpan().SequenceEqual((byte[])right)
+                        : left.Equals(right));
+                    if (!equal)
+                        throw Invalid("Retained SQLite storage types, cell bytes, or scan order differ from the captured source transaction.");
+                }
+                rowNumber++;
+            }
+        }
+    }
+
+    private static async Task ConfigureCaptureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        raw.sqlite3_limit(connection.Handle, raw.SQLITE_LIMIT_LENGTH, MaximumTableSchemaSqlBytes);
+        raw.sqlite3_limit(connection.Handle, raw.SQLITE_LIMIT_SQL_LENGTH, MaximumTableSchemaSqlBytes);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA cache_size=-2048; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA trusted_schema=OFF";
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<string> ReadSelectedTableSqlAsync(SqliteConnection source,
@@ -317,13 +431,16 @@ public static class SqliteSourceSnapshotStore
     {
         await using var command = source.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name=$name COLLATE NOCASE";
+        command.CommandText = "SELECT length(CAST(sql AS BLOB)), sql FROM sqlite_master WHERE type='table' AND name=$name COLLATE NOCASE";
         command.Parameters.AddWithValue("$name", table);
-        var sql = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
-        if (string.IsNullOrWhiteSpace(sql))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, $"SQLite table '{table}' no longer exists.");
-        if (Encoding.UTF8.GetByteCount(sql) > MaximumTableSchemaSqlBytes)
+        if (reader.GetInt64(0) is <= 0 or > MaximumTableSchemaSqlBytes)
             throw Invalid("Selected SQLite table definition exceeds the snapshot schema budget.");
+        var sql = reader.GetString(1);
+        if (string.IsNullOrWhiteSpace(sql) || await reader.ReadAsync(cancellationToken))
+            throw Invalid("Selected SQLite table definition is missing or ambiguous.");
         return sql;
     }
 
@@ -333,7 +450,8 @@ public static class SqliteSourceSnapshotStore
         var result = new List<string>();
         await using var command = source.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=$name COLLATE NOCASE AND sql IS NOT NULL ORDER BY name";
+        command.CommandText = "SELECT length(CAST(sql AS BLOB)), length(CAST(name AS BLOB)), name, sql FROM sqlite_master "
+            + "WHERE type='index' AND tbl_name=$name COLLATE NOCASE AND sql IS NOT NULL ORDER BY name";
         command.Parameters.AddWithValue("$name", table);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var schemaBytes = 0L;
@@ -342,10 +460,15 @@ public static class SqliteSourceSnapshotStore
             cancellationToken.ThrowIfCancellationRequested();
             if (result.Count >= MaximumIndexCount)
                 throw Invalid("Selected SQLite table exceeds the retained index-count limit.");
-            var sql = reader.GetString(0);
-            schemaBytes = checked(schemaBytes + Encoding.UTF8.GetByteCount(sql));
-            if (schemaBytes > MaximumTableSchemaSqlBytes)
+            var sqlBytes = reader.GetInt64(0);
+            var nameBytes = reader.GetInt64(1);
+            if (sqlBytes <= 0 || nameBytes <= 0 || nameBytes > MaximumTableSchemaSqlBytes
+                || sqlBytes > MaximumTableSchemaSqlBytes - schemaBytes)
                 throw Invalid("Selected SQLite index definitions exceed the snapshot schema budget.");
+            schemaBytes += sqlBytes;
+            var name = reader.GetString(2);
+            var sql = reader.GetString(3);
+            AdmitSchemaStatement(sql, table, name, cancellationToken);
             result.Add(sql);
         }
         return result;
@@ -372,17 +495,146 @@ public static class SqliteSourceSnapshotStore
     private static async Task VerifySelectedTableOnlyAsync(string databasePath, string expectedTable,
         CancellationToken cancellationToken)
     {
-        await using var connection = Open(databasePath, SqliteOpenMode.ReadOnly);
+        // Scope validation must not consult or create journals for retained images.
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = new Uri(Path.GetFullPath(databasePath)).AbsoluteUri + "?immutable=1&mode=ro",
+            Mode = SqliteOpenMode.ReadOnly, Pooling = false, DefaultTimeout = 5
+        }.ToString());
         await connection.OpenAsync(cancellationToken);
+        await ConfigureCaptureConnectionAsync(connection, cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT type, name FROM sqlite_master "
-            + "WHERE type IN ('table', 'view', 'trigger') AND substr(name,1,7) <> 'sqlite_' ORDER BY type, name";
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken)
-            || !StringComparer.Ordinal.Equals(reader.GetString(0), "table")
-            || !StringComparer.OrdinalIgnoreCase.Equals(reader.GetString(1), expectedTable)
-            || await reader.ReadAsync(cancellationToken))
-            throw Invalid("Retained table-only snapshot contains unexpected tables, views, or triggers.");
+        command.CommandText = "SELECT count(*) FROM sqlite_master WHERE COALESCE("
+            + "(type='table' AND name=$name COLLATE NOCASE AND tbl_name=$name COLLATE NOCASE) "
+            + "OR (type='index' AND tbl_name=$name COLLATE NOCASE) "
+            + "OR (type='table' AND name='sqlite_sequence' AND tbl_name='sqlite_sequence'), 0)=0";
+        command.Parameters.AddWithValue("$name", expectedTable);
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 0)
+            throw Invalid("Retained table-only snapshot contains unexpected schema objects.");
+        command.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=$name COLLATE NOCASE";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 1)
+            throw Invalid("Retained table-only snapshot is missing its selected table.");
+        command.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 0)
+        {
+            command.CommandText = "SELECT count(*) FROM sqlite_sequence WHERE name IS NULL OR name<>$name COLLATE NOCASE";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 0)
+                throw Invalid("Retained table-only snapshot contains an unrelated SQLite sequence.");
+        }
+    }
+
+    private static void AdmitSchemaStatement(string sql, string table, string? indexName,
+        CancellationToken cancellationToken)
+    {
+        // sqlite_master.sql is untrusted, including on otherwise readable databases.
+        // Microsoft.Data.Sqlite executes every statement in CommandText, so admit
+        // exactly one CREATE of the catalog object before ever sending it there.
+        var position = 0;
+        void SkipTrivia()
+        {
+            while (position < sql.Length)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (sql[position] is ' ' or '\t' or '\r' or '\n' or '\f' or '\v') { position++; continue; }
+                if (position + 1 < sql.Length && sql[position] == '-' && sql[position + 1] == '-')
+                {
+                    position += 2;
+                    while (position < sql.Length && sql[position] != '\n') position++;
+                    continue;
+                }
+                if (position + 1 < sql.Length && sql[position] == '/' && sql[position + 1] == '*')
+                {
+                    var end = sql.IndexOf("*/", position + 2, StringComparison.Ordinal);
+                    if (end < 0) throw Invalid("SQLite schema has an unterminated comment.");
+                    position = end + 2;
+                    continue;
+                }
+                break;
+            }
+        }
+        (string Text, bool Quoted) Token()
+        {
+            SkipTrivia();
+            if (position >= sql.Length) throw Invalid("SQLite schema definition is incomplete.");
+            var first = sql[position++];
+            if (first is '\'' or '"' or '`' or '[')
+            {
+                var close = first == '[' ? ']' : first;
+                var value = new StringBuilder();
+                while (position < sql.Length)
+                {
+                    var current = sql[position++];
+                    if (current == close)
+                    {
+                        if (close != ']' && position < sql.Length && sql[position] == close)
+                        { value.Append(close); position++; continue; }
+                        return (value.ToString(), true);
+                    }
+                    value.Append(current);
+                }
+                throw Invalid("SQLite schema has an unterminated quoted token.");
+            }
+            var start = position - 1;
+            if (char.IsLetterOrDigit(first) || first is '_' or '$' || first >= 128)
+                while (position < sql.Length && (char.IsLetterOrDigit(sql[position]) || sql[position] is '_' or '$' || sql[position] >= 128)) position++;
+            return (sql[start..position], false);
+        }
+        void Keyword(string expected)
+        {
+            var token = Token();
+            if (token.Quoted || !StringComparer.OrdinalIgnoreCase.Equals(token.Text, expected))
+                throw Invalid("SQLite schema contains an unsupported CREATE definition.");
+        }
+        void Name(string expected)
+        {
+            var name = Token().Text;
+            SkipTrivia();
+            if (position < sql.Length && sql[position] == '.')
+            {
+                if (!StringComparer.OrdinalIgnoreCase.Equals(name, "main"))
+                    throw Invalid("SQLite snapshot schema cannot target another database.");
+                position++;
+                name = Token().Text;
+            }
+            if (!StringComparer.OrdinalIgnoreCase.Equals(name, expected))
+                throw Invalid("SQLite schema definition does not target its selected catalog object.");
+        }
+        if (sql.IndexOf('\0') >= 0) throw Invalid("SQLite schema contains a NUL byte.");
+        Keyword("CREATE");
+        if (indexName is null) Keyword("TABLE");
+        else
+        {
+            var saved = position;
+            var token = Token();
+            if (!token.Quoted && StringComparer.OrdinalIgnoreCase.Equals(token.Text, "UNIQUE")) Keyword("INDEX");
+            else { position = saved; Keyword("INDEX"); }
+        }
+        var optional = position;
+        var next = Token();
+        if (!next.Quoted && StringComparer.OrdinalIgnoreCase.Equals(next.Text, "IF"))
+        { Keyword("NOT"); Keyword("EXISTS"); }
+        else position = optional;
+        Name(indexName ?? table);
+        if (indexName is not null) { Keyword("ON"); Name(table); }
+        SkipTrivia();
+        if (position >= sql.Length || sql[position] != '(')
+            throw Invalid("SQLite table snapshots require a column or index definition, not CREATE AS SELECT.");
+        while (position < sql.Length)
+        {
+            if ((position & 4095) == 0) cancellationToken.ThrowIfCancellationRequested();
+            SkipTrivia();
+            if (position >= sql.Length) break;
+            var current = sql[position];
+            if (current == ';')
+            {
+                position++;
+                SkipTrivia();
+                if (position != sql.Length) throw Invalid("SQLite schema contains more than one SQL statement.");
+                break;
+            }
+            if (current is '\'' or '"' or '`' or '[') { Token(); continue; }
+            position++;
+        }
     }
 
     private static string CombineSqlExpressions(IEnumerable<string> expressions, string operation)
