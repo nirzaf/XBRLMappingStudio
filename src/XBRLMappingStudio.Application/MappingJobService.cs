@@ -434,6 +434,8 @@ public sealed class MappingJobService
                 }
                 progress?.Report(new MappingJobProgress(
                     $"Inspecting source {binding.DisplayName}", bindingIndex, project.Bindings.Count));
+                if (conn.RetainedSnapshot is not null)
+                    await SqliteSourceSnapshotStore.VerifyConnectionAsync(conn, cancellationToken);
                 var adapter = BuildExecutionAdapter(conn);
                 var schema = await adapter.InspectSchemaAsync(conn, cancellationToken);
                 if (!string.IsNullOrEmpty(binding.SchemaFingerprint)
@@ -579,7 +581,7 @@ public sealed class MappingJobService
             var connection = sourceConnections[binding.BindingId];
             var schema = sourceSchemas[binding.BindingId];
             var hasPrimaryKey = schema.Columns.Any(column => column.PrimaryKeyOrdinal > 0);
-            if (!hasPrimaryKey && connection.Kind == "sqlite")
+            if (!hasPrimaryKey && connection.Kind == "sqlite" && connection.RetainedSnapshot is null)
             {
                 context.Diagnostics.Warn(DiagnosticCodes.IoStableRowIdentityUnavailable,
                     DiagnosticSubsystem.Adapter, DiagnosticStage.Execution,
@@ -599,7 +601,8 @@ public sealed class MappingJobService
                 var connection = sourceConnections[binding.BindingId];
                 if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
                 {
-                    AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
+                    if (connection.RetainedSnapshot is null)
+                        AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
                     UpdateSqliteInputIdentity(manifest, binding.BindingId, connection,
                         DigestRecords(connection, context.LoadedSources[binding.BindingId]), schema: sourceSchemas[binding.BindingId], preview: true);
                 }
@@ -612,7 +615,8 @@ public sealed class MappingJobService
                 var connection = sourceConnections[binding.BindingId];
                 if (StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "sqlite"))
                 {
-                    AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
+                    if (connection.RetainedSnapshot is null)
+                        AddSqliteRowIdentityWarning(context, sourceSchemas[binding.BindingId], opId);
                     UpdateSqliteInputIdentity(manifest, binding.BindingId, connection,
                         DigestRecords(connection, context.LoadedSources[binding.BindingId]), schema: sourceSchemas[binding.BindingId], preview: false);
                 }
@@ -806,6 +810,19 @@ public sealed class MappingJobService
             });
         }
 
+        if (manifest.Inputs.Any(input => input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            && await FindChangedFileInputAsync(manifest.Inputs,
+                _executionBudget.MaxInMemorySourceBytes, cancellationToken) is { } changedSnapshot)
+        {
+            context.Diagnostics.Error(DiagnosticCodes.IoInputIdentityChanged,
+                DiagnosticSubsystem.Adapter, DiagnosticStage.Validation,
+                SourceIdentityMismatchMessage(changedSnapshot), operationId: opId);
+            manifest.Outcome = RunOutcome.DataError;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiags).ToArray();
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
         manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiags).ToList();
         manifest.Outputs = new List<OutputIdentity>
@@ -952,10 +969,10 @@ public sealed class MappingJobService
                 var digest = store.ComputeSourceDigest(table, cancellationToken);
                 UpdateSqliteInputIdentity(manifest, binding.BindingId, connection, digest, schema, preview: false, hasPrimaryKey);
             }
-            else if (await FindChangedFileInputAsync(manifest.Inputs,
+            if (await FindChangedFileInputAsync(manifest.Inputs,
                 _executionBudget.MaxInMemorySourceBytes, cancellationToken) is not null)
                 throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
-                    "CSV input changed or could not be verified after its identity was recorded. Retry with a stable input.");
+                    "Retained database or CSV input changed or could not be verified after its identity was recorded. Retry with a stable input.");
             var reportPath = Path.Combine(directory, outputKind == "xbrl-xml" ? "report.xml" : "report.json");
             long reportBytes;
             try
@@ -1103,10 +1120,11 @@ public sealed class MappingJobService
                 progress?.Report(new MappingJobProgress($"Run ended: {manifest.Outcome}"));
                 return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
             }
-            if (connection.Kind == "csv" && await FindChangedFileInputAsync(manifest.Inputs,
+            if ((connection.Kind == "csv" || connection.RetainedSnapshot is not null)
+                && await FindChangedFileInputAsync(manifest.Inputs,
                 _executionBudget.MaxInMemorySourceBytes, cancellationToken) is not null)
                 throw new AdapterException(DiagnosticCodes.IoInputIdentityChanged,
-                    "CSV input changed during validation. Retry with a stable input.");
+                    "Retained database or CSV input changed during validation. Retry with a stable input.");
             manifest.ValidatedArtifactDigest = artifact.Sha256;
             manifest.Outputs = new[]
             {
@@ -1166,11 +1184,12 @@ public sealed class MappingJobService
             {
                 Kind = preview ? "sqlite-preview" : "sqlite-table",
                 Digest = digest,
-                IsReplayable = false,
+                IsReplayable = !preview && connection.RetainedSnapshot is not null,
                 RowIdentityStrategy = declaredPrimaryKey
                     ? SqliteSourceAdapter.StablePrimaryKeyIdentityStrategy
                     : SqliteSourceAdapter.PositionalIdentityStrategy,
-                SnapshotStrategy = "sqlite-read-transaction"
+                SnapshotStrategy = connection.RetainedSnapshot is null
+                    ? "sqlite-read-transaction" : SqliteSourceSnapshotStore.Strategy
             }
             : input).ToArray();
     }
@@ -1837,7 +1856,9 @@ public sealed class MappingJobService
             Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
         var sourceIdAtDestination = DestinationPathGuard.FindSourceIdAtPath(
             destinationPath,
-            result.Manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+            result.Manifest.Inputs.SelectMany(input => new[]
+                { (input.SourceId, input.OriginalPath), (input.SourceId, input.OriginalSourcePath),
+                    (input.SourceId, input.SnapshotMetadataPath) })
                 .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
             root);
         if (sourceIdAtDestination is not null)
@@ -1956,7 +1977,9 @@ public sealed class MappingJobService
             Path.IsPathRooted(plan.Locator) ? plan.Locator : Path.Combine(root, plan.Locator));
         var sourceIdAtDestination = DestinationPathGuard.FindSourceIdAtPath(
             destinationPath,
-            result.Manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+            result.Manifest.Inputs.SelectMany(input => new[]
+                { (input.SourceId, input.OriginalPath), (input.SourceId, input.OriginalSourcePath),
+                    (input.SourceId, input.SnapshotMetadataPath) })
                 .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
             root);
         if (sourceIdAtDestination is not null)
@@ -2163,6 +2186,8 @@ public sealed class MappingJobService
             AppendIntentPart(builder, input.Digest ?? "");
             AppendIntentPart(builder, input.IsReplayable ? "1" : "0");
             AppendIntentPart(builder, input.RowIdentityStrategy ?? "");
+            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+                AppendIntentPart(builder, input.SnapshotDigest ?? "");
         }
 
         foreach (var parameter in result.Manifest.FrozenParameters.OrderBy(parameter => parameter.Key, StringComparer.Ordinal))
@@ -2315,7 +2340,13 @@ public sealed class MappingJobService
             ct.ThrowIfCancellationRequested();
             if (StringComparer.OrdinalIgnoreCase.Equals(kv.Value.Kind, "sqlite"))
             {
-                list.Add(new InputIdentity(kv.Key, "sqlite-table", null, IsReplayable: false, kv.Value.Path));
+                list.Add(new InputIdentity(kv.Key, "sqlite-table", null, IsReplayable: false, kv.Value.Path)
+                {
+                    SnapshotDigest = kv.Value.RetainedSnapshot?.DatabaseDigest,
+                    SnapshotMetadataPath = kv.Value.RetainedSnapshot?.MetadataPath,
+                    OriginalSourcePath = kv.Value.RetainedSnapshot?.OriginalSourcePath,
+                    SnapshotStrategy = kv.Value.RetainedSnapshot is null ? null : SqliteSourceSnapshotStore.Strategy
+                });
                 continue;
             }
             if (StringComparer.Ordinal.Equals(kv.Value.Kind, "csv"))
@@ -2404,7 +2435,9 @@ public sealed class MappingJobService
     }
 
     private static string SourceIdentityMismatchMessage(InputIdentity input)
-        => input.Kind is "sqlite-table" or "sqlite-preview"
+        => input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy
+            ? $"Retained SQLite source '{input.SourceId}' changed, is missing, or cannot be verified against its captured digest. Restore the exact retained snapshot before replay or publication."
+            : input.Kind is "sqlite-table" or "sqlite-preview"
             ? StringComparer.Ordinal.Equals(input.RowIdentityStrategy, SqliteSourceAdapter.PositionalIdentityStrategy)
                 ? $"SQLite input source '{input.SourceId}' has no declared primary key, so its positional row locators cannot be verified for saved-result reuse. Its sqlite-read-transaction snapshot is not replayable; rerun from the current source before preview or publication."
                 : $"SQLite input source '{input.SourceId}' changed or could not be verified since this run. Its sqlite-read-transaction snapshot is not replayable; saved-result reuse requires a verifiable declared primary key. Rerun from the current source before preview or publication."
@@ -2435,6 +2468,14 @@ public sealed class MappingJobService
         foreach (var input in recordedInputs.Where(input => input.Kind == "sqlite-table"))
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            {
+                if (!input.IsReplayable || string.IsNullOrWhiteSpace(input.Digest)
+                    || !await SqliteSourceSnapshotStore.MatchesAsync(input.OriginalPath,
+                        input.SnapshotDigest, cancellationToken)) return input;
+                continue;
+            }
 
             // The set digest is order-independent. It cannot prove that a keyless
             // table still assigns the same pos:n provenance locators, so saved-result
@@ -2520,6 +2561,12 @@ public sealed class MappingJobService
     {
         foreach (var input in recordedInputs)
         {
+            if (input.SnapshotStrategy == SqliteSourceSnapshotStore.Strategy)
+            {
+                if (!await SqliteSourceSnapshotStore.MatchesAsync(input.OriginalPath,
+                    input.SnapshotDigest, cancellationToken)) return input;
+                continue;
+            }
             if (input.Kind is not ("file" or "pdf-review-manifest" or "xbrl-report"))
                 continue;
             if (!input.IsReplayable || string.IsNullOrWhiteSpace(input.Digest)

@@ -32,6 +32,7 @@ return await XBRLMappingStudio.CLI.CliLifetime.RunAsync(async cancellationToken 
     {
         "inspect" => Inspect(rest),
         "inspect-source" => await InspectSourceAsync(rest, cancellationToken),
+        "snapshot-source" => await SnapshotSourceAsync(rest, cancellationToken),
         "validate" => await ValidateAsync(rest),
         "migrate-project-profile" => MigrateProjectProfile(rest),
         "configure-destination" => ConfigureDestination(rest),
@@ -62,12 +63,14 @@ static int PrintUsage()
     Console.Error.WriteLine("Usage:");
     Console.Error.WriteLine("  xbrl-studio inspect  <project.xmap>");
     Console.Error.WriteLine("  xbrl-studio inspect-source <project.xmap> [--binding <id>] (SQLite source schema and capabilities)");
+    Console.Error.WriteLine("  xbrl-studio snapshot-source <project.xmap> --binding <id> --out <new-bundle-directory> [--workspace-root <dir>] (retains the entire database)");
     Console.Error.WriteLine("  xbrl-studio validate <project.xmap> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio migrate-project-profile <legacy.xmap> --output <new.xmap> --profile-id <id> --profile-digest <digest> [--allow-synthetic-profile]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind sqlite --path <existing-db> --table <name> --key <column[,column...]> [--write-mode upsert]");
     Console.Error.WriteLine("  xbrl-studio configure-destination <project.xmap> --kind <csv|excel|json|xml> --path <file> --format <contract> [--write-mode replace]");
     Console.Error.WriteLine("  xbrl-studio execute  <project.xmap> --binding <id>=<path> --param <k>=<v> --output <path> [--allow-synthetic-profile]");
     Console.Error.WriteLine("                       [--output-format xbrl-json|xbrl-xml] (default: xbrl-json)");
+    Console.Error.WriteLine("                       [--source-snapshot <id>=<snapshot.json>] (replay a retained SQLite source without reading the live database)");
     Console.Error.WriteLine("                       [--manifest <path>] (completed run metadata; early failures may have no manifest)");
     Console.Error.WriteLine("                       [--workspace-root <dir>] [--publish-destination] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("                       Combined --output and --publish-destination requires a saved SQLite plan; reconcile partial results by mixed operation key.");
@@ -583,6 +586,56 @@ static int Inspect(string[] args)
     return ExitCodesLocal.Success;
 }
 
+static async Task<int> SnapshotSourceAsync(string[] args, CancellationToken cancellationToken)
+{
+    if (args.Length < 1) return ExitCodesLocal.IncompleteProfile;
+    string? bindingId = null, output = null, workspaceRoot = null;
+    for (var i = 1; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--binding" when i + 1 < args.Length && bindingId is null: bindingId = args[++i]; break;
+            case "--out" when i + 1 < args.Length && output is null: output = args[++i]; break;
+            case "--workspace-root" when i + 1 < args.Length && workspaceRoot is null: workspaceRoot = args[++i]; break;
+            default:
+                Console.Error.WriteLine($"Unrecognized, duplicate or incomplete snapshot-source option: {args[i]}");
+                return ExitCodesLocal.IncompleteProfile;
+        }
+    }
+    if (string.IsNullOrWhiteSpace(bindingId) || string.IsNullOrWhiteSpace(output))
+    {
+        Console.Error.WriteLine("snapshot-source requires --binding <id> and --out <new-bundle-directory>.");
+        return ExitCodesLocal.IncompleteProfile;
+    }
+    try
+    {
+        var projectPath = Path.GetFullPath(args[0]);
+        var project = new ProjectManager(projectPath).Load();
+        var binding = project.Bindings.SingleOrDefault(binding => binding.BindingId == bindingId);
+        if (binding is null || binding.Kind != "sqlite" || string.IsNullOrWhiteSpace(binding.Locator))
+        {
+            Console.Error.WriteLine("Select one existing SQLite binding for snapshot capture.");
+            return ExitCodesLocal.IncompleteProfile;
+        }
+        var root = Path.GetFullPath(workspaceRoot ?? Path.GetDirectoryName(projectPath)!);
+        string Guard(string path) => PathGuard.EnsureWithin(root, Path.GetFullPath(path, root));
+        var source = new SourceConnection(binding.BindingId, binding.Kind, Guard(binding.Locator),
+            binding.Configuration.Where(pair => pair.Value is not null)
+                .ToDictionary(pair => pair.Key, pair => pair.Value!.ToString()!, StringComparer.Ordinal));
+        var destination = Guard(output);
+        Console.Error.WriteLine("Retaining a confidential copy of the entire SQLite database, including tables outside this binding.");
+        var metadataPath = await SqliteSourceSnapshotStore.CaptureAsync(source, destination, cancellationToken);
+        Console.WriteLine(JsonSerializer.Serialize(new { snapshot = metadataPath, sourceId = bindingId,
+            strategy = SqliteSourceSnapshotStore.Strategy, entireDatabase = true }));
+        return ExitCodesLocal.Success;
+    }
+    catch (AdapterException ex)
+    {
+        Console.Error.WriteLine($"IO: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+}
+
 static async Task<int> InspectSourceAsync(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length < 1)
@@ -867,6 +920,7 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
     if (args.Length < 1) { Console.Error.WriteLine("requires <project>"); return ExitCodesLocal.IncompleteProfile; }
     var projectPath = args[0];
     var bindings = new List<(string id, string path)>();
+    var sourceSnapshots = new Dictionary<string, string>(StringComparer.Ordinal);
     var parameters = new Dictionary<string, string>(StringComparer.Ordinal);
     string? output = null;
     string outputFormat = "xbrl-json";
@@ -887,6 +941,15 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                 if (i + 1 >= args.Length) { Console.Error.WriteLine("--binding requires id=path"); return ExitCodesLocal.IncompleteProfile; }
                 var (bid, bpath) = ParsePair(args[++i]);
                 bindings.Add((bid, bpath));
+                break;
+            case "--source-snapshot":
+                if (i + 1 >= args.Length) return ExitCodesLocal.IncompleteProfile;
+                var (snapshotId, snapshotPath) = ParsePair(args[++i]);
+                if (!sourceSnapshots.TryAdd(snapshotId, snapshotPath))
+                {
+                    Console.Error.WriteLine("A source binding can select only one retained snapshot.");
+                    return ExitCodesLocal.IncompleteProfile;
+                }
                 break;
             case "--param":
                 if (i + 1 >= args.Length) { Console.Error.WriteLine("--param requires name=value"); return ExitCodesLocal.IncompleteProfile; }
@@ -1037,6 +1100,17 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
         }
         foreach (var (id, conn) in conns.ToArray())
             if (conn.Path is not null) conns[id] = conn with { Path = GuardPath(conn.Path) };
+        foreach (var (id, path) in sourceSnapshots.ToArray())
+        {
+            if (!conns.TryGetValue(id, out var source) || source.Kind != "sqlite"
+                || bindings.Any(binding => binding.id == id))
+            {
+                Console.Error.WriteLine("--source-snapshot requires an existing SQLite binding without a competing --binding path override.");
+                return ExitCodesLocal.IncompleteProfile;
+            }
+            sourceSnapshots[id] = GuardPath(path);
+            _ = GuardPath(Path.Combine(Path.GetDirectoryName(sourceSnapshots[id])!, "source.sqlite"));
+        }
         if (output is not null) output = GuardPath(output);
         if (manifestPath is not null) manifestPath = GuardPath(manifestPath);
 
@@ -1078,6 +1152,11 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
         IEnumerable<(string SourceId, string? Path)> sourcePaths =
             conns.Values.Select(connection => (connection.SourceId, connection.Path))
             .Concat(p.Bindings.Select(binding => (SourceId: binding.BindingId, Path: (string?)binding.Locator)))
+            .Concat(sourceSnapshots.SelectMany(snapshot => new (string SourceId, string? Path)[]
+            {
+                (snapshot.Key, snapshot.Value),
+                (snapshot.Key, Path.Combine(Path.GetDirectoryName(snapshot.Value)!, "source.sqlite"))
+            }))
             .Concat(new (string SourceId, string? Path)[]
             {
                 ("project-file", fullProjectPath),
@@ -1117,6 +1196,9 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
                 return onlyApproval ? ExitCodesLocal.AuthorizationFailure : ExitCodesLocal.IncompleteProfile;
             }
         }
+
+        foreach (var (id, path) in sourceSnapshots)
+            conns[id] = await SqliteSourceSnapshotStore.OpenAsync(path, conns[id], cancellationToken);
 
         IWorkerClient worker;
         try
@@ -1445,7 +1527,8 @@ static async Task<int> ExecuteAsync(string[] args, bool preview, CancellationTok
     catch (AdapterException ex)
     {
         Console.Error.WriteLine($"IO: {ex.Code}: {ex.Message}");
-        return ExitCodesLocal.AuthorizationFailure;
+        return ex.Code == DiagnosticCodes.IoInputIdentityChanged
+            ? ExitCodesLocal.DataError : ExitCodesLocal.AuthorizationFailure;
     }
     catch (OperationCanceledException)
     {

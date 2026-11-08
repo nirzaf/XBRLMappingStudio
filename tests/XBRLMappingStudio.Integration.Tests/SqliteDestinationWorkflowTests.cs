@@ -469,6 +469,38 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RetainedSqliteSource_PublishesFromSnapshotAndRejectsTampering(bool hasPrimaryKey)
+    {
+        var sourcePath = await CreateSqliteSourceAsync("retained-source.db", hasPrimaryKey);
+        var project = ConfiguredSqliteSourceProject(sourcePath, fileDestination: false);
+        var service = NewService();
+        var source = Assert.Single(Connections(project, sourcePath)).Value;
+        var metadata = await SqliteSourceSnapshotStore.CaptureAsync(source, Path.Combine(_directory, "retained"), default);
+        var replay = await SqliteSourceSnapshotStore.OpenAsync(metadata, source, default);
+        using var result = await service.RunAsync(project,
+            new Dictionary<string, SourceConnection> { [source.SourceId] = replay },
+            new Dictionary<string, string>(), false, default);
+        Assert.True(result.IsPublishable);
+        Assert.True(Assert.Single(result.Manifest.Inputs).IsReplayable);
+        await ChangeSqliteSourceValueAsync(sourcePath, "9999");
+        var preview = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        Assert.Empty(preview.SchemaDiscrepancies);
+        Assert.Equal(1, preview.CandidateRows);
+        var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
+        Assert.Equal(1, receipt.WrittenRows);
+        var before = await File.ReadAllBytesAsync(_databasePath);
+        File.Delete(replay.Path!);
+        var blockedPreview = await service.PreviewDestinationChangesAsync(project, result, _directory);
+        Assert.NotEmpty(blockedPreview.SchemaDiscrepancies);
+        var error = await Assert.ThrowsAsync<PublicationException>(() => service.PublishDestinationAsync(
+            project, result, _directory, true));
+        Assert.Equal(DiagnosticCodes.PubDigestMismatch, error.Code);
+        Assert.Equal(before, await File.ReadAllBytesAsync(_databasePath));
+    }
+
     [Fact]
     public async Task SqliteSourceChange_BlocksPreviewAndSqlitePublicationAndPreservesDestination()
     {

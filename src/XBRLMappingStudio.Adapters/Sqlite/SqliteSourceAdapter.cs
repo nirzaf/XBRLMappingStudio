@@ -284,7 +284,13 @@ public sealed class SqliteSourceAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch, "SQLite source requires a database file path.");
         var db = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = Path.GetFullPath(connection.Path),
+            // Retained backups are closed, digest-verified main-file images. Tell
+            // SQLite not to consult journals, including sidecars reachable through
+            // another filesystem name for the same file. The application verifies
+            // the immutable contract before and after execution/publication.
+            DataSource = connection.RetainedSnapshot is null
+                ? Path.GetFullPath(connection.Path)
+                : new Uri(Path.GetFullPath(connection.Path)).AbsoluteUri + "?immutable=1&mode=ro",
             Mode = SqliteOpenMode.ReadOnly,
             Pooling = false
         }.ToString());

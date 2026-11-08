@@ -15,7 +15,7 @@ using XBRLMappingStudio.XBRL;
 namespace XBRLMappingStudio.Integration.Tests;
 
 [Collection("Process memory qualification")]
-public sealed class LargeRunExecutionTests
+public sealed partial class LargeRunExecutionTests
 {
     [Fact]
     public async Task LargeMultipleBindings_ReturnsStructuredUnsupportedOutcome()

@@ -246,6 +246,8 @@ this development opt-in does not qualify a regulator profile.
 |---|---|
 | `inspect <project.xmap>` | Print the project's bound sources and schemas. |
 | `inspect-source <project.xmap> [--binding <id>]` | Inspect the selected SQLite source schema and capabilities. |
+| `snapshot-source <project.xmap> --binding <id> --out <new-bundle-directory>` | Retain a bounded, confidential SQLite database snapshot, including all tables. |
+| `execute <project.xmap> --source-snapshot <id>=<snapshot.json> ...` | Replay the retained SQLite source with digest checks and the normal approval/profile/publication gates. |
 | `validate <project.xmap> [--allow-synthetic-profile]` | Run graph validation; the built-in development profile requires explicit opt-in. |
 | `configure-destination <project.xmap> ...` | Save a CSV, Excel, JSON, XML, or existing SQLite target plan; use `--kind`, `--path`, and the matching format/table/key options shown by `--help`. |
 | `preview <project.xmap> --binding <id>=<path> --rows <n> [--allow-synthetic-profile] [--arelle ...]` | Sampled, visibly-partial execution. |
@@ -392,9 +394,13 @@ ambiguous-commit recovery and production database qualification remain incomplet
 SQLite source rows with declared single or composite primary keys receive deterministic
 SHA-256 hashed row identities used for provenance; the schema inspector exposes
 declared primary-key order. A table without a primary key keeps positional provenance and
-produces an `IO015` warning; SQLite does not guarantee row ordering between reads. The
+produces an `IO015` warning for live reads; SQLite does not guarantee row ordering between reads. The
 run manifest records which row-identity strategy was used, and the desktop binding UI
-discloses the key configuration.
+discloses the key configuration. Explicit retained SQLite snapshots preserve a complete
+database image and can be replayed without the live database through the CLI/shared
+service. Full-run manifests distinguish the retained-byte digest from the selected-table
+content digest. See [`docs/sqlite-source-snapshots.md`](./docs/sqlite-source-snapshots.md)
+for capture, integrity gates, whole-database confidentiality and remaining limits.
 
 Filing-profile identity is fail-closed: `validate`, `preview` and `execute` compare the
 project's `ProfileId`/`ProfileDigest` against the resolved profile and stop with a blocking

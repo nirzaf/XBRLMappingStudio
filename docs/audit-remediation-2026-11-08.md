@@ -96,7 +96,10 @@ fresh processes on both platforms, while the remaining suite runs in full. The
 CSV in-memory comparison oracle is constructed after measurement, and a nonparallel
 collection prevents unrelated local tests from allocating concurrently. Neither
 row counts, byte-equivalence checks, minimum samples nor the 64 MiB bound is reduced.
-A successful rerun on the subsequent exact commit is required for Windows acceptance.
+Exact-commit CI [42456549238](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42456549238)
+passed on `8092a8ec5394f06d38d9a5613f8e480bbabf5166`: Windows, Ubuntu, pinned
+Arelle and repository hygiene passed, including both fresh-process memory cases
+on each OS and all five Windows worker-cancellation repeats.
 
 Qatar-first priorities and current public official-source evidence are recorded in
 [OPEN.md](decisions/OPEN.md). No Qatar technical package, filing-rule catalogue,
@@ -120,7 +123,7 @@ or represent these rows as completed to make a release appear ready.
 | P1-03 | Selected IFRS profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
 | P1-05 | Remaining derived-record lineage, exact Arelle finding locators, complete input identity and native preview/full-run evidence. |
-| P1-06 | Retained immutable database extracts and replay from those extracts. Live SQLite content rechecks are not replay. |
+| P1-06 | Bounded retained SQLite backups and CLI/shared-service replay are implemented, with independent byte/content digests, WAL consistency, restart/replay and tamper/publication tests. Desktop controls, table-only extraction, retention governance, other providers and capture process/power-loss qualification remain open. Live SQLite content rechecks remain non-replayable. See [snapshot scope](sqlite-source-snapshots.md). |
 | P1-07 | Typed dimensions, concept-to-hypercube applicability and profile-qualified dimensional validation. |
 | P1-08 | Independent JSON/XML conformance fixtures for the selected IFRS taxonomy after the rights/evaluation gate. Existing synthetic equivalence is narrower. |
 | P1-09 | Existing-target-row authorization/update semantics. Aspect and occurrence source selection landed before this increment. |

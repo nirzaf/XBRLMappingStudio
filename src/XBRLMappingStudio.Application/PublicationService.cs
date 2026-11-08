@@ -466,7 +466,9 @@ public sealed class PublicationService
 
         var sourceId = DestinationPathGuard.FindSourceIdAtPath(
             destinationPath,
-            manifest.Inputs.Select(input => (input.SourceId, input.OriginalPath))
+            manifest.Inputs.SelectMany(input => new[]
+                { (input.SourceId, input.OriginalPath), (input.SourceId, input.OriginalSourcePath),
+                    (input.SourceId, input.SnapshotMetadataPath) })
                 .Concat(project.Bindings.Select(binding => (binding.BindingId, binding.Locator))),
             workspaceRoot);
         if (sourceId is not null)

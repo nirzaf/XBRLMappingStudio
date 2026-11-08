@@ -43,7 +43,12 @@ public sealed record SourceConnection(
     string SourceId,
     string Kind,               // "excel", "csv", "db", ...
     string? Path,              // workspace-relative or absolute
-    IReadOnlyDictionary<string, string>? Configuration = null);
+    IReadOnlyDictionary<string, string>? Configuration = null,
+    RetainedSqliteSnapshotReference? RetainedSnapshot = null);
+
+/// <summary>A verified retained database binding; the file digest is separate from the row-content digest.</summary>
+public sealed record RetainedSqliteSnapshotReference(
+    string DatabaseDigest, string OriginalSourcePath, string ConfigurationDigest, string MetadataPath);
 
 /// <summary>
 /// Result of schema introspection: sheet/table + ordered columns with inferred types.

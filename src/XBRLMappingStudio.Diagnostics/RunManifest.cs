@@ -157,6 +157,18 @@ public sealed record InputIdentity(
     /// <summary>Read consistency mechanism; distinct from content fingerprint and row identity.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SnapshotStrategy { get; init; }
+
+    /// <summary>Exact retained database bytes, independent of the table content fingerprint.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SnapshotDigest { get; init; }
+
+    /// <summary>Capture metadata protected from destination overwrite alongside the retained database.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SnapshotMetadataPath { get; init; }
+
+    /// <summary>Original live database location when OriginalPath points to a retained extract.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OriginalSourcePath { get; init; }
 }
 
 public sealed record OutputIdentity(
