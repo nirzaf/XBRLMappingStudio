@@ -206,7 +206,10 @@ Verification:
 - Tests cover no-drift acceptance, changed CSV headers, preserved semantic and
   serialized fingerprints, preview/run blocking, explicit source reload, and
   the actual headless Avalonia button's accessible name and command behavior.
-- Exact-head CI for this implementation is pending.
+- Exact-head CI [42443500123](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42443500123)
+  passed on source commit `72e9f1220c49a00cf0dd45649ae70a3347491c4f`. Windows and
+  Ubuntu each passed 920 tests and skipped 6 environment-gated Arelle cases; the
+  pinned Arelle integration and repository hygiene jobs passed.
 
 ## UX-06 text-fact language inspector
 
@@ -228,5 +231,5 @@ Verification:
   and 6 environment-gated skips; Windows, repository hygiene, and pinned Arelle
   integration also passed.
 - Native visual/screen-reader acceptance, deeper nonnumeric lexical validation,
-  inspector source-drift revalidation, and installed filing-profile workflow
+  automatic/background source-drift monitoring, and installed filing-profile workflow
   remain open.
