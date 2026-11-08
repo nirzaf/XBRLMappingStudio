@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -563,7 +564,7 @@ public sealed partial class CliParityTests : IAsyncLifetime
             new[] { "Line", "Current", "Prior", "AsOf", "Note" },
             new IEnumerable<object?>[]
             {
-                new object?[] { "Revenue", 1250m, 1100m, null, escapedText }
+                new object?[] { "Revenue", "12.5000", "11.0000", null, escapedText }
             });
         await File.WriteAllBytesAsync(lexicalWorkbookPath, lexicalWorkbook);
         var project = TestFixtures.BuildRevenueMappingProject(lexicalWorkbookPath, approved: true);
@@ -573,6 +574,8 @@ public sealed partial class CliParityTests : IAsyncLifetime
         var periodNode = Assert.Single(project.Nodes, node => node.DisplayName == "Period 2025");
         var bindingId = project.Bindings[0].BindingId;
         entityNode.Parameters["literal"] = entityIdentifier;
+        var scaleNode = Assert.Single(project.Nodes, node => node.DisplayName == "Scale to units (thousands)");
+        scaleNode.Parameters["factor"] = "1";
         AddEscapedTextFact(project, bindingId, entityNode, periodNode);
         project.Destination = new DestinationPlan
         {
@@ -612,6 +615,12 @@ public sealed partial class CliParityTests : IAsyncLifetime
             record[fieldPrefix + "concept"].AsString() == SyntheticProfile.Qualified("EntityRegistrantName"));
         Assert.Equal(entityIdentifier, revenueRecord[fieldPrefix + "entity_identifier"].AsString());
         Assert.Equal(escapedText, textRecord[fieldPrefix + "text_value"].AsString());
+        var exactValue = revenueRecord[fieldPrefix + "value"];
+        Assert.Equal(12.5000m, exactValue.AsDecimal());
+        var lexicalValue = exactValue.Raw is decimal decimalValue
+            ? decimalValue.ToString(CultureInfo.InvariantCulture)
+            : exactValue.AsString();
+        Assert.Equal("12.5000", lexicalValue);
         string operationKey;
         using (var manifest = JsonDocument.Parse(await File.ReadAllBytesAsync(manifestPath)))
         {
