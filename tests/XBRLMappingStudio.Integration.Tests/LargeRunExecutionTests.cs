@@ -1381,7 +1381,9 @@ public sealed partial class LargeRunExecutionTests
     private static async Task<string> CreateSourceDatabase(string root, int rowCount, bool variedValues)
     {
         var path = Path.Combine(root, "source.db");
-        await using var database = new SqliteConnection($"Data Source={path}");
+        // Disposal must release the fixture handle, including on Windows, so replay
+        // tests can remove the live source and temporary directories cleanly.
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
         await database.OpenAsync();
         await using var transaction = database.BeginTransaction();
         await using (var create = database.CreateCommand())
