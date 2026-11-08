@@ -20,6 +20,69 @@ public sealed class XmlAdapter : ISourceAdapter
 {
     public string Kind => "xml";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
+    public const long DefaultMaximumInputBytes = Options.DefaultMaximumInputBytes;
+
+    public sealed record Options(
+        int MaxDepth = 128,
+        int MaxRows = 100_000,
+        int MaxStringLength = 1_000_000,
+        long MaxInputBytes = DefaultMaximumInputBytes)
+    {
+        public const long DefaultMaximumInputBytes = 64L * 1024 * 1024;
+        public const long AbsoluteMaximumInputBytes = 64L * 1024 * 1024;
+        public const int DefaultMaximumDocumentCharacters = 16 * 1024 * 1024;
+        public const int AbsoluteMaximumDepth = 256;
+        public const int AbsoluteMaximumRows = 1_000_000;
+        public const int AbsoluteMaximumStringLength = 16 * 1024 * 1024;
+
+        public static Options FromConfiguration(IReadOnlyDictionary<string, string>? cfg)
+        {
+            if (cfg is null) return new Options();
+            int depth = cfg.TryGetValue("maxDepth", out var d) && int.TryParse(d, out var dv) ? dv : 128;
+            int rows = cfg.TryGetValue("maxRows", out var r) && int.TryParse(r, out var rv) ? rv : 100_000;
+            int stringLength = cfg.TryGetValue("maxStringLength", out var s) && int.TryParse(s, out var sv)
+                ? sv : 1_000_000;
+            long bytes = cfg.TryGetValue("maxInputBytes", out var b) && long.TryParse(b, out var bv)
+                ? bv : DefaultMaximumInputBytes;
+            var options = new Options(depth, rows, stringLength, bytes);
+            try
+            {
+                options.Validate();
+            }
+            catch (ArgumentOutOfRangeException exception)
+            {
+                var code = exception.ParamName switch
+                {
+                    nameof(MaxDepth) => DiagnosticCodes.IoDepthExceeded,
+                    nameof(MaxRows) => DiagnosticCodes.IoRowBudgetExceeded,
+                    nameof(MaxStringLength) => DiagnosticCodes.IoStringBudgetExceeded,
+                    _ => DiagnosticCodes.IoInputBudgetExceeded
+                };
+                throw new AdapterException(code,
+                    $"Configured XML source limit '{exception.ParamName}' is outside the supported range.",
+                    isInputBudgetExceeded: true);
+            }
+            return options;
+        }
+
+        public void Validate()
+        {
+            if (MaxDepth is < 0 or > AbsoluteMaximumDepth) throw new ArgumentOutOfRangeException(nameof(MaxDepth));
+            if (MaxRows is < 1 or > AbsoluteMaximumRows) throw new ArgumentOutOfRangeException(nameof(MaxRows));
+            if (MaxStringLength is < 1 or > AbsoluteMaximumStringLength)
+                throw new ArgumentOutOfRangeException(nameof(MaxStringLength));
+            if (MaxInputBytes is < 1 or > AbsoluteMaximumInputBytes)
+                throw new ArgumentOutOfRangeException(nameof(MaxInputBytes));
+        }
+    }
+
+    private readonly Options _options;
+
+    public XmlAdapter(Options? options = null)
+    {
+        _options = options ?? new Options();
+        _options.Validate();
+    }
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
@@ -50,25 +113,19 @@ public sealed class XmlAdapter : ISourceAdapter
         }
     }
 
-    private static List<DataRecord> ReadRecords(SourceConnection connection, CancellationToken ct)
+    private List<DataRecord> ReadRecords(SourceConnection connection, CancellationToken ct)
     {
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
             $"XML connection '{connection.SourceId}' has no file path.");
 
         XDocument doc;
-        var settings = new XmlReaderSettings
-        {
-            DtdProcessing = DtdProcessing.Prohibit,
-            XmlResolver = null,
-            IgnoreComments = true,
-            IgnoreWhitespace = true,
-            MaxCharactersInDocument = 16 * 1024 * 1024
-        };
         try
         {
-            using var stream = File.OpenRead(path);
-            using var reader = XmlReader.Create(stream, settings);
+            using var bytes = ReadBytes(path, ct);
+            ValidateDocumentBounds(bytes, ct);
+            using var parseStream = OpenSnapshot(bytes);
+            using var reader = XmlReader.Create(parseStream, CreateReaderSettings());
             doc = XDocument.Load(reader);
         }
         catch (XmlException ex)
@@ -82,7 +139,10 @@ public sealed class XmlAdapter : ISourceAdapter
         if (doc.Root is null)
             return new List<DataRecord>();
 
-        var rowElements = SelectRowset(doc.Root);
+        var rowElements = SelectRowset(doc.Root).ToArray();
+        if (rowElements.Length > _options.MaxRows)
+            throw BudgetExceeded(DiagnosticCodes.IoRowBudgetExceeded,
+                $"XML rowset exceeds the maximum row count of {_options.MaxRows}.");
         var records = new List<DataRecord>();
         int idx = 0;
         foreach (var el in rowElements)
@@ -101,6 +161,91 @@ public sealed class XmlAdapter : ISourceAdapter
         }
         return records;
     }
+
+    private void ValidateDocumentBounds(MemoryStream bytes, CancellationToken cancellationToken)
+    {
+        var rootChildCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        using var scanStream = OpenSnapshot(bytes);
+        using var reader = XmlReader.Create(scanStream, CreateReaderSettings());
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (reader.NodeType == XmlNodeType.Element)
+            {
+                if (reader.Depth > _options.MaxDepth)
+                    throw BudgetExceeded(DiagnosticCodes.IoDepthExceeded,
+                        $"XML nesting exceeds the maximum depth of {_options.MaxDepth}.");
+                EnsureStringWithinBudget(reader.LocalName);
+                EnsureStringWithinBudget(reader.NamespaceURI);
+                if (reader.Depth == 1)
+                {
+                    var key = reader.NamespaceURI + "\0" + reader.LocalName;
+                    rootChildCounts.TryGetValue(key, out var count);
+                    count++;
+                    if (count > _options.MaxRows)
+                        throw BudgetExceeded(DiagnosticCodes.IoRowBudgetExceeded,
+                            $"XML rowset exceeds the maximum row count of {_options.MaxRows}.");
+                    rootChildCounts[key] = count;
+                }
+                if (reader.HasAttributes)
+                {
+                    while (reader.MoveToNextAttribute())
+                    {
+                        EnsureStringWithinBudget(reader.LocalName);
+                        EnsureStringWithinBudget(reader.NamespaceURI);
+                        EnsureStringWithinBudget(reader.Value);
+                    }
+                    reader.MoveToElement();
+                }
+            }
+            else if (reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA
+                     or XmlNodeType.SignificantWhitespace or XmlNodeType.Whitespace)
+            {
+                EnsureStringWithinBudget(reader.Value);
+            }
+        }
+    }
+
+    private static XmlReaderSettings CreateReaderSettings() => new()
+    {
+        DtdProcessing = DtdProcessing.Prohibit,
+        XmlResolver = null,
+        IgnoreComments = true,
+        IgnoreWhitespace = true,
+        MaxCharactersInDocument = Options.DefaultMaximumDocumentCharacters
+    };
+
+    private static MemoryStream OpenSnapshot(MemoryStream bytes)
+        => new(bytes.GetBuffer(), 0, checked((int)bytes.Length), writable: false);
+
+    private MemoryStream ReadBytes(string path, CancellationToken cancellationToken)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 64 * 1024, FileOptions.SequentialScan);
+        var content = new MemoryStream((int)Math.Min(stream.Length, _options.MaxInputBytes));
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            if (content.Length + read > _options.MaxInputBytes)
+                throw BudgetExceeded(DiagnosticCodes.IoInputBudgetExceeded,
+                    $"XML input exceeds the maximum size of {_options.MaxInputBytes} bytes.");
+            content.Write(buffer, 0, read);
+        }
+        return content;
+    }
+
+    private void EnsureStringWithinBudget(string value)
+    {
+        if (value.Length > _options.MaxStringLength)
+            throw BudgetExceeded(DiagnosticCodes.IoStringBudgetExceeded,
+                $"XML name or text value exceeds the maximum length of {_options.MaxStringLength} characters.");
+    }
+
+    private static AdapterException BudgetExceeded(string code, string message)
+        => new(code, message, isInputBudgetExceeded: true);
 
     /// <summary>
     /// The rowset is the group of same-named root children with the highest count; ties
@@ -123,7 +268,7 @@ public sealed class XmlAdapter : ISourceAdapter
         return groups.Items.Count > 1 ? groups.Items : new[] { root };
     }
 
-    private static void FlattenElement(string prefix, XElement el,
+    private void FlattenElement(string prefix, XElement el,
         Dictionary<string, DataValue> fields, Dictionary<string, SourceReference> srcs,
         string sourceId, int rowIdx)
     {
@@ -173,11 +318,13 @@ public sealed class XmlAdapter : ISourceAdapter
         }
     }
 
-    private static void SetValue(string key, string raw,
+    private void SetValue(string key, string raw,
         Dictionary<string, DataValue> fields, Dictionary<string, SourceReference> srcs,
         string sourceId, int rowIdx)
     {
         if (key.Length == 0) key = "_text";
+        EnsureStringWithinBudget(key);
+        EnsureStringWithinBudget(raw);
         var src = new SourceReference(sourceId, $"xml#r{rowIdx + 1}:{key}");
         DataValue value;
         if (string.IsNullOrWhiteSpace(raw))

@@ -2405,7 +2405,7 @@ public sealed class MappingJobService
         "excel" => ExcelAdapter.FromConnection(conn),
         "csv" => new CsvAdapter(CsvAdapter.Options.FromConfiguration(conn.Configuration), sqliteMaximumRowBytes),
         "json" => new JsonAdapter(JsonAdapter.Options.FromConfiguration(conn.Configuration)),
-        "xml" => new XmlAdapter(),
+        "xml" => new XmlAdapter(XmlAdapter.Options.FromConfiguration(conn.Configuration)),
         "xbrl-report" => new XbrlReportAdapter(),
         "pdf-digital" => new PdfSourceAdapter(),
         "sqlite" => new SqliteSourceAdapter(sqliteMaximumRowBytes),

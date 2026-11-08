@@ -90,9 +90,11 @@ process-tree/Arelle memory or accepted target-hardware qualification.
 
 The generic JSON adapter now applies a default 16 MiB input-byte budget, 100,000
 top-level row limit and 1,000,000-character property/string limit, with strict
-configurable ceilings. It checks cancellation while reading and parsing and
-returns stable input/row/string budget diagnostics. The adapter still buffers
-its bounded document; this does not qualify large JSON or peak process memory.
+configurable ceilings. The XML adapter now preflights one captured byte snapshot
+against byte, document-character, nesting, repeated-row and string limits before
+mapping records. Both poll cancellation during their bounded input read/parse and
+return stable budget diagnostics. They still buffer their bounded documents;
+this does not qualify large JSON/XML or peak process memory.
 
 The initial CSV follow-on [CI 42455720397](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42455720397)
 passed Ubuntu, Arelle and hygiene, but Windows caught a process-wide retained-heap

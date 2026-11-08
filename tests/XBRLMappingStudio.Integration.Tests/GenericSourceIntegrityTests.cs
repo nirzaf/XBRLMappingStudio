@@ -218,6 +218,33 @@ public sealed class GenericSourceIntegrityTests
         Assert.Equal(priorOutput, await File.ReadAllBytesAsync(workspace.Destination));
     }
 
+    [Fact]
+    public async Task XmlRowBudget_BlocksBeforeReportValidationAndPreservesPriorOutput()
+    {
+        using var workspace = new Workspace();
+        var sourcePath = workspace.PathFor("source.xml");
+        await File.WriteAllTextAsync(sourcePath,
+            "<root><financial><amount>123.45</amount></financial><financial><amount>678.90</amount></financial></root>");
+        var project = BuildProject("xml", sourcePath, maxRows: 1);
+        var priorOutput = Encoding.UTF8.GetBytes("accepted prior output");
+        await File.WriteAllBytesAsync(workspace.Destination, priorOutput);
+        await using var worker = new CountingSyntheticWorker();
+        var service = new MappingJobService(Profile, worker);
+
+        using var result = await Run(service, project, preview: false);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Empty(result.Facts);
+        Assert.Empty(result.Manifest.Outputs);
+        Assert.Empty(result.XbrlJson);
+        Assert.Equal(0, worker.ReportValidationCount);
+        var diagnostic = Assert.Single(result.Manifest.Diagnostics, item => item.IsBlocking);
+        Assert.Equal(DiagnosticCodes.IoRowBudgetExceeded, diagnostic.Code);
+        Assert.Equal(project.Bindings.Single().BindingId, diagnostic.Source!.SourceId);
+        Assert.Equal(priorOutput, await File.ReadAllBytesAsync(workspace.Destination));
+    }
+
     [Theory]
     [InlineData("json", "approval", DiagnosticCodes.XbrApprovalRequired)]
     [InlineData("xml", "approval", DiagnosticCodes.XbrApprovalRequired)]
@@ -301,7 +328,8 @@ public sealed class GenericSourceIntegrityTests
         string kind,
         string sourcePath,
         int? maxNumberDigits = null,
-        int? maxInputBytes = null)
+        int? maxInputBytes = null,
+        int? maxRows = null)
     {
         var project = TestFixtures.BuildRevenueMappingProject(sourcePath,
             idSeed: Guid.Parse("4fa6c9d8-8e20-4ad1-ab20-399ed91cd276"));
@@ -313,6 +341,8 @@ public sealed class GenericSourceIntegrityTests
             project.Bindings[0].Configuration["maxNumberDigits"] = budget.ToString(CultureInfo.InvariantCulture);
         if (maxInputBytes is { } byteBudget && kind == "json")
             project.Bindings[0].Configuration["maxInputBytes"] = byteBudget.ToString(CultureInfo.InvariantCulture);
+        if (maxRows is { } rowBudget)
+            project.Bindings[0].Configuration["maxRows"] = rowBudget.ToString(CultureInfo.InvariantCulture);
 
         // ExcelField is the existing format-agnostic source-field node. Do not add
         // another graph registration or a parser that could mask adapter corruption.

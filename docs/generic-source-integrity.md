@@ -55,6 +55,16 @@ IO006, or IO033 respectively. Cancellation is checked while reading bytes and
 parsing tokens. This bounds the adapter's input and token budget; it is not a
 streaming or peak-process-memory qualification.
 
+Generic XML reads use the existing 16 MiB character ceiling plus a 64 MiB byte
+ceiling. They now also default to at most 100,000 repeated rowset records, depth
+128, and 1,000,000 UTF-16 code units for each name or value. Project options may
+lower those limits and may raise row count to 1,000,000, depth to 256, and each
+name/value to 16 Mi code units; the byte and document-character ceilings remain
+fixed. A bounded preflight checks the exact byte snapshot that is then parsed,
+preventing changes between the depth/row/string scan and record creation. Budget
+failures use IO032, IO006, IO013, or IO033. This remains a buffered XML reader and
+does not qualify peak process memory.
+
 ## Verification and limits
 
 Adapter regressions include an independent bounded BigInteger coefficient/scale

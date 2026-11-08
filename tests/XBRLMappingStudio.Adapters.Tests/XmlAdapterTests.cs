@@ -47,6 +47,58 @@ public sealed class XmlAdapterTests
     }
 
     [Fact]
+    public async Task NestingBudget_IsEnforcedByEveryRead()
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("deep.xml", "<root><a><b>value</b></a></root>");
+        var connection = new SourceConnection("xml-source", "xml", ws.PathFor("deep.xml"));
+        var adapter = new XmlAdapter(new XmlAdapter.Options(MaxDepth: 1));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoDepthExceeded);
+    }
+
+    [Fact]
+    public async Task InputByteBudget_IsEnforcedByEveryRead()
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("large.xml", "<root><value>123</value></root>");
+        var connection = new SourceConnection("xml-source", "xml", ws.PathFor("large.xml"));
+        var adapter = new XmlAdapter(new XmlAdapter.Options(MaxInputBytes: 8));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoInputBudgetExceeded);
+    }
+
+    [Fact]
+    public async Task RepeatedRowBudget_IsEnforcedByEveryRead()
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("rows.xml", "<root><row><id>1</id></row><row><id>2</id></row></root>");
+        var connection = new SourceConnection("xml-source", "xml", ws.PathFor("rows.xml"));
+        var adapter = new XmlAdapter(new XmlAdapter.Options(MaxRows: 1));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoRowBudgetExceeded);
+    }
+
+    [Theory]
+    [InlineData("<root><value>long</value></root>")]
+    [InlineData("<root value='long'/>")]
+    [InlineData("<root><long>1</long></root>")]
+    public async Task ValueAttributeAndNameBudgets_AreEnforcedByEveryRead(string xml)
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("long-value.xml", xml);
+        var connection = new SourceConnection("xml-source", "xml", ws.PathFor("long-value.xml"));
+        var adapter = new XmlAdapter(new XmlAdapter.Options(MaxStringLength: 3));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoStringBudgetExceeded);
+    }
+
+    [Fact]
+    public void InvalidConfiguredLimit_ReturnsStableInputBudgetDiagnostic()
+    {
+        var exception = Assert.Throws<AdapterException>(() => XmlAdapter.Options.FromConfiguration(
+            new Dictionary<string, string> { ["maxDepth"] = "257" }));
+        Assert.Equal(DiagnosticCodes.IoDepthExceeded, exception.Code);
+        Assert.True(exception.IsInputBudgetExceeded);
+    }
+
+    [Fact]
     public async Task ExternalEntity_Reference_IsBlocked()
     {
         using var ws = new TempWorkspace();
