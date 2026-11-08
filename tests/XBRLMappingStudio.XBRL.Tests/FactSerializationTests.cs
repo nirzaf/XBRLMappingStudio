@@ -962,6 +962,17 @@ public sealed class FactSerializationTests
         Assert.Contains("lowercase", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void OimJsonReaderRejectsTypedDimensionsWithoutProfile()
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") }))!.AsObject();
+        var fact = root["facts"]!.AsObject().Single().Value!.AsObject();
+        fact["dimensions"]!.AsObject()["synthetic:TypedAxis"] = "Electric Motor Vehicles";
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+        Assert.Contains("typed dimension", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("en--US")]
     [InlineData("en_US")]

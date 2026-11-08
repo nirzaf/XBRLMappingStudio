@@ -383,7 +383,9 @@ public static class OimSerializer
                     throw Unsupported("Dimension values must be strings in the supported report subset.");
                 member = dimension.Value.GetString()!;
                 isExplicit = TryExpandQName(member, namespaces, out var expandedMember);
-                if (isExplicit) member = CanonicalProfileQName(expandedMember, member, profile);
+                if (!isExplicit)
+                    throw Unsupported($"Typed dimension '{dimension.Name}' requires taxonomy domain metadata and is not supported by this report model.");
+                member = CanonicalProfileQName(expandedMember, member, profile);
                 reportedDimensions.Add(new Dimension(dimensionName, member, isExplicit));
             }
 
