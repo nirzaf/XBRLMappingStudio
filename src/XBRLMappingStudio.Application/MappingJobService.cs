@@ -844,7 +844,9 @@ public sealed class MappingJobService
 
         manifest.CompletedUtc = DateTimeOffset.UtcNow;
         manifest.Diagnostics = context.Diagnostics.Items.Concat(workerDiags).ToList();
-        manifest.ProvenanceStatus = AssessProvenanceStatus(facts, manifest.Inputs, manifest.Diagnostics);
+        manifest.ProvenanceStatus = preview
+            ? RunProvenanceStatus.Incomplete
+            : AssessProvenanceStatus(facts, manifest.Inputs, manifest.Diagnostics);
         manifest.Outputs = new List<OutputIdentity>
         {
             new OutputIdentity(
