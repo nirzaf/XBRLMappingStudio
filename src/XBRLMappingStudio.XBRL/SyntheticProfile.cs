@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+using System.Collections.ObjectModel;
 using System.Security.Cryptography;
 using System.Text;
 using XBRLMappingStudio.Diagnostics;
@@ -19,7 +21,7 @@ public static class SyntheticProfile
     public const string TaxonomyPackageDigest = "sha256:e898d8ef578e9e7d7015265b289b7bb63f3df8b2dadc35c11776c32a243d14c9";
 
     /// <summary>Stable, hand-authored concepts for the first vertical slice.</summary>
-    public static IReadOnlyList<ConceptMetadata> Concepts { get; } = new[]
+    public static IReadOnlyList<ConceptMetadata> Concepts { get; } = Array.AsReadOnly(new[]
     {
         new ConceptMetadata(
             Qualified("Assets"), Namespace, "Assets",
@@ -28,12 +30,8 @@ public static class SyntheticProfile
             PeriodType: "instant",
             IsAbstract: false)
         {
-            SupportedLanguages = new[] { "en", "fr" },
-            LabelsByLanguage = new Dictionary<string, string>
-            {
-                ["en"] = "Total Assets",
-                ["fr"] = "Actif total"
-            }
+            SupportedLanguages = Languages("en", "fr"),
+            LabelsByLanguage = Labels(("en", "Total Assets"), ("fr", "Actif total"))
         },
 
         new ConceptMetadata(
@@ -41,7 +39,11 @@ public static class SyntheticProfile
             Label: "Total Liabilities",
             DataType: "monetary",
             PeriodType: "instant",
-            IsAbstract: false),
+            IsAbstract: false)
+        {
+            SupportedLanguages = Languages("en"),
+            LabelsByLanguage = Labels()
+        },
 
         new ConceptMetadata(
             Qualified("Revenue"), Namespace, "Revenue",
@@ -50,13 +52,8 @@ public static class SyntheticProfile
             PeriodType: "duration",
             IsAbstract: false)
         {
-            SupportedLanguages = new[] { "en", "fr", "ar" },
-            LabelsByLanguage = new Dictionary<string, string>
-            {
-                ["en"] = "Revenue",
-                ["fr"] = "Produit",
-                ["ar"] = "إيرادات"
-            }
+            SupportedLanguages = Languages("en", "fr", "ar"),
+            LabelsByLanguage = Labels(("en", "Revenue"), ("fr", "Produit"), ("ar", "إيرادات"))
         },
 
         new ConceptMetadata(
@@ -64,14 +61,22 @@ public static class SyntheticProfile
             Label: "Expenses",
             DataType: "monetary",
             PeriodType: "duration",
-            IsAbstract: false),
+            IsAbstract: false)
+        {
+            SupportedLanguages = Languages("en"),
+            LabelsByLanguage = Labels()
+        },
 
         new ConceptMetadata(
             Qualified("NetIncome"), Namespace, "NetIncome",
             Label: "Net Income",
             DataType: "monetary",
             PeriodType: "duration",
-            IsAbstract: false),
+            IsAbstract: false)
+        {
+            SupportedLanguages = Languages("en"),
+            LabelsByLanguage = Labels()
+        },
 
         new ConceptMetadata(
             Qualified("EntityRegistrantName"), Namespace, "EntityRegistrantName",
@@ -80,13 +85,9 @@ public static class SyntheticProfile
             PeriodType: "duration",
             IsAbstract: false)
         {
-            SupportedLanguages = new[] { "en", "fr", "ar" },
-            LabelsByLanguage = new Dictionary<string, string>
-            {
-                ["en"] = "Entity Registrant Name",
-                ["fr"] = "Nom du titulaire de l'entité",
-                ["ar"] = "اسم الكيان"
-            }
+            SupportedLanguages = Languages("en", "fr", "ar"),
+            LabelsByLanguage = Labels(("en", "Entity Registrant Name"),
+                ("fr", "Nom du titulaire de l'entité"), ("ar", "اسم الكيان"))
         },
 
         new ConceptMetadata(
@@ -95,10 +96,14 @@ public static class SyntheticProfile
             DataType: "non-float",
             PeriodType: "duration",
             IsAbstract: true)
-    };
+        {
+            SupportedLanguages = Languages("en"),
+            LabelsByLanguage = Labels()
+        }
+    });
 
     public static IReadOnlySet<string> SupportedUnits { get; } =
-        new HashSet<string>(StringComparer.Ordinal) { "EUR", "USD", "QAR" };
+        new[] { "EUR", "USD", "QAR" }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>Default presentation role (xBRL standard summary role).</summary>
     public const string PresentationRole =
@@ -108,7 +113,7 @@ public static class SyntheticProfile
     /// exercise. If a rule never fires (empty fact set, or a filtered-out concept class),
     /// <see cref="FilingRuleValidator"/> records an <c>Incomplete</c> outcome so the run
     /// maps to <see cref="Diagnostics.RunOutcome.IncompleteConfiguration"/>.</summary>
-    public static IReadOnlySet<string> RequiredChecks { get; } = new HashSet<string>(StringComparer.Ordinal)
+    public static IReadOnlySet<string> RequiredChecks { get; } = new[]
     {
         "synthetic:concept-exists",
         "synthetic:abstract-concept-not-used",
@@ -117,12 +122,12 @@ public static class SyntheticProfile
         "synthetic:fact-value-contract",
         "synthetic:period-type-match",
         "synthetic:no-duplicate-facts",
-    };
+    }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>Financial-statement hierarchy used to build the presentation network (XBR03).
     /// The instant and duration children both hang under the abstract FinancialStatements
     /// concept so a concept appears across roles.</summary>
-    public static IReadOnlyList<PresentationLink> PresentationLinks { get; } = new[]
+    public static IReadOnlyList<PresentationLink> PresentationLinks { get; } = Array.AsReadOnly(new[]
     {
         new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Revenue"), 1),
         new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Expenses"), 2),
@@ -131,11 +136,23 @@ public static class SyntheticProfile
         new PresentationLink(PresentationRole, Qualified("FinancialStatements"), Qualified("Liabilities"), 5),
         // A second role reuses Revenue, proving a concept may appear in multiple networks.
         new PresentationLink(PresentationRole + "/income-statement", Qualified("NetIncome"), Qualified("Revenue"), 1),
-    };
+    });
+
+    private static readonly Lazy<FilingProfile> BuiltInProfile = new(CreateBuiltInProfile);
 
     public static string Qualified(string local) => $"{Prefix}:{local}";
 
-    public static FilingProfile Build()
+    /// <summary>
+    /// Returns the immutable built-in development profile. Callers must not use its
+    /// reserved profile ID for a copied or modified profile.
+    /// </summary>
+    public static FilingProfile Build() => BuiltInProfile.Value;
+
+    /// <summary>True only for the immutable profile instance created by this assembly.</summary>
+    public static bool IsBuiltInFixture(FilingProfile? profile)
+        => ReferenceEquals(profile, BuiltInProfile.Value);
+
+    private static FilingProfile CreateBuiltInProfile()
     {
         // Profile identity binds the complete concept metadata, units and the exact
         // offline taxonomy bytes. Reordering concepts, labels or units does not change it.
@@ -190,20 +207,29 @@ public static class SyntheticProfile
             Concepts = Concepts,
             SupportedUnits = SupportedUnits,
             TaxonomyVersion = ProfileId,
-            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal),
-            TaxonomyUrls = new[] { TaxonomyFileName },
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                .ToFrozenDictionary(StringComparer.Ordinal),
+            TaxonomyUrls = Array.AsReadOnly(new[] { TaxonomyFileName }),
             NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [Prefix] = Namespace
-            },
+            }.ToFrozenDictionary(StringComparer.Ordinal),
             OutputFormat = "xbrl-json",
-            PackageHashes = packageHashes,
-            RequiredChecks = SyntheticProfile.RequiredChecks
+            PackageHashes = packageHashes.ToFrozenDictionary(StringComparer.Ordinal),
+            RequiredPlugins = Array.Empty<string>().ToFrozenSet(StringComparer.Ordinal),
+            RequiredChecks = RequiredChecks
         };
     }
 
     private static void AppendPart(StringBuilder builder, string value)
         => builder.Append(value.Length).Append(':').Append(value);
+
+    private static IReadOnlyList<string> Languages(params string[] languages)
+        => Array.AsReadOnly(languages);
+
+    private static IReadOnlyDictionary<string, string> Labels(params (string Language, string Label)[] labels)
+        => new ReadOnlyDictionary<string, string>(labels.ToDictionary(
+            label => label.Language, label => label.Label, StringComparer.Ordinal));
 
     private static string Hash(string value)
         => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();

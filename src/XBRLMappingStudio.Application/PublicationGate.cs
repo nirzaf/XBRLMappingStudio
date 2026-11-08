@@ -37,7 +37,21 @@ public static class PublicationGate
         if (diagnostics.HasBlockingErrors)
             return diagnostics;
 
-        var isSynthetic = string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
+        var hasReservedSyntheticId =
+            string.Equals(profile.ProfileId, SyntheticProfile.ProfileId, StringComparison.Ordinal);
+        var isSynthetic = SyntheticProfile.IsBuiltInFixture(profile);
+        if (hasReservedSyntheticId && !isSynthetic)
+        {
+            diagnostics.Error(
+                DiagnosticCodes.XbrProfileMismatch,
+                DiagnosticSubsystem.XBRL,
+                DiagnosticStage.Publication,
+                $"Profile ID '{SyntheticProfile.ProfileId}' is reserved for the immutable built-in development fixture; "
+                + "a copied or modified profile cannot use the unsigned synthetic approval path.",
+                operationId: operationId);
+            return diagnostics;
+        }
+
         if (isSynthetic && !allowSyntheticProfile)
         {
             diagnostics.Error(

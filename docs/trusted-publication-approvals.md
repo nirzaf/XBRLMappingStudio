@@ -2,6 +2,8 @@
 
 Non-synthetic publication fails closed unless the application host supplies a `PublicationApprovalTrustPolicy` and the project contains a valid signed approval for the current executable revision, semantic digest, and filing profile. Project approval text alone does not establish trust. XBR016 reports missing, invalid, expired, or unauthorized approval evidence.
 
+The unsigned development exception applies only to the immutable `SyntheticProfile.Build()` instance. The publication gate rejects a copied, deserialized, or modified profile that reuses the reserved synthetic profile ID, even when the project repeats its ID and digest. The built-in fixture's nested collections are read-only so a caller cannot change its validation rules in place.
+
 The host enrolls `TrustedPublicationReviewer` entries containing a unique key ID, exact reviewer identity, authority, and Base64 DER SubjectPublicKeyInfo public key. Enrollment must come from an owner-controlled source outside the project. Pass the policy to `MappingJobService` and `PublicationService`; direct gate users pass `approvalTrustPolicy` to `PublicationGate.Evaluate`. Supplying a policy also requires signed approvals for synthetic profiles. Without a policy, legacy synthetic development approvals remain available only with explicit synthetic opt-in.
 
 ## Signing contract

@@ -27,6 +27,55 @@ public sealed class PublicationGateTests
     }
 
     [Fact]
+    public void CopiedOrModifiedProfileCannotBorrowTheReservedSyntheticIdentity()
+    {
+        var project = Project();
+        var copiedProfile = new FilingProfile
+        {
+            ProfileId = Synthetic.ProfileId,
+            Digest = Synthetic.Digest,
+            Concepts = Synthetic.Concepts,
+            SupportedUnits = Synthetic.SupportedUnits,
+            TaxonomyVersion = Synthetic.TaxonomyVersion,
+            DimensionDomains = Synthetic.DimensionDomains,
+            OutputFormat = Synthetic.OutputFormat,
+            NamespaceUris = Synthetic.NamespaceUris,
+            TaxonomyUrls = Synthetic.TaxonomyUrls,
+            PackageHashes = Synthetic.PackageHashes,
+            RequiredPlugins = Synthetic.RequiredPlugins,
+            RequiredChecks = new HashSet<string>(StringComparer.Ordinal)
+        };
+
+        var diagnostics = PublicationGate.Evaluate(project, copiedProfile, allowSyntheticProfile: true);
+
+        Assert.True(diagnostics.HasBlockingErrors);
+        Assert.Contains(diagnostics.Items, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrProfileMismatch && diagnostic.IsBlocking);
+        Assert.DoesNotContain(diagnostics.Items, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.XbrApprovalRequired);
+    }
+
+    [Fact]
+    public void BuiltInSyntheticProfileIsSharedAndDeeplyReadOnly()
+    {
+        var profile = SyntheticProfile.Build();
+
+        Assert.Same(profile, SyntheticProfile.Build());
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<ConceptMetadata>)profile.Concepts)[0] = profile.Concepts[1]);
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)profile.Concepts[0].SupportedLanguages)[0] = "spoofed-language");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)profile.Concepts[0].LabelsByLanguage)["en"] = "spoofed label");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)profile.Concepts[1].SupportedLanguages)[0] = "spoofed-language");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)profile.Concepts[1].LabelsByLanguage)["en"] = "spoofed label");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)profile.TaxonomyUrls)[0] = "spoofed-taxonomy.xsd");
+    }
+
+    [Fact]
     public void SubstitutedProfile_Blocks_XBR015_BeforeAnyOtherCheck()
     {
         var project = Project();
