@@ -23,6 +23,8 @@ public static class CrashPublicationContract
 
     public static string OperationKey(string stage) => "mixed-crash-" + stage;
 
+    public static string AtomicRunId(string stage) => "atomic-mixed-" + stage;
+
     public static string SqliteOperationKey(string stage) => "sqlite-crash-" + stage;
 
     public static string SqliteIntentFingerprint(string stage) => "sha256:sqlite-intent-" + stage;
@@ -40,6 +42,9 @@ internal static class Program
 
         if (args.Length != 4)
             return 2;
+
+        if (StringComparer.Ordinal.Equals(args[0], "mixed-atomic-after-move"))
+            return await CrashMixedAfterAtomicMoveAsync(args);
 
         if (StringComparer.Ordinal.Equals(args[0], "atomic-after-replace"))
             return CrashAfterAtomicReplace(args);
@@ -81,6 +86,42 @@ internal static class Program
                 return receipt;
             });
 
+        return 0;
+    }
+
+    private static async Task<int> CrashMixedAfterAtomicMoveAsync(string[] args)
+    {
+        var stage = args[0];
+        var statePath = Path.GetFullPath(args[1]);
+        var filePath = Path.GetFullPath(args[2]);
+        var sqlitePath = Path.GetFullPath(args[3]);
+        var bytes = CrashPublicationContract.AtomicReportBytes;
+        var digest = DestinationLock.DigestBytes(bytes);
+        var intent = new MixedPublicationIntent(
+            CrashPublicationContract.OperationKey(stage), "sha256:mixed-intent-" + stage,
+            filePath, digest, bytes.LongLength, sqlitePath, "facts");
+        var coordinator = new MixedPublicationCoordinator(
+            new MixedPublicationStore(new LocalApplicationDatabase(statePath)));
+        var service = new PublicationService(new RunJournal(databasePath: statePath));
+
+        await coordinator.PublishAsync(intent,
+            token =>
+            {
+                return Task.FromResult(service.Publish(filePath, bytes,
+                    CrashPublicationContract.AtomicRunId(stage),
+                    validateStagedArtifactAsync: (stagedPath, _) =>
+                        Task.FromResult(DestinationLock.DigestFile(stagedPath)),
+                    cancellationToken: token,
+                    refuseDifferentExisting: true,
+                    afterAtomicReplaceForTest: _ => KillCurrentProcess()));
+            },
+            async (prepared, token) =>
+            {
+                var operationKey = CrashPublicationContract.SqliteOperationKey(stage);
+                var fingerprint = CrashPublicationContract.SqliteIntentFingerprint(stage);
+                prepared(operationKey, fingerprint);
+                return await CommitSqliteOnceAsync(sqlitePath, operationKey, fingerprint, token);
+            });
         return 0;
     }
 

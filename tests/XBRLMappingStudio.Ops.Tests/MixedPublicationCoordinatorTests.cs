@@ -456,7 +456,64 @@ public sealed class MixedPublicationCoordinatorTests
         Assert.Empty(new RunJournal(databasePath: statePath).RecoverUnfinalized());
     }
 
+    [Fact]
+    public async Task AbruptProcessTerminationAfterMixedFileMove_ReconcilesFileAndPublishesSqliteOnce()
+    {
+        const string stage = "mixed-atomic-after-move";
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "local-state.db");
+        var targetPath = Path.Combine(workspace.Path, "destination.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var reportBytes = CrashPublicationContract.AtomicReportBytes;
+        await CreateCrashTargetAsync(targetPath);
+
+        var exitCode = await StartCrashHarnessAsync(stage, statePath, filePath, targetPath);
+
+        Assert.NotEqual(0, exitCode);
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+        var journalRecovery = Assert.Single(new RunJournal(databasePath: statePath).RecoverUnfinalized());
+        Assert.Equal(CrashPublicationContract.AtomicRunId(stage), journalRecovery.RunId);
+        Assert.Equal(RecoveryDecision.Finalized, journalRecovery.Decision);
+
+        var coordinator = new MixedPublicationCoordinator(
+            new MixedPublicationStore(new LocalApplicationDatabase(statePath)));
+        var recovered = await coordinator.ReconcileAsync(CrashPublicationContract.OperationKey(stage));
+        Assert.NotNull(recovered);
+        Assert.Equal(DestinationPublicationState.Confirmed, recovered!.FileState);
+        Assert.Equal(DestinationPublicationState.Pending, recovered.SqliteState);
+
+        var filePublishAttempts = 0;
+        var retry = await coordinator.PublishAsync(
+            IntentForMixedAtomic(stage, filePath, reportBytes, targetPath),
+            _ =>
+            {
+                filePublishAttempts++;
+                throw new InvalidOperationException("The digest-confirmed file must not be replaced again.");
+            },
+            async (prepared, token) =>
+            {
+                var operationKey = CrashPublicationContract.SqliteOperationKey(stage);
+                var fingerprint = CrashPublicationContract.SqliteIntentFingerprint(stage);
+                prepared(operationKey, fingerprint);
+                return await CommitCrashReceiptOnceAsync(targetPath, operationKey, fingerprint, token);
+            });
+
+        Assert.Null(retry.Failure);
+        Assert.Equal(0, filePublishAttempts);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.FileState);
+        Assert.Equal(DestinationPublicationState.Confirmed, retry.Record.SqliteState);
+        Assert.Equal(reportBytes, await File.ReadAllBytesAsync(filePath));
+        Assert.Equal(1, await CountRowsAsync(targetPath, "facts"));
+        Assert.Equal(1, await CountRowsAsync(targetPath, "xms_idempotency_receipts"));
+    }
+
     private static MixedPublicationIntent IntentForCrash(
+        string stage, string filePath, byte[] reportBytes, string targetPath)
+        => new(CrashPublicationContract.OperationKey(stage), "sha256:mixed-intent-" + stage,
+            Path.GetFullPath(filePath), DestinationLock.DigestBytes(reportBytes), reportBytes.LongLength,
+            Path.GetFullPath(targetPath), "facts");
+
+    private static MixedPublicationIntent IntentForMixedAtomic(
         string stage, string filePath, byte[] reportBytes, string targetPath)
         => new(CrashPublicationContract.OperationKey(stage), "sha256:mixed-intent-" + stage,
             Path.GetFullPath(filePath), DestinationLock.DigestBytes(reportBytes), reportBytes.LongLength,
@@ -492,8 +549,11 @@ public sealed class MixedPublicationCoordinatorTests
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-        _ = await stdout;
-        _ = await stderr;
+        var output = await stdout;
+        var error = await stderr;
+        if (process.ExitCode == 0)
+            throw new InvalidOperationException(
+                $"Crash harness stage '{stage}' exited normally. stdout: {output}{Environment.NewLine}stderr: {error}");
         return process.ExitCode;
     }
 

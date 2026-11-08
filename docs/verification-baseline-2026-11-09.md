@@ -25,3 +25,7 @@ No official IFRS package was downloaded or bundled. Package artifact identity, d
 ## DST-08 lexical identity follow-up
 
 The focused Windows Release integration filter `Cli_MixedPublicationPublishesVersionedRecordFilesAndRetriesWithoutReplacement` passed **6/6** using an isolated artifact root. Each CSV v1/v2, XLSX v1/v2, JSON v1, and XML v1 mixed-publication journey now publishes, reopens through the corresponding source adapter, and asserts exact preservation of both the QName-valid entity identifier `Entity-00123-04` an escaped, multiline language-tagged text fact, and the exact decimal lexeme `12.5000` from a one-row synthetic workbook. Initial invalid entity-identifier and duplicated constant-text fixtures were rejected with XBR011 and duplicate-fact validation; the final fixture uses a QName-valid identifier and row-filtered source field.
+
+## DST-08 mixed journal and atomic-move crash follow-up
+
+`MixedPublicationCoordinatorTests.AbruptProcessTerminationAfterMixedFileMove_ReconcilesFileAndPublishesSqliteOnce` passed **1/1** on Windows Release using an isolated artifact root. The real child process is terminated after a new report is moved into place but before the file and mixed journals confirm it. Restart finalizes the digest-verified file journal, reconciles the mixed file leg as confirmed with SQLite pending, then retries only SQLite and records one fact plus one receipt. This covers the first-time atomic move for a synthetic report. Per-record-adapter mid-write termination and filesystem power-loss durability remain open.
