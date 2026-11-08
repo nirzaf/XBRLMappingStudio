@@ -2849,6 +2849,7 @@ public sealed class DesignerSessionTests
             viewModel.DestinationTable = null;
             Assert.False(viewModel.CanPublishDestination);
             await viewModel.LoadDestinationAsync(database);
+            Assert.Contains("destination selection changed", viewModel.DestinationPreviewSummary, StringComparison.OrdinalIgnoreCase);
             Assert.False(viewModel.IsDestinationSchemaConfirmed);
             viewModel.IsDestinationSchemaConfirmed = true;
             Assert.True(viewModel.CanPublishDestination);

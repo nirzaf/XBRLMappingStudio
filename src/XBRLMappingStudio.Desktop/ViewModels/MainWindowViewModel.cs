@@ -876,7 +876,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         {
             if (!Set(ref _selectedDestinationKey, value)) return;
             InvalidateMappingOperationIfStale();
-            ResetDestinationPreviewSummary("The business key changed; rerun the dry run to refresh its estimate.");
+            ResetDestinationPreviewSummary("The destination selection changed; rerun the dry run to refresh its estimate.");
             IsDestinationSchemaConfirmed = false;
             ValidateSelectedDestinationSchema();
             NotifyDestinationCommands();
