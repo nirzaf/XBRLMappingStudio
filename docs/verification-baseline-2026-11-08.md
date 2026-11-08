@@ -256,13 +256,13 @@ Verification on the local Windows Release build:
   source path. GroupBy output samples retain all four source contribution paths.
   A 501-row full run verifies exact output counts in both the in-memory and
   forced SQLite-spooled execution paths.
-- Integration tests passed 245 with 6 environment-gated Arelle skips (251 total).
+- Integration tests passed 246 with 6 environment-gated Arelle skips (252 total).
   Changed-source rejection is covered for both preview and full runs, with no
   intermediate values returned after the blocking source-identity diagnostic.
 - Each row frame stores its node/port values once in a typed-key map used by
   evaluation and preview collection, avoiding a duplicate per-row value map.
 - These are synthetic fixture and headless UI checks. Exact-head GitHub CI
-  [42446894415](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42446894415)
+  [42447864654](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42447864654)
   passed repository hygiene, Windows/Ubuntu Release matrices, and pinned Arelle
-  integration for source `d4e89f0a08ec09f619b2e6eb8d72cf9a8595587d`. Native
+  integration for source `0310ee73141a429609773020f356be9664a17e2f`. Native
   visual/screen-reader and real filing-profile qualification are not claimed.
