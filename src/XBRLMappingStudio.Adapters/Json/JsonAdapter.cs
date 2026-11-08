@@ -19,20 +19,79 @@ public sealed class JsonAdapter : ISourceAdapter
     public string Kind => "json";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
 
-    public sealed record Options(int MaxDepth = 64, int MaxNumberDigits = 28)
+    public sealed record Options(
+        int MaxDepth = 64,
+        int MaxNumberDigits = 28,
+        long MaxInputBytes = DefaultMaximumInputBytes,
+        int MaxRows = DefaultMaximumRows,
+        int MaxStringLength = DefaultMaximumStringLength)
     {
+        public const long DefaultMaximumInputBytes = 16L * 1024 * 1024;
+        public const long AbsoluteMaximumInputBytes = 64L * 1024 * 1024;
+        public const int DefaultMaximumRows = 100_000;
+        public const int AbsoluteMaximumRows = 1_000_000;
+        public const int DefaultMaximumStringLength = 1_000_000;
+        public const int AbsoluteMaximumStringLength = 16 * 1024 * 1024;
+
         public static Options FromConfiguration(IReadOnlyDictionary<string, string>? cfg)
         {
             if (cfg is null) return new Options();
             int depth = cfg.TryGetValue("maxDepth", out var d) && int.TryParse(d, out var dv) ? dv : 64;
             int digits = cfg.TryGetValue("maxNumberDigits", out var n) && int.TryParse(n, out var nv) ? nv : 28;
-            return new Options(depth, digits);
+            long bytes = cfg.TryGetValue("maxInputBytes", out var b) && long.TryParse(b, out var bv)
+                ? bv : DefaultMaximumInputBytes;
+            int rows = cfg.TryGetValue("maxRows", out var r) && int.TryParse(r, out var rv)
+                ? rv : DefaultMaximumRows;
+            int stringLength = cfg.TryGetValue("maxStringLength", out var s) && int.TryParse(s, out var sv)
+                ? sv : DefaultMaximumStringLength;
+            var options = new Options(depth, digits, bytes, rows, stringLength);
+            try
+            {
+                options.Validate();
+            }
+            catch (ArgumentOutOfRangeException exception)
+            {
+                var code = exception.ParamName switch
+                {
+                    nameof(MaxDepth) => DiagnosticCodes.IoDepthExceeded,
+                    nameof(MaxNumberDigits) => DiagnosticCodes.IoNumberOutOfBudget,
+                    nameof(MaxRows) => DiagnosticCodes.IoRowBudgetExceeded,
+                    nameof(MaxStringLength) => DiagnosticCodes.IoStringBudgetExceeded,
+                    _ => DiagnosticCodes.IoInputBudgetExceeded
+                };
+                throw new AdapterException(code,
+                    $"Configured JSON source limit '{exception.ParamName}' is outside the supported range.",
+                    isInputBudgetExceeded: true);
+            }
+            return options;
+        }
+
+        public void Validate()
+        {
+            if (MaxDepth is < 0 or > 64) throw new ArgumentOutOfRangeException(nameof(MaxDepth));
+            // Keep caller-selected mantissa budgets compatible with long removable zero
+            // tails; the byte ceiling bounds the maximum lexical digit count regardless.
+            if (MaxNumberDigits < 1 || MaxNumberDigits > AbsoluteMaximumInputBytes)
+                throw new ArgumentOutOfRangeException(nameof(MaxNumberDigits));
+            if (MaxInputBytes is < 1 or > AbsoluteMaximumInputBytes)
+                throw new ArgumentOutOfRangeException(nameof(MaxInputBytes));
+            if (MaxRows is < 1 or > AbsoluteMaximumRows) throw new ArgumentOutOfRangeException(nameof(MaxRows));
+            if (MaxStringLength is < 1 or > AbsoluteMaximumStringLength)
+                throw new ArgumentOutOfRangeException(nameof(MaxStringLength));
         }
     }
 
+    public const long DefaultMaximumInputBytes = Options.DefaultMaximumInputBytes;
+    public const int DefaultMaximumRows = Options.DefaultMaximumRows;
+    public const int DefaultMaximumStringLength = Options.DefaultMaximumStringLength;
+
     private readonly Options _options;
 
-    public JsonAdapter(Options? options = null) => _options = options ?? new Options();
+    public JsonAdapter(Options? options = null)
+    {
+        _options = options ?? new Options();
+        _options.Validate();
+    }
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
@@ -86,7 +145,7 @@ public sealed class JsonAdapter : ISourceAdapter
 
     private List<DataRecord> ReadRecords(SourceConnection connection, CancellationToken ct)
     {
-        var bytes = ReadBytes(connection);
+        var bytes = ReadBytes(connection, ct);
         var reader = new Utf8JsonReader(bytes, new JsonReaderOptions
         {
             CommentHandling = JsonCommentHandling.Disallow,
@@ -96,13 +155,17 @@ public sealed class JsonAdapter : ISourceAdapter
         JNode root;
         if (!reader.Read())
             throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "JSON document is empty.");
-        root = ReadValue(ref reader, depth: 0);
+        root = ReadValue(ref reader, depth: 0, ct);
         if (reader.Read())
             throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "JSON document has trailing content.");
 
         var records = new List<DataRecord>();
         if (root is JArray arr)
         {
+            if (arr.Items.Count > _options.MaxRows)
+                throw new AdapterException(DiagnosticCodes.IoRowBudgetExceeded,
+                    $"JSON array exceeds the maximum row count of {_options.MaxRows}.",
+                    isInputBudgetExceeded: true);
             int idx = 0;
             foreach (var item in arr.Items)
             {
@@ -135,8 +198,9 @@ public sealed class JsonAdapter : ISourceAdapter
         return records;
     }
 
-    private JNode ReadValue(ref Utf8JsonReader r, int depth)
+    private JNode ReadValue(ref Utf8JsonReader r, int depth, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (depth > _options.MaxDepth)
             throw new AdapterException(DiagnosticCodes.IoDepthExceeded,
                 $"JSON nesting exceeds the maximum depth of {_options.MaxDepth}.");
@@ -149,16 +213,18 @@ public sealed class JsonAdapter : ISourceAdapter
                 var seen = new HashSet<string>(StringComparer.Ordinal);
                 while (r.Read())
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (r.TokenType == JsonTokenType.EndObject) return obj;
                     if (r.TokenType != JsonTokenType.PropertyName)
                         throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "Malformed JSON object.");
                     var name = r.GetString()!;
+                    EnsureStringWithinBudget(name);
                     if (!seen.Add(name))
                         throw new AdapterException(DiagnosticCodes.IoDuplicateKey,
                             $"Duplicate JSON key '{name}' at depth {depth}.");
                     if (!r.Read())
                         throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "JSON value missing.");
-                    obj.Props.Add((name, ReadValue(ref r, depth + 1)));
+                    obj.Props.Add((name, ReadValue(ref r, depth + 1, cancellationToken)));
                 }
                 throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "Unterminated JSON object.");
             }
@@ -167,13 +233,22 @@ public sealed class JsonAdapter : ISourceAdapter
                 var arr = new JArray();
                 while (r.Read())
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (r.TokenType == JsonTokenType.EndArray) return arr;
-                    arr.Items.Add(ReadValue(ref r, depth + 1));
+                    if (depth == 0 && arr.Items.Count >= _options.MaxRows)
+                        throw new AdapterException(DiagnosticCodes.IoRowBudgetExceeded,
+                            $"JSON array exceeds the maximum row count of {_options.MaxRows}.",
+                            isInputBudgetExceeded: true);
+                    arr.Items.Add(ReadValue(ref r, depth + 1, cancellationToken));
                 }
                 throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding, "Unterminated JSON array.");
             }
             case JsonTokenType.String:
-                return new JLeaf(r.GetString(), JsonValueKind.String);
+            {
+                var text = r.GetString();
+                EnsureStringWithinBudget(text ?? string.Empty);
+                return new JLeaf(text, JsonValueKind.String);
+            }
             case JsonTokenType.Number:
             {
                 var raw = NumberRaw(r);
@@ -196,6 +271,14 @@ public sealed class JsonAdapter : ISourceAdapter
                 throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding,
                     $"Unsupported JSON token '{r.TokenType}'.");
         }
+    }
+
+    private void EnsureStringWithinBudget(string value)
+    {
+        if (value.Length > _options.MaxStringLength)
+            throw new AdapterException(DiagnosticCodes.IoStringBudgetExceeded,
+                $"JSON string or property name exceeds the maximum length of {_options.MaxStringLength} characters.",
+                isInputBudgetExceeded: true);
     }
 
     private static string NumberRaw(Utf8JsonReader r)
@@ -301,11 +384,26 @@ public sealed class JsonAdapter : ISourceAdapter
         return cols;
     }
 
-    private static byte[] ReadBytes(SourceConnection connection)
+    private byte[] ReadBytes(SourceConnection connection, CancellationToken cancellationToken)
     {
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
             $"JSON connection '{connection.SourceId}' has no file path.");
-        return File.ReadAllBytes(path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 64 * 1024, FileOptions.SequentialScan);
+        using var content = new MemoryStream((int)Math.Min(stream.Length, _options.MaxInputBytes));
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            if (content.Length + read > _options.MaxInputBytes)
+                throw new AdapterException(DiagnosticCodes.IoInputBudgetExceeded,
+                    $"JSON input exceeds the maximum size of {_options.MaxInputBytes} bytes.",
+                    isInputBudgetExceeded: true);
+            content.Write(buffer, 0, read);
+        }
+        return content.ToArray();
     }
 }

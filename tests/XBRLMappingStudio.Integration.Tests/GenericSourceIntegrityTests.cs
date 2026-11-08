@@ -192,6 +192,32 @@ public sealed class GenericSourceIntegrityTests
         Assert.Equal(validationCount, worker.ReportValidationCount);
     }
 
+    [Fact]
+    public async Task JsonInputBudget_BlocksBeforeReportValidationAndPreservesPriorOutput()
+    {
+        using var workspace = new Workspace();
+        var sourcePath = workspace.PathFor("source.json");
+        await File.WriteAllTextAsync(sourcePath, Document("json", "123.45"));
+        var project = BuildProject("json", sourcePath, maxInputBytes: 8);
+        var priorOutput = Encoding.UTF8.GetBytes("accepted prior output");
+        await File.WriteAllBytesAsync(workspace.Destination, priorOutput);
+        await using var worker = new CountingSyntheticWorker();
+        var service = new MappingJobService(Profile, worker);
+
+        using var result = await Run(service, project, preview: false);
+
+        Assert.Equal(RunOutcome.IncompleteConfiguration, result.Manifest.Outcome);
+        Assert.False(result.IsPublishable);
+        Assert.Empty(result.Facts);
+        Assert.Empty(result.Manifest.Outputs);
+        Assert.Empty(result.XbrlJson);
+        Assert.Equal(0, worker.ReportValidationCount);
+        var diagnostic = Assert.Single(result.Manifest.Diagnostics, item => item.IsBlocking);
+        Assert.Equal(DiagnosticCodes.IoInputBudgetExceeded, diagnostic.Code);
+        Assert.Equal(project.Bindings.Single().BindingId, diagnostic.Source!.SourceId);
+        Assert.Equal(priorOutput, await File.ReadAllBytesAsync(workspace.Destination));
+    }
+
     [Theory]
     [InlineData("json", "approval", DiagnosticCodes.XbrApprovalRequired)]
     [InlineData("xml", "approval", DiagnosticCodes.XbrApprovalRequired)]
@@ -271,7 +297,11 @@ public sealed class GenericSourceIntegrityTests
         ? "{\"financial\":{\"amount\":" + lexical + "}}"
         : "<root><financial><amount>" + lexical + "</amount></financial></root>";
 
-    private static MappingProject BuildProject(string kind, string sourcePath, int? maxNumberDigits = null)
+    private static MappingProject BuildProject(
+        string kind,
+        string sourcePath,
+        int? maxNumberDigits = null,
+        int? maxInputBytes = null)
     {
         var project = TestFixtures.BuildRevenueMappingProject(sourcePath,
             idSeed: Guid.Parse("4fa6c9d8-8e20-4ad1-ab20-399ed91cd276"));
@@ -281,6 +311,8 @@ public sealed class GenericSourceIntegrityTests
         };
         if (maxNumberDigits is { } budget && kind == "json")
             project.Bindings[0].Configuration["maxNumberDigits"] = budget.ToString(CultureInfo.InvariantCulture);
+        if (maxInputBytes is { } byteBudget && kind == "json")
+            project.Bindings[0].Configuration["maxInputBytes"] = byteBudget.ToString(CultureInfo.InvariantCulture);
 
         // ExcelField is the existing format-agnostic source-field node. Do not add
         // another graph registration or a parser that could mask adapter corruption.

@@ -79,6 +79,8 @@ public static class DiagnosticCodes
     public const string IoPdfReviewManifestInvalid = "IO029";
     public const string IoInputIdentityChanged = "IO030";
     public const string IoReverseMappingCannotRecoverAbsentSourceDetail = "IO031";
+    public const string IoInputBudgetExceeded = "IO032";
+    public const string IoStringBudgetExceeded = "IO033";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

@@ -45,6 +45,16 @@ Schema inspection, sampling and full reads use the same parser and refusal rules
 These checks complement the existing duplicate JSON property, depth, byte-budget,
 DTD/entity and namespace controls; they do not replace them.
 
+Generic JSON reads remain buffered, so they now have explicit limits before an
+input can grow without bound: 16 MiB by default (64 MiB absolute configuration
+ceiling), 100,000 top-level array records by default (1,000,000 ceiling), and
+1,000,000 UTF-16 code units per property name or string value by default
+(16 MiB ceiling). Project connection options may lower or raise the defaults
+within those ceilings. Exceeding the byte, row, or string limits reports IO032,
+IO006, or IO033 respectively. Cancellation is checked while reading bytes and
+parsing tokens. This bounds the adapter's input and token budget; it is not a
+streaming or peak-process-memory qualification.
+
 ## Verification and limits
 
 Adapter regressions include an independent bounded BigInteger coefficient/scale
@@ -55,6 +65,6 @@ exact inputs and fail-closed invalid sources without changing accepted destinati
 bytes or bypassing approval and input-identity checks.
 
 XML's current rowset selection, repeated-element representation and text inference
-remain limited. Existing buffering and depth behavior is unchanged; this increment
+remain limited. Existing XML buffering and depth behavior is unchanged; this increment
 does not establish streaming or total-process-memory qualification. Generic adapter checks do not qualify arbitrary XML/JSON constructs,
 real IFRS artifacts, regulator conformance, native desktop acceptance or a release.

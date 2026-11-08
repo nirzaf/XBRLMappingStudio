@@ -77,6 +77,63 @@ public sealed class JsonAdapterTests
         Assert.Equal(DiagnosticCodes.IoNumberOutOfBudget, ex.Code);
     }
 
+    [Fact]
+    public async Task InputByteBudget_IsEnforcedByEveryRead()
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("large.json", "{\"amount\":123}");
+        var connection = new SourceConnection("json-source", "json", ws.PathFor("large.json"));
+        var adapter = new JsonAdapter(new JsonAdapter.Options(MaxInputBytes: 8));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoInputBudgetExceeded);
+    }
+
+    [Fact]
+    public async Task TopLevelRowBudget_IsEnforcedBeforeReadingPastTheLimit()
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("rows.json", "[{\"id\":1},{\"id\":2}]");
+        var connection = new SourceConnection("json-source", "json", ws.PathFor("rows.json"));
+        var adapter = new JsonAdapter(new JsonAdapter.Options(MaxRows: 1));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoRowBudgetExceeded);
+    }
+
+    [Theory]
+    [InlineData("{\"name\":\"long\"}")]
+    [InlineData("{\"long\":1}")]
+    public async Task StringAndPropertyNameBudgets_AreEnforcedByEveryRead(string json)
+    {
+        using var ws = new TempWorkspace();
+        ws.Write("long-string.json", json);
+        var connection = new SourceConnection("json-source", "json", ws.PathFor("long-string.json"));
+        var adapter = new JsonAdapter(new JsonAdapter.Options(MaxStringLength: 3));
+        await AssertEveryReadFails(adapter, connection, DiagnosticCodes.IoStringBudgetExceeded);
+    }
+
+    [Fact]
+    public async Task LimitsFromProjectConfiguration_AreAppliedAndHardCeilingIsEnforced()
+    {
+        var options = JsonAdapter.Options.FromConfiguration(new Dictionary<string, string>
+        {
+            ["maxInputBytes"] = "128",
+            ["maxRows"] = "12",
+            ["maxStringLength"] = "17"
+        });
+        Assert.Equal(128, options.MaxInputBytes);
+        Assert.Equal(12, options.MaxRows);
+        Assert.Equal(17, options.MaxStringLength);
+
+        using var ws = new TempWorkspace();
+        ws.Write("large.json", "{}");
+        var connection = new SourceConnection("json-source", "json", ws.PathFor("large.json"));
+        var invalidLimit = Assert.Throws<Adapters.AdapterException>(() => JsonAdapter.Options.FromConfiguration(new Dictionary<string, string>
+        {
+            ["maxInputBytes"] = (JsonAdapter.Options.AbsoluteMaximumInputBytes + 1).ToString()
+        }));
+        Assert.Equal(DiagnosticCodes.IoInputBudgetExceeded, invalidLimit.Code);
+        Assert.True(invalidLimit.IsInputBudgetExceeded);
+        await new JsonAdapter(options).InspectSchemaAsync(connection, default);
+    }
+
     public static TheoryData<string, int> InexactNumbers => new()
     {
         { "1e-29", 28 },
