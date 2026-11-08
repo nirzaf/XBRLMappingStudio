@@ -17,7 +17,8 @@ and samples intentionally do not validate unread tails. Destination formatting i
 subject to these source limits.
 
 Full runs can use the disk-backed large-run path for one CSV binding with a row-scoped
-plan and no configured destination. Multiple bindings and set-phase plans remain
+plan or the supported [single-GroupBy graph](disk-partitioned-grouping.md), and no
+configured destination. Multiple bindings and other set-phase plans remain
 unsupported in large mode and return a structured configuration outcome. Existing
 profile validation and publication approval gates still apply.
 

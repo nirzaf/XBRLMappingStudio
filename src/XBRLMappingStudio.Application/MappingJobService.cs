@@ -564,13 +564,14 @@ public sealed class MappingJobService
         {
             var binding = project.Bindings.Count == 1 ? project.Bindings[0] : null;
             if (binding is null || project.Bindings.Count != 1
-                || compile.Plan!.SetSteps.Count != 0
+                || (compile.Plan!.SetSteps.Count != 0
+                    && compile.Plan.PartitionedGroup?.BindingId != binding.BindingId)
                 || sourceConnections[binding.BindingId].Kind is not ("sqlite" or "csv")
                 || project.Destination is not null)
             {
                 context.Diagnostics.Error(DiagnosticCodes.IoUnsupportedOperation,
                     DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
-                    "Large-run execution is currently qualified only for one streamed SQLite or CSV source, a row-scoped plan, and no configured destination.",
+                    "Large-run execution is currently qualified only for one streamed SQLite or CSV source, a row-scoped or supported single-GroupBy plan, and no configured destination.",
                     operationId: opId);
                 manifest.Outcome = RunOutcome.IncompleteConfiguration;
                 manifest.CompletedUtc = DateTimeOffset.UtcNow;
@@ -589,7 +590,7 @@ public sealed class MappingJobService
                     operationId: opId);
             }
             context.Diagnostics.SetMaximumRetainedItems(255);
-            return await RunLargeRowScopedAsync(project, binding, connection, schema,
+            return await RunLargeAsync(project, binding, connection, schema,
                 sourceReaders[binding.BindingId], compile.Plan!, context, manifest, runId, opId, probedBytes,
                 progress, cancellationToken, hasPrimaryKey, outputKind);
         }
@@ -840,7 +841,7 @@ public sealed class MappingJobService
             nodeOutputPreviews: exec.NodeOutputPreviews);
     }
 
-    private async Task<JobResult> RunLargeRowScopedAsync(
+    private async Task<JobResult> RunLargeAsync(
         MappingProject project,
         SourceBinding binding,
         SourceConnection connection,
@@ -867,20 +868,43 @@ public sealed class MappingJobService
             store = new LargeRunFactStore(Path.Combine(directory, "facts.sqlite"),
                 _executionBudget.SqliteCacheKiB, _executionBudget.MaxSpoolBytes);
             long sourceRows = 0;
+            var groupsExecuted = 0;
             var table = connection.Configuration is not null
                 && connection.Configuration.TryGetValue("table", out var configuredTable) ? configuredTable : "";
 
-            while (true)
+            async IAsyncEnumerable<IReadOnlyList<DataRecord>> ExecutionBatches()
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var rows = await reader.ReadBatchAsync(_executionBudget.RowBatchSize,
-                    _executionBudget.MaxBatchBytes, BufferedSourceReader.EstimateRecordBytes, cancellationToken);
-                if (rows.Count == 0) break;
-                sourceRows = checked(sourceRows + rows.Count);
-                if (connection.Kind == "sqlite")
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var rows = await reader.ReadBatchAsync(_executionBudget.RowBatchSize,
+                        _executionBudget.MaxBatchBytes, BufferedSourceReader.EstimateRecordBytes, cancellationToken);
+                    if (rows.Count == 0) break;
+                    sourceRows = checked(sourceRows + rows.Count);
                     foreach (var row in rows)
-                        store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (BufferedSourceReader.EstimateRecordBytes(row) > _executionBudget.MaxRowBytes)
+                            throw new LargeRunBudgetExceededException($"A source row exceeded the {_executionBudget.MaxRowBytes} byte row budget.");
+                        if (connection.Kind == "sqlite")
+                            store.AddSourceDigestRecord(CanonicalRecord(row), _executionBudget.MaxRowBytes);
+                        if (plan.PartitionedGroup is { } grouping)
+                            store.AddGroupRecord(row, grouping, _executionBudget, cancellationToken);
+                    }
+                    if (plan.PartitionedGroup is null) yield return rows;
+                    else progress?.Report(new MappingJobProgress("Partitioning source groups on disk",
+                        checked((int)Math.Min(sourceRows, int.MaxValue))));
+                }
+                if (plan.PartitionedGroup is not null)
+                    for (var group = 1; group <= store.GroupCount; group++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        yield return store.ReadGroup(group, cancellationToken);
+                    }
+            }
 
+            await foreach (var rows in ExecutionBatches())
+            {
                 context.LoadedSources[binding.BindingId] = rows;
                 var execution = await plan.ExecuteAsync(context);
                 if (execution.Outcome == RunOutcome.Cancelled || cancellationToken.IsCancellationRequested)
@@ -934,7 +958,9 @@ public sealed class MappingJobService
 
                 context.Provenance.Clear();
                 context.LoadedSources.Remove(binding.BindingId);
-                progress?.Report(new MappingJobProgress("Executing bounded row batch", checked((int)Math.Min(sourceRows, int.MaxValue))));
+                progress?.Report(plan.PartitionedGroup is null
+                    ? new MappingJobProgress("Executing bounded row batch", checked((int)Math.Min(sourceRows, int.MaxValue)))
+                    : new MappingJobProgress("Executing bounded disk-partitioned group", ++groupsExecuted, store.GroupCount));
             }
 
             if (sourceRows <= _executionBudget.InMemorySourceRecordLimit
@@ -1147,6 +1173,16 @@ public sealed class MappingJobService
         {
             context.Diagnostics.Add(ex.ToDiagnostic(binding.BindingId, operationId));
             manifest.Outcome = ex.IsInputBudgetExceeded ? RunOutcome.IncompleteConfiguration : RunOutcome.DataError;
+            manifest.CompletedUtc = DateTimeOffset.UtcNow;
+            manifest.Diagnostics = context.Diagnostics.Items;
+            return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");
+        }
+        catch (GroupPartitionBudgetExceededException ex)
+        {
+            context.Diagnostics.Error(DiagnosticCodes.MapCollectionBudgetExceeded,
+                DiagnosticSubsystem.Mapping, DiagnosticStage.Execution,
+                ex.Message, nodeId: ex.NodeId, operationId: operationId);
+            manifest.Outcome = RunOutcome.InvalidMapping;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.Diagnostics = context.Diagnostics.Items;
             return JobResult.FromManifest(manifest, Array.Empty<XbrlFact>(), "");

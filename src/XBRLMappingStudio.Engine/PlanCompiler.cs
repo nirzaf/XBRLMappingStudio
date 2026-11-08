@@ -108,7 +108,7 @@ public sealed class PlanCompiler
 
         return CompilationResult.Ok(
             new ExecutionPlan(rowSteps, setSteps, sinks, iterationSources,
-                sinkSetInputPorts, sinkSetInputSources),
+                sinkSetInputPorts, sinkSetInputSources, PartitionedGroupPlan.TryCreate(graph)),
             graph);
     }
 
@@ -504,23 +504,6 @@ public sealed class PlanCompiler
                     static long EstimateStringStorageBytes(string? value)
                         => value is null ? 0 : 24L + (long)value.Length * sizeof(char);
 
-                    static string EncodeGroupIdentity(
-                        IReadOnlyList<string> values, CancellationToken cancellationToken)
-                    {
-                        var builder = new System.Text.StringBuilder();
-                        foreach (var value in values)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            builder.Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':');
-                            foreach (var character in value)
-                            {
-                                cancellationToken.ThrowIfCancellationRequested();
-                                builder.Append(character);
-                            }
-                        }
-                        return builder.ToString();
-                    }
-
                     static string FormatGroupKey(
                         IReadOnlyList<string> values, CancellationToken cancellationToken)
                     {
@@ -592,7 +575,7 @@ public sealed class PlanCompiler
                             ctx.CancellationToken.ThrowIfCancellationRequested();
                             keyValues[keyIndex] = GetField(fields, keyFields[keyIndex]).AsString();
                         }
-                        var bk = EncodeGroupIdentity(keyValues, ctx.CancellationToken);
+                        var bk = GroupIdentity.Encode(keyValues, ctx.CancellationToken);
                         if (!totals.ContainsKey(bk))
                         {
                             if (order.Count >= ctx.MaxGroupCount)

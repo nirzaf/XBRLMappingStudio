@@ -57,6 +57,7 @@ public sealed class ExecutionPlan
     public IReadOnlyList<SetStep> SetSteps { get; }
     public IReadOnlyList<string> SinkNodeIds { get; }
     public IReadOnlyList<string> IterationSourceNodeIds { get; }
+    public PartitionedGroupPlan? PartitionedGroup { get; }
 
     /// <summary>For each sink, the input port names whose upstream source is a
     /// set-phase producer. Sinks with a non-empty list fire once after the row loop
@@ -75,8 +76,10 @@ public sealed class ExecutionPlan
         IReadOnlyList<string> sinks,
         IReadOnlyList<string> iterationSources,
         IReadOnlyDictionary<string, IReadOnlyList<string>>? sinkSetInputPorts = null,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, (string, string)>>? sinkSetInputSources = null)
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, (string, string)>>? sinkSetInputSources = null,
+        PartitionedGroupPlan? partitionedGroup = null)
     {
+        PartitionedGroup = partitionedGroup;
         Steps = steps;
         SetSteps = setSteps;
         SinkNodeIds = sinks;

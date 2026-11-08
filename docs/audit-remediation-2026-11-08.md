@@ -125,6 +125,27 @@ hypercube algorithm oracle. Thirty direct semantic cases and five conditional
 worker/publication cases cover the new contract. Exact-commit CI is required for
 this follow-on independently of the previous increments.
 
+## Disk-partitioned grouping follow-on
+
+The [bounded grouping contract](disk-partitioned-grouping.md) admits one validated
+CollectRows -> GroupBy -> FactConstruct graph over a single SQLite/CSV source.
+Interleaved groups are stored on disk, preserve first-seen/member order, and run
+through the existing engine one bounded group at a time. All retained source
+fields still receive numeric validation. Source digests, exact decimals, nil and
+missing semantics, and field-local contributor paths remain intact. Global group
+counts, per-group input/provenance limits and a shared spool budget fail closed.
+Unsupported graphs and oversized individual groups remain refused.
+
+Verification includes small/large byte and source-path equivalence, independent
+null/numeric oracles, limit/cancellation cleanup and restart, and staged publication
+acceptance/rejection. The additional isolated 100k-row/10k-group fixture measures
+retained managed-heap variation, not process-tree peak memory. Durable spill
+recovery, joins, real-profile acceptance and the existing production gates remain
+open. Local Release build passed with zero warnings/errors; **1,113** ordinary
+solution tests passed with six environment-gated skips. All three isolated 100k-row
+memory fixtures passed, the enabled Arelle selection passed **15/15**, and the
+unchanged worker suite passed **78/78**. Exact-commit CI is required for this increment.
+
 ## Remaining acceptance ledger
 
 The following items are deliberately open. Do not remove fail-closed restrictions
@@ -138,7 +159,7 @@ or represent these rows as completed to make a release appear ready.
 | P0-04 | Authorized reviewer enrollment/revocation, protected host trust configuration, external signing workflow and CLI/Desktop deployment integration. The application API contract is implemented; production identity governance is not. |
 | P0-05 | Clean Windows installer, native/Python dependencies, signing, license clearance and installed upgrade/backup/rollback proof. |
 | P1-01 | Single row-scoped CSV large runs are added alongside SQLite. Multiple large bindings, further file adapters and end-to-end worker resource qualification remain open. |
-| P1-02 | Disk-backed grouping/joins, spill recovery and provenance qualification. |
+| P1-02 | Bounded single-source disk-partitioned grouping is implemented with exact report/source-path parity, fail-closed limits and synthetic qualification. Disk-backed joins, within-group spill, durable recovery and broader provenance/resource qualification remain open; see [the contract](disk-partitioned-grouping.md). |
 | P1-03 | Selected IFRS profile precision/rounding/accuracy values and permitted financial acceptance fixtures. The optional policy mechanism is implemented. |
 | P1-04 | Generalized visual authoring beyond the numeric-template editor and native accessibility acceptance. Engine/library signatures and desktop pinning are implemented. |
 | P1-05 | Remaining derived-record lineage, exact Arelle finding locators, complete input identity and native preview/full-run evidence. |

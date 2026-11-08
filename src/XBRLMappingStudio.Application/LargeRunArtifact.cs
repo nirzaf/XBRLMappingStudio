@@ -178,7 +178,7 @@ public sealed class LargeRunArtifact : IDisposable
 /// result enumeration within a fixed page-cache budget while preserving stable input
 /// order among identical semantic keys.
 /// </summary>
-internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
+internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.General);
     private readonly SqliteConnection _connection;
@@ -248,7 +248,7 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
         var semanticKey = fact.SemanticKey();
         if (System.Text.Encoding.UTF8.GetByteCount(semanticKey) > maxFactBytes)
             throw new LargeRunBudgetExceededException($"A fact semantic key exceeded the {maxFactBytes} byte fact budget.");
-        if (bytes > _maxBytes - _bytes - _sourceBytes)
+        if (bytes > _maxBytes - _bytes - _sourceBytes - _groupBytes)
             throw new LargeRunBudgetExceededException($"The fact spool exceeded its {_maxBytes} byte budget.");
 
         _insert!.Parameters["$key"].Value = semanticKey;
@@ -267,7 +267,7 @@ internal sealed class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
         var rowBytes = System.Text.Encoding.UTF8.GetByteCount(canonicalRecord);
         if (rowBytes > maxRowBytes)
             throw new LargeRunBudgetExceededException($"A source row exceeded the {maxRowBytes} byte row budget.");
-        if (rowBytes > _maxBytes - _bytes - _sourceBytes)
+        if (rowBytes > _maxBytes - _bytes - _sourceBytes - _groupBytes)
             throw new LargeRunBudgetExceededException($"The combined fact and source spool exceeded its {_maxBytes} byte budget.");
         using var command = _connection.CreateCommand();
         command.Transaction = _transaction;
