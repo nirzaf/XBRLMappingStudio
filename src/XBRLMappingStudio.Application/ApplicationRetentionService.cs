@@ -109,12 +109,11 @@ public sealed class ApplicationRetentionService
             throw new InvalidOperationException("The retention preview is malformed or exceeds its bounded limits.");
 
         ValidateApproval(approval, plan);
-        if (_authorizer?.IsAuthorized(approval, plan) != true)
-            throw new UnauthorizedAccessException("The retention policy approval is missing, invalid, or not authorized.");
-
         var suppliedPlanDigest = ComputePlanDigest(plan.ExpireBeforeUtc, plan.TaxonomyCacheCandidates);
         if (!StringComparer.Ordinal.Equals(plan.PlanSha256, suppliedPlanDigest))
             throw new InvalidOperationException("The retention preview was changed after it was created.");
+        if (_authorizer?.IsAuthorized(approval, plan) != true)
+            throw new UnauthorizedAccessException("The retention policy approval is missing, invalid, or not authorized.");
 
         using var connection = _database.OpenConnection();
         using var transaction = connection.BeginTransaction(deferred: false);

@@ -97,6 +97,30 @@ public sealed class ApplicationRetentionServiceTests : IDisposable
     }
 
     [Fact]
+    public void Apply_RejectsModifiedPreviewBeforeCallingPolicyAuthorizer()
+    {
+        var database = NewDatabase();
+        InsertCache(database, "expired-profile", "a", "2026-10-01T00:00:00.0000000+00:00", "expired-cache");
+        var cutoff = DateTimeOffset.Parse("2026-11-01T00:00:00Z");
+        var plan = new ApplicationRetentionService(database).PreviewTaxonomyCachePrune(cutoff);
+        var approval = new RetentionApproval("local-cache-policy-v1", Guid.NewGuid().ToString("D"), "reviewer-id", plan.PlanSha256);
+        var authorizer = new CountingAuthorizer();
+        var modifiedPlan = plan with
+        {
+            TaxonomyCacheCandidates = plan.TaxonomyCacheCandidates
+                .Select(candidate => candidate with { TaxonomyVersion = "changed" })
+                .ToArray()
+        };
+
+        Assert.Throws<InvalidOperationException>(() => new ApplicationRetentionService(database, authorizer)
+            .ApplyTaxonomyCachePrune(modifiedPlan, approval));
+
+        Assert.Equal(0, authorizer.CallCount);
+        Assert.Equal(1L, Scalar(database, "SELECT COUNT(*) FROM taxonomy_profile_index"));
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM retention_audit"));
+    }
+
+    [Fact]
     public void Apply_RejectsStalePlanWithoutDeletingNewOrChangedCacheRows()
     {
         var database = NewDatabase();
@@ -213,5 +237,16 @@ public sealed class ApplicationRetentionServiceTests : IDisposable
                && StringComparer.Ordinal.Equals(approval.PolicyId, "local-cache-policy-v1")
                && StringComparer.Ordinal.Equals(approval.PlanSha256, planSha256)
                && StringComparer.Ordinal.Equals(plan.PlanSha256, planSha256);
+    }
+
+    private sealed class CountingAuthorizer : IRetentionPolicyAuthorizer
+    {
+        public int CallCount { get; private set; }
+
+        public bool IsAuthorized(RetentionApproval approval, ApplicationRetentionPlan plan)
+        {
+            CallCount++;
+            return true;
+        }
     }
 }
