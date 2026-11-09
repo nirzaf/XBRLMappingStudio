@@ -23,6 +23,175 @@ namespace XBRLMappingStudio.Integration.Tests;
 public sealed class ArelleExecutionTests
 {
     [RequiresArelleRuntimeFact]
+    public async Task ArelleAcceptsProfileDeclaredXsStringTypedDimensionFromOfflineSyntheticTaxonomy()
+    {
+        var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
+        Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
+        var workerScript = Path.Combine(AppContext.BaseDirectory, "worker", "arelle_worker.py");
+        Assert.True(File.Exists(workerScript), $"Arelle worker script is missing: {workerScript}");
+
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-arelle-typed-dimension-" + Guid.NewGuid().ToString("N"));
+        var taxonomyRoot = Path.Combine(workspace, "taxonomy");
+        var stagedDirectory = Path.Combine(Path.GetTempPath(), "xms-staged-xml-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(taxonomyRoot);
+        Directory.CreateDirectory(stagedDirectory);
+        try
+        {
+            const string taxonomyFileName = "typed-dimension-taxonomy.xsd";
+            const string taxonomy = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           xmlns:xbrli="http://www.xbrl.org/2003/instance"
+                           xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
+                           xmlns:link="http://www.xbrl.org/2003/linkbase"
+                           xmlns:xlink="http://www.w3.org/1999/xlink"
+                           xmlns:ex="urn:synthetic:typed-dimensions:1.0"
+                           targetNamespace="urn:synthetic:typed-dimensions:1.0"
+                           elementFormDefault="qualified">
+                  <xs:import namespace="http://www.xbrl.org/2003/instance"
+                             schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+                  <xs:import namespace="http://xbrl.org/2005/xbrldt"
+                             schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>
+                  <xs:element name="Revenue" type="xbrli:monetaryItemType"
+                              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+                  <xs:element name="RegionAxis" type="xbrli:stringItemType"
+                              substitutionGroup="xbrldt:dimensionItem" xbrli:periodType="duration"
+                              xbrldt:typedDomainRef="typed-dimension-taxonomy.xsd#RegionDomain"
+                              abstract="true" nillable="true"/>
+                  <xs:element name="RegionDomain" id="RegionDomain" type="xs:string"/>
+                  <xs:element name="StatementTable" id="StatementTable" type="xbrli:stringItemType"
+                              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+                              abstract="true" nillable="true"/>
+                  <link:roleType id="StatementRole" roleURI="https://example.test/role/statement">
+                    <link:definition>Statement dimensional relationships</link:definition>
+                    <link:usedOn>link:definitionLink</link:usedOn>
+                  </link:roleType>
+                  <link:linkbaseRef xlink:type="simple"
+                                    xlink:href="typed-dimension-definition.xml"/>
+                </xs:schema>
+                """;
+            await File.WriteAllTextAsync(Path.Combine(taxonomyRoot, taxonomyFileName), taxonomy,
+                new UTF8Encoding(false));
+            const string definitionLinkbase = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+                               xmlns:xlink="http://www.w3.org/1999/xlink"
+                               xmlns:xbrldt="http://xbrl.org/2005/xbrldt">
+                  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/all"
+                                   xlink:type="simple"
+                                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#all"/>
+                  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
+                                   xlink:type="simple"
+                                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#hypercube-dimension"/>
+                  <link:roleRef roleURI="https://example.test/role/statement"
+                                xlink:type="simple"
+                                xlink:href="typed-dimension-taxonomy.xsd#StatementRole"/>
+                  <link:definitionLink xlink:type="extended"
+                                       xlink:role="https://example.test/role/statement">
+                    <link:loc xlink:type="locator" xlink:label="revenue"
+                              xlink:href="typed-dimension-taxonomy.xsd#Revenue"/>
+                    <link:loc xlink:type="locator" xlink:label="hypercube"
+                              xlink:href="typed-dimension-taxonomy.xsd#StatementTable"/>
+                    <link:loc xlink:type="locator" xlink:label="region"
+                              xlink:href="typed-dimension-taxonomy.xsd#RegionAxis"/>
+                    <link:definitionArc xlink:type="arc"
+                                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/all"
+                                        xlink:from="revenue" xlink:to="hypercube"
+                                        xbrldt:contextElement="segment" xbrldt:closed="false" order="1"/>
+                    <link:definitionArc xlink:type="arc"
+                                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
+                                        xlink:from="hypercube" xlink:to="region" order="1"/>
+                  </link:definitionLink>
+                </link:linkbase>
+                """;
+            await File.WriteAllTextAsync(Path.Combine(taxonomyRoot, "typed-dimension-definition.xml"),
+                definitionLinkbase, new UTF8Encoding(false));
+
+            var schemaDigest = RunManifest.ComputeSha256(Encoding.UTF8.GetBytes(taxonomy));
+            var profile = new FilingProfile
+            {
+                ProfileId = "synthetic-typed-dimension-e2e-v1",
+                Digest = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(taxonomy))).ToLowerInvariant(),
+                TaxonomyVersion = "1.0",
+                Concepts = new[]
+                {
+                    new ConceptMetadata("ex:Revenue", "urn:synthetic:typed-dimensions:1.0", "Revenue",
+                        "Revenue", "monetary", "duration", false)
+                },
+                SupportedUnits = new HashSet<string>(StringComparer.Ordinal) { "USD" },
+                NamespaceUris = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["ex"] = "urn:synthetic:typed-dimensions:1.0",
+                    ["xs"] = "http://www.w3.org/2001/XMLSchema"
+                },
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:RegionAxis"] = new("ex:RegionDomain", "xs:string")
+                },
+                TaxonomyUrls = new[] { taxonomyFileName },
+                PackageHashes = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [taxonomyFileName] = schemaDigest
+                },
+                RequiredChecks = new HashSet<string>(StringComparer.Ordinal)
+            };
+            var fact = new XbrlFact
+            {
+                ConceptName = "ex:Revenue",
+                EntityScheme = "https://example.test/entity",
+                EntityIdentifier = "synthetic-typed-dimension",
+                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Unit = new XbrlUnit("USD"),
+                Value = 125m,
+                Decimals = 0,
+                Dimensions = [new Dimension("ex:RegionAxis", "", IsExplicit: false)
+                    { TypedValue = "Northern region" }]
+            };
+            Assert.True(fact.ValidateAgainst(profile, profile.FindConcept(fact.ConceptName)!, out var reason), reason);
+
+            var xml = XmlSerializer.Serialize(profile, [fact]);
+            Assert.Contains("<ex:RegionDomain>Northern region</ex:RegionDomain>", xml, StringComparison.Ordinal);
+            var reportPath = Path.Combine(stagedDirectory, "report.xml");
+            await File.WriteAllTextAsync(reportPath, xml, new UTF8Encoding(false));
+            var xmlDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
+
+            await using var worker = new ArelleWorker(python!, new[]
+            {
+                workerScript,
+                "--taxonomy-root",
+                taxonomyRoot
+            });
+            using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new
+            {
+                xbrlXmlPath = reportPath,
+                sha256 = xmlDigest
+            }));
+            var request = new WorkerRequest(
+                WorkerOperations.ValidateReport,
+                "typed-dimension-" + Guid.NewGuid().ToString("N"),
+                "synthetic-typed-dimension-e2e",
+                profile.Digest,
+                DateTimeOffset.UtcNow.AddMinutes(2),
+                payload.RootElement.Clone())
+            {
+                ValidationRequirements = new ValidationRequirements(
+                    profile.ProfileId, profile.Digest, Array.Empty<string>(), Array.Empty<string>())
+            };
+
+            var response = await worker.RequestAsync(request, CancellationToken.None);
+            Assert.True(response.Status == WorkerStatus.Success,
+                $"Arelle status was {response.Status}. Error: {response.Error}. Diagnostics: "
+                + string.Join(Environment.NewLine, response.Diagnostics?.Select(diagnostic =>
+                    $"{diagnostic.Code}: {diagnostic.Message}") ?? Array.Empty<string>()));
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+            try { Directory.Delete(stagedDirectory, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [RequiresArelleRuntimeFact]
     public async Task AuthorizedPublicationRevalidatesExactStagedArtifactWithOfflineArelle()
     {
         var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
