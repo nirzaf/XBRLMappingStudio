@@ -182,7 +182,8 @@ public sealed class PublicationService
         Action<string>? afterAtomicReplaceForTest = null,
         Action<string>? afterStagedJournalForTest = null,
         Action? afterPartialStageWriteForTest = null,
-        Action<string>? afterStageFlushForTest = null)
+        Action<string>? afterStageFlushForTest = null,
+        Action<string>? afterDestinationLockAcquiredForTest = null)
         => PublishCoreAsync(destinationPath,
             async (stream, token) =>
             {
@@ -200,7 +201,8 @@ public sealed class PublicationService
             cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting,
             afterAtomicReplaceForTest, afterStagedJournalForTest: afterStagedJournalForTest,
             afterPartialStageWriteForTest: afterPartialStageWriteForTest,
-            afterStageFlushForTest: afterStageFlushForTest).GetAwaiter().GetResult();
+            afterStageFlushForTest: afterStageFlushForTest,
+            afterDestinationLockAcquiredForTest: afterDestinationLockAcquiredForTest).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -217,7 +219,8 @@ public sealed class PublicationService
         Action? authorizeBeforeReplace = null,
         Action<string>? afterStagedJournalForTest = null,
         Action? afterPartialStageWriteForTest = null,
-        Action<string>? afterStageFlushForTest = null)
+        Action<string>? afterStageFlushForTest = null,
+        Action<string>? afterDestinationLockAcquiredForTest = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -375,6 +378,12 @@ public sealed class PublicationService
 
         using (lk)
         {
+            try { afterDestinationLockAcquiredForTest?.Invoke(full); }
+            catch
+            {
+                Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                throw;
+            }
             try { authorizeBeforeReplace?.Invoke(); }
             catch
             {
@@ -398,6 +407,27 @@ public sealed class PublicationService
 
             if (refuseDifferentExisting && lk.DestinationDigestAtAcquire is { } existingDigest)
             {
+                string? currentDigest;
+                try
+                {
+                    currentDigest = File.Exists(full) ? DestinationLock.DigestFile(full) : null;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                        $"Mixed publication could not verify the destination while holding its lock: {ex.Message}",
+                        runId, full);
+                }
+
+                if (!StringComparer.Ordinal.Equals(existingDigest, currentDigest))
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                        "Mixed publication destination changed after its lock was acquired; retry reconciliation before publishing.",
+                        runId, full);
+                }
+
                 if (!StringComparer.Ordinal.Equals(existingDigest, validatedDigest))
                 {
                     Abort(runId, full, stagedPath, stagedDigest, lk.Token,
@@ -419,6 +449,30 @@ public sealed class PublicationService
                     stagedDigest, existingDigest, lk.Token, unchangedReceipt.CompletedUtc)
                 { ValidatedDigest = validateStagedArtifactAsync is null ? null : validatedDigest });
                 return unchangedReceipt;
+            }
+
+            if (refuseDifferentExisting)
+            {
+                string? currentDigest;
+                try
+                {
+                    currentDigest = File.Exists(full) ? DestinationLock.DigestFile(full) : null;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                        $"Mixed publication could not verify the destination while holding its lock: {ex.Message}",
+                        runId, full);
+                }
+
+                if (currentDigest is not null)
+                {
+                    Abort(runId, full, stagedPath, stagedDigest, lk.Token, validatedDigest);
+                    throw PublicationFailed(DiagnosticCodes.PubReceiptConflict,
+                        "Mixed publication destination appeared after its lock was acquired; it was left untouched.",
+                        runId, full);
+                }
             }
 
             var backupPath = full + $".xbsl-prev-{runId}";

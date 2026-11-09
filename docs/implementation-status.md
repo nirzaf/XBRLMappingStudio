@@ -311,6 +311,17 @@ Release Ops suite passed 517/517. This does not simulate sudden machine power
 loss or establish parent-directory metadata durability; those and target-file
 replacement stress remain open.
 
+## DST-08 mixed target replacement race follow-on (2026-11-09)
+
+Mixed publication now re-reads the destination under its lock before accepting
+an existing identical file as a successful no-op retry. If external software
+replaces that file after lock acquisition, publication aborts with a receipt
+conflict and records no successful receipt. The create-after-lock case is also
+rejected, so an initially absent destination cannot silently become an
+unreviewed overwrite. Two deterministic Windows Release Ops cases passed.
+Cooperating writer serialization remains covered separately; filesystem power
+loss and target-directory durability remain open.
+
 ## ENG-07 typed-dimension reverse-mapping follow-on (2026-11-09)
 
 The xBRL-XML source reader now retains typed dimension values as namespace-aware,

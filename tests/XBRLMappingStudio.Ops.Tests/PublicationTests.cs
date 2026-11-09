@@ -90,6 +90,31 @@ public class PublicationTests : IDisposable
         Assert.Equal(JournalState.Finalized, _journal.Load("mixed-same-content")!.State);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MixedPublication_RejectsDestinationChangeAfterLockAcquisition(bool destinationExists)
+    {
+        var service = new PublicationService(_journal);
+        var destination = Dest(destinationExists ? "mixed-replaced-under-lock.json" : "mixed-created-under-lock.json");
+        var accepted = Encoding.UTF8.GetBytes("accepted-content");
+        var external = Encoding.UTF8.GetBytes("external-content");
+        if (destinationExists) File.WriteAllBytes(destination, accepted);
+
+        var error = Assert.Throws<PublicationException>(() => service.Publish(
+            destination,
+            accepted,
+            runId: destinationExists ? "mixed-replaced-under-lock" : "mixed-created-under-lock",
+            refuseDifferentExisting: true,
+            afterDestinationLockAcquiredForTest: path => File.WriteAllBytes(path, external)));
+
+        Assert.Equal(DiagnosticCodes.PubReceiptConflict, error.Code);
+        Assert.Equal(external, File.ReadAllBytes(destination));
+        Assert.Equal(JournalState.Aborted,
+            _journal.Load(destinationExists ? "mixed-replaced-under-lock" : "mixed-created-under-lock")!.State);
+        Assert.Empty(Directory.GetFiles(_dir, "*.xbsl-staging-*"));
+    }
+
     [Fact]
     public void Publish_ValidatesExactStagedBytes_AndTiesReceiptToValidatedDigest()
     {
