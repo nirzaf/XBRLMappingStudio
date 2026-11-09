@@ -361,6 +361,7 @@ public sealed class MixedPublicationCoordinator
 
     public async Task<MixedPublicationRecord?> ReconcileAsync(string operationKey, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var record = _store.Find(operationKey);
         if (record is null) return null;
 
@@ -425,6 +426,13 @@ public sealed class MixedPublicationCoordinator
         catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
         {
             return MarkReceiptUnconfirmed(record);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Receipt reconciliation is read-only. A caller-requested stop must
+            // remain cancellation so the UI/CLI can distinguish it from an
+            // unresolved destination outcome; no publish leg has been retried.
+            throw;
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or OperationCanceledException)
         {

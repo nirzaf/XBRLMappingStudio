@@ -293,6 +293,38 @@ public sealed class MixedPublicationCoordinatorTests
     }
 
     [Fact]
+    public async Task ExplicitReconciliation_HonorsCallerCancellationWithoutChangingDurableState()
+    {
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "local-state.db");
+        var targetPath = Path.Combine(workspace.Path, "target.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var bytes = Encoding.UTF8.GetBytes("pending report bytes");
+        const string sqliteOperationKey = "xms-cancelled-reconciliation";
+        const string sqliteIntent = "sha256:cancelled-reconciliation-intent";
+        await CreateReceiptDatabaseAsync(targetPath, sqliteOperationKey, sqliteIntent, 2);
+
+        var intent = Intent(filePath, bytes, targetPath, "mixed-cancelled-reconciliation");
+        var store = new MixedPublicationStore(new LocalApplicationDatabase(statePath));
+        _ = store.GetOrCreate(intent);
+        _ = store.SetSqlitePrepared(intent.OperationKey, sqliteOperationKey, sqliteIntent);
+        _ = store.SetSqlite(intent.OperationKey, DestinationPublicationState.InProgress);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var coordinator = new MixedPublicationCoordinator(store);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => coordinator.ReconcileAsync(intent.OperationKey, cancellation.Token));
+
+        var persisted = new MixedPublicationStore(new LocalApplicationDatabase(statePath)).Find(intent.OperationKey);
+        Assert.NotNull(persisted);
+        Assert.Equal(DestinationPublicationState.Pending, persisted!.FileState);
+        Assert.Equal(DestinationPublicationState.InProgress, persisted.SqliteState);
+        Assert.False(File.Exists(filePath));
+    }
+
+    [Fact]
     public async Task RestartWithUnconfirmedFileWrite_RemainsUnknownAndBlocksBothRetryLegs()
     {
         using var workspace = new TemporaryDirectory();
