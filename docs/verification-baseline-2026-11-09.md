@@ -154,3 +154,12 @@ environment-gated Arelle skips; all five streaming/snapshot memory qualification
 passed on both platforms, along with the repeated Windows worker-cancellation
 checks, pinned Arelle integration, and repository hygiene. Broader set-graph
 spilling and all non-database temporary-disk accounting remain open.
+
+## OPS-07 SQLite WAL backup and restore follow-up
+
+`BackupAndRestore_CapturesCommittedWalAndRemainsIndependent` passed **1/1** on
+Windows Release. It confirms that a committed setting still present in the live
+WAL is included in `BackupTo`, that the copied backup opens with a successful
+integrity check, and that later writes to the source do not change the restore.
+This verifies the local SQLite-aware backup/restore path; installed-release
+upgrade interruption, rollback and clean-machine recovery remain open.

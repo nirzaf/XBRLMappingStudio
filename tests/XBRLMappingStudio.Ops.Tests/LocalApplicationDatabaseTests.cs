@@ -465,6 +465,54 @@ public sealed class LocalApplicationDatabaseTests
     }
 
     [Fact]
+    public void BackupAndRestore_CapturesCommittedWalAndRemainsIndependent()
+    {
+        using var workspace = new TemporaryDirectory();
+        var sourcePath = Path.Combine(workspace.Path, "live-state.db");
+        var backupPath = Path.Combine(workspace.Path, "state-backup.db");
+        var restoredPath = Path.Combine(workspace.Path, "restored-state.db");
+        var database = new LocalApplicationDatabase(sourcePath);
+
+        using (var writer = database.OpenConnection())
+        {
+            using (var insert = writer.CreateCommand())
+            {
+                insert.CommandText = "INSERT INTO app_settings(key,value,updated_utc) VALUES('restore-canary','captured','2026-11-09T00:00:00Z')";
+                insert.ExecuteNonQuery();
+            }
+
+            var walPath = sourcePath + "-wal";
+            Assert.True(File.Exists(walPath));
+            Assert.True(new FileInfo(walPath).Length > 0,
+                "The committed canary should still be represented in the live WAL before backup.");
+
+            database.BackupTo(backupPath);
+
+            using var update = writer.CreateCommand();
+            update.CommandText = "UPDATE app_settings SET value='changed-after-backup' WHERE key='restore-canary'";
+            Assert.Equal(1, update.ExecuteNonQuery());
+        }
+
+        File.Copy(backupPath, restoredPath);
+        var restored = new LocalApplicationDatabase(restoredPath);
+        Assert.Equal("ok", restored.IntegrityCheck());
+
+        using (var original = database.OpenConnection())
+        using (var query = original.CreateCommand())
+        {
+            query.CommandText = "SELECT value FROM app_settings WHERE key='restore-canary'";
+            Assert.Equal("changed-after-backup", query.ExecuteScalar());
+        }
+
+        using (var copy = restored.OpenConnection())
+        using (var query = copy.CreateCommand())
+        {
+            query.CommandText = "SELECT value FROM app_settings WHERE key='restore-canary'";
+            Assert.Equal("captured", query.ExecuteScalar());
+        }
+    }
+
+    [Fact]
     public async Task ConcurrentBackupsPublishOnlyOneSnapshotWithoutOverwriting()
     {
         using var workspace = new TemporaryDirectory();
