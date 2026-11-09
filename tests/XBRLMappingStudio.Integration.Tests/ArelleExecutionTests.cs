@@ -73,6 +73,7 @@ public sealed class ArelleExecutionTests
                         <link:usedOn>link:definitionLink</link:usedOn>
                       </link:roleType>
                       <link:linkbaseRef xlink:type="simple"
+                                        xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"
                                         xlink:href="typed-dimension-definition.xml"/>
                     </xs:appinfo>
                   </xs:annotation>
