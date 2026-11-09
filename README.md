@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest exact-head CI [42548631301](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42548631301) verified `6c59fc6510361f00e81f0cecbf9634b7a47903a1`; each OS matrix passed 1,887 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
+| Tests | xUnit 2.9.3 | Latest exact-head CI [42587516341](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42587516341) verified `264053c460b0a2ca98581a138e7ae39ca1ed3007`; Windows and Ubuntu each passed 1,959 tests with 6 environment-gated Arelle subprocess skips (1,965 total per matrix). Five memory qualifications and five Windows worker-cancellation repeats also passed. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -317,13 +317,13 @@ UX-06 now also offers an explicit source-schema recheck: detected drift stays pi
 
 | Suite | Count | Covers |
 |---|---:|---|
-| Engine.Tests | 155 | Validation, plan compilation, collections/joins, immutable pinned function revisions, bounded per-node output previews and reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
-| XBRL.Tests | 197 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import and occurrence selection, conjunctive multi-dimension filtering, QName alias normalization, filing rules, conversion resilience, required-check completeness |
+| Engine.Tests | 156 | Validation, plan compilation, collections/joins, immutable pinned function revisions, bounded per-node output previews and reconciliation, determinism, cancellation, GroupBy resource caps, set-collected text and compound-unit facts |
+| XBRL.Tests | 202 | Taxonomy index, dimensions and compound units, xBRL-JSON↔XML equivalence, report re-import and occurrence selection, conjunctive multi-dimension filtering, QName alias normalization, filing rules, conversion resilience, required-check completeness |
 | AI.Tests | 72 | Zero-outbound policy, deterministic retrieval, provider contract, draft validation, analyst workflow, in-memory and durable audit sink (AI06) |
-| Adapters.Tests | 113 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
-| Ops.Tests | 263 | Destination locking/publication/journal and interrupted-recovery safety, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
-| Integration.Tests | 404 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
-| Desktop.Tests | 116 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence, typed text-fact language editing, source-schema drift recheck |
+| Adapters.Tests | 309 | XLSX input/output and drift policies, CSV/JSON/XML round-trips and hardening, staged writers, SQLite snapshot under WAL writes, destination schema inspection, PK identity and target upsert |
+| Ops.Tests | 519 | Destination locking/publication/journal and interrupted-recovery safety, exact staged validation and tamper recovery, local database migrations and backups, durable suggestion audit, worker supervision, path guard, redaction |
+| Integration.Tests | 504 passed; 6 gated skips | CLI parity, cross-format acceptance oracles, destination workflows, staged report validation, preserved output on incomplete validation, disabled-profile gates, bounded large-run preflight/finalization and worker failures |
+| Desktop.Tests | 171 | Project lifecycle, graph editing and transforms, source/target review, destination dry run and publication, disabled-profile preview blocking, suggestion review and audit persistence, typed text-fact language editing, source-schema drift recheck |
 | Project.Tests | 32 | Atomic save, backward-compatible destination persistence, revision conflict and semantic digest |
 
 ```bash
