@@ -168,3 +168,18 @@ passed all four jobs; Windows and Ubuntu each passed **1,996 tests** with **6**
 gated Arelle skips, the pinned Arelle integration and repository hygiene passed,
 all five memory qualifications passed on both platforms, and Windows worker
 cancellation regressions passed repeatedly.
+
+## DST-04 SQLite destination desktop regression
+
+The isolated Windows Release Desktop test
+`DesktopDestinationRequiresSchemaReviewDryRunAndFinalConfirmation` passed **1/1**.
+It verifies destination schema/key review, saving the destination-bound semantic
+revision, a read-only dry run, invalidation after selection changes, cancellation
+without writes, explicit publish confirmation, and the resulting SQLite receipt.
+The test used an isolated `bin-codex/dst04` output root because the open Desktop
+instance held the shared Release assemblies. A native Windows click-through could
+not be completed: Computer Use captured the workspace but window activation failed;
+the visible project also reported `XBR017` because its synthetic development
+profile was not explicitly enabled. This is an environment-blocked native journey,
+not evidence of an application interaction failure. Native DST-04 acceptance remains
+open.
