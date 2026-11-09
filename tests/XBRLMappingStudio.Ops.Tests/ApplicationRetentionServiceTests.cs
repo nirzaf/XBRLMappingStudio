@@ -126,6 +126,31 @@ public sealed class ApplicationRetentionServiceTests : IDisposable
         Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM retention_audit"));
     }
 
+    [Fact]
+    public void BackupTo_PreservesRetentionAuditCanaryAndRemainingCacheState()
+    {
+        var database = NewDatabase();
+        InsertCache(database, "expired-profile", "a", "2026-10-01T00:00:00.0000000+00:00", "expired-cache");
+        InsertCache(database, "current-profile", "b", "2026-11-02T00:00:00.0000000+00:00", "current-cache");
+        var cutoff = DateTimeOffset.Parse("2026-11-01T00:00:00Z");
+        var plan = new ApplicationRetentionService(database).PreviewTaxonomyCachePrune(cutoff);
+        var approval = new RetentionApproval("local-cache-policy-v1", Guid.NewGuid().ToString("D"), "reviewer-id", plan.PlanSha256);
+        new ApplicationRetentionService(database, new ExactPlanAuthorizer(plan.PlanSha256))
+            .ApplyTaxonomyCachePrune(plan, approval);
+
+        var backupPath = Path.Combine(_directory, "retention-backup.db");
+        database.BackupTo(backupPath);
+        var restored = new LocalApplicationDatabase(backupPath);
+
+        Assert.Equal("ok", restored.IntegrityCheck());
+        Assert.Equal(1L, Scalar(restored, "SELECT COUNT(*) FROM taxonomy_profile_index"));
+        Assert.Equal("current-profile", Text(restored, "SELECT profile_id FROM taxonomy_profile_index"));
+        Assert.Equal(1L, Scalar(restored,
+            "SELECT COUNT(*) FROM retention_audit WHERE approval_id=$id AND plan_sha256=$digest",
+            ("$id", approval.ApprovalId), ("$digest", plan.PlanSha256)));
+        Assert.Throws<SqliteException>(() => Execute(restored, "DELETE FROM retention_audit"));
+    }
+
     private LocalApplicationDatabase NewDatabase()
         => new(Path.Combine(_directory, Guid.NewGuid().ToString("N") + ".db"));
 
