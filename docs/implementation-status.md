@@ -468,3 +468,17 @@ window twice (`failed to activate captured window`), including after refreshing
 the available-window list. No DST-04 UI actions, assertions, or publication
 attempts were made in this retest. Native acceptance remains open; the prior
 bounded synthetic native evidence above is unchanged.
+
+## XBR04 synthetic typed-dimension Arelle follow-on (2026-11-10)
+
+`ArelleExecutionTests.ArelleAcceptsProfileDeclaredXsStringTypedDimensionFromOfflineSyntheticTaxonomy`
+builds a local-only taxonomy with an `xs:string` typed axis/domain and a
+segment hypercube, serializes a profile-declared typed fact, and validates the
+staged XML through the pinned offline Arelle worker. The first CI run correctly
+rejected the test fixture's default Unix directory permissions; the fixture now
+uses the worker-required private `0700` staging directory. Exact-head CI
+[42715745703](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42715745703)
+passed all Windows, Ubuntu, Arelle and repository-hygiene jobs on
+`3598ce74dea784910eaefd063b8899db1101ae98`. This adds synthetic typed-axis
+processor evidence only; real taxonomy, complex typed domains and regulatory
+qualification remain gated.
