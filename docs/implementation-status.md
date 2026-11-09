@@ -422,3 +422,12 @@ in both input orders and confirms each serialized value keeps the same distinct
 key; the isolated Windows Release mapper provenance selection passed 5/5. This
 does not enable typed-dimension validation or report generation without qualified
 profile metadata.
+
+## DST-04 native retest availability (2026-11-09)
+
+After the user confirmed that the Windows desktop was unlocked and visible, the
+computer-use session still failed to activate the selected Release application
+window twice (`failed to activate captured window`), including after refreshing
+the available-window list. No DST-04 UI actions, assertions, or publication
+attempts were made in this retest. Native acceptance remains open; the prior
+bounded synthetic native evidence above is unchanged.
