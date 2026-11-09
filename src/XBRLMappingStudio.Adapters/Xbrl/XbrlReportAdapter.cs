@@ -1,13 +1,10 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.Json;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
-using XBRLMappingStudio.Adapters.Json;
-using XBRLMappingStudio.Adapters.Xml;
 
 namespace XBRLMappingStudio.Adapters.Xbrl;
 
@@ -186,7 +183,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
             $"XBRL report connection '{connection.SourceId}' has no file path.");
-        var text = ReadBoundedText(path, GetMaximumInputBytes(connection), cancellationToken);
+        var text = XbrlReportInputReader.ReadText(path, GetMaximumInputBytes(connection), cancellationToken);
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
         try
         {
@@ -205,52 +202,12 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static long GetMaximumInputBytes(SourceConnection connection)
     {
-        var extension = System.IO.Path.GetExtension(connection.Path ?? string.Empty);
-        var defaultLimit = string.Equals(extension, ".xml", StringComparison.OrdinalIgnoreCase)
-            ? XmlAdapter.DefaultMaximumInputBytes
-            : JsonAdapter.DefaultMaximumInputBytes;
-        var absoluteLimit = JsonAdapter.Options.AbsoluteMaximumInputBytes;
-        if (connection.Configuration is null
-            || !connection.Configuration.TryGetValue("maxInputBytes", out var configured))
-            return defaultLimit;
-
-        if (!long.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-            || value < 1 || value > absoluteLimit)
-            throw new AdapterException(DiagnosticCodes.IoInputBudgetExceeded,
-                $"Configured XBRL report input limit must be between 1 and {absoluteLimit} bytes.",
-                isInputBudgetExceeded: true);
-        return value;
+        var configured = connection.Configuration is not null
+            && connection.Configuration.TryGetValue("maxInputBytes", out var value)
+                ? value
+                : null;
+        return XbrlReportInputReader.ResolveMaximumInputBytes(connection.Path ?? string.Empty, configured);
     }
-
-    private static string ReadBoundedText(string path, long maximumBytes, CancellationToken cancellationToken)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 64 * 1024, FileOptions.SequentialScan);
-        if (stream.Length > maximumBytes)
-            throw InputBudgetExceeded(maximumBytes);
-
-        using var content = new MemoryStream((int)Math.Min(stream.Length, maximumBytes));
-        var buffer = new byte[64 * 1024];
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var read = stream.Read(buffer, 0, buffer.Length);
-            if (read == 0) break;
-            if (content.Length + read > maximumBytes)
-                throw InputBudgetExceeded(maximumBytes);
-            content.Write(buffer, 0, read);
-        }
-
-        content.Position = 0;
-        using var reader = new StreamReader(content, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
-            bufferSize: 4096, leaveOpen: true);
-        return reader.ReadToEnd();
-    }
-
-    private static AdapterException InputBudgetExceeded(long maximumBytes)
-        => new(DiagnosticCodes.IoInputBudgetExceeded,
-            $"XBRL report input exceeds the maximum size of {maximumBytes} bytes.",
-            isInputBudgetExceeded: true);
 
     private static DataRecord ToRecord(SourceConnection connection, XbrlFact f, int index)
     {

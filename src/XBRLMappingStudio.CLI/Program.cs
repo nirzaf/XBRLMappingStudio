@@ -1,6 +1,7 @@
 using System.Text.Json;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Sqlite;
+using XBRLMappingStudio.Adapters.Xbrl;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
@@ -78,8 +79,8 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio preview  <project.xmap> --binding <id>=<path> --rows 10 [--allow-synthetic-profile] [--arelle [--python <exe>] [--taxonomy-root <dir>]]");
     Console.Error.WriteLine("  xbrl-studio taxonomy-search [--allow-synthetic-profile] [--query <text>] [--lang <tag>] [--page <n>] [--size <n>]");
     Console.Error.WriteLine("  xbrl-studio install-profile <profile-id/version-directory> [--catalog <directory>] (offline; installs disabled)");
-    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile");
-    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json> --allow-synthetic-profile --arelle [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
+    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json|file.xml> --allow-synthetic-profile [--max-input-bytes <bytes>]");
+    Console.Error.WriteLine("  xbrl-studio validate-artifact <file.xbrl.json|file.xml> --allow-synthetic-profile --arelle [--max-input-bytes <bytes>] [--python <exe>] [--taxonomy-root <dir>] [--package <zip>] [--plugin <name>] [--disclosure-system <name>]");
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
     Console.Error.WriteLine("  xbrl-studio recover-file-publications (adjudicate interrupted atomic report writes; does not publish or retry)");
     Console.Error.WriteLine("  xbrl-studio reconcile-publication <mixed-operation-key>");
@@ -314,6 +315,7 @@ static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken ca
     string? python = null;
     string? taxonomyRoot = null;
     string? disclosureSystem = null;
+    string? maximumInputBytes = null;
     var packages = new List<string>();
     var plugins = new List<string>();
     for (int i = 1; i < args.Length; i++)
@@ -324,6 +326,7 @@ static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken ca
             case "--arelle": useArelle = true; break;
             case "--python" when i + 1 < args.Length: python = args[++i]; break;
             case "--taxonomy-root" when i + 1 < args.Length: taxonomyRoot = args[++i]; break;
+            case "--max-input-bytes" when i + 1 < args.Length: maximumInputBytes = args[++i]; break;
             case "--disclosure-system" when i + 1 < args.Length: disclosureSystem = args[++i]; break;
             case "--package" when i + 1 < args.Length: packages.Add(args[++i]); break;
             case "--plugin" when i + 1 < args.Length: plugins.Add(args[++i]); break;
@@ -338,6 +341,23 @@ static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken ca
     }
 
     if (!File.Exists(args[0])) { Console.Error.WriteLine($"Artifact not found: {args[0]}"); return ExitCodesLocal.DataError; }
+
+    string reportText;
+    try
+    {
+        var limit = XbrlReportInputReader.ResolveMaximumInputBytes(args[0], maximumInputBytes);
+        reportText = XbrlReportInputReader.ReadText(args[0], limit, cancellationToken);
+    }
+    catch (AdapterException ex)
+    {
+        Console.Error.WriteLine($"XBRL: {ex.Code}: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
+    catch (IOException ex)
+    {
+        Console.Error.WriteLine($"Artifact could not be read: {ex.Message}");
+        return ExitCodesLocal.DataError;
+    }
 
     if (useArelle)
     {
@@ -365,7 +385,6 @@ static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken ca
                 return ExitCodesLocal.IncompleteProfile;
             }
             var syntheticProfile = SyntheticProfile.Build();
-            var reportText = File.ReadAllText(args[0]);
             var request = new WorkerRequest(
                 WorkerOperations.ValidateReport,
                 Guid.NewGuid().ToString("N"),
@@ -419,9 +438,8 @@ static async Task<int> ValidateArtifactAsync(string[] args, CancellationToken ca
         }
     }
 
-    var text = File.ReadAllText(args[0]);
     var profile = SyntheticProfile.Build();
-    var facts = OimSerializer.ReadFacts(text, profile);
+    var facts = OimSerializer.ReadFacts(reportText, profile);
     var result = new FilingRuleValidator(profile).Validate(facts);
 
     var json = JsonSerializer.Serialize(new

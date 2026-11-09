@@ -1627,6 +1627,21 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Contains("--allow-synthetic-profile", stderr, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Cli_ArtifactValidationRejectsInputAboveConfiguredByteBudget()
+    {
+        var artifactPath = Path.Combine(_dir, "over-budget.xbrl.json");
+        await File.WriteAllTextAsync(artifactPath, "{}");
+
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "validate-artifact", artifactPath,
+            "--allow-synthetic-profile", "--max-input-bytes", "1");
+
+        Assert.Equal(ExitCodes.DataError, exit);
+        Assert.Empty(stdout);
+        Assert.Contains("IO032", stderr, StringComparison.Ordinal);
+        Assert.Contains("1 bytes", stderr, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1654,11 +1669,11 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Equal(0, exit);
         Assert.Empty(stdout);
         Assert.Contains(
-            "validate-artifact <file.xbrl.json> --allow-synthetic-profile",
+            "validate-artifact <file.xbrl.json|file.xml> --allow-synthetic-profile [--max-input-bytes <bytes>]",
             stderr,
             StringComparison.Ordinal);
         Assert.Contains(
-            "validate-artifact <file.xbrl.json> --allow-synthetic-profile --arelle",
+            "validate-artifact <file.xbrl.json|file.xml> --allow-synthetic-profile --arelle [--max-input-bytes <bytes>]",
             stderr,
             StringComparison.Ordinal);
     }
