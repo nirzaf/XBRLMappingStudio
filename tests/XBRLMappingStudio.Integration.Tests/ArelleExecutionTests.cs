@@ -37,6 +37,10 @@ public sealed class ArelleExecutionTests
         Directory.CreateDirectory(stagedDirectory);
         try
         {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(stagedDirectory,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
             const string taxonomyFileName = "typed-dimension-taxonomy.xsd";
             const string taxonomy = """
                 <?xml version="1.0" encoding="UTF-8"?>
