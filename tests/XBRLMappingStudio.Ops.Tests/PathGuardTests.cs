@@ -214,6 +214,38 @@ public class SupportBundleTests
     }
 
     [Fact]
+    public void Bundle_BoundsEnumerationOfAnUnboundedLogSequence()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ops-bundle-input-bound-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var enumerated = 0;
+            IEnumerable<string> InfiniteLines()
+            {
+                while (true)
+                {
+                    enumerated++;
+                    yield return $"log-entry-{enumerated}";
+                }
+            }
+
+            var bundle = SupportBundle.Build(
+                Path.Combine(dir, "missing.xmap"),
+                "run-input-bound",
+                new RunJournal(Path.Combine(dir, "journal")),
+                InfiniteLines());
+
+            Assert.Equal(SupportBundle.MaximumLogInputLines + 1, enumerated);
+            Assert.Contains("<log input truncated: line limit exceeded>", bundle);
+            Assert.Contains($"log-entry-{SupportBundle.MaximumLogInputLines}", bundle);
+            Assert.DoesNotContain($"log-entry-{SupportBundle.MaximumLogInputLines + 1}", bundle);
+            Assert.True(bundle.Length < 80 * 1024, $"Bundle length was {bundle.Length} characters.");
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+    }
+
+    [Fact]
     public void ReadBoundedLogTail_UsesOnlyTailAndRedactsBoundedLines()
     {
         var path = Path.Combine(Path.GetTempPath(), "ops-log-tail-" + Guid.NewGuid().ToString("N") + ".log");

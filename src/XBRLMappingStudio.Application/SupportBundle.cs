@@ -16,6 +16,7 @@ public static partial class SupportBundle
 {
     public const int MaximumLogTailBytes = 256 * 1024;
     public const int MaximumLogLines = 200;
+    public const int MaximumLogInputLines = 4096;
     public const int MaximumLogLineCharacters = 8 * 1024;
     public const int MaximumLogOutputCharacters = 64 * 1024;
 
@@ -124,13 +125,29 @@ public static partial class SupportBundle
         sb.Append("--- logs (redacted) ---\n");
         var tail = new Queue<string>();
         var totalCharacters = 0;
+        var inputLines = 0;
+        var inputTruncated = false;
         foreach (var line in logLines ?? Array.Empty<string>())
         {
+            if (inputLines == MaximumLogInputLines)
+            {
+                inputTruncated = true;
+                break;
+            }
+            inputLines++;
             var safeLine = line.Length > MaximumLogLineCharacters
                 ? "<log line omitted: character limit exceeded>"
                 : Redact(line);
             tail.Enqueue(safeLine);
             totalCharacters += safeLine.Length;
+            while (tail.Count > MaximumLogLines || totalCharacters > MaximumLogOutputCharacters)
+                totalCharacters -= tail.Dequeue().Length;
+        }
+        if (inputTruncated)
+        {
+            const string truncationNotice = "<log input truncated: line limit exceeded>";
+            tail.Enqueue(truncationNotice);
+            totalCharacters += truncationNotice.Length;
             while (tail.Count > MaximumLogLines || totalCharacters > MaximumLogOutputCharacters)
                 totalCharacters -= tail.Dequeue().Length;
         }
