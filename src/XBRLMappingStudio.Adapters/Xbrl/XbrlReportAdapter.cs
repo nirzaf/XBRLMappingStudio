@@ -18,6 +18,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 {
     public string Kind => "xbrl-report";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
+    private const int MaximumTypedDimensionEvidenceCharacters = 6_004_096;
+    private const int MaximumTypedDimensionFilterJsonCharacters = 40_000_000;
 
     private static readonly string[] Columns =
     {
@@ -30,7 +32,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     {
         "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
-        "unit", "dimensionAxis", "dimensionMember", "dimensionFilters",
+        "unit", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
         "maxInputBytes"
     };
 
@@ -105,6 +107,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             .Where(item => selection.Dimensions.All(filter => item.Fact.Dimensions.Any(dimension => dimension.IsExplicit
                 && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
                 && StringComparer.Ordinal.Equals(dimension.MemberName, filter.Value))))
+            .Where(item => selection.TypedDimensions.All(filter => item.Fact.Dimensions.Any(dimension => !dimension.IsExplicit
+                && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
+                && StringComparer.Ordinal.Equals(dimension.TypedValueJson, filter.Value))))
             .ToArray();
 
         if (selection.HasAspectFilters && matched.Length == 0)
@@ -216,9 +221,55 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report dimension selection cannot repeat an axis in both 'dimensionFilters' and the 'dimensionAxis'/'dimensionMember' pair.");
 
+        var typedDimensions = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (configuration.TryGetValue("typedDimensionFilters", out var typedDimensionFilters))
+        {
+            if (string.IsNullOrWhiteSpace(typedDimensionFilters)
+                || typedDimensionFilters.Length > MaximumTypedDimensionFilterJsonCharacters)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"XBRL report selection 'typedDimensionFilters' must be a non-empty JSON object of dimension names to exact opaque typed-value evidence, within {MaximumTypedDimensionFilterJsonCharacters} characters.");
+
+            try
+            {
+                using var document = JsonDocument.Parse(typedDimensionFilters, new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 8
+                });
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'typedDimensionFilters' must be a JSON object.");
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    var evidence = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : null;
+                    if (string.IsNullOrWhiteSpace(property.Name) || string.IsNullOrWhiteSpace(evidence)
+                        || evidence.Length > MaximumTypedDimensionEvidenceCharacters
+                        || !typedDimensions.TryAdd(property.Name, evidence))
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            $"XBRL report selection 'typedDimensionFilters' must contain unique, non-empty dimension names and exact evidence strings within {MaximumTypedDimensionEvidenceCharacters} characters.");
+                }
+                if (typedDimensions.Count == 0)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'typedDimensionFilters' must contain at least one filter.");
+            }
+            catch (JsonException ex)
+            {
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"XBRL report selection 'typedDimensionFilters' is invalid JSON: {ex.Message}");
+            }
+        }
+
+        if (typedDimensions.Keys.Any(dimensions.ContainsKey))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection cannot apply explicit-member and typed-value filters to the same dimension axis.");
+
         return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,
-            instantDate, periodStart, periodEnd, Get("unit"), dimensions);
+            instantDate, periodStart, periodEnd, Get("unit"), dimensions, typedDimensions);
     }
 
     private static IReadOnlyList<XbrlFact> Read(SourceConnection connection, CancellationToken cancellationToken)
@@ -320,16 +371,18 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         DateOnly? PeriodStart,
         DateOnly? PeriodEnd,
         string? Unit,
-        IReadOnlyDictionary<string, string> Dimensions)
+        IReadOnlyDictionary<string, string> Dimensions,
+        IReadOnlyDictionary<string, string> TypedDimensions)
     {
         public bool HasAspectFilters
             => OccurrenceId is not null || Concept is not null || EntityScheme is not null
                 || EntityIdentifier is not null || Period is not null || PeriodKind is not null
                 || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
-                || Unit is not null || Dimensions.Count != 0;
+                || Unit is not null || Dimensions.Count != 0 || TypedDimensions.Count != 0;
 
         public static ReportSelection Empty { get; }
             = new(null, null, null, null, null, null, null, null, null, null,
+                new Dictionary<string, string>(StringComparer.Ordinal),
                 new Dictionary<string, string>(StringComparer.Ordinal));
     }
 }

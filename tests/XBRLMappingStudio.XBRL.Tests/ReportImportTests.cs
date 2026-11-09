@@ -388,6 +388,26 @@ public sealed class ReportImportTests : IDisposable
         Assert.Contains("no destination rows are created", error.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("[]")]
+    [InlineData("{")]
+    [InlineData("{\"synthetic:TypedAxis\":17}")]
+    [InlineData("{\"synthetic:TypedAxis\":\"one\",\"synthetic:TypedAxis\":\"two\"}")]
+    public async Task InvalidTypedDimensionFilterConfiguration_FailsClosed(string filterJson)
+    {
+        var path = Write("typed-filter-validation.json", OimSerializer.Serialize(Profile, Report()));
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, path,
+            new Dictionary<string, string> { ["typedDimensionFilters"] = filterJson });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        Assert.Contains("typedDimensionFilters", error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task UnitSelection_KeepsPoweredAndCompoundUnitsDistinct()
     {
@@ -451,7 +471,34 @@ public sealed class ReportImportTests : IDisposable
         using var dimensions = JsonDocument.Parse(typedRow["dimensionsJson"].AsString());
         var dimension = Assert.Single(dimensions.RootElement.EnumerateArray());
         Assert.False(dimension.GetProperty("IsExplicit").GetBoolean());
-        Assert.Contains("typed value", dimension.GetProperty("TypedValueJson").GetString(), StringComparison.Ordinal);
+        var typedEvidence = dimension.GetProperty("TypedValueJson").GetString()!;
+        Assert.Contains("typed value", typedEvidence, StringComparison.Ordinal);
+
+        var typedFilteredConnection = new SourceConnection("typed-filtered-report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["typedDimensionFilters"] = JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["synthetic:TypedAxis"] = typedEvidence })
+            });
+        var typedFilteredSchema = await adapter.InspectSchemaAsync(typedFilteredConnection, CancellationToken.None);
+        var typedFilteredRows = new List<DataRecord>();
+        await foreach (var row in adapter.ReadFullAsync(typedFilteredConnection, typedFilteredSchema, CancellationToken.None))
+            typedFilteredRows.Add(row);
+        Assert.EndsWith("#f1", Assert.Single(typedFilteredRows)["occurrenceId"].AsString(), StringComparison.Ordinal);
+
+        var typedNoMatchConnection = new SourceConnection("typed-no-match-report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["typedDimensionFilters"] = JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["synthetic:TypedAxis"] = "{\"opaque\":\"different\"}" })
+            });
+        var typedNoMatchSchema = await adapter.InspectSchemaAsync(typedNoMatchConnection, CancellationToken.None);
+        var typedNoMatch = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(typedNoMatchConnection, typedNoMatchSchema, CancellationToken.None)) { }
+        });
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, typedNoMatch.Code);
+        Assert.Contains("matched no fact occurrences", typedNoMatch.Message, StringComparison.Ordinal);
 
         var fact = Assert.Single(XmlSerializer.ReadFacts(xml.ToString()));
         Assert.NotNull(Assert.Single(fact.Dimensions).TypedValueJson);
@@ -471,6 +518,18 @@ public sealed class ReportImportTests : IDisposable
             await foreach (var _ in adapter.ReadFullAsync(filteredConnection, filteredSchema, CancellationToken.None)) { }
         });
         Assert.Equal(DiagnosticCodes.IoSchemaMismatch, filterError.Code);
+
+        var mixedFilter = new SourceConnection("mixed-dimension-filter-report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["dimensionFilters"] = "{\"synthetic:TypedAxis\":\"synthetic:TypedMember\"}",
+                ["typedDimensionFilters"] = JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["synthetic:TypedAxis"] = typedEvidence })
+            });
+        var mixedFilterError = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(mixedFilter, CancellationToken.None));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, mixedFilterError.Code);
+        Assert.Contains("cannot apply explicit-member and typed-value filters", mixedFilterError.Message, StringComparison.Ordinal);
     }
 
     [Fact]
