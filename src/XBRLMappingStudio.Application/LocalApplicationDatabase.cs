@@ -17,10 +17,11 @@ public sealed class LocalApplicationDatabase
     /// integrity-checked offline taxonomy metadata cache, v7 adds durable mixed
     /// file/SQLite publication reconciliation, v8 records its file artifact kind,
     /// v9 expands mixed reconciliation to versioned record file contracts, and v10
-    /// adds append-only audit for explicitly authorized disposable-cache pruning.
+    /// adds append-only audit for explicitly authorized disposable-cache pruning,
+    /// and v11 adds a pending-to-terminal audit for abandoned large-run spool cleanup.
     /// Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 11;
     public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
@@ -475,6 +476,56 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=10;
                 """;
             migration10.ExecuteNonQuery();
+        }
+        if (version < 11)
+        {
+            using var migration11 = connection.CreateCommand();
+            migration11.Transaction = transaction;
+            migration11.CommandText = """
+                CREATE TABLE temporary_artifact_retention_audit (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    approval_id TEXT NOT NULL UNIQUE,
+                    policy_id TEXT NOT NULL,
+                    approved_by_id TEXT NOT NULL,
+                    plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+                    expired_before_utc TEXT NOT NULL,
+                    planned_directories INTEGER NOT NULL CHECK(planned_directories > 0),
+                    planned_bytes INTEGER NOT NULL CHECK(planned_bytes >= 0),
+                    plan_items_json TEXT NOT NULL CHECK(length(plan_items_json) <= 262144),
+                    removed_directories INTEGER NOT NULL DEFAULT 0 CHECK(removed_directories >= 0),
+                    removed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(removed_bytes >= 0),
+                    state TEXT NOT NULL CHECK(state IN ('pending','complete','partial','failed')),
+                    occurred_utc TEXT NOT NULL,
+                    completed_utc TEXT,
+                    CHECK(removed_directories <= planned_directories),
+                    CHECK(removed_bytes <= planned_bytes),
+                    CHECK((state='pending' AND removed_directories=0 AND removed_bytes=0 AND completed_utc IS NULL)
+                       OR (state<>'pending' AND completed_utc IS NOT NULL))
+                );
+                CREATE TRIGGER temporary_artifact_retention_audit_update
+                    BEFORE UPDATE ON temporary_artifact_retention_audit
+                    WHEN OLD.state <> 'pending'
+                      OR NEW.state = 'pending'
+                      OR NEW.sequence IS NOT OLD.sequence
+                      OR NEW.approval_id IS NOT OLD.approval_id
+                      OR NEW.policy_id IS NOT OLD.policy_id
+                      OR NEW.approved_by_id IS NOT OLD.approved_by_id
+                      OR NEW.plan_sha256 IS NOT OLD.plan_sha256
+                      OR NEW.expired_before_utc IS NOT OLD.expired_before_utc
+                      OR NEW.planned_directories IS NOT OLD.planned_directories
+                      OR NEW.planned_bytes IS NOT OLD.planned_bytes
+                      OR NEW.plan_items_json IS NOT OLD.plan_items_json
+                      OR NEW.occurred_utc IS NOT OLD.occurred_utc
+                      OR (NEW.state='complete' AND (NEW.removed_directories<>NEW.planned_directories OR NEW.removed_bytes<>NEW.planned_bytes))
+                      OR (NEW.state='failed' AND (NEW.removed_directories<>0 OR NEW.removed_bytes<>0))
+                      OR (NEW.state='partial' AND (NEW.removed_directories=0 OR NEW.removed_directories=NEW.planned_directories))
+                    BEGIN SELECT RAISE(ABORT, 'temporary retention audit permits one terminal outcome only'); END;
+                CREATE TRIGGER temporary_artifact_retention_audit_no_delete
+                    BEFORE DELETE ON temporary_artifact_retention_audit
+                    BEGIN SELECT RAISE(ABORT, 'temporary retention audit entries are immutable'); END;
+                PRAGMA user_version=11;
+                """;
+            migration11.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();

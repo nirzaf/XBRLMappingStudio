@@ -905,14 +905,14 @@ public sealed class MappingJobService
         CancellationToken cancellationToken,
         string outputKind)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "xms-large-" + Guid.NewGuid().ToString("N"));
+        TemporaryArtifactLease? retentionLease = TemporaryArtifactLease.CreateLargeRun();
+        var directory = retentionLease.DirectoryPath;
         LargeRunFactStore? store = null;
         LargeRunArtifact? artifact = null;
         var ownershipTransferred = false;
         string? activeBindingId = null;
         try
         {
-            CreatePrivateArtifactDirectory(directory);
             store = new LargeRunFactStore(Path.Combine(directory, "facts.sqlite"),
                 _executionBudget.SqliteCacheKiB, _executionBudget.MaxSpoolBytes);
             long sourceRows = 0;
@@ -1111,7 +1111,9 @@ public sealed class MappingJobService
                 var actualBytes = new FileInfo(reportPath).Length;
                 if (actualBytes != reportBytes)
                     throw new InvalidDataException("The streamed report byte count changed before worker validation.");
-                artifact = new LargeRunArtifact(directory, store, reportPath, actualDigest, actualBytes, outputKind);
+                artifact = new LargeRunArtifact(directory, store, reportPath, actualDigest, actualBytes,
+                    outputKind, retentionLease);
+                retentionLease = null;
                 store = null;
             }
 
@@ -1284,6 +1286,7 @@ public sealed class MappingJobService
             {
                 artifact?.Dispose();
                 store?.Dispose();
+                retentionLease?.Dispose();
                 try { Directory.Delete(directory, recursive: true); }
                 catch (DirectoryNotFoundException) { }
                 catch (IOException) { }

@@ -69,6 +69,7 @@ public sealed class LargeRunArtifact : IDisposable
 
     private readonly string _directory;
     private readonly LargeRunFactStore _facts;
+    private readonly TemporaryArtifactLease? _retentionLease;
     private bool _disposed;
 
     public string ReportPath { get; }
@@ -81,9 +82,9 @@ public sealed class LargeRunArtifact : IDisposable
     public int FactCount => _facts.Count;
 
     internal LargeRunArtifact(string directory, LargeRunFactStore facts, string reportPath,
-        string sha256, long bytes, string outputKind = "xbrl-json")
-        => (_directory, _facts, ReportPath, Sha256, Bytes, OutputKind)
-            = (directory, facts, reportPath, sha256, bytes, outputKind);
+        string sha256, long bytes, string outputKind = "xbrl-json", TemporaryArtifactLease? retentionLease = null)
+        => (_directory, _facts, _retentionLease, ReportPath, Sha256, Bytes, OutputKind)
+            = (directory, facts, retentionLease, reportPath, sha256, bytes, outputKind);
 
     public Stream OpenReportRead()
     {
@@ -164,11 +165,18 @@ public sealed class LargeRunArtifact : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _facts.Dispose();
-        try { Directory.Delete(_directory, recursive: true); }
-        catch (DirectoryNotFoundException) { }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        try { _facts.Dispose(); }
+        finally
+        {
+            try { _retentionLease?.Dispose(); }
+            finally
+            {
+                try { Directory.Delete(_directory, recursive: true); }
+                catch (DirectoryNotFoundException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
         GC.SuppressFinalize(this);
     }
 }

@@ -176,6 +176,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
                 DROP TABLE taxonomy_profile_index;
                 DROP TABLE mixed_publication_reconciliation;
                 DROP TABLE retention_audit;
+                DROP TABLE temporary_artifact_retention_audit;
                 """;
             rollbackColumns.ExecuteNonQuery();
             using var drop = connection.CreateCommand();
@@ -222,7 +223,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
         using (var check = verify.CreateCommand())
         {
             check.CommandText = "PRAGMA user_version";
-            Assert.Equal(10L, check.ExecuteScalar());
+            Assert.Equal(11L, check.ExecuteScalar());
             check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='taxonomy_profile_index'";
             Assert.Equal(1L, check.ExecuteScalar());
         }

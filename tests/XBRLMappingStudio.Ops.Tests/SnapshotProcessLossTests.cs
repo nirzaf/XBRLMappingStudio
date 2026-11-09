@@ -529,7 +529,7 @@ public sealed class SnapshotProcessLossTests
         public async Task<SnapshotCaptureCrashContract.ReadySignal> WaitUntilReadyAsync()
         {
             var elapsed = Stopwatch.StartNew();
-            while (!File.Exists(_readyPath))
+            while (true)
             {
                 if (_process.HasExited)
                     throw new InvalidOperationException($"Harness exited before {_boundary}. " + (await WaitForExitAsync()).Describe());
@@ -538,14 +538,26 @@ public sealed class SnapshotProcessLossTests
                     await StopAsync();
                     throw new TimeoutException($"Harness never reached {_boundary}. " + (await WaitForExitAsync()).Describe());
                 }
+                if (File.Exists(_readyPath))
+                {
+                    try
+                    {
+                        var ready = JsonSerializer.Deserialize<SnapshotCaptureCrashContract.ReadySignal>(
+                            await File.ReadAllBytesAsync(_readyPath), JsonOptions);
+                        Assert.NotNull(ready);
+                        Assert.Equal(_boundary, ready.Boundary);
+                        Assert.False(_process.HasExited, $"Harness exited rather than blocking at {_boundary}.");
+                        return ready;
+                    }
+                    catch (IOException)
+                    {
+                        // The ready marker is published with an atomic rename, but
+                        // Windows scanners can briefly hold the new path open.
+                        // Retry within the existing bounded readiness deadline.
+                    }
+                }
                 await Task.Delay(20);
             }
-            var ready = JsonSerializer.Deserialize<SnapshotCaptureCrashContract.ReadySignal>(
-                await File.ReadAllBytesAsync(_readyPath), JsonOptions);
-            Assert.NotNull(ready);
-            Assert.Equal(_boundary, ready.Boundary);
-            Assert.False(_process.HasExited, $"Harness exited rather than blocking at {_boundary}.");
-            return ready;
         }
 
         public Task ReleaseAsync() => File.WriteAllTextAsync(_releasePath, "release");
