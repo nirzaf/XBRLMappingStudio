@@ -409,6 +409,26 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
+    public async Task TypedDimensionFilterConfiguration_EnforcesFactDimensionLimit()
+    {
+        var path = Write("typed-filter-axis-limit.json", OimSerializer.Serialize(Profile, Report()));
+        var adapter = new XbrlReportAdapter();
+        var filters = Enumerable.Range(0, FactDimensionParser.MaximumDimensions + 1)
+            .ToDictionary(index => $"synthetic:Axis{index}", _ => "opaque", StringComparer.Ordinal);
+        var connection = new SourceConnection("report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["typedDimensionFilters"] = JsonSerializer.Serialize(filters)
+            });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        Assert.Contains($"cannot exceed {FactDimensionParser.MaximumDimensions} axes", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UnitSelection_KeepsPoweredAndCompoundUnitsDistinct()
     {
         var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));

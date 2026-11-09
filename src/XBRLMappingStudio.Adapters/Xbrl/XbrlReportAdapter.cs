@@ -251,6 +251,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                         || !typedDimensions.TryAdd(property.Name, evidence))
                         throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                             $"XBRL report selection 'typedDimensionFilters' must contain unique, non-empty dimension names and exact evidence strings within {MaximumTypedDimensionEvidenceCharacters} characters.");
+                    if (typedDimensions.Count > FactDimensionParser.MaximumDimensions)
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            $"XBRL report selection 'typedDimensionFilters' cannot exceed {FactDimensionParser.MaximumDimensions} axes.");
                 }
                 if (typedDimensions.Count == 0)
                     throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
