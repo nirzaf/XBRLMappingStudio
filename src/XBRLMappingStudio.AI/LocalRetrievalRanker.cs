@@ -33,6 +33,8 @@ public sealed record RankedCandidate(
 /// </summary>
 public sealed class LocalRetrievalRanker
 {
+    /// <summary>Persisted AIM-08 identity for this deterministic scoring contract. Bump when ranking semantics change.</summary>
+    public const string PolicyRevision = "offline-lexical/v1";
     /// <summary>File name for a reviewed alias table persisted inside the project directory.</summary>
     public const string AliasFileName = "ai_aliases.json";
     public const int MaximumResults = 100;

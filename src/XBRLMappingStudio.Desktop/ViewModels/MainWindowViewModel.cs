@@ -5089,7 +5089,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 _auditSinkFactory?.Invoke(),
                 new SuggestionSessionContext(
                     Actor: Environment.UserName,
-                    Method: "offline-retrieval",
+                    Method: LocalRetrievalRanker.PolicyRevision,
                     ProviderConfigId: "local-retrieval"));
             session.LoadSuggestions(sessionSuggestions);
             _suggestionSession = session;
@@ -5238,7 +5238,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 _auditSinkFactory?.Invoke(),
                 new SuggestionSessionContext(
                     Actor: Environment.UserName,
-                    Method: "offline-retrieval",
+                    Method: LocalRetrievalRanker.PolicyRevision,
                     ProviderConfigId: "local-retrieval"));
             var sessionSuggestions = suggestions.Select(suggestion =>
             {

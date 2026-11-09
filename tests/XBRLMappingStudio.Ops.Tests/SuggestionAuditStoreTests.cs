@@ -95,7 +95,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
             store,
             new SuggestionSessionContext(
                 Actor: "test-analyst",
-                Method: "offline-retrieval",
+                Method: LocalRetrievalRanker.PolicyRevision,
                 ProviderConfigId: "local-retrieval"));
         session.LoadSuggestions(new[]
         {
@@ -114,7 +114,7 @@ public sealed class SuggestionAuditStoreTests : IDisposable
         var batch = Assert.Single(reopenedStore.Read(project.ProjectId, project.SemanticRevision));
         Assert.Equal("batch-accept", batch.Decision);
         Assert.Equal("test-analyst", batch.Actor);
-        Assert.Equal("offline-retrieval", batch.Method);
+        Assert.Equal(LocalRetrievalRanker.PolicyRevision, batch.Method);
         Assert.Equal(new[] { "sales", "costs" }, batch.CandidateIds);
         Assert.Equal(project.SemanticRevision, batch.AcceptedRevision);
         Assert.Contains("synthetic:Revenue", batch.ApprovedEditJson);
