@@ -267,6 +267,27 @@ public class SupportBundleTests
         finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
     }
 
+    [Theory]
+    [InlineData("../outside")]
+    [InlineData("..\\outside")]
+    public void Bundle_RejectsPathLikeRunIdentifierWithoutLoadingLegacyJournal(string runId)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ops-bundle-runid-path-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var bundle = SupportBundle.Build(
+                Path.Combine(dir, "missing.xmap"), runId,
+                new RunJournal(Path.Combine(dir, "journal")));
+
+            Assert.Contains("run: <invalid>", bundle, StringComparison.Ordinal);
+            Assert.Contains("journal: no entry for run", bundle, StringComparison.Ordinal);
+            Assert.DoesNotContain("../outside", bundle, StringComparison.Ordinal);
+            Assert.DoesNotContain("..\\outside", bundle, StringComparison.Ordinal);
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+    }
+
     [Fact]
     public void Bundle_BoundsEnumerationOfAnUnboundedLogSequence()
     {

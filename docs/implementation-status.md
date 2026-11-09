@@ -373,6 +373,15 @@ unreviewed overwrite. Two deterministic Windows Release Ops cases passed.
 Cooperating writer serialization remains covered separately; filesystem power
 loss and target-directory durability remain open.
 
+## OPS-08 malformed support-bundle run IDs (2026-11-09)
+
+Support-bundle generation now rejects path-like or otherwise invalid legacy
+journal run IDs without attempting journal lookup, reporting only `<invalid>`.
+Bounded single-line normalization for control-character injection remains intact.
+The focused Windows Release support-bundle tests passed 7/7. This protects the
+diagnostic export path; host-enrolled identity, customer deployment and broader
+retention policy acceptance remain open.
+
 ## ENG-07 typed-dimension reverse-mapping follow-on (2026-11-09)
 
 The xBRL-XML source reader now retains typed dimension values as namespace-aware,

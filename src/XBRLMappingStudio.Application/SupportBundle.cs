@@ -119,7 +119,7 @@ public static partial class SupportBundle
         }
 
         // Journal receipt for the requested run.
-        var safeRunId = SanitizeRunId(runId);
+        var safeRunId = IsSafeJournalRunId(runId) ? SanitizeRunId(runId) : "<invalid>";
         var entry = StringComparer.Ordinal.Equals(safeRunId, runId) ? journal.Load(runId) : null;
         sb.Append("run: ").Append(safeRunId).Append('\n');
         if (entry is null)
@@ -180,5 +180,16 @@ public static partial class SupportBundle
         var normalized = new string(bounded.Select(character => char.IsControl(character) ? ' ' : character).ToArray());
         var singleLine = string.Join(' ', normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         return Redact(singleLine);
+    }
+
+    private static bool IsSafeJournalRunId(string? runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId) || runId.Length > MaximumRunIdCharacters
+            || runId.IndexOfAny(['/', '\\']) >= 0)
+            return false;
+
+        var invalidFileNameCharacters = Path.GetInvalidFileNameChars()
+            .Where(character => !char.IsControl(character)).ToArray();
+        return runId.IndexOfAny(invalidFileNameCharacters) < 0;
     }
 }
