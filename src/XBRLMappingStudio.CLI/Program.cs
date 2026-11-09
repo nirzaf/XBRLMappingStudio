@@ -83,7 +83,7 @@ static int PrintUsage()
     Console.Error.WriteLine("  xbrl-studio inspect-run-result <runId>");
     Console.Error.WriteLine("  xbrl-studio recover-file-publications (adjudicate interrupted atomic report writes; does not publish or retry)");
     Console.Error.WriteLine("  xbrl-studio reconcile-publication <mixed-operation-key>");
-    Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>]");
+    Console.Error.WriteLine("  xbrl-studio support-bundle <project.xmap> <runId> [--out <path>] [--log <file>] (bounded redacted log tail)");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Exit codes: 0=success 1=success-with-warnings 2=invalid-mapping 3=data-error");
     Console.Error.WriteLine("            4=incomplete-profile 5=authorization-failure 6=cancelled 7=operational-failure");
@@ -532,7 +532,7 @@ static async Task<int> ReconcilePublicationAsync(string[] args, CancellationToke
     }
 }
 
-// OPS08 (partial): redacted diagnostic bundle for one run; scheduler integration stays owner-gated.
+// OPS08: bounded redacted diagnostic bundle for one run.
 static int SupportBundleCommand(string[] args)
 {
     if (args.Length < 2) { Console.Error.WriteLine("support-bundle requires <project> <runId> [--out <path>] [--log <file>]"); return ExitCodesLocal.IncompleteProfile; }
@@ -551,7 +551,7 @@ static int SupportBundleCommand(string[] args)
     }
 
     var logLines = logPath is not null && File.Exists(logPath)
-        ? File.ReadAllLines(logPath)
+        ? SupportBundle.ReadBoundedLogTail(logPath)
         : Enumerable.Empty<string>();
     var bundle = SupportBundle.Build(projectPath, runId, new RunJournal(), logLines);
 

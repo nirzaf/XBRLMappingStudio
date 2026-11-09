@@ -154,8 +154,8 @@ public class PathGuardTests : IDisposable
 }
 
 /// <summary>
-/// OPS08 (partial) — redacted support bundle for one run. Scheduler integration
-/// remains owner-gated (needs the customer scheduler to drive unattended runs).
+/// OPS08 — bounded redacted support bundle. Real scheduler deployment remains
+/// an environment-specific qualification.
 /// </summary>
 public class SupportBundleTests
 {
@@ -187,5 +187,59 @@ public class SupportBundleTests
         {
             try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
         }
+    }
+
+    [Fact]
+    public void Bundle_BoundsLineCountAndOmitsOversizedLinesWithoutLeakingTheirContents()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ops-bundle-bounds-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var projectPath = Path.Combine(dir, "missing.xmap");
+            var oversizedCanary = "OVERLONG_SECRET_CANARY_91";
+            var lines = Enumerable.Range(0, SupportBundle.MaximumLogLines + 10)
+                .Select(index => $"log-entry-{index}")
+                .Append(new string('x', SupportBundle.MaximumLogLineCharacters) + oversizedCanary);
+
+            var bundle = SupportBundle.Build(projectPath, "run-bounds", new RunJournal(Path.Combine(dir, "journal")), lines);
+
+            Assert.DoesNotContain("log-entry-0", bundle);
+            Assert.Contains($"log-entry-{SupportBundle.MaximumLogLines + 9}", bundle);
+            Assert.Contains("<log line omitted: character limit exceeded>", bundle);
+            Assert.DoesNotContain(oversizedCanary, bundle);
+            Assert.True(bundle.Length < 80 * 1024, $"Bundle length was {bundle.Length} characters.");
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+    }
+
+    [Fact]
+    public void ReadBoundedLogTail_UsesOnlyTailAndRedactsBoundedLines()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "ops-log-tail-" + Guid.NewGuid().ToString("N") + ".log");
+        try
+        {
+            using (var writer = new StreamWriter(path, false, System.Text.Encoding.UTF8))
+            {
+                writer.WriteLine("old-log-canary");
+                writer.Write(new string('p', SupportBundle.MaximumLogTailBytes));
+                writer.WriteLine();
+                for (var i = 0; i < 250; i++) writer.WriteLine($"tail-{i} token=TAIL_SECRET_{i}");
+                writer.WriteLine(new string('z', SupportBundle.MaximumLogLineCharacters + 100) + " password=OVERLONG_SECRET_CANARY_92");
+            }
+
+            var lines = SupportBundle.ReadBoundedLogTail(path);
+            Assert.True(lines.Count <= SupportBundle.MaximumLogLines);
+            Assert.DoesNotContain(lines, line => line.Contains("old-log-canary", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("tail-249", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("<log line omitted: character limit exceeded>", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("OVERLONG_SECRET_CANARY_92", StringComparison.Ordinal));
+            Assert.All(lines.Where(line => line.Contains("tail-", StringComparison.Ordinal)), line =>
+            {
+                Assert.Contains("token=<redacted>", line, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("TAIL_SECRET_", line, StringComparison.Ordinal);
+            });
+        }
+        finally { try { File.Delete(path); } catch (IOException) { } }
     }
 }

@@ -2136,6 +2136,33 @@ public sealed partial class CliParityTests : IAsyncLifetime
         Assert.Contains("synthetic:Revenue", stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Cli_SupportBundleReadsBoundedTailAndRedactsOversizedLogContent()
+    {
+        var logPath = Path.Combine(_dir, "unbounded-worker.log");
+        using (var writer = new StreamWriter(logPath, false, Encoding.UTF8))
+        {
+            writer.WriteLine("old-log-canary");
+            writer.Write(new string('p', SupportBundle.MaximumLogTailBytes));
+            writer.WriteLine();
+            for (var i = 0; i < 250; i++) writer.WriteLine($"tail-{i} token=TAIL_SECRET_{i}");
+            writer.WriteLine(new string('z', SupportBundle.MaximumLogLineCharacters + 100)
+                + " password=OVERLONG_SECRET_CANARY_93");
+        }
+
+        var missingProject = Path.Combine(_dir, "unreadable-project.xmap");
+        var (exit, stdout, stderr) = await RunCliAsync(LocateCli(), "support-bundle", missingProject,
+            "run-bounded", "--log", logPath);
+
+        Assert.Equal(0, exit);
+        Assert.Contains("tail-249", stdout, StringComparison.Ordinal);
+        Assert.Contains("<log line omitted: character limit exceeded>", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("old-log-canary", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("OVERLONG_SECRET_CANARY_93", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("TAIL_SECRET_", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("OVERLONG_SECRET_CANARY_93", stderr, StringComparison.Ordinal);
+    }
+
     private static void AddEscapedTextFact(
         MappingProject project,
         string bindingId,

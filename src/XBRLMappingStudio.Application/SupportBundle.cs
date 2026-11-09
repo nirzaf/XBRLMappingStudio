@@ -7,19 +7,79 @@ namespace XBRLMappingStudio.Application;
 
 /// <summary>
 /// Redacts credential-looking values and builds a shareable diagnostic bundle (OPS04,
-/// OPS08-partial). Any <c>password=</c>, <c>token=</c> or <c>secret=</c> assignment in
+/// OPS08). Any <c>password=</c>, <c>token=</c> or <c>secret=</c> assignment in
 /// a rendered line is masked before it leaves the process; the bundle carries the run
-/// journal receipt, a project summary and redacted log lines — never raw payloads.
-/// Full scheduler integration remains owner-gated (needs the customer scheduler).
+/// journal receipt, a project summary and bounded, redacted log lines — never raw payloads.
+/// Scheduler deployment remains an operator-owned environment qualification.
 /// </summary>
 public static partial class SupportBundle
 {
+    public const int MaximumLogTailBytes = 256 * 1024;
+    public const int MaximumLogLines = 200;
+    public const int MaximumLogLineCharacters = 8 * 1024;
+    public const int MaximumLogOutputCharacters = 64 * 1024;
+
     [GeneratedRegex(@"\b(password|token|secret)\b\s*[=:]\s*\S+", RegexOptions.IgnoreCase)]
     private static partial Regex SecretPattern();
 
     /// <summary>Mask credential assignments in a single line of text.</summary>
     public static string Redact(string line) =>
         SecretPattern().Replace(line, "$1=<redacted>");
+
+    /// <summary>Read a bounded UTF-8 tail without materializing the complete log or any unbounded line.</summary>
+    public static IReadOnlyList<string> ReadBoundedLogTail(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var offset = Math.Max(0, stream.Length - MaximumLogTailBytes);
+        stream.Position = offset;
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
+            bufferSize: 4096, leaveOpen: false);
+
+        if (offset > 0)
+        {
+            stream.Position = offset - 1;
+            var startsAtLineBoundary = stream.ReadByte() == '\n';
+            stream.Position = offset;
+            if (!startsAtLineBoundary)
+            {
+                int skipped;
+                do { skipped = reader.Read(); } while (skipped >= 0 && skipped != '\n');
+            }
+        }
+
+        var tail = new Queue<string>();
+        var line = new StringBuilder(Math.Min(MaximumLogLineCharacters, 1024));
+        var overlong = false;
+        var totalCharacters = 0;
+        void AddLine()
+        {
+            var value = overlong ? "<log line omitted: character limit exceeded>" : line.ToString().TrimEnd('\r');
+            value = Redact(value);
+            tail.Enqueue(value);
+            totalCharacters += value.Length;
+            while (tail.Count > MaximumLogLines || totalCharacters > MaximumLogOutputCharacters)
+                totalCharacters -= tail.Dequeue().Length;
+            line.Clear();
+            overlong = false;
+        }
+
+        int character;
+        while ((character = reader.Read()) >= 0)
+        {
+            if (character == '\n')
+            {
+                AddLine();
+                continue;
+            }
+            if (!overlong)
+            {
+                if (line.Length == MaximumLogLineCharacters) overlong = true;
+                else line.Append((char)character);
+            }
+        }
+        if (line.Length > 0 || overlong) AddLine();
+        return tail.ToArray();
+    }
 
     /// <summary>Compose the bundle text for one run; safe to write to disk or attach.</summary>
     public static string Build(string projectPath, string runId, RunJournal journal,
@@ -59,10 +119,22 @@ public static partial class SupportBundle
             sb.Append("lock-token: ").Append(entry.LockToken ?? "-").Append('\n');
         }
 
-        // Redacted log tail.
+        // Redacted bounded log tail. Bound this API too, even when callers do not
+        // use ReadBoundedLogTail to load the source file.
         sb.Append("--- logs (redacted) ---\n");
+        var tail = new Queue<string>();
+        var totalCharacters = 0;
         foreach (var line in logLines ?? Array.Empty<string>())
-            sb.Append(Redact(line)).Append('\n');
+        {
+            var safeLine = line.Length > MaximumLogLineCharacters
+                ? "<log line omitted: character limit exceeded>"
+                : Redact(line);
+            tail.Enqueue(safeLine);
+            totalCharacters += safeLine.Length;
+            while (tail.Count > MaximumLogLines || totalCharacters > MaximumLogOutputCharacters)
+                totalCharacters -= tail.Dequeue().Length;
+        }
+        foreach (var line in tail) sb.Append(line).Append('\n');
 
         return sb.ToString();
     }
