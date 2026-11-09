@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest completed exact-head CI [42635662699](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42635662699) verified `4f0af032106bdd35d68ae78ee77d049394ee9ec0`; Windows and Ubuntu each passed 1,992 tests with 6 environment-gated Arelle subprocess skips. Five memory qualifications, Windows cancellation regression repeats, pinned Arelle integration and repository hygiene also passed. See the [November 9 verification baseline](docs/verification-baseline-2026-11-09.md). |
+| Tests | xUnit 2.9.3 | Latest completed exact-head CI [42639813409](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42639813409) verified `1105f2f1970db1d29836c7ca37cc9e16884c3fdc`; Windows and Ubuntu each passed 1,992 tests with 6 environment-gated Arelle subprocess skips. Five memory qualifications, Windows cancellation regression repeats, pinned Arelle integration and repository hygiene also passed. See the [November 9 verification baseline](docs/verification-baseline-2026-11-09.md). |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -288,8 +288,8 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest completed exact-head CI [42635662699](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42635662699)
-verified `4f0af032106bdd35d68ae78ee77d049394ee9ec0`. Repository hygiene, Windows and
+Latest completed exact-head CI [42639813409](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42639813409)
+verified `1105f2f1970db1d29836c7ca37cc9e16884c3fdc`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate memory qualifications, and repeated Windows worker-cancellation
 checks passed. Each OS matrix passed **1,992 tests**, skipped **6** environment-gated
