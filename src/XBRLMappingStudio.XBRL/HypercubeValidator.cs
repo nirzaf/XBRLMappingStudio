@@ -1,7 +1,7 @@
 namespace XBRLMappingStudio.XBRL;
 
 /// <summary>
-/// Bounded evaluation of the explicit, segment-only subset of XBRL Dimensions.
+/// Bounded evaluation of the explicit and supported xs:string typed, segment-only subset of XBRL Dimensions.
 /// Relationships must be the effective arcs from the selected, verified profile.
 /// This is not a replacement for DTS/schema validation or a filing authority's rules.
 /// </summary>
@@ -67,8 +67,6 @@ internal sealed class HypercubeValidator
                 return parents;
             }, budget);
             if (applicable.Count == 0) return (RuleStatus.Pass, null);
-            if (fact.Dimensions.Any(dimension => !dimension.IsExplicit))
-                return (RuleStatus.Incomplete, "Typed dimensions are not supported by the local hypercube evaluator.");
             if (fact.Dimensions.Select(dimension => dimension.Name).Distinct(StringComparer.Ordinal).Count()
                 != fact.Dimensions.Count)
                 return (RuleStatus.Fail, "A fact cannot report the same dimension more than once.");
@@ -115,12 +113,21 @@ internal sealed class HypercubeValidator
             budget.Visit();
             var axis = relationship.ChildQName;
             cubeAxes.Add(axis);
+            var reported = fact.Dimensions.FirstOrDefault(dimension => dimension.Name == axis);
+            if (_profile.TypedDimensionDomains.TryGetValue(axis, out var typedDomain))
+            {
+                if (!StringComparer.Ordinal.Equals(typedDomain.DataTypeQName, "xs:string"))
+                    return (RuleStatus.Incomplete, $"Typed dimension '{axis}' uses an unsupported datatype.");
+                valid &= reported is { IsExplicit: false, TypedValue: not null };
+                continue;
+            }
             if (!_profile.DimensionDomains.TryGetValue(axis, out var profileDomain) || profileDomain is null || profileDomain.Count == 0)
                 return (RuleStatus.Incomplete, $"Dimension '{axis}' lacks declared explicit-domain metadata.");
+            if (reported is { IsExplicit: false })
+                return (RuleStatus.Incomplete, $"Dimension '{axis}' is declared explicit but the fact reports a typed value without typed-domain metadata.");
             if (_defaults.TryGetValue(axis, out var defaults) && defaults.Length != 1)
                 return (RuleStatus.Incomplete, $"Dimension '{axis}' has conflicting default members.");
-            var member = fact.Dimensions.FirstOrDefault(dimension => dimension.Name == axis)?.MemberName
-                ?? defaults?.SingleOrDefault();
+            var member = reported?.MemberName ?? defaults?.SingleOrDefault();
             // Resolve even absent members: missing domain metadata is not evidence
             // that a negated hypercube is valid.
             var domainArcs = Outgoing(XbrlArcRoles.DimensionDomain, NextRole(relationship), axis);

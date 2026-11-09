@@ -23,8 +23,8 @@ public sealed record TypedDimensionDomainMetadata(
 
 /// <summary>
 /// A dimensional aspect carried by a fact (XBR04). Explicit dimensions pair a dimension
-/// concept with a member concept. Imported typed dimensions may retain an opaque canonical
-/// value for reverse-mapping evidence; this does not make them valid for generated reports.
+/// concept with a member concept. Supported typed values are normalized separately from
+/// opaque imported XML evidence and require matching selected-profile metadata.
 /// </summary>
 public sealed record Dimension(
     string Name,
@@ -37,6 +37,10 @@ public sealed record Dimension(
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TypedValueJson { get; init; }
+
+    /// <summary>A profile-validated simple typed value, currently used for xs:string domains.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TypedValue { get; init; }
 
     /// <summary>OIM-style key: the bracketed dimension qualified name.</summary>
     public string Key => Name;

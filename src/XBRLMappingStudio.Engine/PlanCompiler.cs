@@ -1988,7 +1988,7 @@ public sealed class PlanCompiler
                     ? dimensionsJsonIn.Presence == ValuePresence.Present ? dimensionsJsonIn.AsString() : null
                     : GetString(node, "dimensions");
                 var dimensionsValid = dimensionsJsonConnected
-                    ? FactDimensionParser.TryParseJson(dimensionsText, profile.DimensionDomains,
+                    ? FactDimensionParser.TryParseJson(dimensionsText, profile,
                         out var dimensionsFromJson, out var dimensionJsonError)
                     : FactDimensionParser.TryParse(dimensionsText, profile.DimensionDomains,
                         out dimensionsFromJson, out dimensionJsonError);
@@ -2129,7 +2129,7 @@ public sealed class PlanCompiler
                     Dimensions = pf.Dimensions,
                     IsNil = pf.IsNil
                 };
-                if (!probe.ValidateAgainst(conceptMeta, out var reason, out var issue))
+                if (!probe.ValidateAgainst(profile, conceptMeta, out var reason, out var issue))
                 {
                     var (diagnosticCode, portName, source) = issue switch
                     {

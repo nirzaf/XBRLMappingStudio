@@ -1019,6 +1019,54 @@ public sealed class FactSerializationTests
     }
 
     [Fact]
+    public void SupportedXsStringTypedDimensionRoundTripsThroughOimAndXml()
+    {
+        var baseProfile = Profile;
+        var profile = new FilingProfile
+        {
+            ProfileId = baseProfile.ProfileId,
+            Digest = baseProfile.Digest,
+            Concepts = baseProfile.Concepts,
+            SupportedUnits = baseProfile.SupportedUnits,
+            NamespaceUris = baseProfile.NamespaceUris.Concat(new[]
+            {
+                new KeyValuePair<string, string>("xs", "http://www.w3.org/2001/XMLSchema")
+            }).ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+            TaxonomyUrls = baseProfile.TaxonomyUrls,
+            TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+            {
+                ["synthetic:TypedAxis"] = new("synthetic:TypedMember", "xs:string")
+            }
+        };
+        var textFact = CreateTextFact("en");
+        var fact = new XbrlFact
+        {
+            ConceptName = textFact.ConceptName,
+            EntityScheme = textFact.EntityScheme,
+            EntityIdentifier = textFact.EntityIdentifier,
+            Period = textFact.Period,
+            TextValue = textFact.TextValue,
+            Language = textFact.Language,
+            Dimensions = [new Dimension("synthetic:TypedAxis", "", IsExplicit: false)
+                { TypedValue = "synthetic:QNameLookingText" }]
+        };
+        Assert.True(fact.ValidateAgainst(profile, profile.FindConcept(fact.ConceptName)!, out var reason), reason);
+
+        var oim = OimSerializer.Serialize(profile, [fact]);
+        var fromOim = Assert.Single(OimSerializer.ReadFacts(oim, profile));
+        Assert.False(Assert.Single(fromOim.Dimensions).IsExplicit);
+        Assert.Equal("synthetic:QNameLookingText", Assert.Single(fromOim.Dimensions).TypedValue);
+        Assert.Equal(fact.SemanticKey(), fromOim.SemanticKey());
+
+        var xml = XmlSerializer.Serialize(profile, [fact]);
+        var fromXml = Assert.Single(XmlSerializer.ReadFacts(xml, profile));
+        Assert.False(Assert.Single(fromXml.Dimensions).IsExplicit);
+        Assert.Equal("synthetic:QNameLookingText", Assert.Single(fromXml.Dimensions).TypedValue);
+        Assert.Equal(fact.SemanticKey(), fromXml.SemanticKey());
+        Assert.Contains("typedMember", xml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void OimJsonReaderRejectsDuplicateDimensionPropertiesWithoutProfile()
     {
         var json = OimSerializer.Serialize(Profile, new[] { CreateTextFact("en") });

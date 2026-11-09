@@ -73,14 +73,19 @@ public static class XmlSerializer
                 ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
             if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
                 throw Unsupported(unitError);
-            if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
+            if (!fact.ValidateAgainst(profile, concept, out var reason)) throw Unsupported(reason);
             _ = ResolveQName(fact.ConceptName);
             foreach (var dimension in fact.Dimensions)
             {
-                if (!dimension.IsExplicit)
-                    throw Unsupported($"Typed dimension '{dimension.Name}' requires taxonomy domain metadata and is not exportable in this profile.");
                 _ = ResolveQName(dimension.Name);
-                _ = ResolveQName(dimension.MemberName);
+                if (dimension.IsExplicit) _ = ResolveQName(dimension.MemberName);
+                else
+                {
+                    if (!profile.TypedDimensionDomains.TryGetValue(dimension.Name, out var typedDomain)
+                        || typedDomain.DataTypeQName != "xs:string" || dimension.TypedValue is null)
+                        throw Unsupported($"Typed dimension '{dimension.Name}' lacks supported profile metadata or a normalized value.");
+                    _ = TypedDomainXName(profile, dimension.Name);
+                }
             }
             foreach (var measure in (fact.Unit is null ? Enumerable.Empty<string>() : new[] { fact.Unit.Measure })
                          .Concat(fact.CompoundUnit?.Numerators ?? Array.Empty<string>())
@@ -118,7 +123,7 @@ public static class XmlSerializer
             {
                 ValidateFact(fact);
                 ordinal = checked(ordinal + 1);
-                BuildContext("c" + ordinal.ToString(CultureInfo.InvariantCulture), fact, ResolveQName).WriteTo(writer);
+                BuildContext("c" + ordinal.ToString(CultureInfo.InvariantCulture), fact, profile, ResolveQName).WriteTo(writer);
                 writer.Flush();
             }
 
@@ -202,7 +207,7 @@ public static class XmlSerializer
             if (!FactUnitParser.TryValidateForConcept(concept, profile, f.Unit, f.CompoundUnit, out var unitError))
                 throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                     unitError);
-            if (!f.ValidateAgainst(concept, out var reason))
+            if (!f.ValidateAgainst(profile, concept, out var reason))
                 throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct, reason);
         }
 
@@ -249,11 +254,15 @@ public static class XmlSerializer
             _ = ResolveQName(f.ConceptName);
             foreach (var d in f.Dimensions)
             {
-                if (!d.IsExplicit)
-                    throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
-                        $"Typed dimension '{d.Name}' requires taxonomy domain metadata and is not exportable in this profile.");
                 _ = ResolveQName(d.Name);
-                _ = ResolveQName(d.MemberName);
+                if (d.IsExplicit) _ = ResolveQName(d.MemberName);
+                else
+                {
+                    if (!profile.TypedDimensionDomains.TryGetValue(d.Name, out var typedDomain)
+                        || typedDomain.DataTypeQName != "xs:string" || d.TypedValue is null)
+                        throw Unsupported($"Typed dimension '{d.Name}' lacks supported profile metadata or a normalized value.");
+                    _ = TypedDomainXName(profile, d.Name);
+                }
             }
             foreach (var measure in (f.Unit is null ? Enumerable.Empty<string>() : new[] { f.Unit.Measure })
                          .Concat(f.CompoundUnit?.Numerators ?? Array.Empty<string>())
@@ -269,7 +278,7 @@ public static class XmlSerializer
                 new XAttribute(Xlink + "type", "simple"), new XAttribute(Xlink + "href", url)));
 
         foreach (var (id, f) in contextOrder)
-            root.Add(BuildContext(id, f, ResolveQName));
+            root.Add(BuildContext(id, f, profile, ResolveQName));
         foreach (var (id, f) in unitOrder)
             root.Add(BuildUnit(id, f, profile, ResolveQName));
 
@@ -306,15 +315,20 @@ public static class XmlSerializer
         }
     }
 
-    private static XElement BuildContext(string id, XbrlFact f, Func<string, string> qname)
+    private static XElement BuildContext(string id, XbrlFact f, FilingProfile profile, Func<string, string> qname)
     {
         var entity = new XElement(Xbrli + "entity",
             new XElement(Xbrli + "identifier",
                 new XAttribute("scheme", f.EntityScheme), f.EntityIdentifier));
         if (f.Dimensions.Count > 0)
             entity.Add(new XElement(Xbrli + "segment", f.Dimensions.OrderBy(d => d.Name, StringComparer.Ordinal)
-                .Select(d => new XElement(Xbrldi + "explicitMember",
-                    new XAttribute("dimension", qname(d.Name)), qname(d.MemberName)))));
+                .Select(d => d.IsExplicit
+                    ? new XElement(Xbrldi + "explicitMember",
+                        new XAttribute("dimension", qname(d.Name)), qname(d.MemberName))
+                    : new XElement(Xbrldi + "typedMember",
+                        new XAttribute("dimension", qname(d.Name)),
+                        new XElement(TypedDomainXName(profile, d.Name), d.TypedValue
+                            ?? throw Unsupported($"Typed dimension '{d.Name}' has no normalized value."))))));
 
         var period = f.Period.Kind == PeriodKind.Instant
             ? new XElement(Xbrli + "period", new XElement(Xbrli + "instant", Iso(f.Period.Instant)))
@@ -327,6 +341,18 @@ public static class XmlSerializer
 
         return new XElement(Xbrli + "context",
             new XAttribute("id", id), entity, period);
+    }
+
+    private static XName TypedDomainXName(FilingProfile profile, string dimensionName)
+    {
+        if (!profile.TypedDimensionDomains.TryGetValue(dimensionName, out var metadata))
+            throw Unsupported($"Typed dimension '{dimensionName}' has no selected-profile domain metadata.");
+        var (prefix, local) = SplitQName(metadata.DomainElementQName);
+        if (prefix is null || !profile.NamespaceUris.TryGetValue(prefix, out var uri))
+            throw Unsupported($"Typed domain element '{metadata.DomainElementQName}' has no selected-profile namespace.");
+        try { XmlConvert.VerifyNCName(local); }
+        catch (XmlException) { throw Unsupported($"Typed domain element '{metadata.DomainElementQName}' is invalid."); }
+        return XName.Get(local, uri);
     }
 
     private static XElement BuildUnit(string id, XbrlFact f, FilingProfile profile, Func<string, string> qname)
@@ -529,9 +555,24 @@ public static class XmlSerializer
                         throw Unsupported($"Dimension '{typedDimName}' duplicates another dimension on the fact.");
                     if (profile is not null)
                         typedDimName = CanonicalProfileQName(child, typedDimName, profile);
+                    var typedEvidence = typedValues[0];
+                    string? normalizedValue = null;
+                    if (profile is not null && profile.TypedDimensionDomains.TryGetValue(typedDimName, out _))
+                    {
+                        if (profile.TypedDimensionDomains[typedDimName].DataTypeQName != "xs:string"
+                            || typedEvidence.Name != TypedDomainXName(profile, typedDimName))
+                            throw Unsupported($"Typed dimension '{typedDimName}' does not match its supported xs:string domain element.");
+                        EnsureOnlyAttributes(typedEvidence);
+                        if (typedEvidence.Elements().Any())
+                            throw Unsupported($"Typed dimension '{typedDimName}' must contain simple xs:string text.");
+                        normalizedValue = typedEvidence.Value;
+                        if (normalizedValue.Length > MaximumTypedDimensionValueCharacters)
+                            throw Unsupported($"Typed dimension '{typedDimName}' exceeds the {MaximumTypedDimensionValueCharacters}-character value limit.");
+                    }
                     dims.Add(new Dimension(typedDimName, "", IsExplicit: false)
                     {
-                        TypedValueJson = CanonicalizeTypedValue(typedValues[0])
+                        TypedValue = normalizedValue,
+                        TypedValueJson = CanonicalizeTypedValue(typedEvidence)
                     });
                     continue;
                 }

@@ -77,6 +77,7 @@ public sealed record XbrlUnit(
 /// </summary>
 public sealed class XbrlFact
 {
+    public const int MaximumTypedDimensionValueCharacters = 1_000_000;
     public required string ConceptName { get; init; }         // qualified name: "synthetic:Revenue"
     public required string EntityScheme { get; init; }
     public required string EntityIdentifier { get; init; }
@@ -227,9 +228,27 @@ public sealed class XbrlFact
 
     /// <summary>Verify the fact value and period against a taxonomy concept.</summary>
     public bool ValidateAgainst(ConceptMetadata meta, out string reason)
-        => ValidateAgainst(meta, out reason, out _);
+        => ValidateAgainst(meta, null, null, out reason, out _);
 
     public bool ValidateAgainst(ConceptMetadata meta, out string reason, out FactValidationIssue issue)
+        => ValidateAgainst(meta, null, null, out reason, out issue);
+
+    /// <summary>Verify fact aspects against the exact selected filing profile.</summary>
+    public bool ValidateAgainst(FilingProfile profile, ConceptMetadata meta, out string reason)
+        => ValidateAgainst(profile, meta, out reason, out _);
+
+    public bool ValidateAgainst(FilingProfile profile, ConceptMetadata meta, out string reason, out FactValidationIssue issue)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return ValidateAgainst(meta, profile.TypedDimensionDomains, profile.NamespaceUris, out reason, out issue);
+    }
+
+    private bool ValidateAgainst(
+        ConceptMetadata meta,
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata>? typedDimensionDomains,
+        IReadOnlyDictionary<string, string>? namespaceUris,
+        out string reason,
+        out FactValidationIssue issue)
     {
         if (string.IsNullOrWhiteSpace(EntityScheme)
             || !Uri.TryCreate(EntityScheme, UriKind.Absolute, out _)
@@ -249,15 +268,19 @@ public sealed class XbrlFact
         if (!validPeriod)
             return Fail(FactValidationIssue.InvalidPeriod, "Fact period is incomplete or invalid.", out reason, out issue);
 
-        if (Dimensions?.Any(dimension => !dimension.IsExplicit) == true)
-            return Fail(FactValidationIssue.InvalidDimensions,
-                "Typed dimensions require filing-profile domain metadata and are unsupported.", out reason, out issue);
-
         if (Dimensions is null || Dimensions.Count > FactDimensionParser.MaximumDimensions
             || Dimensions.Any(dimension => string.IsNullOrWhiteSpace(dimension.Name)
-                || string.IsNullOrWhiteSpace(dimension.MemberName))
+                || (dimension.IsExplicit
+                    ? string.IsNullOrWhiteSpace(dimension.MemberName) || dimension.TypedValue is not null
+                    : !string.IsNullOrEmpty(dimension.MemberName)
+                        || !IsSupportedTypedDimension(dimension, typedDimensionDomains, namespaceUris)))
             || Dimensions.Select(dimension => dimension.Name).Distinct(StringComparer.Ordinal).Count() != Dimensions.Count)
-            return Fail(FactValidationIssue.InvalidDimensions, "Fact dimensions are empty, duplicated, or exceed the supported limit.", out reason, out issue);
+        {
+            var message = Dimensions?.Any(dimension => !dimension.IsExplicit) == true
+                ? "Typed dimensions are unsupported without matching xs:string profile metadata and a normalized value; dimensions must also be unique and within the supported limit."
+                : "Fact dimensions are empty, duplicated, or exceed the supported limit.";
+            return Fail(FactValidationIssue.InvalidDimensions, message, out reason, out issue);
+        }
 
         if (!ValidateValueAgainst(meta, out reason, out issue)) return false;
         if (meta.IsAbstract)
@@ -275,6 +298,27 @@ public sealed class XbrlFact
         reason = "";
         issue = FactValidationIssue.None;
         return true;
+    }
+
+    private static bool IsSupportedTypedDimension(
+        Dimension dimension,
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata>? typedDimensionDomains,
+        IReadOnlyDictionary<string, string>? namespaceUris)
+    {
+        if (typedDimensionDomains is null || namespaceUris is null
+            || dimension.TypedValue is null
+            || dimension.TypedValue.Length > MaximumTypedDimensionValueCharacters
+            || !typedDimensionDomains.TryGetValue(dimension.Name, out var metadata)
+            || metadata is null)
+            return false;
+        try { System.Xml.XmlConvert.VerifyXmlChars(dimension.TypedValue); }
+        catch (System.Xml.XmlException) { return false; }
+        var separator = metadata.DataTypeQName.IndexOf(':');
+        return separator > 0 && separator == metadata.DataTypeQName.LastIndexOf(':')
+            && separator < metadata.DataTypeQName.Length - 1
+            && namespaceUris.TryGetValue(metadata.DataTypeQName[..separator], out var typeNamespace)
+            && StringComparer.Ordinal.Equals(typeNamespace, "http://www.w3.org/2001/XMLSchema")
+            && StringComparer.Ordinal.Equals(metadata.DataTypeQName[(separator + 1)..], "string");
     }
 
     private static bool Fail(FactValidationIssue failure, string message, out string reason, out FactValidationIssue issue)
@@ -304,7 +348,9 @@ public sealed class XbrlFact
             .OrderBy(d => d.Name, System.StringComparer.Ordinal)
             .Select(d => $"{EscapeSemanticComponent(d.Name, "|,=")}="
                 + $"{EscapeSemanticComponent(d.MemberName, "|,=")}:{d.IsExplicit}:"
-                + (d.TypedValueJson is null ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(d.TypedValueJson))))));
+                + (d.TypedValue is not null
+                    ? "s:" + EscapeSemanticComponent(d.TypedValue, "|,=")
+                    : d.TypedValueJson is null ? "" : "xml:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(d.TypedValueJson))))));
         var val = IsNil ? "nil"
             : Value is not null ? "n:" + Value.Value.ToString(CultureInfo.InvariantCulture)
             : TextValue is not null ? "s:" + EscapeSemanticComponent(TextValue, "|")

@@ -29,7 +29,7 @@ public static class OimSerializer
                 ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
             if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
                 throw Unsupported(unitError);
-            if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
+            if (!fact.ValidateAgainst(profile, concept, out var reason)) throw Unsupported(reason);
         }
         var ns = BuildNamespaces(profile, facts);
         var docInfo = new JsonObject
@@ -92,7 +92,7 @@ public static class OimSerializer
                 ?? throw Unsupported($"Concept '{fact.ConceptName}' is not defined in the filing profile.");
             if (!FactUnitParser.TryValidateForConcept(concept, profile, fact.Unit, fact.CompoundUnit, out var unitError))
                 throw Unsupported(unitError);
-            if (!fact.ValidateAgainst(concept, out var reason)) throw Unsupported(reason);
+            if (!fact.ValidateAgainst(profile, concept, out var reason)) throw Unsupported(reason);
         }
         var ns = BuildNamespaces(profile, facts, maxNamespaces, cancellationToken);
         using var bounded = new BoundedWriteStream(destination, maxOutputBytes);
@@ -212,9 +212,13 @@ public static class OimSerializer
                 throw Unsupported("A taxonomy-defined dimension cannot use the reserved xbrl prefix.");
             if (dimensions.ContainsKey(name))
                 throw Unsupported($"Fact '{fact.ConceptName}' repeats dimension '{name}'.");
-            dimensions[name] = dimension.IsExplicit
-                ? JsonValue.Create(ns.QName(dimension.MemberName))
-                : JsonValue.Create(dimension.MemberName);
+            if (dimension.IsExplicit)
+                dimensions[name] = JsonValue.Create(ns.QName(dimension.MemberName));
+            else
+            {
+                dimensions[name] = JsonValue.Create(dimension.TypedValue
+                    ?? throw Unsupported($"Typed dimension '{dimension.Name}' has no supported normalized value."));
+            }
         }
 
         var result = new JsonObject
@@ -388,11 +392,24 @@ public static class OimSerializer
                 if (dimension.Value.ValueKind != JsonValueKind.String)
                     throw Unsupported("Dimension values must be strings in the supported report subset.");
                 member = dimension.Value.GetString()!;
-                isExplicit = TryExpandQName(member, namespaces, out var expandedMember);
-                if (!isExplicit)
-                    throw Unsupported($"Typed dimension '{dimension.Name}' requires taxonomy domain metadata and is not supported by this report model.");
-                member = CanonicalProfileQName(expandedMember, member, profile);
-                reportedDimensions.Add(new Dimension(dimensionName, member, isExplicit));
+                if (profile is not null && profile.TypedDimensionDomains.TryGetValue(dimensionName, out var typedDomain))
+                {
+                    if (!StringComparer.Ordinal.Equals(typedDomain.DataTypeQName, "xs:string"))
+                        throw Unsupported($"Typed dimension '{dimension.Name}' uses an unsupported typed value datatype.");
+                    if (member.Length > XbrlFact.MaximumTypedDimensionValueCharacters)
+                        throw Unsupported($"Typed dimension '{dimension.Name}' exceeds the supported value length.");
+                    try { XmlConvert.VerifyXmlChars(member); }
+                    catch (XmlException) { throw Unsupported($"Typed dimension '{dimension.Name}' contains invalid XML characters."); }
+                    reportedDimensions.Add(new Dimension(dimensionName, "", IsExplicit: false) { TypedValue = member });
+                }
+                else
+                {
+                    isExplicit = TryExpandQName(member, namespaces, out var expandedMember);
+                    if (!isExplicit)
+                        throw Unsupported($"Typed dimension '{dimension.Name}' requires supported xs:string taxonomy domain metadata.");
+                    member = CanonicalProfileQName(expandedMember, member, profile);
+                    reportedDimensions.Add(new Dimension(dimensionName, member));
+                }
             }
 
             int? decimals = null;
@@ -641,6 +658,10 @@ public static class OimSerializer
             {
                 _ = QName(dimension.Name);
                 if (dimension.IsExplicit) _ = QName(dimension.MemberName);
+                else if (!profile.TypedDimensionDomains.TryGetValue(dimension.Name, out var typedDomain)
+                         || !StringComparer.Ordinal.Equals(typedDomain.DataTypeQName, "xs:string")
+                         || dimension.TypedValue is null)
+                    throw Unsupported($"Typed dimension '{dimension.Name}' lacks supported profile metadata or a normalized value.");
             }
             if (fact.Unit is not null) _ = Measure(fact.Unit.Measure);
             if (fact.CompoundUnit is not null)

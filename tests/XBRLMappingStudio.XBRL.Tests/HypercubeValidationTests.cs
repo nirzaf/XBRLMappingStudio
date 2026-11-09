@@ -20,7 +20,7 @@ public sealed class HypercubeValidationTests
             Arc(XbrlArcRoles.DimensionDomain, "Axis", cube + "Domain", role, usable: false),
             Arc(XbrlArcRoles.DomainMember, cube + "Domain", member, role)];
 
-    private static FilingProfile Profile(IEnumerable<DefinitionLink> relationships)
+    private static FilingProfile Profile(IEnumerable<DefinitionLink> relationships, bool typedAxis = false)
     {
         var links = relationships.ToArray();
         var source = SyntheticProfile.Build();
@@ -35,11 +35,14 @@ public sealed class HypercubeValidationTests
             SupportedUnits = source.SupportedUnits, RequiredChecks = source.RequiredChecks,
             DefinitionLinks = links,
             // The flattened profile restriction is deliberately a superset of every role's domain.
-            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>
+            DimensionDomains = typedAxis ? new Dictionary<string, IReadOnlyList<string>>() : new Dictionary<string, IReadOnlyList<string>>
             {
                 [Q("Axis")] = links.Select(link => link.ChildQName).Concat(new[] { Q("Member"), Q("Other") }).Distinct().ToArray(),
                 [Q("ExtraAxis")] = [Q("Extra")]
-            }
+            },
+            TypedDimensionDomains = typedAxis
+                ? new Dictionary<string, TypedDimensionDomainMetadata> { [Q("Axis")] = new(Q("TypedMember"), "xs:string") }
+                : new Dictionary<string, TypedDimensionDomainMetadata>()
         };
     }
 
@@ -238,10 +241,20 @@ public sealed class HypercubeValidationTests
         Expect(RuleStatus.Pass, links, D());
     }
 
-    [Fact] public void RepeatedAxisFailsAndTypedDimensionIsIncomplete()
+    [Fact] public void RepeatedAxisFailsAndTypedDimensionsNeedSupportedMetadata()
     {
         Expect(RuleStatus.Fail, Cube(), D(), D("Other"));
         Expect(RuleStatus.Incomplete, Cube(), D() with { IsExplicit = false });
+    }
+
+    [Fact] public void TypedStringAxisIsEvaluatedWhenProfileDeclaresItsDomain()
+    {
+        var profile = Profile(Cube(), typedAxis: true);
+        var validator = new FilingRuleValidator(profile);
+        var typed = D() with { IsExplicit = false, TypedValue = "North" };
+        Assert.Equal(RuleStatus.Pass, validator.ValidateDimensionalAspects(Fact(typed)).Single(o => o.RuleId == Rule).Status);
+        Assert.Equal(RuleStatus.Fail, validator.ValidateDimensionalAspects(Fact()).Single(o => o.RuleId == Rule).Status);
+        Assert.Equal(RuleStatus.Fail, validator.ValidateDimensionalAspects(Fact(D())).Single(o => o.RuleId == Rule).Status);
     }
 
     [Fact] public void BudgetExhaustionIsIncompleteRatherThanSuccessOrUnboundedTraversal()

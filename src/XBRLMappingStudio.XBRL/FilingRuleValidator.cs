@@ -243,8 +243,15 @@ public sealed class FilingRuleValidator
     private RuleOutcome DimensionRule(XbrlFact f, Dimension d, string op)
     {
         if (!d.IsExplicit)
+        {
+            if (_profile.TypedDimensionDomains.TryGetValue(d.Name, out var typedDomain)
+                && StringComparer.Ordinal.Equals(typedDomain.DataTypeQName, "xs:string")
+                && d.TypedValue is not null
+                && d.TypedValue.Length <= XbrlFact.MaximumTypedDimensionValueCharacters)
+                return Pass("synthetic:dimension-member-valid");
             return IncompleteDimension(op, GetFirstSource(f),
-                "Typed dimensions require supported taxonomy domain metadata.", f.SourceTransformationPaths);
+                "Typed dimensions require supported xs:string taxonomy domain metadata and a normalized value.", f.SourceTransformationPaths);
+        }
         // XBRL Dimensions infers a default member when its axis is omitted and
         // forbids spelling that same member explicitly in an instance.
         if (_defaultMembersByDimension.TryGetValue(d.Name, out var defaultMembers)
