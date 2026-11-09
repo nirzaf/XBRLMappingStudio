@@ -345,6 +345,71 @@ public class ExecutionPlanTests
     }
 
     [Fact]
+    public async Task FactConstructUnknownMappedConceptReportsConceptSource()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-dynamic-concept-source-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, profile) = Prepare(path);
+            var bindingId = project.Bindings[0].BindingId;
+            var fact = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            fact.Parameters.Remove("concept");
+            fact.InputPorts.Add(new PortDefinition("conceptName", PortShape.String, PortCardinality.Single));
+
+            var conceptSource = new MappingNode
+            {
+                NodeId = Id.New(),
+                NodeType = NodeTypeConstants.ExcelField,
+                DisplayName = "Mapped concept",
+                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["bindingId"] = bindingId,
+                    ["column"] = "dynamicConcept"
+                },
+                OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+            };
+            project.Nodes.Add(conceptSource);
+            project.Edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(),
+                SourceNodeId = conceptSource.NodeId,
+                SourcePortName = "textValue",
+                TargetNodeId = fact.NodeId,
+                TargetPortName = "conceptName"
+            });
+
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
+            var context = MakeContext(project, path);
+            var conceptReference = new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, "workbook#concept");
+            context.LoadedSources[bindingId] = context.LoadedSources[bindingId].Select(record =>
+            {
+                var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                fields["dynamicConcept"] = DataValue.StringValue("synthetic:UnknownConcept", conceptReference);
+                return new DataRecord
+                {
+                    RowId = record.RowId,
+                    Fields = fields,
+                    CellSources = record.CellSources,
+                    HasStableRowIdentity = record.HasStableRowIdentity
+                };
+            }).ToArray();
+
+            var result = await compile.Plan!.ExecuteAsync(context);
+
+            Assert.Empty(result.Facts);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrConceptUnknown);
+            Assert.Equal("conceptName", diagnostic.PortName);
+            Assert.Equal(conceptReference, diagnostic.Source);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task FactConstructCarriesProfileValidatedCompoundUnit()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xbrl-compound-unit-" + Guid.NewGuid().ToString("N"));

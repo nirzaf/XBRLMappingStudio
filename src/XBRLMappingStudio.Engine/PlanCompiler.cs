@@ -1852,8 +1852,8 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         $"Concept '{concept}' is not defined in profile '{profile.ProfileId}'.",
                         nodeId: node.NodeId,
-                        portName: factValuePortName,
-                        source: factValueSource,
+                        portName: conceptConnected ? "conceptName" : factValuePortName,
+                        source: conceptIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
@@ -1866,8 +1866,8 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         $"Concept '{concept}' is abstract and cannot carry fact values.",
                         nodeId: node.NodeId,
-                        portName: factValuePortName,
-                        source: factValueSource,
+                        portName: conceptConnected ? "conceptName" : factValuePortName,
+                        source: conceptIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
@@ -2073,7 +2073,9 @@ public sealed class PlanCompiler
                         FactValidationIssue.InvalidDimensions =>
                             (DiagnosticCodes.XbrDimensionInvalid, factValuePortName, dimensionsJsonIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidConcept =>
-                            (DiagnosticCodes.XbrConceptUnknown, factValuePortName, factValueSource),
+                            (DiagnosticCodes.XbrConceptUnknown,
+                                conceptConnected ? "conceptName" : factValuePortName,
+                                conceptIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidLanguage =>
                             (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, languageIn.Source ?? factValueSource ?? entityIn.Source),
                         FactValidationIssue.InvalidValue =>
