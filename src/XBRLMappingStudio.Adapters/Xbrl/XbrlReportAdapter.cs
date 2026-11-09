@@ -28,7 +28,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static readonly HashSet<string> SupportedSelectionKeys = new(StringComparer.Ordinal)
     {
-        "occurrenceId", "concept", "period", "unit", "dimensionAxis", "dimensionMember", "dimensionFilters",
+        "occurrenceId", "concept", "period", "periodKind", "instantDate", "periodStart", "periodEnd",
+        "unit", "dimensionAxis", "dimensionMember", "dimensionFilters",
         "maxInputBytes"
     };
 
@@ -87,6 +88,12 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                 || StringComparer.Ordinal.Equals(item.Fact.ConceptName, selection.Concept))
             .Where(item => selection.Period is null
                 || StringComparer.Ordinal.Equals(item.Fact.Period.ToIsoString(), selection.Period))
+            .Where(item => selection.PeriodKind is null
+                || StringComparer.Ordinal.Equals(item.Fact.Period.Kind == PeriodKind.Instant ? "instant" : "duration",
+                    selection.PeriodKind))
+            .Where(item => selection.InstantDate is null || item.Fact.Period.Instant == selection.InstantDate)
+            .Where(item => selection.PeriodStart is null || item.Fact.Period.Start == selection.PeriodStart)
+            .Where(item => selection.PeriodEnd is null || item.Fact.Period.End == selection.PeriodEnd)
             .Where(item => selection.Unit is null
                 || StringComparer.Ordinal.Equals(item.Fact.Unit?.ToString(), selection.Unit)
                 || StringComparer.Ordinal.Equals(item.Fact.CompoundUnit?.CanonicalKey, selection.Unit))
@@ -125,6 +132,34 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                     $"XBRL report selection '{key}' must be a non-empty exact value.");
             return value;
         }
+
+        static DateOnly? GetDate(string? value, string key)
+        {
+            if (value is null) return null;
+            if (!DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var parsed))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    $"XBRL report selection '{key}' must be an exact ISO date in yyyy-MM-dd form.");
+            return parsed;
+        }
+
+        var periodKind = Get("periodKind");
+        if (periodKind is not null && periodKind is not ("instant" or "duration"))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'periodKind' must be exactly 'instant' or 'duration'.");
+        var instantDate = GetDate(Get("instantDate"), "instantDate");
+        var periodStart = GetDate(Get("periodStart"), "periodStart");
+        var periodEnd = GetDate(Get("periodEnd"), "periodEnd");
+        if (instantDate is not null && (periodStart is not null || periodEnd is not null))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection cannot combine 'instantDate' with duration period bounds.");
+        if (instantDate is not null && periodKind == "duration"
+            || (periodStart is not null || periodEnd is not null) && periodKind == "instant")
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection period kind conflicts with its instant or duration date filters.");
+        if (periodStart is not null && periodEnd is not null && periodStart >= periodEnd)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'periodStart' must be before 'periodEnd'.");
 
         var dimensions = new Dictionary<string, string>(StringComparer.Ordinal);
         if (configuration.TryGetValue("dimensionFilters", out var dimensionFilters))
@@ -176,7 +211,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report dimension selection cannot repeat an axis in both 'dimensionFilters' and the 'dimensionAxis'/'dimensionMember' pair.");
 
-        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("period"), Get("unit"), dimensions);
+        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("period"), periodKind,
+            instantDate, periodStart, periodEnd, Get("unit"), dimensions);
     }
 
     private static IReadOnlyList<XbrlFact> Read(SourceConnection connection, CancellationToken cancellationToken)
@@ -271,13 +307,20 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         string? OccurrenceId,
         string? Concept,
         string? Period,
+        string? PeriodKind,
+        DateOnly? InstantDate,
+        DateOnly? PeriodStart,
+        DateOnly? PeriodEnd,
         string? Unit,
         IReadOnlyDictionary<string, string> Dimensions)
     {
         public bool HasAspectFilters
-            => OccurrenceId is not null || Concept is not null || Period is not null || Unit is not null || Dimensions.Count != 0;
+            => OccurrenceId is not null || Concept is not null || Period is not null || PeriodKind is not null
+                || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
+                || Unit is not null || Dimensions.Count != 0;
 
         public static ReportSelection Empty { get; }
-            = new(null, null, null, null, new Dictionary<string, string>(StringComparer.Ordinal));
+            = new(null, null, null, null, null, null, null, null,
+                new Dictionary<string, string>(StringComparer.Ordinal));
     }
 }

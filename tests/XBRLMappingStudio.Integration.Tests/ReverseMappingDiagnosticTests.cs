@@ -91,6 +91,123 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
+    public async Task XbrlReportAdapter_FiltersByStructuredPeriodPartsAndPreservesRepeatedOccurrences()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-period-filter-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var reportPath = Path.Combine(directory, "period-filter.xml");
+            var facts = new[]
+            {
+                ReverseRevenue(10m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
+                ReverseRevenue(10m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
+                ReverseRevenue(20m, XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1))),
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("Assets"),
+                    EntityScheme = "https://example.test/entity",
+                    EntityIdentifier = "ACME-1",
+                    Period = XbrlPeriod.OfInstant(new DateOnly(2025, 12, 31)),
+                    Unit = new XbrlUnit("QAR"),
+                    Value = 30m
+                }
+            };
+            await File.WriteAllTextAsync(reportPath, XBRLMappingStudio.XBRL.XmlSerializer.Serialize(profile, facts));
+
+            var adapter = new XbrlReportAdapter();
+            var durationSelection = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["concept"] = SyntheticProfile.Qualified("Revenue"),
+                ["periodKind"] = "duration",
+                ["periodStart"] = "2025-01-01",
+                ["periodEnd"] = "2026-01-01"
+            };
+            var durationConnection = new SourceConnection("report", adapter.Kind, reportPath, durationSelection);
+            var durationSchema = await adapter.InspectSchemaAsync(durationConnection, CancellationToken.None);
+            var durationRows = new List<DataRecord>();
+            await foreach (var row in adapter.ReadFullAsync(durationConnection, durationSchema, CancellationToken.None))
+                durationRows.Add(row);
+
+            Assert.Equal(new[] { "report#f1", "report#f2" }, durationRows.Select(row => row.RowId));
+            Assert.Equal(new[] { "10", "10" }, durationRows.Select(row => row["value"].LexicalSource));
+            Assert.All(durationRows, row =>
+            {
+                Assert.Equal("duration", row["periodKind"].AsString());
+                Assert.Equal("2025-01-01", row["periodStart"].AsString());
+                Assert.Equal("2026-01-01", row["periodEnd"].AsString());
+                Assert.Equal(new SourceReference("report", row.RowId), row.CellSources!["periodStart"]);
+            });
+
+            var instantConnection = new SourceConnection("report", adapter.Kind, reportPath,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["periodKind"] = "instant",
+                    ["instantDate"] = "2025-12-31"
+                });
+            var instantSchema = await adapter.InspectSchemaAsync(instantConnection, CancellationToken.None);
+            var instantRows = new List<DataRecord>();
+            await foreach (var row in adapter.ReadFullAsync(instantConnection, instantSchema, CancellationToken.None))
+                instantRows.Add(row);
+
+            var instant = Assert.Single(instantRows);
+            Assert.Equal("report#f4", instant.RowId);
+            Assert.Equal("instant", instant["periodKind"].AsString());
+            Assert.Equal("2025-12-31", instant["instantDate"].AsString());
+            Assert.Equal(ValuePresence.Missing, instant["periodStart"].Presence);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        static XbrlFact ReverseRevenue(decimal value, XbrlPeriod period) => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = period,
+            Unit = new XbrlUnit("QAR"),
+            Value = value
+        };
+    }
+
+    [Theory]
+    [InlineData("periodKind", "fiscal-year")]
+    [InlineData("instantDate", "31/12/2025")]
+    [InlineData("periodStart", "2026-01-01")]
+    public async Task XbrlReportAdapter_RejectsInvalidStructuredPeriodFilters(string key, string value)
+    {
+        var adapter = new XbrlReportAdapter();
+        var configuration = new Dictionary<string, string>(StringComparer.Ordinal) { [key] = value };
+        if (key == "periodStart") configuration["periodEnd"] = "2026-01-01";
+        var connection = new SourceConnection("report", adapter.Kind, "unused.json", configuration);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+            await adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+    }
+
+    [Fact]
+    public async Task XbrlReportAdapter_RejectsContradictoryStructuredPeriodKinds()
+    {
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, "unused.json",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["periodKind"] = "duration",
+                ["instantDate"] = "2025-12-31"
+            });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+            await adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+    }
+
+    [Fact]
     public void ReportSource_RecordsNonBlockingReconstructionLimitation()
     {
         var diagnostics = new DiagnosticBag();

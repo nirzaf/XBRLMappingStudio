@@ -91,3 +91,17 @@ passed on commit `9142880c9c9db891336c2836841085796fb240d3`; Windows and Ubuntu
 each passed **1,987 tests** with **6** environment-gated Arelle skips. All four
 jobs passed, including Arelle integration, five memory qualifications and Windows
 worker-cancellation regression repeats.
+
+## XBR-07 structured reporting-period selection follow-up
+
+`XbrlReportAdapter` now accepts exact `periodKind`, `instantDate`, `periodStart`,
+and `periodEnd` filters alongside the existing combined ISO period filter.
+Malformed ISO dates, unsupported period-kind values, mixed instant/duration
+filters, and non-positive bounded durations fail with `IO_SCHEMA_MISMATCH`
+before report reading. A synthetic XML occurrence fixture confirms alternate
+periods are filtered while duplicate facts remain distinct and retain source
+locators. The focused reverse-mapping integration class passed **13/13**; the
+complete Windows Release Integration suite passed **514/514 runnable tests**
+with **6** environment-gated Arelle skips. This does not complete destination
+row selection, tuple flattening, typed-dimension generation, or full reverse
+mapping qualification.
