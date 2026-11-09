@@ -118,3 +118,22 @@ with independently exercised and conjunctive entity-scheme and entity-identifier
 snapshot memory qualifications and repeated worker-cancellation regressions
 also passed. The synthetic entity fixture does not qualify a real taxonomy or
 complete destination-row, tuple, and typed-dimension behavior.
+
+## ENG-02 Join working-set budget and failure classification follow-up
+
+Commit `5dc5e75c0725d6a2e8476ed13b945d61281bf6ca` adds a conservative retained-state
+estimate for in-memory Join indexes, matched-key state, expanded records and staged
+lineage, and drops the whole output if a later limit fails. The first exact-head
+workflow exposed a result-classification regression when this fail-closed behavior
+left no facts: MAP015 was being masked by the secondary XBR014 no-facts diagnostic as
+`IncompleteConfiguration`. Commit `a7d830d3a73f09488fc7d41d25b8b0186a66edfd`
+preserves `InvalidMapping` when a blocking graph error exists and asserts that
+expansion and field-conflict failures return no partial facts. The focused
+Integration regression passed **1/1**. Exact-head CI
+[42658862587](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42658862587)
+passed all four jobs. Windows and Ubuntu each passed **1,994 tests** with **6**
+environment-gated Arelle skips; all five streaming/snapshot memory qualifications
+passed on both platforms, as did the repeated Windows worker-cancellation checks,
+pinned Arelle worker integration, and repository hygiene. This is deterministic
+working-state budgeting, not a process-wide memory cap; general set-graph spilling,
+within-key spill, and native desktop acceptance remain open.
