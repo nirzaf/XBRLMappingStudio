@@ -57,3 +57,7 @@ The documentation-only commit `6786684044ed1b5ee707cfc77a3ef7a99fa38d91` exposed
 ## XBR06 mapped-aspect diagnostic evidence
 
 Commit `575aa4a5306e785d73ca7dd40a9dd6b8a72a1a39` strengthens the dynamic XBRL report-import regression to verify the exact FactConstruct port and source locator for invalid mapped concepts, units, dimensions, decimals, and languages. The Engine Release suite passed **156/156** locally. Exact-head CI [42572016556](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42572016556) passed Windows, Ubuntu, pinned Arelle integration, and repository hygiene. This does not close XBR06's existing-target-row, tuple, typed-dimension-generation, or large-input streaming limitations.
+
+## DST-08 explicit reconciliation cancellation follow-up
+
+Commit `84754f8f78d6bdf5c96d17ce97cfedc219c11765` makes explicit read-only receipt reconciliation propagate caller-requested cancellation and preserves the durable mixed outcome. The focused regression passed locally, and the complete Ops suite passed **446/446**. Exact-head CI [42574879444](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42574879444) passed all four jobs: Windows and Ubuntu each passed **1,892 tests** with **6** gated Arelle skips, all five memory qualifications passed on both platforms, the Windows worker-cancellation regression repeats passed, and pinned Arelle integration, repository hygiene, and SPDX/dependency inventory passed. Exhaustive mixed-destination reconciliation and filesystem power-loss durability remain open.
