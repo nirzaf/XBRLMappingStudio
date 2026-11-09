@@ -53,6 +53,23 @@ public sealed class MixedReceiptRevalidationTests
             yield return new object[] { kind, entryPoint, failure };
     }
 
+    public static IEnumerable<object[]> SqliteReceiptStateMatrix()
+    {
+        var priorStates = new (DestinationPublicationState State, string? FailureCode)[]
+        {
+            (DestinationPublicationState.Pending, null),
+            (DestinationPublicationState.InProgress, null),
+            (DestinationPublicationState.Rejected, null),
+            (DestinationPublicationState.Unknown, DiagnosticCodes.PubPartialFailure),
+            (DestinationPublicationState.Unknown, DiagnosticCodes.PubReceiptConflict),
+            (DestinationPublicationState.Confirmed, null)
+        };
+        foreach (var kind in new[] { "xbrl-json", "xbrl-xml" })
+        foreach (var (priorState, failureCode) in priorStates)
+        foreach (var evidence in new[] { "matching", "missing", "unavailable", "conflicting" })
+            yield return new object[] { kind, priorState, failureCode!, evidence };
+    }
+
     [Theory]
     [MemberData(nameof(TargetFailures))]
     public async Task PreviouslyConfirmedTargetFailure_IsStickyAcrossRestartsAndRecoversReadOnly(
@@ -251,6 +268,76 @@ public sealed class MixedReceiptRevalidationTests
         Assert.Equal(1, sqliteWrites);
         AssertConfirmed(retried.Record, kind);
         await AssertRecoveredWithoutWritesAsync(fixture);
+    }
+
+    [Theory]
+    [MemberData(nameof(SqliteReceiptStateMatrix))]
+    public async Task ReconciliationUsesDurableReceiptEvidenceAcrossPriorSqliteStates(
+        string kind, DestinationPublicationState priorState, string? priorFailureCode, string evidence)
+    {
+        using var fixture = await Fixture.CreateAsync(kind);
+        var protectedReceipt = priorState == DestinationPublicationState.Confirmed
+            || (priorState == DestinationPublicationState.Unknown
+                && priorFailureCode == DiagnosticCodes.PubReceiptConflict);
+        fixture.OpenStore().SetSqlite(fixture.Intent.OperationKey, priorState,
+            rowsWritten: priorState == DestinationPublicationState.Confirmed
+                || priorFailureCode == DiagnosticCodes.PubReceiptConflict ? OriginalRows : null,
+            failureCode: priorFailureCode);
+
+        switch (evidence)
+        {
+            case "matching":
+                break;
+            case "missing":
+                await ExecuteAsync(fixture.TargetPath, "DELETE FROM xms_idempotency_receipts");
+                break;
+            case "unavailable":
+                File.Delete(fixture.TargetPath);
+                break;
+            case "conflicting":
+                await ExecuteAsync(fixture.TargetPath,
+                    "UPDATE xms_idempotency_receipts SET intent_fingerprint='sha256:other-input' WHERE operation_key=$key",
+                    ("$key", SqliteOperationKey));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(evidence));
+        }
+
+        var reconciled = await fixture.OpenCoordinator().ReconcileAsync(fixture.Intent.OperationKey);
+
+        Assert.NotNull(reconciled);
+        Assert.Equal(DestinationPublicationState.Confirmed, reconciled.FileState);
+        Assert.Equal(SqliteOperationKey, reconciled.SqliteOperationKey);
+        Assert.Equal(SqliteFingerprint, reconciled.SqliteIntentFingerprint);
+        if (evidence == "matching")
+        {
+            Assert.Equal(DestinationPublicationState.Confirmed, reconciled.SqliteState);
+            Assert.Null(reconciled.SqliteFailureCode);
+            Assert.Equal(OriginalRows, reconciled.SqliteRowsWritten);
+        }
+        else if (evidence == "missing")
+        {
+            Assert.Equal(protectedReceipt ? DestinationPublicationState.Unknown : DestinationPublicationState.Rejected,
+                reconciled.SqliteState);
+            Assert.Equal(protectedReceipt ? DiagnosticCodes.PubReceiptConflict : "PUB_NOT_COMMITTED",
+                reconciled.SqliteFailureCode);
+            Assert.Equal(protectedReceipt ? OriginalRows : null, reconciled.SqliteRowsWritten);
+        }
+        else if (evidence == "unavailable")
+        {
+            Assert.Equal(DestinationPublicationState.Unknown, reconciled.SqliteState);
+            Assert.Equal(protectedReceipt ? DiagnosticCodes.PubReceiptConflict : DiagnosticCodes.PubPartialFailure,
+                reconciled.SqliteFailureCode);
+            Assert.Equal(protectedReceipt ? OriginalRows : null, reconciled.SqliteRowsWritten);
+        }
+        else
+        {
+            Assert.Equal(DestinationPublicationState.Unknown, reconciled.SqliteState);
+            Assert.Equal(DiagnosticCodes.PubReceiptConflict, reconciled.SqliteFailureCode);
+            Assert.Equal(protectedReceipt ? OriginalRows : null, reconciled.SqliteRowsWritten);
+        }
+
+        Assert.Equal(reconciled, fixture.OpenStore().Find(fixture.Intent.OperationKey));
     }
 
     [Theory]
