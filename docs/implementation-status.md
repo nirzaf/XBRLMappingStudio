@@ -319,3 +319,14 @@ checks both period forms, missing-field semantics, and source references. This
 improves generic reverse mapping but does not implement dimension-aware
 `FactConstruct`, target-row joins/updates, tuple flattening, or complete loss
 accounting; ENG-07 remains partial.
+
+The follow-on service regression now maps XBRL report `periodStart` and
+`periodEnd` through ordinary ExcelField string outputs and the existing
+`BuildDurationDate`/`FactConstruct` graph into three generated facts. Its
+independent source fixture includes duplicate occurrences with the same period
+and value plus a fact from an alternate period; the generated occurrence count,
+periods, scaled values and source locators reconcile, while the non-blocking
+IO031 reconstruction warning remains present. This demonstrates period-aware
+reverse mapping for that supported graph shape only; concept/unit/dimension
+selection remains partly static/configuration-bound, and the other ENG-07 gaps
+above are unchanged.

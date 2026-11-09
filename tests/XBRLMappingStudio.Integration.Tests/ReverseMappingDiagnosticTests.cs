@@ -226,6 +226,123 @@ public sealed class ReverseMappingDiagnosticTests
         }
     }
 
+    [Fact]
+    public async Task ReportPeriodFields_MapRepeatedAndAlternateDurationsIntoGeneratedFacts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-period-map-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var sourceFacts = new[]
+            {
+                ReverseRevenue(12.5m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
+                ReverseRevenue(12.5m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
+                ReverseRevenue(20m, XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1)))
+            };
+            var reportPath = Path.Combine(directory, "periods.json");
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, sourceFacts));
+
+            var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+            var binding = Assert.Single(project.Bindings);
+            project.Bindings[0] = binding with
+            {
+                Kind = "xbrl-report",
+                Configuration = new Dictionary<string, object?>(),
+                SchemaFingerprint = null
+            };
+
+            foreach (var field in project.Nodes.Where(node => node.NodeType == NodeTypeConstants.ExcelField).ToArray())
+            {
+                var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+                {
+                    ["column"] = "value"
+                };
+                parameters.Remove("rowFilterColumn");
+                parameters.Remove("rowFilterValue");
+                project.Nodes[project.Nodes.FindIndex(node => node.NodeId == field.NodeId)] = field with
+                {
+                    Parameters = parameters
+                };
+            }
+
+            string? sourceColumn = null;
+            foreach (var node in project.Nodes.ToArray())
+            {
+                sourceColumn = node.DisplayName switch
+                {
+                    "Entity" => "entityIdentifier",
+                    "Period start (2025-01-01)" => "periodStart",
+                    "Period end (2026-01-01)" => "periodEnd",
+                    _ => sourceColumn
+                };
+                if (sourceColumn is null) continue;
+                var updated = node with
+                {
+                    NodeType = NodeTypeConstants.ExcelField,
+                    Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["bindingId"] = binding.BindingId,
+                        ["column"] = sourceColumn
+                    },
+                    OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+                };
+                project.Nodes[project.Nodes.FindIndex(candidate => candidate.NodeId == node.NodeId)] = updated;
+                sourceColumn = null;
+            }
+
+            var sourceNodeIds = project.Nodes
+                .Where(node => node.NodeType == NodeTypeConstants.ExcelField)
+                .Select(node => node.NodeId)
+                .ToHashSet(StringComparer.Ordinal);
+            for (var edgeIndex = 0; edgeIndex < project.Edges.Count; edgeIndex++)
+            {
+                var edge = project.Edges[edgeIndex];
+                if (sourceNodeIds.Contains(edge.SourceNodeId)
+                    && project.Nodes.Single(node => node.NodeId == edge.SourceNodeId)
+                        .OutputPorts.Any(port => port.Name == "textValue"))
+                    project.Edges[edgeIndex] = edge with { SourcePortName = "textValue" };
+            }
+
+            var result = await new MappingJobService(profile, new SuccessfulWorker()).RunAsync(
+                project,
+                new Dictionary<string, SourceConnection>
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, "xbrl-report", reportPath)
+                },
+                new Dictionary<string, string>(),
+                preview: false,
+                CancellationToken.None);
+
+            Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
+            Assert.Equal(3, result.Facts.Count);
+            Assert.Equal(new[] { "2025-01-01/2026-01-01", "2025-01-01/2026-01-01", "2026-01-01/2027-01-01" },
+                result.Facts.Select(fact => fact.Period.ToIsoString()));
+            Assert.Equal(new[] { 12_500m, 12_500m, 20_000m }, result.Facts.Select(fact => fact.Value!.Value));
+            Assert.All(result.Facts, fact => Assert.Contains(fact.ContributingSources,
+                source => source.SourceId == binding.BindingId && source.Locator.StartsWith("report#f", StringComparison.Ordinal)));
+            Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail
+                && diagnostic.Severity == DiagnosticSeverity.Warning
+                && !diagnostic.IsBlocking);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        static XbrlFact ReverseRevenue(decimal value, XbrlPeriod period) => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "http://xbrl.org/entity/",
+            EntityIdentifier = "ABC-Corp",
+            Period = period,
+            Unit = new XbrlUnit("QAR"),
+            Value = value,
+            Decimals = -3
+        };
+    }
+
     [Theory]
     [InlineData("json", "json-records-v1", "reverse-records.json")]
     [InlineData("xml", "xml-records-v1", "reverse-records.xml")]
