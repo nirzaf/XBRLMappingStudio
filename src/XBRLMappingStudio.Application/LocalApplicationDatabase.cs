@@ -16,10 +16,11 @@ public sealed class LocalApplicationDatabase
     /// references, v5 adds append-only PDF review audit events, v6 adds an
     /// integrity-checked offline taxonomy metadata cache, v7 adds durable mixed
     /// file/SQLite publication reconciliation, v8 records its file artifact kind,
-    /// and v9 expands mixed reconciliation to versioned record file contracts.
+    /// v9 expands mixed reconciliation to versioned record file contracts, and v10
+    /// adds append-only audit for explicitly authorized disposable-cache pruning.
     /// Migrations are non-destructive.
     /// </summary>
-    public const int CurrentSchemaVersion = 9;
+    public const int CurrentSchemaVersion = 10;
     public const string SelectedAiProviderConfigSetting = "selected_ai_provider_config_id";
     public string Path { get; }
 
@@ -448,6 +449,32 @@ public sealed class LocalApplicationDatabase
                 PRAGMA user_version=9;
                 """;
             migration9.ExecuteNonQuery();
+        }
+        if (version < 10)
+        {
+            using var migration10 = connection.CreateCommand();
+            migration10.Transaction = transaction;
+            migration10.CommandText = """
+                CREATE TABLE retention_audit (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    approval_id TEXT NOT NULL UNIQUE,
+                    policy_id TEXT NOT NULL,
+                    approved_by_id TEXT NOT NULL,
+                    plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+                    expired_before_utc TEXT NOT NULL,
+                    deleted_cache_entries INTEGER NOT NULL CHECK(deleted_cache_entries > 0),
+                    deleted_cache_bytes INTEGER NOT NULL CHECK(deleted_cache_bytes >= 0),
+                    occurred_utc TEXT NOT NULL
+                );
+                CREATE TRIGGER retention_audit_no_update
+                    BEFORE UPDATE ON retention_audit
+                    BEGIN SELECT RAISE(ABORT, 'retention audit entries are immutable'); END;
+                CREATE TRIGGER retention_audit_no_delete
+                    BEFORE DELETE ON retention_audit
+                    BEGIN SELECT RAISE(ABORT, 'retention audit entries are immutable'); END;
+                PRAGMA user_version=10;
+                """;
+            migration10.ExecuteNonQuery();
         }
         transaction.Commit();
         using var wal = connection.CreateCommand();
