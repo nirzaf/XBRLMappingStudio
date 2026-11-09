@@ -193,6 +193,8 @@ public class SupportBundleTests
             File.WriteAllText(projectPath, XBRLMappingStudio.Project.ProjectSerializer.Serialize(project));
             var receipt = new PublicationService(journal).Publish(
                 dest, System.Text.Encoding.UTF8.GetBytes("{}"), runId: "run-b1");
+            var lockTokenCanary = "LOCK_TOKEN_CANARY_4E1D";
+            journal.Save(journal.Load("run-b1")! with { LockToken = lockTokenCanary });
 
             var bundle = SupportBundle.Build(projectPath, "run-b1", journal, new[]
             {
@@ -212,6 +214,8 @@ public class SupportBundleTests
             Assert.DoesNotContain("FY2026.xlsx", bundle, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("alex.analyst@example.com", bundle, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("SEEDCANARY999", bundle);
+            Assert.Contains("lock-token: <redacted>", bundle, StringComparison.Ordinal);
+            Assert.DoesNotContain(lockTokenCanary, bundle, StringComparison.Ordinal);
             Assert.Contains("<redacted>", bundle);
         }
         finally

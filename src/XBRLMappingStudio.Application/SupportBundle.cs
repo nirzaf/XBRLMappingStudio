@@ -128,7 +128,9 @@ public static partial class SupportBundle
             sb.Append("destination: <redacted>\n");
             sb.Append("staged-digest: ").Append(entry.StagedDigest ?? "-").Append('\n');
             sb.Append("final-digest: ").Append(entry.FinalDigest ?? "-").Append('\n');
-            sb.Append("lock-token: ").Append(entry.LockToken ?? "-").Append('\n');
+            // Lock tokens are publication-control material. They are useful for
+            // local recovery but must not leave the host through a shareable bundle.
+            sb.Append("lock-token: ").Append(entry.LockToken is null ? "-" : "<redacted>").Append('\n');
         }
 
         // Redacted bounded log tail. Bound this API too, even when callers do not
