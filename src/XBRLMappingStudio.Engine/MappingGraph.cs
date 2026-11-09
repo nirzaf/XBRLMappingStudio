@@ -322,13 +322,21 @@ public sealed class FunctionCatalog
                 new PortDefinition("textValue", PortShape.String, PortCardinality.Single, false),
                 new PortDefinition("textValues", PortShape.String, PortCardinality.Collection, false),
                 new PortDefinition("entity", PortShape.String, PortCardinality.Single, true),
+                new PortDefinition("conceptName", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("entityScheme", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("unitExpression", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("dimensionsJson", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("decimalsValue", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("languageValue", PortShape.String, PortCardinality.Single, false),
+                new PortDefinition("isNil", PortShape.Boolean, PortCardinality.Single, false),
                 new PortDefinition("period", PortShape.Instant, PortCardinality.Single, false),
                 new PortDefinition("instantDate", PortShape.Instant, PortCardinality.Single, false)
             },
             new[] { new PortDefinition("fact", PortShape.Fact, PortCardinality.Single, true) },
             new Dictionary<string, ParameterRequirement>
             {
-                ["concept"] = new("concept", PortShape.QualifiedName, true),
+                ["concept"] = new("concept", PortShape.QualifiedName, false,
+                    Description: "Fallback concept QName when the conceptName input is not connected."),
                 ["unit"] = new("unit", PortShape.String, false,
                     Description: "A profile-supported measure or product/ratio expression, e.g. USD, USD/shares, or USD*EUR/shares."),
                 ["periodType"] = new("periodType", PortShape.String, true, Description: "'instant'|'duration'"),

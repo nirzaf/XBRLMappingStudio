@@ -1168,7 +1168,7 @@ public sealed class PlanCompiler
                 ? CollectFactConstructSourcePaths(node, row, ctx)
                 : null;
             var outputs = Dispatch(node, sig, inputs, row, ctx, diag, profile,
-                periodInputConnected, factConstructSourcePaths);
+                graph, periodInputConnected, factConstructSourcePaths);
             foreach (var (name, value) in outputs)
             {
                 ctx.CancellationToken.ThrowIfCancellationRequested();
@@ -1229,6 +1229,7 @@ public sealed class PlanCompiler
         ExecutionContext ctx,
         DiagnosticBag diag,
         FilingProfile profile,
+        MappingGraph graph,
         bool periodInputConnected,
         IReadOnlyList<SourceTransformationPath>? factConstructSourcePaths)
     {
@@ -1785,8 +1786,24 @@ public sealed class PlanCompiler
                 var textValuePortName = hasCollectedTextValue && !hasScalarTextValue ? "textValues" : "textValue";
                 var hasNumericInput = !valueIn.IsMissing;
                 var hasTextInput = textIn.Presence is ValuePresence.Present or ValuePresence.ExplicitNil;
-                if (!hasNumericInput && !hasTextInput)
+                var nilIn = inputs.GetValueOrDefault("isNil", DataValue.Missing(PortShape.Boolean));
+                var requestedNil = nilIn.Presence == ValuePresence.Present && nilIn.AsBoolean();
+                if (!hasNumericInput && !hasTextInput && !requestedNil)
                 {
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
+                if (requestedNil && (hasNumericInput || hasTextInput))
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrUnsupportedConstruct,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        "A nil fact cannot also carry a numeric or text value.",
+                        nodeId: node.NodeId,
+                        portName: "isNil",
+                        source: nilIn.Source ?? valueIn.Source ?? textIn.Source,
+                        sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
@@ -1807,8 +1824,25 @@ public sealed class PlanCompiler
                 var factValueSource = hasTextInput ? textIn.Source : valueIn.Source;
                 var factValuePortName = hasTextInput ? textValuePortName : "value";
 
-                var concept = GetString(node, "concept")
-                    ?? throw new InvalidOperationException($"FactConstruct node '{node.DisplayName}' has no concept parameter.");
+                var conceptIn = inputs.GetValueOrDefault("conceptName", DataValue.Missing(PortShape.String));
+                var conceptConnected = graph.IncomingEdge(node.NodeId, "conceptName") is not null;
+                var concept = conceptConnected
+                    ? conceptIn.Presence == ValuePresence.Present ? conceptIn.AsString() : null
+                    : GetString(node, "concept");
+                if (string.IsNullOrWhiteSpace(concept))
+                {
+                    diag.Error(
+                        DiagnosticCodes.XbrConceptUnknown,
+                        DiagnosticSubsystem.XBRL,
+                        DiagnosticStage.Execution,
+                        "FactConstruct requires a concept QName from its conceptName input or concept parameter.",
+                        nodeId: node.NodeId,
+                        portName: conceptIn.Presence == ValuePresence.Present ? "conceptName" : factValuePortName,
+                        source: conceptIn.Source ?? factValueSource,
+                        sourceTransformationPaths: factConstructSourcePaths);
+                    outputs["fact"] = DataValue.Missing(PortShape.Fact);
+                    break;
+                }
                 var conceptMeta = profile.FindConcept(concept);
                 if (conceptMeta is null)
                 {
@@ -1839,7 +1873,11 @@ public sealed class PlanCompiler
                     break;
                 }
 
-                var unitStr = GetString(node, "unit");
+                var unitIn = inputs.GetValueOrDefault("unitExpression", DataValue.Missing(PortShape.String));
+                var unitConnected = graph.IncomingEdge(node.NodeId, "unitExpression") is not null;
+                var unitStr = unitConnected
+                    ? unitIn.Presence == ValuePresence.Present ? unitIn.AsString() : null
+                    : GetString(node, "unit");
                 XbrlUnit? unit = null;
                 CompoundUnit? compoundUnit = null;
                 if (!FactUnitParser.TryParse(unitStr, profile, out unit, out compoundUnit, out var unitError))
@@ -1851,7 +1889,7 @@ public sealed class PlanCompiler
                         unitError,
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource,
+                        source: unitIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
@@ -1865,17 +1903,25 @@ public sealed class PlanCompiler
                         unitContractError,
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource,
+                        source: unitIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
                 }
 
-                if (!FactDimensionParser.TryParse(
-                        GetString(node, "dimensions"),
-                        profile.DimensionDomains,
-                        out var dimensions,
-                        out var dimensionError))
+                var dimensionsJsonIn = inputs.GetValueOrDefault("dimensionsJson", DataValue.Missing(PortShape.String));
+                var dimensionsJsonConnected = graph.IncomingEdge(node.NodeId, "dimensionsJson") is not null;
+                var dimensionsText = dimensionsJsonConnected
+                    ? dimensionsJsonIn.Presence == ValuePresence.Present ? dimensionsJsonIn.AsString() : null
+                    : GetString(node, "dimensions");
+                var dimensionsValid = dimensionsJsonConnected
+                    ? FactDimensionParser.TryParseJson(dimensionsText, profile.DimensionDomains,
+                        out var dimensionsFromJson, out var dimensionJsonError)
+                    : FactDimensionParser.TryParse(dimensionsText, profile.DimensionDomains,
+                        out dimensionsFromJson, out dimensionJsonError);
+                var dimensions = dimensionsFromJson;
+                var dimensionError = dimensionJsonError;
+                if (!dimensionsValid)
                 {
                     diag.Error(
                         DiagnosticCodes.XbrDimensionInvalid,
@@ -1884,7 +1930,7 @@ public sealed class PlanCompiler
                         dimensionError,
                         nodeId: node.NodeId,
                         portName: factValuePortName,
-                        source: factValueSource,
+                        source: dimensionsJsonIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
                     break;
@@ -1892,6 +1938,11 @@ public sealed class PlanCompiler
 
                 var entityIn = inputs.GetValueOrDefault("entity", DataValue.Missing(PortShape.String));
                 var entity = entityIn.AsString();
+                var entitySchemeIn = inputs.GetValueOrDefault("entityScheme", DataValue.Missing(PortShape.String));
+                var entitySchemeConnected = graph.IncomingEdge(node.NodeId, "entityScheme") is not null;
+                var entityScheme = entitySchemeConnected
+                    ? entitySchemeIn.Presence == ValuePresence.Present ? entitySchemeIn.AsString() : string.Empty
+                    : "http://xbrl.org/entity/";
                 var periodIn = inputs.GetValueOrDefault("period", DataValue.Missing(PortShape.Instant));
                 var instantIn = inputs.GetValueOrDefault("instantDate", DataValue.Missing(PortShape.Instant));
 
@@ -1920,9 +1971,14 @@ public sealed class PlanCompiler
                 }
 
                 int? decimals = null;
-                if (node.Parameters.TryGetValue("decimals", out var dv))
+                var decimalsIn = inputs.GetValueOrDefault("decimalsValue", DataValue.Missing(PortShape.String));
+                var decimalsConnected = graph.IncomingEdge(node.NodeId, "decimalsValue") is not null;
+                var decimalsText = decimalsConnected
+                    ? decimalsIn.Presence == ValuePresence.Present ? decimalsIn.AsString() : null
+                    : node.Parameters.TryGetValue("decimals", out var dv) ? dv?.ToString() : null;
+                if (decimalsText is not null)
                 {
-                    var decimalsStr = dv?.ToString();
+                    var decimalsStr = decimalsText;
                     if (string.Equals(decimalsStr, "INF", StringComparison.OrdinalIgnoreCase))
                     {
                         decimals = null;
@@ -1936,7 +1992,7 @@ public sealed class PlanCompiler
                             "Decimals must be an integer in the supported range [-30, 30] or INF.",
                             nodeId: node.NodeId,
                             portName: factValuePortName,
-                            source: factValueSource,
+                            source: decimalsIn.Source ?? factValueSource,
                             sourceTransformationPaths: factConstructSourcePaths);
                         outputs["fact"] = DataValue.Missing(PortShape.Fact);
                         break;
@@ -1953,7 +2009,7 @@ public sealed class PlanCompiler
                                 $"Decimals value {parsed} is outside the supported range [-30, 30].",
                                 nodeId: node.NodeId,
                                 portName: factValuePortName,
-                                source: factValueSource,
+                                source: decimalsIn.Source ?? factValueSource,
                                 sourceTransformationPaths: factConstructSourcePaths);
                             outputs["fact"] = DataValue.Missing(PortShape.Fact);
                             break;
@@ -1962,20 +2018,26 @@ public sealed class PlanCompiler
                     }
                 }
 
+                var languageIn = inputs.GetValueOrDefault("languageValue", DataValue.Missing(PortShape.String));
+                var languageConnected = graph.IncomingEdge(node.NodeId, "languageValue") is not null;
+                var language = languageConnected
+                    ? languageIn.Presence == ValuePresence.Present ? languageIn.AsString() : null
+                    : GetString(node, "language");
+
                 var pf = new PendingFact
                 {
                     ConceptName = concept,
-                    EntityScheme = "http://xbrl.org/entity/",
+                    EntityScheme = entityScheme,
                     EntityIdentifier = entity,
                     Period = period,
                     Unit = unit,
                     CompoundUnit = compoundUnit,
                     Decimals = decimals,
-                    Language = GetString(node, "language"),
+                    Language = language,
                     Dimensions = dimensions,
                     Value = hasNumericInput && valueIn.Presence == ValuePresence.Present ? valueIn.AsDecimal() : null,
                     TextValue = textIn.Presence == ValuePresence.Present ? textIn.AsString() : null,
-                    IsNil = valueIn.IsNil || textIn.IsNil
+                    IsNil = requestedNil || valueIn.IsNil || textIn.IsNil
                 };
 
                 // Period-vs-concept type check (acceptance: wrong period type produces useful error).
@@ -1999,21 +2061,21 @@ public sealed class PlanCompiler
                     var (diagnosticCode, portName, source) = issue switch
                     {
                         FactValidationIssue.InvalidEntity =>
-                            (DiagnosticCodes.XbrEntityMissing, "entity", entityIn.Source ?? factValueSource),
+                            (DiagnosticCodes.XbrEntityMissing, "entity", entitySchemeIn.Source ?? entityIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidPeriod =>
                             (DiagnosticCodes.XbrPeriodInvalid, "period", periodIn.Source ?? instantIn.Source ?? factValueSource),
                         FactValidationIssue.PeriodTypeMismatch =>
                             (DiagnosticCodes.XbrPeriodTypeMismatch, "period", periodIn.Source ?? instantIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidUnit =>
-                            (DiagnosticCodes.XbrUnitMissing, factValuePortName, factValueSource ?? entityIn.Source),
+                            (DiagnosticCodes.XbrUnitMissing, factValuePortName, unitIn.Source ?? factValueSource ?? entityIn.Source),
                         FactValidationIssue.InvalidDecimals =>
-                            (DiagnosticCodes.XbrDecimalsOutOfRange, factValuePortName, factValueSource),
+                            (DiagnosticCodes.XbrDecimalsOutOfRange, factValuePortName, decimalsIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidDimensions =>
-                            (DiagnosticCodes.XbrDimensionInvalid, factValuePortName, factValueSource),
+                            (DiagnosticCodes.XbrDimensionInvalid, factValuePortName, dimensionsJsonIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidConcept =>
                             (DiagnosticCodes.XbrConceptUnknown, factValuePortName, factValueSource),
                         FactValidationIssue.InvalidLanguage =>
-                            (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source),
+                            (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, languageIn.Source ?? factValueSource ?? entityIn.Source),
                         FactValidationIssue.InvalidValue =>
                             (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source),
                         _ => (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source)

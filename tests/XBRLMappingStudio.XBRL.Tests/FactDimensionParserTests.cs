@@ -52,4 +52,27 @@ public class FactDimensionParserTests
         Assert.False(FactDimensionParser.TryParse(tooMany, Domains, out _, out error));
         Assert.Contains("at most", error, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void ParsesBoundedAdapterDimensionJsonAndRejectsTypedOrUnknownProperties()
+    {
+        const string json = "[{\"Name\":\"ex:RegionAxis\",\"MemberName\":\"ex:Domestic\",\"IsExplicit\":true}]";
+        Assert.True(FactDimensionParser.TryParseJson(json, Domains, out var dimensions, out var error), error);
+        Assert.Equal(new Dimension("ex:RegionAxis", "ex:Domestic"), Assert.Single(dimensions));
+
+        Assert.False(FactDimensionParser.TryParseJson(
+            "[{\"Name\":\"ex:RegionAxis\",\"MemberName\":\"ex:Domestic\",\"IsExplicit\":false}]",
+            Domains, out dimensions, out error));
+        Assert.Empty(dimensions);
+        Assert.Contains("Typed dimensions", error, StringComparison.OrdinalIgnoreCase);
+
+        Assert.False(FactDimensionParser.TryParseJson(
+            "[{\"Name\":\"ex:RegionAxis\",\"MemberName\":\"ex:Domestic\",\"extra\":1}]",
+            Domains, out dimensions, out error));
+        Assert.Contains("unsupported", error, StringComparison.OrdinalIgnoreCase);
+
+        Assert.False(FactDimensionParser.TryParseJson(new string('x', FactDimensionParser.MaximumJsonLength + 1),
+            Domains, out dimensions, out error));
+        Assert.Contains("limit", error, StringComparison.OrdinalIgnoreCase);
+    }
 }

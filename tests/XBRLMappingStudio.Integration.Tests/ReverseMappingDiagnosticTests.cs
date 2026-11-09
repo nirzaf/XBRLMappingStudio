@@ -238,7 +238,8 @@ public sealed class ReverseMappingDiagnosticTests
             {
                 ReverseRevenue(12.5m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
                 ReverseRevenue(12.5m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1))),
-                ReverseRevenue(20m, XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1)))
+                ReverseRevenue(20m, XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1))),
+                ReverseRevenue(null, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)))
             };
             var reportPath = Path.Combine(directory, "periods.json");
             await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, sourceFacts));
@@ -304,6 +305,70 @@ public sealed class ReverseMappingDiagnosticTests
                     project.Edges[edgeIndex] = edge with { SourcePortName = "textValue" };
             }
 
+            var factIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var factNode = project.Nodes[factIndex];
+            var dynamicAspects = new (string Port, string Column)[]
+            {
+                ("conceptName", "concept"),
+                ("entityScheme", "entityScheme"),
+                ("unitExpression", "unit"),
+                ("dimensionsJson", "dimensionsJson"),
+                ("decimalsValue", "decimals")
+            };
+            var factInputs = factNode.InputPorts.ToList();
+            foreach (var (port, column) in dynamicAspects)
+            {
+                factInputs.Add(new PortDefinition(port, PortShape.String, PortCardinality.Single));
+                var aspectNodeId = Id.New();
+                project.Nodes.Add(new MappingNode
+                {
+                    NodeId = aspectNodeId,
+                    NodeType = NodeTypeConstants.ExcelField,
+                    DisplayName = $"Imported {column}",
+                    Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["bindingId"] = binding.BindingId,
+                        ["column"] = column
+                    },
+                    OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+                });
+                project.Edges.Add(new MappingEdge
+                {
+                    EdgeId = Id.New(),
+                    SourceNodeId = aspectNodeId,
+                    SourcePortName = "textValue",
+                    TargetNodeId = factNode.NodeId,
+                    TargetPortName = port
+                });
+            }
+            factInputs.Add(new PortDefinition("isNil", PortShape.Boolean, PortCardinality.Single));
+            var nilNodeId = Id.New();
+            project.Nodes.Add(new MappingNode
+            {
+                NodeId = nilNodeId,
+                NodeType = NodeTypeConstants.ExcelField,
+                DisplayName = "Imported nil flag",
+                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["bindingId"] = binding.BindingId,
+                    ["column"] = "nil"
+                },
+                OutputPorts = new() { new PortDefinition("value", PortShape.Boolean, PortCardinality.Single) }
+            });
+            project.Edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(),
+                SourceNodeId = nilNodeId,
+                SourcePortName = "value",
+                TargetNodeId = factNode.NodeId,
+                TargetPortName = "isNil"
+            });
+            var factParameters = new Dictionary<string, object?>(factNode.Parameters, StringComparer.Ordinal);
+            factParameters.Remove("concept");
+            factParameters.Remove("unit");
+            factParameters.Remove("decimals");
+            project.Nodes[factIndex] = factNode with { InputPorts = factInputs, Parameters = factParameters };
+
             var result = await new MappingJobService(profile, new SuccessfulWorker()).RunAsync(
                 project,
                 new Dictionary<string, SourceConnection>
@@ -315,10 +380,12 @@ public sealed class ReverseMappingDiagnosticTests
                 CancellationToken.None);
 
             Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
-            Assert.Equal(3, result.Facts.Count);
-            Assert.Equal(new[] { "2025-01-01/2026-01-01", "2025-01-01/2026-01-01", "2026-01-01/2027-01-01" },
+            Assert.Equal(4, result.Facts.Count);
+            Assert.Equal(new[] { "2025-01-01/2026-01-01", "2025-01-01/2026-01-01", "2025-01-01/2026-01-01", "2026-01-01/2027-01-01" },
                 result.Facts.Select(fact => fact.Period.ToIsoString()));
-            Assert.Equal(new[] { 12_500m, 12_500m, 20_000m }, result.Facts.Select(fact => fact.Value!.Value));
+            Assert.Equal(new decimal?[] { 12_500m, 12_500m, null, 20_000m }, result.Facts.Select(fact => fact.Value));
+            Assert.True(result.Facts[2].IsNil);
+            Assert.All(result.Facts, fact => Assert.Equal("https://example.test/xbrl/entity", fact.EntityScheme));
             Assert.All(result.Facts, fact => Assert.Contains(fact.ContributingSources,
                 source => source.SourceId == binding.BindingId && source.Locator.StartsWith("report#f", StringComparison.Ordinal)));
             Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
@@ -331,15 +398,16 @@ public sealed class ReverseMappingDiagnosticTests
             Directory.Delete(directory, recursive: true);
         }
 
-        static XbrlFact ReverseRevenue(decimal value, XbrlPeriod period) => new()
+        static XbrlFact ReverseRevenue(decimal? value, XbrlPeriod period) => new()
         {
             ConceptName = SyntheticProfile.Qualified("Revenue"),
-            EntityScheme = "http://xbrl.org/entity/",
+            EntityScheme = "https://example.test/xbrl/entity",
             EntityIdentifier = "ABC-Corp",
             Period = period,
             Unit = new XbrlUnit("QAR"),
             Value = value,
-            Decimals = -3
+            Decimals = value is null ? null : -3,
+            IsNil = value is null
         };
     }
 
