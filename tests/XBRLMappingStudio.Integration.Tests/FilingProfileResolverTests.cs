@@ -359,6 +359,19 @@ public sealed class FilingProfileResolverTests
                 installed.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
             var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(
                 File.ReadAllText(manifestPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var entryPath = Path.Combine(installed.InstallationDirectory, "taxonomy", "entry.xsd");
+            File.WriteAllText(entryPath, """
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           xmlns:ex="urn:example"
+                           targetNamespace="urn:example"
+                           elementFormDefault="qualified">
+                  <xs:element name="TypedMember" type="xs:string" />
+                </xs:schema>
+                """);
+            var packageFiles = new Dictionary<string, string>(manifest.PackageFiles, StringComparer.Ordinal)
+            {
+                ["taxonomy/entry.xsd"] = FileDigest(entryPath)
+            };
             var typedManifest = manifest with
             {
                 Concepts = manifest.Concepts.Append(new ConceptMetadata(
@@ -367,6 +380,7 @@ public sealed class FilingProfileResolverTests
                 {
                     ["xs"] = "http://www.w3.org/2001/XMLSchema"
                 },
+                PackageFiles = packageFiles,
                 TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
                 {
                     ["ex:TypedAxis"] = new("ex:TypedMember", "xs:string")
@@ -405,6 +419,58 @@ public sealed class FilingProfileResolverTests
             var rejected = InstalledFilingProfileCatalog.Load(root);
             Assert.Empty(rejected.Profiles);
             Assert.Contains(rejected.Issues, issue => issue.Message.Contains("schema version 7", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CatalogRejectsTypedDomainElementMissingFromHashVerifiedSchemas()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-missing-typed-domain", "1.0.0", "Revenue");
+            var entryPath = Path.Combine(installed.InstallationDirectory, "taxonomy", "entry.xsd");
+            File.WriteAllText(entryPath, """
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           xmlns:ex="urn:example"
+                           targetNamespace="urn:example">
+                  <xs:element name="ActualDomain" type="xs:string" />
+                </xs:schema>
+                """);
+            var manifestPath = Path.Combine(
+                installed.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
+            var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(
+                File.ReadAllText(manifestPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var typedManifest = manifest with
+            {
+                Concepts = manifest.Concepts.Append(new ConceptMetadata(
+                    "ex:TypedAxis", "urn:example", "TypedAxis", "Typed axis", "dimension", "duration", true)).ToList(),
+                NamespaceUris = new Dictionary<string, string>(manifest.NamespaceUris, StringComparer.Ordinal)
+                {
+                    ["xs"] = "http://www.w3.org/2001/XMLSchema"
+                },
+                PackageFiles = new Dictionary<string, string>(manifest.PackageFiles, StringComparer.Ordinal)
+                {
+                    ["taxonomy/entry.xsd"] = FileDigest(entryPath)
+                },
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new("ex:MissingDomain", "xs:string")
+                },
+                ProfileDigest = ""
+            };
+            typedManifest = typedManifest with { ProfileDigest = typedManifest.ComputeDigest() };
+            File.WriteAllText(manifestPath, typedManifest.ToJson());
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue =>
+                issue.Message.Contains("hash-verified package schemas", StringComparison.Ordinal));
         }
         finally
         {

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Application;
@@ -384,6 +385,7 @@ public static class InstalledFilingProfileCatalog
             if (!StringComparer.Ordinal.Equals(actualDigest, expectedDigest))
                 throw new InvalidDataException($"Package hash mismatch for '{relativePath}'.");
         }
+        ValidateTypedDimensionDomainDeclarations(manifest, versionDirectory);
 
         var entryPointPath = ResolvePackageFile(versionDirectory, manifest.EntryPoint);
         var profile = manifest.ToProfile();
@@ -661,6 +663,105 @@ public static class InstalledFilingProfileCatalog
         {
             return false;
         }
+    }
+
+    private static void ValidateTypedDimensionDomainDeclarations(
+        FilingProfileManifest manifest,
+        string versionDirectory)
+    {
+        if (manifest.TypedDimensionDomains.Count == 0) return;
+
+        XNamespace xsd = "http://www.w3.org/2001/XMLSchema";
+        var declarations = new Dictionary<(string NamespaceUri, string LocalName), List<bool>>();
+        foreach (var relativePath in manifest.PackageFiles.Keys
+                     .Where(path => Path.GetExtension(path).Equals(".xsd", StringComparison.OrdinalIgnoreCase))
+                     .Order(StringComparer.Ordinal))
+        {
+            var fullPath = ResolvePackageFile(versionDirectory, relativePath);
+            var info = new FileInfo(fullPath);
+            if (info.Length > 16L * 1024 * 1024)
+                throw new InvalidDataException($"Typed-domain schema '{relativePath}' exceeds the 16 MiB XML inspection limit.");
+
+            using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                64 * 1024, FileOptions.SequentialScan);
+            using var reader = System.Xml.XmlReader.Create(stream, new System.Xml.XmlReaderSettings
+            {
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 16L * 1024 * 1024,
+                MaxCharactersFromEntities = 0,
+                IgnoreComments = true,
+                IgnoreWhitespace = true
+            });
+            XDocument document;
+            try
+            {
+                document = XDocument.Load(reader, LoadOptions.None);
+            }
+            catch (System.Xml.XmlException exception)
+            {
+                throw new InvalidDataException($"Typed-domain schema '{relativePath}' is not safe, bounded XML.", exception);
+            }
+
+            var schema = document.Root;
+            if (schema?.Name != xsd + "schema") continue;
+            var targetNamespace = (string?)schema.Attribute("targetNamespace") ?? string.Empty;
+            foreach (var element in schema.Elements(xsd + "element"))
+            {
+                var name = (string?)element.Attribute("name");
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var isSupportedString = IsXsdStringElementDeclaration(element, xsd);
+                var key = (targetNamespace, name);
+                if (!declarations.TryGetValue(key, out var matches))
+                    declarations.Add(key, matches = new List<bool>());
+                matches.Add(isSupportedString);
+            }
+        }
+
+        foreach (var (dimensionQName, typedDomain) in manifest.TypedDimensionDomains)
+        {
+            var separator = typedDomain.DomainElementQName.IndexOf(':');
+            var prefix = typedDomain.DomainElementQName[..separator];
+            var localName = typedDomain.DomainElementQName[(separator + 1)..];
+            var namespaceUri = manifest.NamespaceUris[prefix];
+            if (!declarations.TryGetValue((namespaceUri, localName), out var matches)
+                || matches.Count != 1 || !matches[0])
+                throw new InvalidDataException(
+                    $"Typed dimension '{dimensionQName}' domain element '{typedDomain.DomainElementQName}' must resolve to exactly one global xs:string element declaration in the hash-verified package schemas.");
+        }
+    }
+
+    private static bool IsXsdStringElementDeclaration(XElement element, XNamespace xsd)
+    {
+        var typeName = (string?)element.Attribute("type");
+        if (!string.IsNullOrWhiteSpace(typeName))
+            return ResolvesToXsdString(element, typeName);
+
+        var simpleType = element.Element(xsd + "simpleType");
+        var restriction = simpleType?.Element(xsd + "restriction");
+        var baseName = (string?)restriction?.Attribute("base");
+        return !string.IsNullOrWhiteSpace(baseName) && ResolvesToXsdString(element, baseName);
+    }
+
+    private static bool ResolvesToXsdString(XElement element, string qualifiedName)
+    {
+        var separator = qualifiedName.IndexOf(':');
+        if (separator <= 0 || separator != qualifiedName.LastIndexOf(':')
+            || separator == qualifiedName.Length - 1)
+            return false;
+        var prefix = qualifiedName[..separator];
+        var localName = qualifiedName[(separator + 1)..];
+        try
+        {
+            System.Xml.XmlConvert.VerifyNCName(prefix);
+            System.Xml.XmlConvert.VerifyNCName(localName);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return false;
+        }
+        return localName == "string"
+            && element.GetNamespaceOfPrefix(prefix)?.NamespaceName == "http://www.w3.org/2001/XMLSchema";
     }
 
     private static string ResolvePackageFile(string versionDirectory, string relativePath)
