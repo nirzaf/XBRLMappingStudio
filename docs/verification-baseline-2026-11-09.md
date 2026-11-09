@@ -94,14 +94,16 @@ worker-cancellation regression repeats.
 
 ## XBR-07 structured reporting-period selection follow-up
 
-`XbrlReportAdapter` now accepts exact `periodKind`, `instantDate`, `periodStart`,
-and `periodEnd` filters alongside the existing combined ISO period filter.
+`XbrlReportAdapter` now accepts exact entity-scheme and entity-identifier filters
+alongside `periodKind`, `instantDate`, `periodStart`, and `periodEnd` filters and
+the existing combined ISO period filter.
 Malformed ISO dates, unsupported period-kind values, mixed instant/duration
 filters, and non-positive bounded durations fail with `IO_SCHEMA_MISMATCH`
-before report reading. A synthetic XML occurrence fixture confirms alternate
-periods are filtered while duplicate facts remain distinct and retain source
-locators. The focused reverse-mapping integration class passed **13/13**; the
-complete Windows Release Integration suite passed **514/514 runnable tests**
-with **6** environment-gated Arelle skips. This does not complete destination
+before report reading. A synthetic XML occurrence fixture confirms a second
+entity with the same concept and period is excluded while duplicate facts for
+the selected entity remain distinct and retain source locators. The focused
+reverse-mapping integration class passed **13/13**; after this entity-filter
+follow-up, the complete Windows Release Integration suite passed **514/514
+runnable tests** with **6** environment-gated Arelle skips. This does not complete destination
 row selection, tuple flattening, typed-dimension generation, or full reverse
 mapping qualification.

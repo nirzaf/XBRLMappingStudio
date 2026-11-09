@@ -112,7 +112,9 @@ public sealed class ReverseMappingDiagnosticTests
                     Period = XbrlPeriod.OfInstant(new DateOnly(2025, 12, 31)),
                     Unit = new XbrlUnit("QAR"),
                     Value = 30m
-                }
+                },
+                ReverseRevenue(40m, XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                    "https://example.test/other-entity", "ACME-2")
             };
             await File.WriteAllTextAsync(reportPath, XBRLMappingStudio.XBRL.XmlSerializer.Serialize(profile, facts));
 
@@ -120,6 +122,8 @@ public sealed class ReverseMappingDiagnosticTests
             var durationSelection = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["concept"] = SyntheticProfile.Qualified("Revenue"),
+                ["entityScheme"] = "https://example.test/entity",
+                ["entityIdentifier"] = "ACME-1",
                 ["periodKind"] = "duration",
                 ["periodStart"] = "2025-01-01",
                 ["periodEnd"] = "2026-01-01"
@@ -162,11 +166,12 @@ public sealed class ReverseMappingDiagnosticTests
             Directory.Delete(directory, recursive: true);
         }
 
-        static XbrlFact ReverseRevenue(decimal value, XbrlPeriod period) => new()
+        static XbrlFact ReverseRevenue(decimal value, XbrlPeriod period,
+            string entityScheme = "https://example.test/entity", string entityIdentifier = "ACME-1") => new()
         {
             ConceptName = SyntheticProfile.Qualified("Revenue"),
-            EntityScheme = "https://example.test/entity",
-            EntityIdentifier = "ACME-1",
+            EntityScheme = entityScheme,
+            EntityIdentifier = entityIdentifier,
             Period = period,
             Unit = new XbrlUnit("QAR"),
             Value = value

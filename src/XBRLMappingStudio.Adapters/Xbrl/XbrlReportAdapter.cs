@@ -28,7 +28,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static readonly HashSet<string> SupportedSelectionKeys = new(StringComparer.Ordinal)
     {
-        "occurrenceId", "concept", "period", "periodKind", "instantDate", "periodStart", "periodEnd",
+        "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
+        "instantDate", "periodStart", "periodEnd",
         "unit", "dimensionAxis", "dimensionMember", "dimensionFilters",
         "maxInputBytes"
     };
@@ -86,6 +87,10 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                     $"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId))
             .Where(item => selection.Concept is null
                 || StringComparer.Ordinal.Equals(item.Fact.ConceptName, selection.Concept))
+            .Where(item => selection.EntityScheme is null
+                || StringComparer.Ordinal.Equals(item.Fact.EntityScheme, selection.EntityScheme))
+            .Where(item => selection.EntityIdentifier is null
+                || StringComparer.Ordinal.Equals(item.Fact.EntityIdentifier, selection.EntityIdentifier))
             .Where(item => selection.Period is null
                 || StringComparer.Ordinal.Equals(item.Fact.Period.ToIsoString(), selection.Period))
             .Where(item => selection.PeriodKind is null
@@ -211,7 +216,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report dimension selection cannot repeat an axis in both 'dimensionFilters' and the 'dimensionAxis'/'dimensionMember' pair.");
 
-        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("period"), periodKind,
+        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("entityScheme"),
+            Get("entityIdentifier"), Get("period"), periodKind,
             instantDate, periodStart, periodEnd, Get("unit"), dimensions);
     }
 
@@ -306,6 +312,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     private sealed record ReportSelection(
         string? OccurrenceId,
         string? Concept,
+        string? EntityScheme,
+        string? EntityIdentifier,
         string? Period,
         string? PeriodKind,
         DateOnly? InstantDate,
@@ -315,12 +323,13 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         IReadOnlyDictionary<string, string> Dimensions)
     {
         public bool HasAspectFilters
-            => OccurrenceId is not null || Concept is not null || Period is not null || PeriodKind is not null
+            => OccurrenceId is not null || Concept is not null || EntityScheme is not null
+                || EntityIdentifier is not null || Period is not null || PeriodKind is not null
                 || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
                 || Unit is not null || Dimensions.Count != 0;
 
         public static ReportSelection Empty { get; }
-            = new(null, null, null, null, null, null, null, null,
+            = new(null, null, null, null, null, null, null, null, null, null,
                 new Dictionary<string, string>(StringComparer.Ordinal));
     }
 }
