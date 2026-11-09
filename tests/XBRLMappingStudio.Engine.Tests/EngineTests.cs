@@ -345,7 +345,7 @@ public class ExecutionPlanTests
     }
 
     [Fact]
-    public async Task FactConstructUnknownMappedConceptReportsConceptSource()
+    public async Task FactConstructMappedAspectDiagnosticsReportTheirSourcePorts()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xbrl-dynamic-concept-source-" + Guid.NewGuid().ToString("N"));
         var path = TestFixtures.MaterializeWorkbook(dir);
@@ -355,97 +355,95 @@ public class ExecutionPlanTests
             var bindingId = project.Bindings[0].BindingId;
             var fact = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
             fact.Parameters.Remove("concept");
-            fact.InputPorts.Add(new PortDefinition("conceptName", PortShape.String, PortCardinality.Single));
-            fact.InputPorts.Add(new PortDefinition("decimalsValue", PortShape.String, PortCardinality.Single));
-
-            var conceptSource = new MappingNode
+            var aspectColumns = new[]
             {
-                NodeId = Id.New(),
-                NodeType = NodeTypeConstants.ExcelField,
-                DisplayName = "Mapped concept",
-                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["bindingId"] = bindingId,
-                    ["column"] = "dynamicConcept"
-                },
-                OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+                (Port: "conceptName", Column: "dynamicConcept"),
+                (Port: "unitExpression", Column: "dynamicUnit"),
+                (Port: "dimensionsJson", Column: "dynamicDimensions"),
+                (Port: "decimalsValue", Column: "dynamicDecimals"),
+                (Port: "languageValue", Column: "dynamicLanguage")
             };
-            project.Nodes.Add(conceptSource);
-            project.Edges.Add(new MappingEdge
+            foreach (var (port, column) in aspectColumns)
             {
-                EdgeId = Id.New(),
-                SourceNodeId = conceptSource.NodeId,
-                SourcePortName = "textValue",
-                TargetNodeId = fact.NodeId,
-                TargetPortName = "conceptName"
-            });
-            var decimalsSource = conceptSource with
-            {
-                NodeId = Id.New(),
-                DisplayName = "Mapped decimals",
-                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                fact.InputPorts.Add(new PortDefinition(port, PortShape.String, PortCardinality.Single));
+                var source = new MappingNode
                 {
-                    ["bindingId"] = bindingId,
-                    ["column"] = "dynamicDecimals"
-                }
-            };
-            project.Nodes.Add(decimalsSource);
-            project.Edges.Add(new MappingEdge
-            {
-                EdgeId = Id.New(),
-                SourceNodeId = decimalsSource.NodeId,
-                SourcePortName = "textValue",
-                TargetNodeId = fact.NodeId,
-                TargetPortName = "decimalsValue"
-            });
+                    NodeId = Id.New(),
+                    NodeType = NodeTypeConstants.ExcelField,
+                    DisplayName = $"Mapped {port}",
+                    Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["bindingId"] = bindingId,
+                        ["column"] = column
+                    },
+                    OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+                };
+                project.Nodes.Add(source);
+                project.Edges.Add(new MappingEdge
+                {
+                    EdgeId = Id.New(),
+                    SourceNodeId = source.NodeId,
+                    SourcePortName = "textValue",
+                    TargetNodeId = fact.NodeId,
+                    TargetPortName = port
+                });
+            }
 
             var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
             Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
-            var context = MakeContext(project, path);
-            var conceptReference = new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, "workbook#concept");
-            var decimalsReference = new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, "workbook#decimals");
-            context.LoadedSources[bindingId] = context.LoadedSources[bindingId].Select(record =>
+
+            var references = aspectColumns.ToDictionary(
+                item => item.Column,
+                item => new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, $"workbook#{item.Port}"),
+                StringComparer.Ordinal);
+            ExecutionContext CreateContext(string concept, string unit, string dimensions, string decimals, string language)
             {
-                var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-                fields["dynamicConcept"] = DataValue.StringValue("synthetic:UnknownConcept", conceptReference);
-                fields["dynamicDecimals"] = DataValue.StringValue("3", decimalsReference);
-                return new DataRecord
+                var context = MakeContext(project, path);
+                var values = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    RowId = record.RowId,
-                    Fields = fields,
-                    CellSources = record.CellSources,
-                    HasStableRowIdentity = record.HasStableRowIdentity
+                    ["dynamicConcept"] = concept,
+                    ["dynamicUnit"] = unit,
+                    ["dynamicDimensions"] = dimensions,
+                    ["dynamicDecimals"] = decimals,
+                    ["dynamicLanguage"] = language
                 };
-            }).ToArray();
+                context.LoadedSources[bindingId] = context.LoadedSources[bindingId].Select(record =>
+                {
+                    var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                    foreach (var (column, value) in values)
+                        fields[column] = DataValue.StringValue(value, references[column]);
+                    return new DataRecord
+                    {
+                        RowId = record.RowId,
+                        Fields = fields,
+                        CellSources = record.CellSources,
+                        HasStableRowIdentity = record.HasStableRowIdentity
+                    };
+                }).ToArray();
+                return context;
+            }
 
-            var result = await compile.Plan!.ExecuteAsync(context);
-
-            Assert.Empty(result.Facts);
-            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrConceptUnknown);
-            Assert.Equal("conceptName", diagnostic.PortName);
-            Assert.Equal(conceptReference, diagnostic.Source);
-
-            var decimalsContext = MakeContext(project, path);
-            decimalsContext.LoadedSources[bindingId] = decimalsContext.LoadedSources[bindingId].Select(record =>
+            async Task AssertDiagnosticAsync(
+                string expectedCode, string expectedPort, string invalidConcept = "",
+                string unit = "USD", string dimensions = "[]", string decimals = "3", string language = "")
             {
-                var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-                fields["dynamicConcept"] = DataValue.StringValue(SyntheticProfile.Qualified("Revenue"), conceptReference);
-                fields["dynamicDecimals"] = DataValue.StringValue("999", decimalsReference);
-                return new DataRecord
-                {
-                    RowId = record.RowId,
-                    Fields = fields,
-                    CellSources = record.CellSources,
-                    HasStableRowIdentity = record.HasStableRowIdentity
-                };
-            }).ToArray();
-            var decimalsResult = await compile.Plan.ExecuteAsync(decimalsContext);
+                var context = CreateContext(
+                    string.IsNullOrEmpty(invalidConcept) ? SyntheticProfile.Qualified("Revenue") : invalidConcept,
+                    unit, dimensions, decimals, language);
+                var result = await compile.Plan!.ExecuteAsync(context);
+                Assert.Empty(result.Facts);
+                var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == expectedCode);
+                Assert.Equal(expectedPort, diagnostic.PortName);
+                Assert.Equal(references[aspectColumns.Single(item => item.Port == expectedPort).Column], diagnostic.Source);
+            }
 
-            Assert.Empty(decimalsResult.Facts);
-            var decimalsDiagnostic = Assert.Single(decimalsResult.Diagnostics,
-                item => item.Code == Diagnostics.DiagnosticCodes.XbrDecimalsOutOfRange);
-            Assert.Equal("decimalsValue", decimalsDiagnostic.PortName);
-            Assert.Equal(decimalsReference, decimalsDiagnostic.Source);
+            await AssertDiagnosticAsync(Diagnostics.DiagnosticCodes.XbrConceptUnknown, "conceptName",
+                invalidConcept: "synthetic:UnknownConcept");
+            await AssertDiagnosticAsync(Diagnostics.DiagnosticCodes.XbrUnitMissing, "unitExpression", unit: "bad:Unit");
+            await AssertDiagnosticAsync(Diagnostics.DiagnosticCodes.XbrDimensionInvalid, "dimensionsJson",
+                dimensions: "[{\"Name\":\"synthetic:UnknownAxis\",\"MemberName\":\"synthetic:UnknownMember\"}]");
+            await AssertDiagnosticAsync(Diagnostics.DiagnosticCodes.XbrDecimalsOutOfRange, "decimalsValue", decimals: "999");
+            await AssertDiagnosticAsync(Diagnostics.DiagnosticCodes.XbrUnsupportedConstruct, "languageValue", language: "en_US");
         }
         finally
         {
