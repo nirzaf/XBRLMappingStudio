@@ -81,3 +81,8 @@ pinned worker job passed **82 Python tests** and **15 .NET Arelle execution
 tests**. The cleanup service has no default age, production authorizer, UI/CLI
 trigger, or automatic purge; completed snapshots, reports and receipts remain
 outside its candidate set.
+
+The focused Windows Release regression `Apply_RejectsEmptyDirectoryAddedAfterPreview`
+also passes, confirming that even an empty directory added after approval changes
+the tree digest and prevents cleanup before a pending audit is written. The full
+Ops suite passes **541/541** with this hardening.

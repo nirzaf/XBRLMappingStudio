@@ -54,6 +54,7 @@ public sealed class SqliteSnapshotStagingRetentionService
     public const long MaximumBytesPerDirectory = 2L * 1024 * 1024 * 1024;
     public const long MaximumBytesPerPlan = 2L * 1024 * 1024 * 1024;
     private const int MaximumDirectoriesToInspect = 10_000;
+    private const int MaximumDirectoriesPerCandidate = 4_096;
     private const int MaximumRelativePathBytes = 32 * 1024;
     private const string Prefix = ".xms-snapshot-";
 
@@ -296,9 +297,11 @@ public sealed class SqliteSnapshotStagingRetentionService
         var pending = new Stack<string>();
         pending.Push(root);
         var count = 0;
+        var directoryCount = 0;
         long totalBytes = 0;
         var buffer = new byte[64 * 1024];
         var lengthBytes = new byte[4];
+        var entryKind = new byte[1];
         while (pending.Count > 0)
         {
             var directory = pending.Pop();
@@ -308,17 +311,26 @@ public sealed class SqliteSnapshotStagingRetentionService
                 var attributes = File.GetAttributes(entry);
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidDataException("Snapshot staging artifact contains a reparse point; retention is refused.");
+                var relative = Path.GetRelativePath(root, entry).Replace(Path.DirectorySeparatorChar, '/');
+                var pathBytes = Encoding.UTF8.GetBytes(relative);
+                if (pathBytes.Length > MaximumRelativePathBytes)
+                    throw new InvalidDataException("Snapshot staging artifact contains an oversized relative path.");
                 if ((attributes & FileAttributes.Directory) != 0)
                 {
+                    if (++directoryCount > MaximumDirectoriesPerCandidate)
+                        throw new InvalidDataException("Snapshot staging artifact exceeds its directory-count limit.");
+                    entryKind[0] = (byte)'D';
+                    hash.AppendData(entryKind);
+                    BinaryPrimitives.WriteInt32LittleEndian(lengthBytes, pathBytes.Length);
+                    hash.AppendData(lengthBytes);
+                    hash.AppendData(pathBytes);
                     pending.Push(entry);
                     continue;
                 }
                 if (++count > MaximumFilesPerDirectory)
                     throw new InvalidDataException("Snapshot staging artifact exceeds its file-count limit.");
-                var relative = Path.GetRelativePath(root, entry).Replace(Path.DirectorySeparatorChar, '/');
-                var pathBytes = Encoding.UTF8.GetBytes(relative);
-                if (pathBytes.Length > MaximumRelativePathBytes)
-                    throw new InvalidDataException("Snapshot staging artifact contains an oversized relative path.");
+                entryKind[0] = (byte)'F';
+                hash.AppendData(entryKind);
                 BinaryPrimitives.WriteInt32LittleEndian(lengthBytes, pathBytes.Length);
                 hash.AppendData(lengthBytes);
                 hash.AppendData(pathBytes);

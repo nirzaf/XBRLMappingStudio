@@ -120,6 +120,25 @@ public sealed class SqliteSnapshotStagingRetentionServiceTests : IDisposable
     }
 
     [Fact]
+    public void Apply_RejectsEmptyDirectoryAddedAfterPreview()
+    {
+        var database = NewDatabase();
+        var abandoned = CreateAbandonedStaging("source", "metadata");
+        var plan = NewService(database).PreviewAbandonedStagingDirectories(_directory, DateTimeOffset.UtcNow.AddSeconds(2));
+        var approval = new SnapshotStagingRetentionApproval("snapshot-temp-policy-v1", Guid.NewGuid().ToString("D"),
+            "reviewer-id", plan.PlanSha256);
+        Directory.CreateDirectory(Path.Combine(abandoned.Path, "empty-after-review"));
+
+        Assert.Throws<InvalidOperationException>(() => NewService(database, new ExactPlanAuthorizer(plan.PlanSha256))
+            .ApplyAbandonedStagingPrune(_directory, plan, approval));
+
+        Assert.True(Directory.Exists(abandoned.Path));
+        Assert.True(Directory.Exists(Path.Combine(abandoned.Path, "empty-after-review")));
+        Assert.Equal(0L, Scalar(database, "SELECT COUNT(*) FROM snapshot_staging_retention_audit"));
+        Assert.Equal("ok", database.IntegrityCheck());
+    }
+
+    [Fact]
     public void Apply_AuditCanarySurvivesBackup()
     {
         var database = NewDatabase();
