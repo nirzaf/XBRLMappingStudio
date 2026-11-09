@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest implementation CI [42540877050](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42540877050) verified `b2e4882a9212752f73e4453d5cc36a66f5aa1afc`; each OS matrix passed 1,882 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
+| Tests | xUnit 2.9.3 | Latest implementation CI [42543208330](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42543208330) verified `53e37b450547ec98ec636e2eb8683ceb8850f11f`; each OS matrix passed 1,886 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -288,14 +288,14 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest implementation CI [42540877050](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42540877050)
-verified `b2e4882a9212752f73e4453d5cc36a66f5aa1afc`. Repository hygiene, Windows and
+Latest implementation CI [42543208330](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42543208330)
+verified `53e37b450547ec98ec636e2eb8683ceb8850f11f`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate streaming/snapshot memory qualifications, and repeated
-Windows worker-cancellation checks passed. Each OS matrix passed **1,882 tests**,
+Windows worker-cancellation checks passed. Each OS matrix passed **1,886 tests**,
 skipped **6** environment-gated Arelle subprocess cases, and had **0 failures**. The
 eight suite counts were Adapters 309, AI 72, Desktop 170, Engine 155, Integration
-508 (502 passed, 6 skipped), Ops 445, Project 32, and XBRL 197. This CI verifies the synthetic/offline implementation; it does
+508 (502 passed, 6 skipped), Ops 445, Project 32, and XBRL 201. This CI verifies the synthetic/offline implementation; it does
 not qualify the selected IFRS package, its rights, a regulator filing profile, or
 native desktop accessibility.
 
