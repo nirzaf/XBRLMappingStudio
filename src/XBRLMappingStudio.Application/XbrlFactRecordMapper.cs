@@ -128,6 +128,7 @@ public static class XbrlFactRecordMapper
             .OrderBy(dimension => dimension.Name, StringComparer.Ordinal)
             .ThenBy(dimension => dimension.MemberName, StringComparer.Ordinal)
             .ThenBy(dimension => dimension.IsExplicit)
+            .ThenBy(dimension => dimension.TypedValueJson, StringComparer.Ordinal)
             .ToArray();
         builder.Append(dimensions.Length).Append(':');
         foreach (var dimension in dimensions)
@@ -135,6 +136,10 @@ public static class XbrlFactRecordMapper
             AppendPart(builder, dimension.Name);
             AppendPart(builder, dimension.MemberName);
             AppendPart(builder, dimension.IsExplicit ? "1" : "0");
+            // Typed values are part of the dimensional aspect identity. Keep the
+            // historical explicit-dimension key contract unchanged.
+            if (!dimension.IsExplicit)
+                AppendPart(builder, dimension.TypedValueJson ?? "");
         }
 
         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())))

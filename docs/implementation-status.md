@@ -415,3 +415,10 @@ IO031 reconstruction warning remains present. This demonstrates period-aware
 reverse mapping for that supported graph shape only; concept/unit/dimension
 selection remains partly static/configuration-bound, and the other ENG-07 gaps
 above are unchanged.
+
+Typed-dimension reverse rows now include canonical typed-value evidence in the
+stable destination aspect key. A regression compares two same-axis typed values
+in both input orders and confirms each serialized value keeps the same distinct
+key; the isolated Windows Release mapper provenance selection passed 5/5. This
+does not enable typed-dimension validation or report generation without qualified
+profile metadata.

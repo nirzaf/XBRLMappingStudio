@@ -88,6 +88,37 @@ public sealed class XbrlFactRecordMapperProvenanceTests
     }
 
     [Fact]
+    public void TypedDimensionValuesHaveDistinctOrderIndependentFactKeys()
+    {
+        var first = Fact(Array.Empty<SourceReference>(), Array.Empty<SourceTransformationPath>(), new[]
+        {
+            new Dimension("synthetic:CustomerAxis", "", IsExplicit: false)
+            {
+                TypedValueJson = "{\"Name\":\"{urn:customer}customer\",\"Attributes\":[],\"Content\":[{\"Kind\":\"text\",\"Value\":\"0017\"}]}"
+            }
+        });
+        var second = Fact(Array.Empty<SourceReference>(), Array.Empty<SourceTransformationPath>(), new[]
+        {
+            new Dimension("synthetic:CustomerAxis", "", IsExplicit: false)
+            {
+                TypedValueJson = "{\"Name\":\"{urn:customer}customer\",\"Attributes\":[],\"Content\":[{\"Kind\":\"text\",\"Value\":\"0042\"}]}"
+            }
+        });
+
+        static IReadOnlyDictionary<string, string> KeysByTypedValue(IReadOnlyList<XBRLMappingStudio.Engine.DataRecord> records)
+            => records.ToDictionary(
+                record => record["dimensions_json"].AsString(),
+                record => record["fact_key"].AsString(),
+                StringComparer.Ordinal);
+
+        var original = XbrlFactRecordMapper.ToRecords(new[] { first, second }, ProfileDigest);
+        var reversed = XbrlFactRecordMapper.ToRecords(new[] { second, first }, ProfileDigest);
+
+        Assert.Equal(2, original.Select(record => record["fact_key"].AsString()).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(KeysByTypedValue(original), KeysByTypedValue(reversed));
+    }
+
+    [Fact]
     public void ProvenanceJsonWithoutTransformationPaths_IsByteForByteCompatible()
     {
         var sources = new[]
@@ -110,7 +141,8 @@ public sealed class XbrlFactRecordMapperProvenanceTests
 
     private static XbrlFact Fact(
         IReadOnlyList<SourceReference> sources,
-        IReadOnlyList<SourceTransformationPath> paths)
+        IReadOnlyList<SourceTransformationPath> paths,
+        IReadOnlyList<Dimension>? dimensions = null)
         => new()
         {
             ConceptName = SyntheticProfile.Qualified("Revenue"),
@@ -120,6 +152,7 @@ public sealed class XbrlFactRecordMapperProvenanceTests
             Unit = new XbrlUnit("QAR"),
             Value = 100m,
             Decimals = 0,
+            Dimensions = dimensions ?? Array.Empty<Dimension>(),
             ContributingSources = sources,
             SourceTransformationPaths = paths
         };
