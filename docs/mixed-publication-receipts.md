@@ -56,6 +56,12 @@ receipt is not distinguishable with the current evidence model. External writers
 can also change either target after a read check. No new automatic data restoration,
 rollback, approval, or publication authorization is introduced.
 
+Caller-requested cancellation during explicit read-only reconciliation propagates
+as cancellation and leaves the stored mixed outcome unchanged. A later publication
+attempt still revalidates any prior SQLite confirmation before invoking either
+destination writer. Operational lookup failures continue to preserve an unknown or
+conflicting outcome rather than authorize an automatic retry.
+
 Full file-adapter journaling, exhaustive interrupted/ambiguous publication recovery,
 retention policy, installed-platform qualification, real IFRS/profile acceptance,
 and other release gates remain open.
