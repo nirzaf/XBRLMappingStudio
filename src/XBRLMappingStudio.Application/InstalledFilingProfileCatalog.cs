@@ -825,7 +825,14 @@ public static class InstalledFilingProfileCatalog
         var simpleType = element.Element(xsd + "simpleType");
         var restriction = simpleType?.Element(xsd + "restriction");
         var baseName = (string?)restriction?.Attribute("base");
-        return !string.IsNullOrWhiteSpace(baseName) && ResolvesToXsdString(element, baseName);
+        var simpleTypeDefinitions = simpleType?.Elements()
+            .Where(child => child.Name != xsd + "annotation")
+            .ToArray();
+        return !string.IsNullOrWhiteSpace(baseName)
+            && ResolvesToXsdString(element, baseName)
+            && restriction!.Elements().All(child => child.Name == xsd + "annotation")
+            && simpleTypeDefinitions is { Length: 1 }
+            && ReferenceEquals(simpleTypeDefinitions[0], restriction);
     }
 
     private static bool ResolvesToXsdString(XElement element, string qualifiedName)

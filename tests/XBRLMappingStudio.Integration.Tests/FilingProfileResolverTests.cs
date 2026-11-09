@@ -430,7 +430,7 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
-    public void CatalogRejectsTypedDomainElementMissingFromHashVerifiedSchemas()
+    public void CatalogRejectsUnresolvedOrConstrainedTypedDomainDeclarations()
     {
         var root = NewCatalogDirectory();
         try
@@ -477,6 +477,42 @@ public sealed class FilingProfileResolverTests
             Assert.Empty(result.Profiles);
             Assert.Contains(result.Issues, issue =>
                 issue.Message.Contains("hash-verified package schemas", StringComparison.Ordinal));
+
+            File.WriteAllText(entryPath, """
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
+                           targetNamespace="urn:example">
+                  <xs:element name="TypedAxis" type="xs:string" abstract="true"
+                              xbrldt:typedDomainRef="entry.xsd#ActualDomain" />
+                  <xs:element name="ActualDomain" id="ActualDomain">
+                    <xs:simpleType>
+                      <xs:restriction base="xs:string">
+                        <xs:pattern value="[A-Z]+" />
+                      </xs:restriction>
+                    </xs:simpleType>
+                  </xs:element>
+                </xs:schema>
+                """);
+            typedManifest = typedManifest with
+            {
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new("ex:ActualDomain", "xs:string")
+                },
+                PackageFiles = new Dictionary<string, string>(typedManifest.PackageFiles, StringComparer.Ordinal)
+                {
+                    ["taxonomy/entry.xsd"] = FileDigest(entryPath)
+                },
+                ProfileDigest = ""
+            };
+            typedManifest = typedManifest with { ProfileDigest = typedManifest.ComputeDigest() };
+            File.WriteAllText(manifestPath, typedManifest.ToJson());
+
+            var constrained = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(constrained.Profiles);
+            Assert.Contains(constrained.Issues, issue =>
+                issue.Message.Contains("global xs:string element", StringComparison.Ordinal));
         }
         finally
         {
