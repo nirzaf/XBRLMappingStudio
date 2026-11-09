@@ -363,9 +363,12 @@ public sealed class FilingProfileResolverTests
             File.WriteAllText(entryPath, """
                 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
                            xmlns:ex="urn:example"
+                           xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
                            targetNamespace="urn:example"
                            elementFormDefault="qualified">
-                  <xs:element name="TypedMember" type="xs:string" />
+                  <xs:element name="TypedAxis" type="xs:string" abstract="true"
+                              xbrldt:typedDomainRef="entry.xsd#TypedMember" />
+                  <xs:element name="TypedMember" id="TypedMember" type="xs:string" />
                 </xs:schema>
                 """);
             var packageFiles = new Dictionary<string, string>(manifest.PackageFiles, StringComparer.Ordinal)
@@ -437,8 +440,11 @@ public sealed class FilingProfileResolverTests
             File.WriteAllText(entryPath, """
                 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
                            xmlns:ex="urn:example"
+                           xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
                            targetNamespace="urn:example">
-                  <xs:element name="ActualDomain" type="xs:string" />
+                  <xs:element name="TypedAxis" type="xs:string" abstract="true"
+                              xbrldt:typedDomainRef="entry.xsd#MissingDomain" />
+                  <xs:element name="ActualDomain" id="ActualDomain" type="xs:string" />
                 </xs:schema>
                 """);
             var manifestPath = Path.Combine(

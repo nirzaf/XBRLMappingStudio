@@ -672,15 +672,22 @@ public static class InstalledFilingProfileCatalog
         if (manifest.TypedDimensionDomains.Count == 0) return;
 
         XNamespace xsd = "http://www.w3.org/2001/XMLSchema";
-        var declarations = new Dictionary<(string NamespaceUri, string LocalName), List<bool>>();
+        XNamespace xbrldt = "http://xbrl.org/2005/xbrldt";
+        var declarationsById = new Dictionary<(string PackagePath, string Id), List<(string NamespaceUri, string LocalName, bool IsString)>>();
+        var dimensions = new Dictionary<(string NamespaceUri, string LocalName), List<(string PackagePath, string TypedDomainRef)>>();
+        long inspectedSchemaBytes = 0;
+        var inspectedSchemaCount = 0;
         foreach (var relativePath in manifest.PackageFiles.Keys
                      .Where(path => Path.GetExtension(path).Equals(".xsd", StringComparison.OrdinalIgnoreCase))
                      .Order(StringComparer.Ordinal))
         {
             var fullPath = ResolvePackageFile(versionDirectory, relativePath);
             var info = new FileInfo(fullPath);
-            if (info.Length > 16L * 1024 * 1024)
-                throw new InvalidDataException($"Typed-domain schema '{relativePath}' exceeds the 16 MiB XML inspection limit.");
+            inspectedSchemaCount++;
+            inspectedSchemaBytes = checked(inspectedSchemaBytes + info.Length);
+            if (info.Length > 16L * 1024 * 1024 || inspectedSchemaCount > 4096
+                || inspectedSchemaBytes > 256L * 1024 * 1024)
+                throw new InvalidDataException("Typed-domain schema inspection exceeds its file-count or byte limits.");
 
             using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 64 * 1024, FileOptions.SequentialScan);
@@ -706,28 +713,106 @@ public static class InstalledFilingProfileCatalog
             var schema = document.Root;
             if (schema?.Name != xsd + "schema") continue;
             var targetNamespace = (string?)schema.Attribute("targetNamespace") ?? string.Empty;
+            var normalizedPath = relativePath.Replace(Path.DirectorySeparatorChar, '/');
             foreach (var element in schema.Elements(xsd + "element"))
             {
                 var name = (string?)element.Attribute("name");
                 if (string.IsNullOrWhiteSpace(name)) continue;
-                var isSupportedString = IsXsdStringElementDeclaration(element, xsd);
                 var key = (targetNamespace, name);
-                if (!declarations.TryGetValue(key, out var matches))
-                    declarations.Add(key, matches = new List<bool>());
-                matches.Add(isSupportedString);
+                var typedDomainRef = (string?)element.Attribute(xbrldt + "typedDomainRef");
+                if (typedDomainRef is not null)
+                {
+                    if (!dimensions.TryGetValue(key, out var matches))
+                        dimensions.Add(key, matches = new List<(string, string)>());
+                    matches.Add((normalizedPath, typedDomainRef));
+                }
+                var id = (string?)element.Attribute("id");
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    var idKey = (normalizedPath, id);
+                    if (!declarationsById.TryGetValue(idKey, out var matches))
+                        declarationsById.Add(idKey, matches = new List<(string, string, bool)>());
+                    matches.Add((targetNamespace, name, IsXsdStringElementDeclaration(element, xsd)));
+                }
             }
         }
 
         foreach (var (dimensionQName, typedDomain) in manifest.TypedDimensionDomains)
         {
+            var dimension = manifest.Concepts.Single(concept =>
+                StringComparer.Ordinal.Equals(concept.QualifiedName, dimensionQName));
             var separator = typedDomain.DomainElementQName.IndexOf(':');
             var prefix = typedDomain.DomainElementQName[..separator];
             var localName = typedDomain.DomainElementQName[(separator + 1)..];
             var namespaceUri = manifest.NamespaceUris[prefix];
-            if (!declarations.TryGetValue((namespaceUri, localName), out var matches)
-                || matches.Count != 1 || !matches[0])
+            var dimensionKey = (dimension.Namespace, dimension.LocalName);
+            if (!dimensions.TryGetValue(dimensionKey, out var dimensionMatches)
+                || dimensionMatches.Count != 1
+                || !TryResolveTypedDomainReference(versionDirectory, dimensionMatches[0].PackagePath,
+                    dimensionMatches[0].TypedDomainRef, manifest.OfflineReferences, manifest.PackageFiles,
+                    out var targetPath, out var targetId)
+                || !declarationsById.TryGetValue((targetPath, targetId), out var domainMatches)
+                || domainMatches.Count != 1
+                || !StringComparer.Ordinal.Equals(domainMatches[0].NamespaceUri, namespaceUri)
+                || !StringComparer.Ordinal.Equals(domainMatches[0].LocalName, localName)
+                || !domainMatches[0].IsString)
                 throw new InvalidDataException(
-                    $"Typed dimension '{dimensionQName}' domain element '{typedDomain.DomainElementQName}' must resolve to exactly one global xs:string element declaration in the hash-verified package schemas.");
+                    $"Typed dimension '{dimensionQName}' must resolve its typedDomainRef URI to the declared global xs:string element '{typedDomain.DomainElementQName}' in the hash-verified package schemas.");
+        }
+    }
+
+    private static bool TryResolveTypedDomainReference(
+        string versionDirectory,
+        string sourceSchemaPath,
+        string typedDomainRef,
+        IReadOnlyDictionary<string, string> offlineReferences,
+        IReadOnlyDictionary<string, string> packageFiles,
+        out string targetPackagePath,
+        out string targetId)
+    {
+        targetPackagePath = string.Empty;
+        targetId = string.Empty;
+        var hash = typedDomainRef.IndexOf('#');
+        if (hash < 0 || hash != typedDomainRef.LastIndexOf('#') || hash == typedDomainRef.Length - 1)
+            return false;
+        var documentUri = typedDomainRef[..hash];
+        try { targetId = Uri.UnescapeDataString(typedDomainRef[(hash + 1)..]); }
+        catch (UriFormatException) { return false; }
+        if (string.IsNullOrWhiteSpace(targetId) || targetId.Any(char.IsControl)) return false;
+
+        if (Uri.TryCreate(documentUri, UriKind.Absolute, out var absoluteUri))
+        {
+            var packageUri = absoluteUri.GetLeftPart(UriPartial.Path);
+            if (!offlineReferences.TryGetValue(packageUri, out var mappedPackagePath))
+                return false;
+            targetPackagePath = mappedPackagePath;
+        }
+        else
+        {
+            try
+            {
+                var sourceDirectory = Path.GetDirectoryName(sourceSchemaPath) ?? string.Empty;
+                var decodedDocumentPath = Uri.UnescapeDataString(documentUri).Replace('/', Path.DirectorySeparatorChar);
+                var fullPath = Path.GetFullPath(Path.Combine(versionDirectory, sourceDirectory, decodedDocumentPath));
+                EnsureWithin(versionDirectory, fullPath, "Typed-domain schema reference");
+                targetPackagePath = Path.GetRelativePath(versionDirectory, fullPath)
+                    .Replace(Path.DirectorySeparatorChar, '/');
+            }
+            catch (Exception exception) when (exception is UriFormatException or InvalidDataException
+                                               or ArgumentException or IOException or NotSupportedException)
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            EnsureSafeRelativePath(targetPackagePath, "Typed-domain schema reference");
+            return packageFiles.ContainsKey(targetPackagePath);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
         }
     }
 
@@ -745,10 +830,15 @@ public static class InstalledFilingProfileCatalog
 
     private static bool ResolvesToXsdString(XElement element, string qualifiedName)
     {
+        return ResolveQName(element, qualifiedName) == "http://www.w3.org/2001/XMLSchema|string";
+    }
+
+    private static string? ResolveQName(XElement element, string qualifiedName)
+    {
         var separator = qualifiedName.IndexOf(':');
         if (separator <= 0 || separator != qualifiedName.LastIndexOf(':')
             || separator == qualifiedName.Length - 1)
-            return false;
+            return null;
         var prefix = qualifiedName[..separator];
         var localName = qualifiedName[(separator + 1)..];
         try
@@ -758,10 +848,10 @@ public static class InstalledFilingProfileCatalog
         }
         catch (System.Xml.XmlException)
         {
-            return false;
+            return null;
         }
-        return localName == "string"
-            && element.GetNamespaceOfPrefix(prefix)?.NamespaceName == "http://www.w3.org/2001/XMLSchema";
+        var namespaceUri = element.GetNamespaceOfPrefix(prefix)?.NamespaceName;
+        return namespaceUri is null ? null : namespaceUri + "|" + localName;
     }
 
     private static string ResolvePackageFile(string versionDirectory, string relativePath)
