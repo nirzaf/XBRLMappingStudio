@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest exact-head CI [42618938295](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42618938295) verified `7126e7f47b2093da3ac08170bd7737392d3c84d4`; Windows and Ubuntu each passed 1,986 tests with 6 environment-gated Arelle subprocess skips. Five memory qualifications, Windows cancellation regression repeats, pinned Arelle integration and repository hygiene also passed. See the [November 9 verification baseline](docs/verification-baseline-2026-11-09.md). |
+| Tests | xUnit 2.9.3 | Latest exact-head CI [42623518977](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42623518977) verified `9142880c9c9db891336c2836841085796fb240d3`; Windows and Ubuntu each passed 1,987 tests with 6 environment-gated Arelle subprocess skips. Five memory qualifications, Windows cancellation regression repeats, pinned Arelle integration and repository hygiene also passed. See the [November 9 verification baseline](docs/verification-baseline-2026-11-09.md). |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -288,14 +288,14 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest exact-head CI [42618938295](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42618938295)
-verified `7126e7f47b2093da3ac08170bd7737392d3c84d4`. Repository hygiene, Windows and
+Latest exact-head CI [42623518977](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42623518977)
+verified `9142880c9c9db891336c2836841085796fb240d3`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate memory qualifications, and repeated Windows worker-cancellation
-checks passed. Each OS matrix passed **1,986 tests**, skipped **6** environment-gated
+checks passed. Each OS matrix passed **1,987 tests**, skipped **6** environment-gated
 Arelle subprocess cases, and had **0 failures**. The eight suite counts were Adapters
 309, AI 72, Desktop 171, Engine 156, Integration 510 (504 passed, 6 skipped), Ops
-540, Project 32, and XBRL 202. The pinned worker passed 82 Python tests and 15 .NET
+541, Project 32, and XBRL 202. The pinned worker passed 82 Python tests and 15 .NET
 Arelle execution tests. This CI verifies the synthetic/offline implementation; it does
 not qualify the selected IFRS package, its rights, a regulator filing profile, or
 native desktop accessibility.

@@ -85,4 +85,9 @@ outside its candidate set.
 The focused Windows Release regression `Apply_RejectsEmptyDirectoryAddedAfterPreview`
 also passes, confirming that even an empty directory added after approval changes
 the tree digest and prevents cleanup before a pending audit is written. The full
-Ops suite passes **541/541** with this hardening.
+Ops suite passes **541/541** with this hardening. Exact-head CI
+[42623518977](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42623518977)
+passed on commit `9142880c9c9db891336c2836841085796fb240d3`; Windows and Ubuntu
+each passed **1,987 tests** with **6** environment-gated Arelle skips. All four
+jobs passed, including Arelle integration, five memory qualifications and Windows
+worker-cancellation regression repeats.
