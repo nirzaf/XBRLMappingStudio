@@ -744,13 +744,19 @@ public sealed class MappingJobService
 
         if (facts.Count == 0)
         {
+            // Preserve the primary mapping failure when a fail-closed execution
+            // discarded its partial output. The empty-facts diagnostic is secondary
+            // to a blocking graph error such as MAP015.
+            var outcome = context.Diagnostics.HasBlockingErrors
+                ? RunOutcome.InvalidMapping
+                : RunOutcome.IncompleteConfiguration;
             context.Diagnostics.Error(
                 DiagnosticCodes.XbrRequiredCheckMissing,
                 DiagnosticSubsystem.XBRL,
                 DiagnosticStage.Validation,
                 "The mapping produced no XBRL facts. Verify the selected source rows and reporting-year filters before validation.",
                 operationId: opId);
-            manifest.Outcome = RunOutcome.IncompleteConfiguration;
+            manifest.Outcome = outcome;
             manifest.CompletedUtc = DateTimeOffset.UtcNow;
             manifest.Diagnostics = context.Diagnostics.Items;
             return JobResult.FromManifest(manifest, facts, "");

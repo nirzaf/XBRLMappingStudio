@@ -990,8 +990,7 @@ public sealed partial class LargeRunExecutionTests
                 item => item.Code == DiagnosticCodes.MapJoinExpansionExceeded);
             Assert.True(diagnostic.IsBlocking);
             Assert.Contains("MaxJoinExpansionRows=2", diagnostic.Message, StringComparison.Ordinal);
-            Assert.Single(result.Facts);
-            Assert.Equal(2501m, result.Facts[0].Value!.Value);
+            Assert.Empty(result.Facts);
             Assert.Equal(string.Empty, result.XbrlJson);
             Assert.Empty(result.Manifest.Outputs);
             Assert.Null(result.Manifest.ValidatedArtifactDigest);
@@ -1025,8 +1024,7 @@ public sealed partial class LargeRunExecutionTests
             Assert.False(conflictResult.IsPublishable);
             Assert.Contains(conflictResult.Manifest.Diagnostics,
                 item => item.Code == DiagnosticCodes.MapJoinFieldConflict && item.IsBlocking);
-            Assert.Single(conflictResult.Facts);
-            Assert.Equal(1250m, conflictResult.Facts[0].Value!.Value);
+            Assert.Empty(conflictResult.Facts);
             Assert.Equal(string.Empty, conflictResult.XbrlJson);
             Assert.Empty(conflictResult.Manifest.Outputs);
             Assert.Equal(0, conflictWorker.ValidationRequests);
