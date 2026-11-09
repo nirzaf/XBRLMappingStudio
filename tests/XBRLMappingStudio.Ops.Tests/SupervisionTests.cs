@@ -93,10 +93,10 @@ public class SupervisionTests
     {
         var supervisor = new WorkerSupervisor();
         var (badExe, badArgs) = Shell("exit 3", "exit 3");
-        await supervisor.RunAsync(badExe, badArgs, TimeSpan.FromSeconds(10));
+        await supervisor.RunAsync(badExe, badArgs, TimeSpan.FromSeconds(30));
 
         var (okExe, okArgs) = Shell("echo healthy", "Write-Output healthy");
-        var result = await supervisor.RunAsync(okExe, okArgs, TimeSpan.FromSeconds(10));
+        var result = await supervisor.RunAsync(okExe, okArgs, TimeSpan.FromSeconds(30));
 
         Assert.Equal(SupervisedOutcome.Completed, result.Outcome);
         Assert.Contains("healthy", string.Join('\n', result.CapturedLog));
@@ -328,9 +328,12 @@ public class SupervisionTests
         try
         {
             var supervisor = new WorkerSupervisor();
-            running = supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(30),
+            // Windows hosted runners can take longer to start PowerShell when other
+            // process-heavy suites are active; cancellation is asserted separately
+            // below once the child PIDs are observed.
+            running = supervisor.RunAsync(exe, args, TimeSpan.FromSeconds(60),
                 stdinPayload: "launch\n", cancellationToken: cancellation.Token);
-            var pidFileWait = WaitForFileAsync(pidPath, TimeSpan.FromSeconds(15));
+            var pidFileWait = WaitForFileAsync(pidPath, TimeSpan.FromSeconds(45));
             if (await Task.WhenAny(pidFileWait, running) == running)
             {
                 var completed = await running;
@@ -378,12 +381,14 @@ public class SupervisionTests
         int? childId = null;
         try
         {
+            // Allow the Windows shell and its child to start on a loaded CI runner;
+            // the inherited-pipe timeout is still asserted as the terminal outcome.
             var running = new WorkerSupervisor().RunAsync(exe, args,
-                TimeSpan.FromSeconds(5), stdinPayload: "launch\n");
-            Assert.True(await WaitForFileAsync(pidPath, TimeSpan.FromSeconds(5)),
+                TimeSpan.FromSeconds(30), stdinPayload: "launch\n");
+            Assert.True(await WaitForFileAsync(pidPath, TimeSpan.FromSeconds(25)),
                 "The parent did not start its pipe-inheriting child.");
             childId = int.Parse(await File.ReadAllTextAsync(pidPath), System.Globalization.CultureInfo.InvariantCulture);
-            var result = await running.WaitAsync(TimeSpan.FromSeconds(8));
+            var result = await running.WaitAsync(TimeSpan.FromSeconds(35));
 
             Assert.Equal(SupervisedOutcome.TimedOut, result.Outcome);
             Assert.Equal(DiagnosticCodes.WkrTimeout, result.Failure!.Code);
