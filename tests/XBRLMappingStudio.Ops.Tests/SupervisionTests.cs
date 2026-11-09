@@ -109,6 +109,9 @@ public class SupervisionTests
         const int maximumWorkers = 2;
         var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-limit-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspace);
+        var quotedRelease = OperatingSystem.IsWindows()
+            ? "'" + Path.Combine(workspace, "release").Replace("'", "''", StringComparison.Ordinal) + "'"
+            : "'" + Path.Combine(workspace, "release").Replace("'", "'\\''", StringComparison.Ordinal) + "'";
         var quotedWorkspace = OperatingSystem.IsWindows()
             ? "'" + workspace.Replace("'", "''", StringComparison.Ordinal) + "'"
             : "'" + workspace.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
@@ -118,12 +121,14 @@ public class SupervisionTests
                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                 $"$marker = Join-Path {quotedWorkspace} ('worker-' + $PID); " +
                 "[System.IO.File]::WriteAllText($marker, [string]$PID); " +
-                "Start-Sleep -Milliseconds 350; Remove-Item -LiteralPath $marker -Force"
+                $"while (-not (Test-Path -LiteralPath {quotedRelease})) {{ Start-Sleep -Milliseconds 10 }}; " +
+                "Remove-Item -LiteralPath $marker -Force"
             })
             : ("/bin/sh", new[]
             {
                 "-c",
-                $"marker={quotedWorkspace}/worker-$$; : > \"$marker\"; sleep 0.35; rm -f \"$marker\""
+                $"marker={quotedWorkspace}/worker-$$; : > \"$marker\"; " +
+                $"while [ ! -f {quotedRelease} ]; do sleep 0.01; done; rm -f \"$marker\""
             });
 
         try
@@ -133,12 +138,28 @@ public class SupervisionTests
                 .ToArray();
             var allRuns = Task.WhenAll(runs);
             var maximumObserved = 0;
-            while (!allRuns.IsCompleted)
+            var observationDeadline = DateTime.UtcNow.AddSeconds(10);
+            while (!allRuns.IsCompleted && maximumObserved < maximumWorkers && DateTime.UtcNow < observationDeadline)
             {
                 maximumObserved = Math.Max(maximumObserved,
                     Directory.EnumerateFiles(workspace, "worker-*").Count());
                 await Task.Delay(10);
             }
+
+            // Keep the first active workers in place long enough for any process that
+            // incorrectly bypasses the shared capacity gate to become observable.
+            if (!allRuns.IsCompleted && maximumObserved == maximumWorkers)
+            {
+                var overCapacityObservationDeadline = DateTime.UtcNow.AddSeconds(1);
+                while (DateTime.UtcNow < overCapacityObservationDeadline)
+                {
+                    maximumObserved = Math.Max(maximumObserved,
+                        Directory.EnumerateFiles(workspace, "worker-*").Count());
+                    await Task.Delay(10);
+                }
+            }
+
+            File.WriteAllText(Path.Combine(workspace, "release"), "release workers");
 
             var results = await allRuns.WaitAsync(TimeSpan.FromSeconds(15));
             maximumObserved = Math.Max(maximumObserved,
@@ -149,6 +170,7 @@ public class SupervisionTests
         }
         finally
         {
+            try { File.WriteAllText(Path.Combine(workspace, "release"), "release workers"); } catch (IOException) { }
             try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
         }
     }
