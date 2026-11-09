@@ -356,6 +356,7 @@ public class ExecutionPlanTests
             var fact = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
             fact.Parameters.Remove("concept");
             fact.InputPorts.Add(new PortDefinition("conceptName", PortShape.String, PortCardinality.Single));
+            fact.InputPorts.Add(new PortDefinition("decimalsValue", PortShape.String, PortCardinality.Single));
 
             var conceptSource = new MappingNode
             {
@@ -378,15 +379,36 @@ public class ExecutionPlanTests
                 TargetNodeId = fact.NodeId,
                 TargetPortName = "conceptName"
             });
+            var decimalsSource = conceptSource with
+            {
+                NodeId = Id.New(),
+                DisplayName = "Mapped decimals",
+                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["bindingId"] = bindingId,
+                    ["column"] = "dynamicDecimals"
+                }
+            };
+            project.Nodes.Add(decimalsSource);
+            project.Edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(),
+                SourceNodeId = decimalsSource.NodeId,
+                SourcePortName = "textValue",
+                TargetNodeId = fact.NodeId,
+                TargetPortName = "decimalsValue"
+            });
 
             var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
             Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));
             var context = MakeContext(project, path);
             var conceptReference = new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, "workbook#concept");
+            var decimalsReference = new XBRLMappingStudio.Diagnostics.SourceReference(bindingId, "workbook#decimals");
             context.LoadedSources[bindingId] = context.LoadedSources[bindingId].Select(record =>
             {
                 var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
                 fields["dynamicConcept"] = DataValue.StringValue("synthetic:UnknownConcept", conceptReference);
+                fields["dynamicDecimals"] = DataValue.StringValue("3", decimalsReference);
                 return new DataRecord
                 {
                     RowId = record.RowId,
@@ -402,6 +424,28 @@ public class ExecutionPlanTests
             var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == Diagnostics.DiagnosticCodes.XbrConceptUnknown);
             Assert.Equal("conceptName", diagnostic.PortName);
             Assert.Equal(conceptReference, diagnostic.Source);
+
+            var decimalsContext = MakeContext(project, path);
+            decimalsContext.LoadedSources[bindingId] = decimalsContext.LoadedSources[bindingId].Select(record =>
+            {
+                var fields = record.Fields.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                fields["dynamicConcept"] = DataValue.StringValue(SyntheticProfile.Qualified("Revenue"), conceptReference);
+                fields["dynamicDecimals"] = DataValue.StringValue("999", decimalsReference);
+                return new DataRecord
+                {
+                    RowId = record.RowId,
+                    Fields = fields,
+                    CellSources = record.CellSources,
+                    HasStableRowIdentity = record.HasStableRowIdentity
+                };
+            }).ToArray();
+            var decimalsResult = await compile.Plan.ExecuteAsync(decimalsContext);
+
+            Assert.Empty(decimalsResult.Facts);
+            var decimalsDiagnostic = Assert.Single(decimalsResult.Diagnostics,
+                item => item.Code == Diagnostics.DiagnosticCodes.XbrDecimalsOutOfRange);
+            Assert.Equal("decimalsValue", decimalsDiagnostic.PortName);
+            Assert.Equal(decimalsReference, decimalsDiagnostic.Source);
         }
         finally
         {

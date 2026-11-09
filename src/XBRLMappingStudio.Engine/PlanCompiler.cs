@@ -1888,7 +1888,7 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         unitError,
                         nodeId: node.NodeId,
-                        portName: factValuePortName,
+                        portName: unitConnected ? "unitExpression" : factValuePortName,
                         source: unitIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
@@ -1902,7 +1902,7 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         unitContractError,
                         nodeId: node.NodeId,
-                        portName: factValuePortName,
+                        portName: unitConnected ? "unitExpression" : factValuePortName,
                         source: unitIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
@@ -1929,7 +1929,7 @@ public sealed class PlanCompiler
                         DiagnosticStage.Execution,
                         dimensionError,
                         nodeId: node.NodeId,
-                        portName: factValuePortName,
+                        portName: dimensionsJsonConnected ? "dimensionsJson" : factValuePortName,
                         source: dimensionsJsonIn.Source ?? factValueSource,
                         sourceTransformationPaths: factConstructSourcePaths);
                     outputs["fact"] = DataValue.Missing(PortShape.Fact);
@@ -1991,7 +1991,7 @@ public sealed class PlanCompiler
                             DiagnosticStage.Execution,
                             "Decimals must be an integer in the supported range [-30, 30] or INF.",
                             nodeId: node.NodeId,
-                            portName: factValuePortName,
+                            portName: decimalsConnected ? "decimalsValue" : factValuePortName,
                             source: decimalsIn.Source ?? factValueSource,
                             sourceTransformationPaths: factConstructSourcePaths);
                         outputs["fact"] = DataValue.Missing(PortShape.Fact);
@@ -2008,7 +2008,7 @@ public sealed class PlanCompiler
                                 DiagnosticStage.Execution,
                                 $"Decimals value {parsed} is outside the supported range [-30, 30].",
                                 nodeId: node.NodeId,
-                                portName: factValuePortName,
+                                portName: decimalsConnected ? "decimalsValue" : factValuePortName,
                                 source: decimalsIn.Source ?? factValueSource,
                                 sourceTransformationPaths: factConstructSourcePaths);
                             outputs["fact"] = DataValue.Missing(PortShape.Fact);
@@ -2067,17 +2067,25 @@ public sealed class PlanCompiler
                         FactValidationIssue.PeriodTypeMismatch =>
                             (DiagnosticCodes.XbrPeriodTypeMismatch, "period", periodIn.Source ?? instantIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidUnit =>
-                            (DiagnosticCodes.XbrUnitMissing, factValuePortName, unitIn.Source ?? factValueSource ?? entityIn.Source),
+                            (DiagnosticCodes.XbrUnitMissing,
+                                unitConnected ? "unitExpression" : factValuePortName,
+                                unitIn.Source ?? factValueSource ?? entityIn.Source),
                         FactValidationIssue.InvalidDecimals =>
-                            (DiagnosticCodes.XbrDecimalsOutOfRange, factValuePortName, decimalsIn.Source ?? factValueSource),
+                            (DiagnosticCodes.XbrDecimalsOutOfRange,
+                                decimalsConnected ? "decimalsValue" : factValuePortName,
+                                decimalsIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidDimensions =>
-                            (DiagnosticCodes.XbrDimensionInvalid, factValuePortName, dimensionsJsonIn.Source ?? factValueSource),
+                            (DiagnosticCodes.XbrDimensionInvalid,
+                                dimensionsJsonConnected ? "dimensionsJson" : factValuePortName,
+                                dimensionsJsonIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidConcept =>
                             (DiagnosticCodes.XbrConceptUnknown,
                                 conceptConnected ? "conceptName" : factValuePortName,
                                 conceptIn.Source ?? factValueSource),
                         FactValidationIssue.InvalidLanguage =>
-                            (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, languageIn.Source ?? factValueSource ?? entityIn.Source),
+                            (DiagnosticCodes.XbrUnsupportedConstruct,
+                                languageConnected ? "languageValue" : factValuePortName,
+                                languageIn.Source ?? factValueSource ?? entityIn.Source),
                         FactValidationIssue.InvalidValue =>
                             (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source),
                         _ => (DiagnosticCodes.XbrUnsupportedConstruct, factValuePortName, factValueSource ?? entityIn.Source)
