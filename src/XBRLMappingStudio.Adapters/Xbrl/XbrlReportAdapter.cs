@@ -21,7 +21,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static readonly string[] Columns =
     {
-        "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period",
+        "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
+        "instantDate", "periodStart", "periodEnd",
         "unit", "compoundUnit", "value", "textValue", "decimals", "lang", "nil", "dimensions", "dimensionsJson"
     };
 
@@ -219,6 +220,16 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             ["entityScheme"] = DataValue.StringValue(f.EntityScheme, src),
             ["entityIdentifier"] = DataValue.StringValue(f.EntityIdentifier, src),
             ["period"] = DataValue.StringValue(f.Period.ToIsoString(), src),
+            ["periodKind"] = DataValue.StringValue(f.Period.Kind == PeriodKind.Instant ? "instant" : "duration", src),
+            ["instantDate"] = f.Period.Instant is { } instant
+                ? DataValue.StringValue(instant.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), src)
+                : DataValue.Missing(PortShape.String),
+            ["periodStart"] = f.Period.Start is { } start
+                ? DataValue.StringValue(start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), src)
+                : DataValue.Missing(PortShape.String),
+            ["periodEnd"] = f.Period.End is { } end
+                ? DataValue.StringValue(end.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), src)
+                : DataValue.Missing(PortShape.String),
             ["unit"] = f.Unit is not null
                 ? DataValue.StringValue(f.Unit.ToString(), src)
                 : DataValue.Missing(PortShape.String),

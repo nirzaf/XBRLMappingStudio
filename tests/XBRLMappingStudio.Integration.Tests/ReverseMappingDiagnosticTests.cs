@@ -43,6 +43,15 @@ public sealed class ReverseMappingDiagnosticTests
                     Period = period,
                     Unit = new XbrlUnit("QAR"),
                     Value = 125m
+                },
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("Assets"),
+                    EntityScheme = "http://xbrl.org/entity/",
+                    EntityIdentifier = "ABC123",
+                    Period = XbrlPeriod.OfInstant(new DateOnly(2025, 12, 31)),
+                    Unit = new XbrlUnit("QAR"),
+                    Value = 900m
                 }
             };
             await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, facts));
@@ -58,10 +67,22 @@ public sealed class ReverseMappingDiagnosticTests
             Assert.Equal(ValuePresence.Missing, text.Fields["decimals"].Presence);
             Assert.Equal(ValuePresence.Missing, text.Fields["unit"].Presence);
             Assert.Equal("en", text.Fields["lang"].Raw);
+            Assert.Equal("duration", text.Fields["periodKind"].Raw);
+            Assert.Equal(ValuePresence.Missing, text.Fields["instantDate"].Presence);
+            Assert.Equal("2025-01-01", text.Fields["periodStart"].Raw);
+            Assert.Equal("2026-01-01", text.Fields["periodEnd"].Raw);
+            Assert.Equal(new SourceReference("report", text.RowId), text.CellSources!["periodKind"]);
+            Assert.Equal(new SourceReference("report", text.RowId), text.CellSources["periodStart"]);
 
             var numeric = Assert.Single(rows, row => row.Fields["concept"].Raw?.ToString() == SyntheticProfile.Qualified("Revenue"));
             Assert.Equal("INF", numeric.Fields["decimals"].Raw);
             Assert.Equal("QAR", numeric.Fields["unit"].Raw);
+
+            var instant = Assert.Single(rows, row => row.Fields["concept"].Raw?.ToString() == SyntheticProfile.Qualified("Assets"));
+            Assert.Equal("instant", instant.Fields["periodKind"].Raw);
+            Assert.Equal("2025-12-31", instant.Fields["instantDate"].Raw);
+            Assert.Equal(ValuePresence.Missing, instant.Fields["periodStart"].Presence);
+            Assert.Equal(ValuePresence.Missing, instant.Fields["periodEnd"].Presence);
         }
         finally
         {

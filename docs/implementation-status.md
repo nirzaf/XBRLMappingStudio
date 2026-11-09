@@ -309,3 +309,13 @@ report-import regression passed, and the full Windows Release solution passed
 1,893 tests with 6 environment-gated Arelle skips. Native GUI acceptance remains
 blocked by the Windows lock screen observed during this task; no UI actions or
 publication were performed.
+
+The report adapter now also exposes `periodKind` and nullable `instantDate`,
+`periodStart`, and `periodEnd` fields while retaining the original ISO `period`
+field. These fields carry the same per-fact source locator, and give mapping graphs
+the date-builder inputs needed to construct instant and duration `FactConstruct`
+periods without parsing the combined period string. The integration regression
+checks both period forms, missing-field semantics, and source references. This
+improves generic reverse mapping but does not implement dimension-aware
+`FactConstruct`, target-row joins/updates, tuple flattening, or complete loss
+accounting; ENG-07 remains partial.
