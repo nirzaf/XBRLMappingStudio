@@ -3,3 +3,6 @@
 
 # Acceptance fixture digests bind exact authored bytes across Windows and Linux.
 /tests/XBRLMappingStudio.Fixtures/AcceptanceFixtures/** -text
+
+# Synthetic evaluation dataset digests bind authored bytes across operating systems.
+/tools/ai-evaluation/fixtures/** -text

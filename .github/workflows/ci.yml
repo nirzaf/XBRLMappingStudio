@@ -64,6 +64,9 @@ jobs:
       - name: Self-test synthetic taxonomy benchmark
         run: dotnet tools/performance/taxonomy-benchmark/bin/Release/net10.0/XBRLMappingStudio.TaxonomyBenchmark.dll --self-test
 
+      - name: Self-test synthetic AI retrieval evaluation
+        run: dotnet tools/ai-evaluation/bin/Release/net10.0/XBRLMappingStudio.AIEvaluation.dll --self-test
+
       - name: Test (Release)
         # Subprocess-supervision tests launch nested workers; avoid host-load timeouts across projects.
         run: dotnet test ${{ env.SOLUTION }} -c Release --no-build -m:1 --filter "Category!=ProcessMemory" --logger "trx;LogFileName=test-results-${{ matrix.os }}.trx"

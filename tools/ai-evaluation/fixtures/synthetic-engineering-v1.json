@@ -1,0 +1,33 @@
+{
+  "datasetId": "xms-ai-synthetic-engineering-v1",
+  "scope": "Self-authored synthetic engineering behavior only; not an accounting-quality or production-model evaluation.",
+  "topK": 3,
+  "profile": {
+    "profileId": "synthetic-ai-evaluation-v1",
+    "taxonomyVersion": "synthetic-v1",
+    "namespacePrefix": "eval",
+    "namespaceUri": "urn:xms:synthetic-ai-evaluation:1",
+    "supportedUnits": [ "USD" ],
+    "concepts": [
+      { "qualifiedName": "eval:Revenue", "localName": "Revenue", "label": "Revenue", "dataType": "monetary", "periodType": "duration" },
+      { "qualifiedName": "eval:GrossRevenue", "localName": "GrossRevenue", "label": "Gross Revenue", "dataType": "monetary", "periodType": "duration" },
+      { "qualifiedName": "eval:NetRevenue", "localName": "NetRevenue", "label": "Net Revenue", "dataType": "monetary", "periodType": "duration" },
+      { "qualifiedName": "eval:Assets", "localName": "Assets", "label": "Total Assets", "dataType": "monetary", "periodType": "instant" },
+      { "qualifiedName": "eval:NetIncome", "localName": "NetIncome", "label": "Net Income", "dataType": "monetary", "periodType": "duration" }
+    ],
+    "aliases": {
+      "eval:Revenue": [ "sales", "turnover" ],
+      "eval:NetIncome": [ "earnings", "profit" ]
+    }
+  },
+  "cases": [
+    { "caseId": "positive-sales-alias", "category": "positive", "label": "sales", "unit": "USD", "periodType": "duration", "relevantConcepts": [ "eval:Revenue" ] },
+    { "caseId": "positive-gross-label", "category": "positive", "label": "gross revenue", "unit": "USD", "periodType": "duration", "relevantConcepts": [ "eval:GrossRevenue" ] },
+    { "caseId": "positive-instant-assets", "category": "positive", "label": "total assets", "unit": "USD", "periodType": "instant", "relevantConcepts": [ "eval:Assets" ] },
+    { "caseId": "positive-net-income-alias", "category": "positive", "label": "earnings", "unit": "USD", "periodType": "duration", "relevantConcepts": [ "eval:NetIncome" ] },
+    { "caseId": "ambiguous-gross-net-revenue", "category": "ambiguous", "label": "gross net revenue", "unit": "USD", "periodType": "duration", "relevantConcepts": [ "eval:GrossRevenue", "eval:NetRevenue", "eval:Revenue" ] },
+    { "caseId": "no-match-internal-reference", "category": "no-match", "label": "internal reference code", "unit": "USD", "periodType": "duration", "relevantConcepts": [] },
+    { "caseId": "context-mismatch-revenue-period", "category": "context-mismatch", "label": "revenue", "unit": "USD", "periodType": "instant", "relevantConcepts": [] },
+    { "caseId": "context-mismatch-unit", "category": "context-mismatch", "label": "sales", "unit": "EUR", "periodType": "duration", "relevantConcepts": [] }
+  ]
+}

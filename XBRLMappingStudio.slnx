@@ -23,6 +23,7 @@
     <Project Path="tests/XBRLMappingStudio.XBRL.Tests/XBRLMappingStudio.XBRL.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
+    <Project Path="tools/ai-evaluation/XBRLMappingStudio.AIEvaluation.csproj" />
     <Project Path="tools/performance/taxonomy-benchmark/XBRLMappingStudio.TaxonomyBenchmark.csproj" />
   </Folder>
 </Solution>
