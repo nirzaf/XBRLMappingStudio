@@ -281,7 +281,9 @@ public sealed class MixedPublicationCoordinator
 
         // Always inspect the file independently, including when SQLite evidence
         // failed. The returned outcomes must not hide a changed file destination.
-        var fileMatches = TryDigest(intent.FilePath, out var currentDigest)
+        var (fileDigestAvailable, currentDigest) = await TryDigestAsync(intent.FilePath, cancellationToken)
+            .ConfigureAwait(false);
+        var fileMatches = fileDigestAvailable
             && StringComparer.Ordinal.Equals(currentDigest, intent.FileDigest);
         if (fileMatches)
         {
@@ -365,7 +367,10 @@ public sealed class MixedPublicationCoordinator
         var record = _store.Find(operationKey);
         if (record is null) return null;
 
-        if (TryDigest(record.FilePath, out var fileDigest)
+        var (fileDigestAvailable, fileDigest) = await TryDigestAsync(record.FilePath, cancellationToken)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (fileDigestAvailable
             && StringComparer.Ordinal.Equals(fileDigest, record.FileDigest))
             record = _store.SetFile(operationKey, DestinationPublicationState.Confirmed);
         else if (record.FileState is DestinationPublicationState.InProgress
@@ -378,6 +383,7 @@ public sealed class MixedPublicationCoordinator
     private async Task<MixedPublicationRecord> ReconcileSqliteAsync(
         MixedPublicationRecord record, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var protectedReceipt = RequiresReceiptRevalidation(record);
         if (string.IsNullOrWhiteSpace(record.SqliteOperationKey)
             || string.IsNullOrWhiteSpace(record.SqliteIntentFingerprint))
@@ -456,15 +462,21 @@ public sealed class MixedPublicationCoordinator
             "SQLite receipt evidence is missing or inconsistent. Reconcile the target before retrying.",
             record.OperationKey, record.SqlitePath));
 
-    private static bool TryDigest(string path, out string? digest)
+    private static async Task<(bool Found, string? Digest)> TryDigestAsync(
+        string path, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            digest = File.Exists(path) ? DestinationLock.DigestFile(path) : null;
-            return digest is not null;
+            if (!File.Exists(path)) return (false, null);
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            return (true, "sha256:" + Convert.ToHexString(hash).ToLowerInvariant());
         }
-        catch (IOException) { digest = null; return false; }
-        catch (UnauthorizedAccessException) { digest = null; return false; }
+        catch (IOException) { return (false, null); }
+        catch (UnauthorizedAccessException) { return (false, null); }
     }
 
     private static bool IsPublicationFailure(Exception ex)

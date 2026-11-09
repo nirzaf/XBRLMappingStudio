@@ -57,10 +57,13 @@ can also change either target after a read check. No new automatic data restorat
 rollback, approval, or publication authorization is introduced.
 
 Caller-requested cancellation during explicit read-only reconciliation propagates
-as cancellation and leaves the stored mixed outcome unchanged. A later publication
-attempt still revalidates any prior SQLite confirmation before invoking either
-destination writer. Operational lookup failures continue to preserve an unknown or
-conflicting outcome rather than authorize an automatic retry.
+as cancellation and is not classified as proof of commit or non-commit. The bounded
+file digest read observes cancellation before persisting a file-state classification;
+if file evidence was already completed, that evidence may be persisted before a
+later SQLite receipt read is cancelled. A later publication attempt still revalidates
+any prior SQLite confirmation before invoking either destination writer. Operational
+lookup failures continue to preserve an unknown or conflicting outcome rather than
+authorize an automatic retry.
 
 Full file-adapter journaling, exhaustive interrupted/ambiguous publication recovery,
 retention policy, installed-platform qualification, real IFRS/profile acceptance,
