@@ -324,6 +324,57 @@ public sealed class MixedPublicationCoordinatorTests
         Assert.False(File.Exists(filePath));
     }
 
+    [Theory]
+    [InlineData("Pending", "missing", "Pending")]
+    [InlineData("Pending", "different", "Pending")]
+    [InlineData("Pending", "matching", "Confirmed")]
+    [InlineData("InProgress", "missing", "Unknown")]
+    [InlineData("InProgress", "different", "Unknown")]
+    [InlineData("InProgress", "matching", "Confirmed")]
+    [InlineData("Confirmed", "missing", "Unknown")]
+    [InlineData("Confirmed", "different", "Unknown")]
+    [InlineData("Confirmed", "matching", "Confirmed")]
+    [InlineData("Rejected", "missing", "Rejected")]
+    [InlineData("Rejected", "different", "Rejected")]
+    [InlineData("Rejected", "matching", "Confirmed")]
+    [InlineData("Unknown", "missing", "Unknown")]
+    [InlineData("Unknown", "different", "Unknown")]
+    [InlineData("Unknown", "matching", "Confirmed")]
+    public async Task ExplicitReconciliation_ResolvesFileEvidenceForEveryPersistedOutcome(
+        string initialState, string fileCondition, string expectedState)
+    {
+        using var workspace = new TemporaryDirectory();
+        var statePath = Path.Combine(workspace.Path, "local-state.db");
+        var filePath = Path.Combine(workspace.Path, "report.json");
+        var targetPath = Path.Combine(workspace.Path, "target.db");
+        var bytes = Encoding.UTF8.GetBytes("intended report bytes");
+        if (fileCondition != "missing")
+        {
+            var currentBytes = fileCondition == "matching"
+                ? bytes
+                : Encoding.UTF8.GetBytes("different destination bytes");
+            await File.WriteAllBytesAsync(filePath, currentBytes);
+        }
+
+        var intent = Intent(filePath, bytes, targetPath, "mixed-file-state-" + Guid.NewGuid().ToString("N"));
+        var store = new MixedPublicationStore(new LocalApplicationDatabase(statePath));
+        _ = store.GetOrCreate(intent);
+        _ = store.SetFile(intent.OperationKey, Enum.Parse<DestinationPublicationState>(initialState),
+            initialState == "Rejected" ? "PUB_TEST_REJECTED" : null);
+
+        var record = await new MixedPublicationCoordinator(store).ReconcileAsync(intent.OperationKey);
+
+        Assert.NotNull(record);
+        Assert.Equal(Enum.Parse<DestinationPublicationState>(expectedState), record!.FileState);
+        Assert.Equal(DestinationPublicationState.Pending, record.SqliteState);
+        if (expectedState == "Unknown")
+            Assert.Equal(DiagnosticCodes.PubPartialFailure, record.FileFailureCode);
+        else if (expectedState == "Rejected")
+            Assert.Equal("PUB_TEST_REJECTED", record.FileFailureCode);
+        else
+            Assert.Null(record.FileFailureCode);
+    }
+
     [Fact]
     public async Task RestartWithUnconfirmedFileWrite_RemainsUnknownAndBlocksBothRetryLegs()
     {
