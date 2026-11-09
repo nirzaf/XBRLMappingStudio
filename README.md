@@ -142,7 +142,7 @@ graph TD
 | XBRL | Synthetic OIM profile (`urn:synthetic:finance:1.0`) | No real regulator taxonomy is available offline. |
 | Local state | `Microsoft.Data.Sqlite` | Versioned app database (`state.db`): run journal, publication receipts, backups. |
 | XBRL validation worker | Python 3.12 + Arelle (`tools/worker/`) | Hash-locked requirements; offline CI validation against a checked-in synthetic taxonomy. |
-| Tests | xUnit 2.9.3 | Latest implementation CI [42545993025](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42545993025) verified `9a18c6c71af87c896f746fe1f61c0be8ef43045b`; each OS matrix passed 1,887 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
+| Tests | xUnit 2.9.3 | Latest exact-head CI [42548631301](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42548631301) verified `6c59fc6510361f00e81f0cecbf9634b7a47903a1`; each OS matrix passed 1,887 tests with 6 environment-gated Arelle subprocess skips. Current suite counts and separate worker/memory evidence are recorded below. |
 | CI/CD | GitHub Actions | See [CI/CD](#cicd). |
 
 ---
@@ -288,8 +288,8 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest implementation CI [42545993025](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42545993025)
-verified `9a18c6c71af87c896f746fe1f61c0be8ef43045b`. Repository hygiene, Windows and
+Latest exact-head CI [42548631301](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42548631301)
+verified `6c59fc6510361f00e81f0cecbf9634b7a47903a1`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate streaming/snapshot memory qualifications, and repeated
 Windows worker-cancellation checks passed. Each OS matrix passed **1,887 tests**,
