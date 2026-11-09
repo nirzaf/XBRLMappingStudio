@@ -66,12 +66,16 @@ public sealed class ArelleExecutionTests
                   <xs:element name="StatementTable" id="StatementTable" type="xbrli:stringItemType"
                               substitutionGroup="xbrli:item" xbrli:periodType="duration"
                               abstract="true" nillable="true"/>
-                  <link:roleType id="StatementRole" roleURI="https://example.test/role/statement">
-                    <link:definition>Statement dimensional relationships</link:definition>
-                    <link:usedOn>link:definitionLink</link:usedOn>
-                  </link:roleType>
-                  <link:linkbaseRef xlink:type="simple"
-                                    xlink:href="typed-dimension-definition.xml"/>
+                  <xs:annotation>
+                    <xs:appinfo>
+                      <link:roleType id="StatementRole" roleURI="https://example.test/role/statement">
+                        <link:definition>Statement dimensional relationships</link:definition>
+                        <link:usedOn>link:definitionLink</link:usedOn>
+                      </link:roleType>
+                      <link:linkbaseRef xlink:type="simple"
+                                        xlink:href="typed-dimension-definition.xml"/>
+                    </xs:appinfo>
+                  </xs:annotation>
                 </xs:schema>
                 """;
             await File.WriteAllTextAsync(Path.Combine(taxonomyRoot, taxonomyFileName), taxonomy,
