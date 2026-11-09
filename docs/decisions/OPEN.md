@@ -101,10 +101,16 @@ this source review. Publication, human approval and licensing gates remain uncha
   requires a form submission. No form was submitted, and no package artifact or
   hash has been verified in this repository.
 - **Rights gate:** The current [IFRS Taxonomy terms](https://www.ifrs.org/content/dam/ifrs/about-us/legal-and-governance/legal-docs/taxonomy/taxonomy-terms-and-conditions.pdf)
-  restrict use and prohibit commercial use without permission. Engineering will
-  not make a legal determination that product evaluation or distribution is
-  permitted; obtain written clarification or licensing before integrating the
-  package into a product build or distributing it.
+  grant use for listed purposes, prohibit Commercial Use (including tagging
+  software and other commercial products), and direct users to the Foundation
+  for commercial-use permission. This means the owner's conditional authorization
+  for local evaluation does not by itself establish that using the package during
+  development or integration of this product is permitted. Obtain written
+  clarification or licensing before product integration, and separately verify
+  any evaluation-use terms. The official [package download page](https://392942.hs-sites-eu1.com/ifrs-accounting-taxonomy-2025-download-page)
+  requires completing and submitting a form. No form was submitted and no package
+  was downloaded during this review; package identity and SHA-256 evidence remain
+  open. No legal determination or redistribution permission is inferred here.
 - **Rationale:** The synthetic profile exercises the architecture but does not
   qualify any real concept set. A production or conformance claim requires
   verified package identity, rights, dependency closure, and offline-resolution
