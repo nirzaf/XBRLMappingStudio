@@ -6,6 +6,8 @@ using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
 using XBRLMappingStudio.XBRL;
+using XBRLMappingStudio.Adapters.Json;
+using XBRLMappingStudio.Adapters.Xml;
 
 namespace XBRLMappingStudio.Adapters.Xbrl;
 
@@ -28,12 +30,14 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static readonly HashSet<string> SupportedSelectionKeys = new(StringComparer.Ordinal)
     {
-        "occurrenceId", "concept", "period", "unit", "dimensionAxis", "dimensionMember", "dimensionFilters"
+        "occurrenceId", "concept", "period", "unit", "dimensionAxis", "dimensionMember", "dimensionFilters",
+        "maxInputBytes"
     };
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
         _ = ParseSelection(connection);
+        _ = GetMaximumInputBytes(connection);
         var cols = new List<ColumnSchema>();
         for (int i = 0; i < Columns.Length; i++)
         {
@@ -53,7 +57,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         int maxRows, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection));
+        var facts = Select(connection, Read(connection, cancellationToken));
         bool truncated = facts.Count > maxRows;
         var rows = facts.Take(maxRows).Select(item => ToRecord(connection, item.Fact, item.Index)).ToList();
         return Task.FromResult(new DataSample(schema, rows, truncated));
@@ -63,7 +67,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection));
+        var facts = Select(connection, Read(connection, cancellationToken));
         for (int i = 0; i < facts.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -177,12 +181,12 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("period"), Get("unit"), dimensions);
     }
 
-    private static IReadOnlyList<XbrlFact> Read(SourceConnection connection)
+    private static IReadOnlyList<XbrlFact> Read(SourceConnection connection, CancellationToken cancellationToken)
     {
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
             $"XBRL report connection '{connection.SourceId}' has no file path.");
-        var text = File.ReadAllText(path, Encoding.UTF8);
+        var text = ReadBoundedText(path, GetMaximumInputBytes(connection), cancellationToken);
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
         try
         {
@@ -198,6 +202,55 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                 $"Report '{path}' could not be parsed as xBRL-JSON or xBRL-XML: {ex.Message}");
         }
     }
+
+    private static long GetMaximumInputBytes(SourceConnection connection)
+    {
+        var extension = System.IO.Path.GetExtension(connection.Path ?? string.Empty);
+        var defaultLimit = string.Equals(extension, ".xml", StringComparison.OrdinalIgnoreCase)
+            ? XmlAdapter.DefaultMaximumInputBytes
+            : JsonAdapter.DefaultMaximumInputBytes;
+        var absoluteLimit = JsonAdapter.Options.AbsoluteMaximumInputBytes;
+        if (connection.Configuration is null
+            || !connection.Configuration.TryGetValue("maxInputBytes", out var configured))
+            return defaultLimit;
+
+        if (!long.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+            || value < 1 || value > absoluteLimit)
+            throw new AdapterException(DiagnosticCodes.IoInputBudgetExceeded,
+                $"Configured XBRL report input limit must be between 1 and {absoluteLimit} bytes.",
+                isInputBudgetExceeded: true);
+        return value;
+    }
+
+    private static string ReadBoundedText(string path, long maximumBytes, CancellationToken cancellationToken)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 64 * 1024, FileOptions.SequentialScan);
+        if (stream.Length > maximumBytes)
+            throw InputBudgetExceeded(maximumBytes);
+
+        using var content = new MemoryStream((int)Math.Min(stream.Length, maximumBytes));
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            if (content.Length + read > maximumBytes)
+                throw InputBudgetExceeded(maximumBytes);
+            content.Write(buffer, 0, read);
+        }
+
+        content.Position = 0;
+        using var reader = new StreamReader(content, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
+            bufferSize: 4096, leaveOpen: true);
+        return reader.ReadToEnd();
+    }
+
+    private static AdapterException InputBudgetExceeded(long maximumBytes)
+        => new(DiagnosticCodes.IoInputBudgetExceeded,
+            $"XBRL report input exceeds the maximum size of {maximumBytes} bytes.",
+            isInputBudgetExceeded: true);
 
     private static DataRecord ToRecord(SourceConnection connection, XbrlFact f, int index)
     {

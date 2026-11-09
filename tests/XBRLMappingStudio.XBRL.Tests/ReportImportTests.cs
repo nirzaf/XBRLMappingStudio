@@ -112,6 +112,42 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
+    public async Task JsonReport_RejectsInputAboveConfiguredByteBudget()
+    {
+        var path = Write("over-budget.json", OimSerializer.Serialize(Profile, Report()));
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, path,
+            new Dictionary<string, string> { ["maxInputBytes"] = "8" });
+        var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) { }
+        });
+
+        Assert.Equal(DiagnosticCodes.IoInputBudgetExceeded, error.Code);
+        Assert.True(error.IsInputBudgetExceeded);
+        Assert.Contains("8 bytes", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("not-a-number")]
+    [InlineData("67108865")]
+    public async Task InvalidReportInputByteBudget_FailsDuringSchemaInspection(string budget)
+    {
+        var adapter = new XbrlReportAdapter();
+        var connection = new SourceConnection("report", adapter.Kind, Write("budget.json", "{}"),
+            new Dictionary<string, string> { ["maxInputBytes"] = budget });
+
+        var error = await Assert.ThrowsAsync<AdapterException>(
+            () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
+
+        Assert.Equal(DiagnosticCodes.IoInputBudgetExceeded, error.Code);
+        Assert.True(error.IsInputBudgetExceeded);
+    }
+
+    [Fact]
     public async Task XmlReport_YieldsSameRecordsAsJson()
     {
         var facts = Report();
