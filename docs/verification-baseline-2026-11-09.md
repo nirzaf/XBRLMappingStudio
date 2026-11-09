@@ -107,3 +107,13 @@ follow-up, the complete Windows Release Integration suite passed **514/514
 runnable tests** with **6** environment-gated Arelle skips. This does not complete destination
 row selection, tuple flattening, typed-dimension generation, or full reverse
 mapping qualification.
+
+Exact-head CI [42633181590](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42633181590)
+passed on `7a38f4be804749d449348ac8192c49a88399788f`. Windows and Ubuntu each
+passed **1,992 tests** with **6** environment-gated Arelle skips; repository
+hygiene and the pinned Arelle job passed, including **82 Python** and **15 .NET**
+worker tests. Both matrix test suites include `ReverseMappingDiagnosticTests`
+with the entity-scheme and entity-identifier selectors. Windows streaming and
+snapshot memory qualifications and repeated worker-cancellation regressions
+also passed. The synthetic entity fixture does not qualify a real taxonomy or
+complete destination-row, tuple, and typed-dimension behavior.
