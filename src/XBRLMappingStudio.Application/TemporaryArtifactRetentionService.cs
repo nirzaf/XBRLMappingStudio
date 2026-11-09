@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
@@ -55,21 +56,29 @@ internal sealed class TemporaryArtifactLease : IDisposable
 {
     internal const string OwnerFileName = ".xms-large-run-owner.json";
     private const int OwnerSchemaVersion = 1;
+    private static readonly ConcurrentDictionary<string, byte> LeasedDirectories = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly FileStream _lock;
     private bool _disposed;
 
     public string DirectoryPath { get; }
 
     private TemporaryArtifactLease(string directoryPath, FileStream ownerLock)
-        => (DirectoryPath, _lock) = (directoryPath, ownerLock);
+    {
+        DirectoryPath = Path.GetFullPath(directoryPath);
+        _lock = ownerLock;
+    }
 
     public static TemporaryArtifactLease CreateLargeRun(string? temporaryRoot = null)
     {
         var directory = Path.Combine(Path.GetFullPath(temporaryRoot ?? Path.GetTempPath()), "xms-large-" + Guid.NewGuid().ToString("N"));
-        LocalApplicationDatabase.CreatePrivateDirectory(directory);
+        var leaseKey = Path.GetFullPath(directory);
+        if (!LeasedDirectories.TryAdd(leaseKey, 0))
+            throw new IOException("The large-run spool already has an in-process lease.");
         FileStream? ownerLock = null;
         try
         {
+            LocalApplicationDatabase.CreatePrivateDirectory(directory);
             var markerPath = Path.Combine(directory, OwnerFileName);
             var options = new FileStreamOptions
             {
@@ -92,6 +101,7 @@ internal sealed class TemporaryArtifactLease : IDisposable
         catch
         {
             ownerLock?.Dispose();
+            LeasedDirectories.TryRemove(leaseKey, out _);
             try { Directory.Delete(directory, recursive: true); } catch { }
             throw;
         }
@@ -102,6 +112,8 @@ internal sealed class TemporaryArtifactLease : IDisposable
         var markerPath = Path.Combine(directory, OwnerFileName);
         if (!File.Exists(markerPath) || (File.GetAttributes(markerPath) & FileAttributes.ReparsePoint) != 0)
             return null;
+        var leaseKey = Path.GetFullPath(directory);
+        if (!LeasedDirectories.TryAdd(leaseKey, 0)) return null;
         FileStream? ownerLock = null;
         try
         {
@@ -110,6 +122,7 @@ internal sealed class TemporaryArtifactLease : IDisposable
             if (!TryLock(ownerLock))
             {
                 ownerLock.Dispose();
+                LeasedDirectories.TryRemove(leaseKey, out _);
                 return null;
             }
             ownerLock.Position = 0;
@@ -118,11 +131,13 @@ internal sealed class TemporaryArtifactLease : IDisposable
         catch (IOException)
         {
             ownerLock?.Dispose();
+            LeasedDirectories.TryRemove(leaseKey, out _);
             return null;
         }
         catch
         {
             ownerLock?.Dispose();
+            LeasedDirectories.TryRemove(leaseKey, out _);
             throw;
         }
     }
@@ -147,7 +162,22 @@ internal sealed class TemporaryArtifactLease : IDisposable
         if (_disposed) return;
         _disposed = true;
         try { Unlock(_lock); } catch (IOException) { }
-        _lock.Dispose();
+        finally
+        {
+            _lock.Dispose();
+            LeasedDirectories.TryRemove(DirectoryPath, out _);
+        }
+    }
+
+    internal static void ReleaseAcquiredDirectory(string directory, FileStream ownerLock)
+    {
+        var key = Path.GetFullPath(directory);
+        try { Unlock(ownerLock); } catch (IOException) { }
+        finally
+        {
+            ownerLock.Dispose();
+            LeasedDirectories.TryRemove(key, out _);
+        }
     }
 
     internal static bool TryLock(FileStream stream)
@@ -407,8 +437,7 @@ public sealed class TemporaryArtifactRetentionService
                 {
                     if (!keepLock)
                     {
-                        try { TemporaryArtifactLease.Unlock(ownerLock); } catch (IOException) { }
-                        ownerLock.Dispose();
+                        TemporaryArtifactLease.ReleaseAcquiredDirectory(directory, ownerLock);
                     }
                 }
             }
@@ -530,10 +559,7 @@ public sealed class TemporaryArtifactRetentionService
     private static void DisposeLocks(IEnumerable<LockedCandidate> candidates)
     {
         foreach (var item in candidates)
-        {
-            try { TemporaryArtifactLease.Unlock(item.OwnerLock); } catch (IOException) { }
-            item.OwnerLock.Dispose();
-        }
+            TemporaryArtifactLease.ReleaseAcquiredDirectory(item.DirectoryPath, item.OwnerLock);
     }
 
     private static DateTimeOffset NormalizeUtc(DateTimeOffset value) => value.ToUniversalTime();
