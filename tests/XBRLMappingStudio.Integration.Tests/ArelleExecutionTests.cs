@@ -187,6 +187,29 @@ public sealed class ArelleExecutionTests
                 $"Arelle status was {response.Status}. Error: {response.Error}. Diagnostics: "
                 + string.Join(Environment.NewLine, response.Diagnostics?.Select(diagnostic =>
                     $"{diagnostic.Code}: {diagnostic.Message}") ?? Array.Empty<string>()));
+
+            var invalidXml = xml
+                .Replace("<ex:RegionDomain>", "<ex:WrongDomain>", StringComparison.Ordinal)
+                .Replace("</ex:RegionDomain>", "</ex:WrongDomain>", StringComparison.Ordinal);
+            Assert.NotEqual(xml, invalidXml);
+            await File.WriteAllTextAsync(reportPath, invalidXml, new UTF8Encoding(false));
+            var invalidDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
+            using var invalidPayload = JsonDocument.Parse(JsonSerializer.Serialize(new
+            {
+                xbrlXmlPath = reportPath,
+                sha256 = invalidDigest
+            }));
+            var invalidResponse = await worker.RequestAsync(request with
+            {
+                OperationId = "typed-dimension-invalid-" + Guid.NewGuid().ToString("N"),
+                DeadlineUtc = DateTimeOffset.UtcNow.AddMinutes(2),
+                Payload = invalidPayload.RootElement.Clone()
+            }, CancellationToken.None);
+            Assert.True(invalidResponse.Status == WorkerStatus.DomainFailure,
+                $"Arelle accepted a typed member outside the declared domain. Status: {invalidResponse.Status}. "
+                + $"Error: {invalidResponse.Error}. Diagnostics: "
+                + string.Join(Environment.NewLine, invalidResponse.Diagnostics?.Select(diagnostic =>
+                    $"{diagnostic.Code}: {diagnostic.Message}") ?? Array.Empty<string>()));
         }
         finally
         {
