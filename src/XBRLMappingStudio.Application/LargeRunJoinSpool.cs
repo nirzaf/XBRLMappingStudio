@@ -32,7 +32,7 @@ internal sealed partial class LargeRunFactStore
                 CREATE TABLE join_rows (seq INTEGER PRIMARY KEY, partition_id INTEGER NOT NULL, side INTEGER NOT NULL, row_json TEXT NOT NULL);
                 CREATE INDEX join_rows_order ON join_rows(partition_id, side, seq);
                 """;
-            schema.ExecuteNonQuery();
+            ExecuteSpoolWrite(schema);
             _joinsInitialized = true;
         }
         var retained = left ? plan.LeftFields : plan.RightFields;
@@ -93,7 +93,7 @@ internal sealed partial class LargeRunFactStore
             insert.Parameters.AddWithValue("$seq", _joinRows + 1);
             insert.Parameters.AddWithValue("$side", left ? 0 : 1);
             insert.Parameters.AddWithValue("$json", json);
-            insert.ExecuteNonQuery();
+            ExecuteSpoolWrite(insert);
         }
         if (!exists) { _joinPartitions++; _joinBytes += key.Length; }
         _joinBytes += jsonBytes;
@@ -155,13 +155,13 @@ internal sealed partial class LargeRunFactStore
             update.Parameters.AddWithValue("$phase", leftOutput ? 0 : rightOutput ? (matchable ? 1 : 2) : 3);
             update.Parameters.AddWithValue("$seq", leftOutput ? lf : rf);
             update.Parameters.AddWithValue("$id", id);
-            update.ExecuteNonQuery();
+            ExecuteSpoolWrite(update);
         }
         cancellationToken.ThrowIfCancellationRequested();
         using var order = _connection.CreateCommand();
         order.Transaction = _transaction;
         order.CommandText = "CREATE INDEX join_partition_order ON join_partitions(phase, first_output, id);";
-        order.ExecuteNonQuery();
+        ExecuteSpoolWrite(order);
         cancellationToken.ThrowIfCancellationRequested();
         CommitAndBeginInsertTransaction();
     }

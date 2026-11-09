@@ -54,9 +54,11 @@ are not global source-row coordinates; fact source locators remain authoritative
   state for the group being evaluated. It is not a peak-process-memory bound.
 - Serialized source rows and facts obey `MaxRowBytes` and `MaxFactBytes`.
 - Group rows, group keys, source identity rows, facts and their indexes share
-  `MaxSpoolBytes`. Logical payload checks occur before insertion; physical SQLite
-  size checks occur at transaction commits and finalization, so a transient disk
-  overshoot is possible. Report bytes retain the separate `MaxReportBytes` cap.
+  `MaxSpoolBytes`. Logical payload checks occur before insertion, and SQLite's
+  `max_page_count` is derived from `MaxSpoolBytes` to cap the private spool
+  database during writes and index creation. This caps the main database file,
+  not any SQLite temporary sort storage or total process disk use. Report bytes
+  retain the separate `MaxReportBytes` cap.
 - Cancellation is polled while reading, partitioning, loading and executing groups.
   Failure or cancellation disposes the private spool, returns no large artifact
   and skips report validation/publication. A later run starts from verified inputs.

@@ -54,8 +54,10 @@ GroupBy and FactConstruct nodes. They are not a claim of complete provenance.
   key/provenance estimate. These estimates are not peak-process-memory limits.
 - Serialized rows/facts retain `MaxRowBytes`/`MaxFactBytes`; both sources' digest
   rows, join rows, partition keys, facts and indexes share `MaxSpoolBytes`.
-  Logical payload checks precede insertion. Physical size checks occur at
-  commits/finalization, so transient disk overshoot remains possible.
+  Logical payload checks precede insertion. SQLite's `max_page_count` is derived
+  from `MaxSpoolBytes`, so the private spool database cannot grow past that byte
+  limit during row or index writes. This caps the main database file, not any
+  SQLite temporary sort storage or total process disk use.
 - Cancellation is polled during input, partitioning, preflight, loading and engine
   execution. Native SQLite index creation is synchronous and observes cancellation
   after it returns. Failures/cancellation discard the private spool and skip

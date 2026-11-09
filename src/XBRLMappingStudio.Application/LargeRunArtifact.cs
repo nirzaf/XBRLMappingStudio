@@ -231,17 +231,27 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
             Pooling = false
         }.ToString());
         _connection.Open();
-        using (var pragma = _connection.CreateCommand())
+        try
         {
-            pragma.CommandText = $"PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-{cacheKiB};";
-            pragma.ExecuteNonQuery();
+            var maxPages = Math.Clamp(maxBytes / 4096, 1L, 2_147_483_646L);
+            using (var pragma = _connection.CreateCommand())
+            {
+                pragma.CommandText = $"PRAGMA page_size=4096; PRAGMA max_page_count={maxPages}; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-{cacheKiB};";
+                ExecuteSpoolWrite(pragma);
+            }
+            using (var schema = _connection.CreateCommand())
+            {
+                schema.CommandText = "CREATE TABLE facts (seq INTEGER PRIMARY KEY AUTOINCREMENT, semantic_key TEXT NOT NULL, semantic_sort_key BLOB NOT NULL, fact_json TEXT NOT NULL); CREATE TABLE source_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, sort_key BLOB NOT NULL, canonical TEXT NOT NULL, source_id TEXT NOT NULL);";
+                ExecuteSpoolWrite(schema);
+            }
+            EnsureDatabaseDiskBudget();
+            BeginInsertTransaction();
         }
-        using (var schema = _connection.CreateCommand())
+        catch
         {
-            schema.CommandText = "CREATE TABLE facts (seq INTEGER PRIMARY KEY AUTOINCREMENT, semantic_key TEXT NOT NULL, semantic_sort_key BLOB NOT NULL, fact_json TEXT NOT NULL); CREATE TABLE source_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, sort_key BLOB NOT NULL, canonical TEXT NOT NULL, source_id TEXT NOT NULL);";
-            schema.ExecuteNonQuery();
+            _connection.Dispose();
+            throw;
         }
-        BeginInsertTransaction();
     }
 
     public void Add(XbrlFact fact, int maxFactBytes)
@@ -262,7 +272,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         _insert!.Parameters["$key"].Value = semanticKey;
         _insert.Parameters["$sortKey"].Value = Utf16OrdinalKey(semanticKey);
         _insert.Parameters["$json"].Value = json;
-        _insert.ExecuteNonQuery();
+        ExecuteSpoolWrite(_insert);
         _count++;
         _bytes += bytes;
         if (_count % 512 == 0) CommitAndBeginInsertTransaction();
@@ -284,7 +294,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         command.Parameters.AddWithValue("$sortKey", Utf16OrdinalKey(canonicalRecord));
         command.Parameters.AddWithValue("$canonical", canonicalRecord);
         command.Parameters.AddWithValue("$sourceId", sourceId);
-        command.ExecuteNonQuery();
+        ExecuteSpoolWrite(command);
         _sourceRows++;
         _sourceBytes += retainedBytes;
         if ((_count + _sourceRows) % 512 == 0) CommitAndBeginInsertTransaction();
@@ -367,13 +377,13 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         {
             cancellationToken.ThrowIfCancellationRequested();
             index.CommandText = "CREATE INDEX facts_semantic_order ON facts(semantic_sort_key, seq);";
-            index.ExecuteNonQuery();
+            ExecuteSpoolWrite(index);
             // Microsoft.Data.Sqlite executes this index build synchronously. Observe
             // cancellation as soon as the native SQLite call returns, then skip the
             // remaining index and let the owner discard the private spool.
             cancellationToken.ThrowIfCancellationRequested();
             index.CommandText = "CREATE INDEX source_rows_order ON source_rows(source_id, sort_key, seq);";
-            index.ExecuteNonQuery();
+            ExecuteSpoolWrite(index);
             cancellationToken.ThrowIfCancellationRequested();
         }
         _finished = true;
@@ -485,7 +495,11 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         _insert?.Dispose();
         _insert = null;
         if (_transaction is null) return;
-        _transaction.Commit();
+        try { _transaction.Commit(); }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 13)
+        {
+            throw SpoolPageLimitExceeded(ex);
+        }
         _transaction.Dispose();
         _transaction = null;
         EnsureDatabaseDiskBudget();
@@ -496,6 +510,18 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         if (File.Exists(_databasePath) && new FileInfo(_databasePath).Length > _maxBytes)
             throw new LargeRunBudgetExceededException($"The fact/source spool exceeded its {_maxBytes} byte on-disk budget.");
     }
+
+    private void ExecuteSpoolWrite(SqliteCommand command)
+    {
+        try { command.ExecuteNonQuery(); }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 13)
+        {
+            throw SpoolPageLimitExceeded(ex);
+        }
+    }
+
+    private LargeRunBudgetExceededException SpoolPageLimitExceeded(SqliteException inner)
+        => new($"The private SQLite spool reached its configured MaxSpoolBytes={_maxBytes} page limit.", inner);
 
     private static byte[] Utf16OrdinalKey(string value)
     {
@@ -518,4 +544,5 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
 internal sealed class LargeRunBudgetExceededException : IOException
 {
     public LargeRunBudgetExceededException(string message) : base(message) { }
+    public LargeRunBudgetExceededException(string message, Exception innerException) : base(message, innerException) { }
 }

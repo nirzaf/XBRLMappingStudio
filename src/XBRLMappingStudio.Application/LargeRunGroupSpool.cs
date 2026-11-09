@@ -40,7 +40,7 @@ internal sealed partial class LargeRunFactStore
                     row_json TEXT NOT NULL);
                 CREATE INDEX group_rows_order ON group_rows(group_id, seq);
                 """;
-            schema.ExecuteNonQuery();
+            ExecuteSpoolWrite(schema);
             _groupsInitialized = true;
         }
         var fields = new Dictionary<string, SpilledValue>(StringComparer.Ordinal);
@@ -101,7 +101,7 @@ internal sealed partial class LargeRunFactStore
             group.Parameters.AddWithValue("$id", groupId);
             group.Parameters.AddWithValue("$key", key);
             group.Parameters.AddWithValue("$bytes", inputBytes);
-            group.ExecuteNonQuery();
+            ExecuteSpoolWrite(group);
         }
         using (var row = _connection.CreateCommand())
         {
@@ -109,7 +109,7 @@ internal sealed partial class LargeRunFactStore
             row.CommandText = "INSERT INTO group_rows(group_id, row_json) VALUES($id, $json);";
             row.Parameters.AddWithValue("$id", groupId);
             row.Parameters.AddWithValue("$json", json);
-            row.ExecuteNonQuery();
+            ExecuteSpoolWrite(row);
         }
         if (rowCount == 0)
         {

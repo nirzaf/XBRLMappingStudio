@@ -506,6 +506,37 @@ public sealed partial class LargeRunExecutionTests
     }
 
     [Fact]
+    public void LargeRunFactStore_EnforcesPhysicalPageLimitDuringWrites()
+    {
+        var root = NewDirectory();
+        try
+        {
+            const long spoolLimit = 128 * 1024;
+            var path = Path.Combine(root, "facts.sqlite");
+            using var store = new LargeRunFactStore(path, cacheKiB: 256, maxBytes: spoolLimit);
+            var error = Assert.Throws<LargeRunBudgetExceededException>(() =>
+            {
+                for (var i = 0; i < 100; i++)
+                {
+                    store.Add(new XbrlFact
+                    {
+                        ConceptName = "synthetic:Disclosure",
+                        EntityScheme = "https://example.test/entity",
+                        EntityIdentifier = $"entity-{i:D3}",
+                        Period = XbrlPeriod.OfInstant(new DateOnly(2026, 12, 31)),
+                        TextValue = new string((char)('a' + i % 20), 2_000) + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    }, maxFactBytes: 8 * 1024);
+                }
+            });
+
+            Assert.Contains("MaxSpoolBytes=131072", error.Message, StringComparison.Ordinal);
+            Assert.True(new FileInfo(path).Length <= spoolLimit,
+                $"Physical spool size {new FileInfo(path).Length} exceeded MaxSpoolBytes={spoolLimit}.");
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
+    [Fact]
     [Trait("Category", "ProcessMemory")]
     public async Task HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded()
     {
