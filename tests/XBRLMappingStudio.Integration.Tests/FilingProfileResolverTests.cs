@@ -349,6 +349,105 @@ public sealed class FilingProfileResolverTests
     }
 
     [Fact]
+    public void SchemaV7IndexesDigestBoundTypedDimensionDomainMetadata()
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            var installed = WriteInstalledProfile(root, "fixture-typed-dimension-profile", "7.0.0", "Revenue");
+            var manifestPath = Path.Combine(
+                installed.InstallationDirectory, InstalledFilingProfileCatalog.ManifestFileName);
+            var manifest = JsonSerializer.Deserialize<FilingProfileManifest>(
+                File.ReadAllText(manifestPath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var typedManifest = manifest with
+            {
+                Concepts = manifest.Concepts.Append(new ConceptMetadata(
+                    "ex:TypedAxis", "urn:example", "TypedAxis", "Typed axis", "dimension", "duration", true)).ToList(),
+                NamespaceUris = new Dictionary<string, string>(manifest.NamespaceUris, StringComparer.Ordinal)
+                {
+                    ["xs"] = "http://www.w3.org/2001/XMLSchema"
+                },
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new("ex:TypedMember", "xs:string")
+                },
+                ProfileDigest = ""
+            };
+            typedManifest = typedManifest with { ProfileDigest = typedManifest.ComputeDigest() };
+            File.WriteAllText(manifestPath, typedManifest.ToJson());
+
+            var loaded = Assert.Single(InstalledFilingProfileCatalog.Load(root).Profiles);
+            Assert.Equal(new TypedDimensionDomainMetadata("ex:TypedMember", "xs:string"),
+                loaded.Profile.TypedDimensionDomains["ex:TypedAxis"]);
+
+            var changedElement = typedManifest with
+            {
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new("ex:OtherMember", "xs:string")
+                },
+                ProfileDigest = ""
+            };
+            Assert.NotEqual(typedManifest.ProfileDigest, changedElement.ComputeDigest());
+            var changedType = typedManifest with
+            {
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new("ex:TypedMember", "xs:token")
+                },
+                ProfileDigest = ""
+            };
+            Assert.NotEqual(typedManifest.ProfileDigest, changedType.ComputeDigest());
+
+            var legacy = typedManifest with { SchemaVersion = 6, ProfileDigest = "" };
+            legacy = legacy with { ProfileDigest = legacy.ComputeDigest() };
+            File.WriteAllText(manifestPath, legacy.ToJson());
+            var rejected = InstalledFilingProfileCatalog.Load(root);
+            Assert.Empty(rejected.Profiles);
+            Assert.Contains(rejected.Issues, issue => issue.Message.Contains("schema version 7", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("ex:Missing:bad", "xs:string")]
+    [InlineData("ex:TypedMember", "xs:decimal")]
+    [InlineData("ex:TypedMember", "fake:string")]
+    public void CatalogRejectsUnsupportedTypedDimensionMetadata(string domainElementQName, string dataTypeQName)
+    {
+        var root = NewCatalogDirectory();
+        try
+        {
+            WriteInvalidManifest(root, "fixture-invalid-typed-domain", "1.0.0", manifest => manifest with
+            {
+                Concepts = manifest.Concepts.Append(new ConceptMetadata(
+                    "ex:TypedAxis", "urn:example", "TypedAxis", "Typed axis", "dimension", "duration", true)).ToList(),
+                NamespaceUris = new Dictionary<string, string>(manifest.NamespaceUris, StringComparer.Ordinal)
+                {
+                    ["xs"] = "http://www.w3.org/2001/XMLSchema",
+                    ["fake"] = "urn:not-xml-schema"
+                },
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["ex:TypedAxis"] = new(domainElementQName, dataTypeQName)
+                }
+            });
+
+            var result = InstalledFilingProfileCatalog.Load(root);
+
+            Assert.Empty(result.Profiles);
+            Assert.Contains(result.Issues, issue => issue.Message.Contains("supported XSD simple type", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CatalogRejectsPresentationRelationshipsThatReferenceUnknownConcepts()
     {
         var root = NewCatalogDirectory();

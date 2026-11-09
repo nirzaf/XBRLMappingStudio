@@ -12,7 +12,7 @@ namespace XBRLMappingStudio.Application;
 /// </summary>
 public sealed record FilingProfileManifest
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
     public const int MaximumRelationships = TaxonomyIndex.MaximumRelationships;
     public const int MaximumPresentationRelationships = MaximumRelationships;
 
@@ -27,6 +27,8 @@ public sealed record FilingProfileManifest
     public Dictionary<string, string> NamespaceUris { get; init; } = new(StringComparer.Ordinal);
     /// <summary>Dimension QName to allowed member QNames for the exact taxonomy version.</summary>
     public Dictionary<string, List<string>> DimensionDomains { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>Typed dimension QName to global typed-domain element and supported simple type.</summary>
+    public Dictionary<string, TypedDimensionDomainMetadata> TypedDimensionDomains { get; init; } = new(StringComparer.Ordinal);
     /// <summary>Ordered presentation arcs; concept identity remains separate from its role-specific occurrences.</summary>
     public List<PresentationLink> PresentationLinks { get; init; } = new();
     /// <summary>Ordered summation-item arcs in the calculation linkbase.</summary>
@@ -57,6 +59,7 @@ public sealed record FilingProfileManifest
             pair => pair.Key,
             pair => (IReadOnlyList<string>)pair.Value.ToArray(),
             StringComparer.Ordinal),
+        TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(TypedDimensionDomains, StringComparer.Ordinal),
         PresentationLinks = PresentationLinks.ToArray(),
         CalculationLinks = CalculationLinks.ToArray(),
         DefinitionLinks = DefinitionLinks.ToArray(),
@@ -438,13 +441,17 @@ public static class InstalledFilingProfileCatalog
             throw new InvalidDataException($"Concept count exceeds the {MaxConcepts}-concept limit or is missing.");
         if (manifest.SupportedUnits is null || manifest.PackageNames is null
             || manifest.PackageFiles is null || manifest.NamespaceUris is null
-            || manifest.DimensionDomains is null || manifest.PresentationLinks is null
+            || manifest.DimensionDomains is null || manifest.TypedDimensionDomains is null || manifest.PresentationLinks is null
             || manifest.CalculationLinks is null || manifest.DefinitionLinks is null
             || manifest.OfflineReferences is null || manifest.RequiredPlugins is null
             || manifest.RequiredChecks is null)
             throw new InvalidDataException("Profile collections cannot be null.");
         if (manifest.SchemaVersion < 3 && manifest.DimensionDomains.Count > 0)
             throw new InvalidDataException("Dimension domains require profile manifest schema version 3.");
+        if (manifest.SchemaVersion < 7 && manifest.TypedDimensionDomains.Count > 0)
+            throw new InvalidDataException("Typed dimension domains require profile manifest schema version 7.");
+        if (manifest.TypedDimensionDomains.Count > 512)
+            throw new InvalidDataException("A profile can declare at most 512 typed dimension domains.");
         if (manifest.SchemaVersion < 4 && manifest.PresentationLinks.Count > 0)
             throw new InvalidDataException("Presentation relationships require profile manifest schema version 4.");
         if (manifest.SchemaVersion < 5 && (manifest.CalculationLinks.Count > 0 || manifest.DefinitionLinks.Count > 0))
@@ -560,6 +567,19 @@ public static class InstalledFilingProfileCatalog
                 if (!manifest.Concepts.Any(concept => StringComparer.Ordinal.Equals(concept.QualifiedName, memberQName)))
                     throw new InvalidDataException($"Dimension domain '{dimensionQName}' refers to unindexed member '{memberQName}'.");
         }
+        foreach (var (dimensionQName, typedDomain) in manifest.TypedDimensionDomains)
+        {
+            var dimension = manifest.Concepts.FirstOrDefault(concept =>
+                StringComparer.Ordinal.Equals(concept.QualifiedName, dimensionQName));
+            if (dimension is null || !StringComparer.Ordinal.Equals(dimension.DataTypeLocalName, "dimension")
+                || typedDomain is null
+                || !IsDeclaredQName(typedDomain.DomainElementQName, manifest.NamespaceUris)
+                || !IsSupportedTypedDimensionDataType(typedDomain.DataTypeQName, manifest.NamespaceUris))
+                throw new InvalidDataException(
+                    $"Typed dimension domain '{dimensionQName}' must reference an indexed dimension concept, a declared global domain element, and a supported XSD simple type (currently xs:string).");
+            if (manifest.DimensionDomains.ContainsKey(dimensionQName))
+                throw new InvalidDataException($"Dimension '{dimensionQName}' cannot declare both explicit members and typed-domain metadata.");
+        }
 
         EnsureSafeRelativePath(manifest.EntryPoint, "taxonomy entry point");
         if (!manifest.PackageFiles.ContainsKey(manifest.EntryPoint))
@@ -594,6 +614,53 @@ public static class InstalledFilingProfileCatalog
             return false;
         return uri.Scheme is not ("http" or "https")
             || (!string.IsNullOrEmpty(uri.Host) && uri.UserInfo.Length == 0);
+    }
+
+    private static bool IsDeclaredQName(string? value, IReadOnlyDictionary<string, string> namespaceUris)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var separator = value.IndexOf(':');
+        if (separator <= 0 || separator != value.LastIndexOf(':') || separator == value.Length - 1)
+            return false;
+        var prefix = value[..separator];
+        var localName = value[(separator + 1)..];
+        if (!namespaceUris.ContainsKey(prefix)) return false;
+        try
+        {
+            System.Xml.XmlConvert.VerifyNCName(prefix);
+            System.Xml.XmlConvert.VerifyNCName(localName);
+            return true;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsSupportedTypedDimensionDataType(
+        string? value,
+        IReadOnlyDictionary<string, string> namespaceUris)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var separator = value.IndexOf(':');
+        if (separator <= 0 || separator != value.LastIndexOf(':') || separator == value.Length - 1)
+            return false;
+        var prefix = value[..separator];
+        var localName = value[(separator + 1)..];
+        if (localName != "string"
+            || !namespaceUris.TryGetValue(prefix, out var namespaceUri)
+            || !StringComparer.Ordinal.Equals(namespaceUri, "http://www.w3.org/2001/XMLSchema"))
+            return false;
+        try
+        {
+            System.Xml.XmlConvert.VerifyNCName(prefix);
+            System.Xml.XmlConvert.VerifyNCName(localName);
+            return true;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return false;
+        }
     }
 
     private static string ResolvePackageFile(string versionDirectory, string relativePath)
@@ -788,6 +855,26 @@ internal static class FilingProfileManifestDigest
         IReadOnlyList<string> RequiredPlugins,
         IReadOnlyList<string> RequiredChecks);
 
+    private sealed record DigestPayloadV7(
+        int SchemaVersion,
+        string ProfileId,
+        string Version,
+        string EntryPoint,
+        string OutputFormat,
+        IReadOnlyList<CanonicalConcept> Concepts,
+        IReadOnlyList<string> SupportedUnits,
+        IReadOnlyDictionary<string, string> NamespaceUris,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains,
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata> TypedDimensionDomains,
+        IReadOnlyList<PresentationLink> PresentationLinks,
+        IReadOnlyList<CalculationLink> CalculationLinks,
+        IReadOnlyList<DefinitionLink> DefinitionLinks,
+        IReadOnlyList<string> PackageNames,
+        IReadOnlyDictionary<string, string> PackageFiles,
+        IReadOnlyDictionary<string, string> OfflineReferences,
+        IReadOnlyList<string> RequiredPlugins,
+        IReadOnlyList<string> RequiredChecks);
+
     private sealed record CanonicalConcept(
         string QualifiedName,
         string Namespace,
@@ -861,7 +948,7 @@ internal static class FilingProfileManifestDigest
                 Sorted(manifest.OfflineReferences),
                 manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
                 manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
-            _ => new DigestPayloadV5(
+            5 or 6 => new DigestPayloadV5(
                 manifest.SchemaVersion,
                 manifest.ProfileId,
                 manifest.Version,
@@ -871,6 +958,25 @@ internal static class FilingProfileManifestDigest
                 manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
                 Sorted(manifest.NamespaceUris),
                 SortedDomains(manifest.DimensionDomains),
+                SortedPresentationLinks(manifest.PresentationLinks),
+                SortedCalculationLinks(manifest.CalculationLinks),
+                SortedDefinitionLinks(manifest.DefinitionLinks),
+                manifest.PackageNames.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.PackageFiles),
+                Sorted(manifest.OfflineReferences),
+                manifest.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                manifest.RequiredChecks.Order(StringComparer.Ordinal).ToArray()),
+            _ => new DigestPayloadV7(
+                manifest.SchemaVersion,
+                manifest.ProfileId,
+                manifest.Version,
+                manifest.EntryPoint,
+                manifest.OutputFormat,
+                concepts,
+                manifest.SupportedUnits.Order(StringComparer.Ordinal).ToArray(),
+                Sorted(manifest.NamespaceUris),
+                SortedDomains(manifest.DimensionDomains),
+                SortedTypedDomains(manifest.TypedDimensionDomains),
                 SortedPresentationLinks(manifest.PresentationLinks),
                 SortedCalculationLinks(manifest.CalculationLinks),
                 SortedDefinitionLinks(manifest.DefinitionLinks),
@@ -899,6 +1005,15 @@ internal static class FilingProfileManifestDigest
         var result = new SortedDictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
         foreach (var (key, members) in values.OrderBy(pair => pair.Key, StringComparer.Ordinal))
             result.Add(key, members.Order(StringComparer.Ordinal).ToArray());
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, TypedDimensionDomainMetadata> SortedTypedDomains(
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata> values)
+    {
+        var result = new SortedDictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal);
+        foreach (var (key, domain) in values.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            result.Add(key, domain);
         return result;
     }
 

@@ -46,6 +46,8 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
         var reused = new TaxonomyConceptIndexStore(new LocalApplicationDatabase(_databasePath))
             .LoadOrBuild(firstProfile);
         Assert.True(reused.ReusedCachedMetadata);
+        Assert.Equal(new TypedDimensionDomainMetadata("ext:TypedDomain", "xs:string"),
+            reused.Index.TypedDimensionDomains["ext:TypedAxis"]);
         Assert.Equal("إيرادات", TaxonomyIndex.ResolveLabel(
             reused.Index.GetByExpandedName(SyntheticProfile.Namespace, "Revenue")!, "ar"));
         Assert.True(reused.Index.Get("synthetic:FinancialStatements")!.IsAbstract);
@@ -113,12 +115,15 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
                 new ConceptMetadata("ext:Domestic", "urn:example:extension", "Domestic",
                     "Domestic", "domain-item", "duration", IsAbstract: false),
                 new ConceptMetadata("ext:International", "urn:example:extension", "International",
-                    "International", "domain-item", "duration", IsAbstract: false)
+                    "International", "domain-item", "duration", IsAbstract: false),
+                new ConceptMetadata("ext:TypedAxis", "urn:example:extension", "TypedAxis",
+                    "Typed axis", "dimension", "duration", IsAbstract: true)
             })
             .ToArray();
         var namespaceUris = new Dictionary<string, string>(baseProfile.NamespaceUris, StringComparer.Ordinal)
         {
-            ["ext"] = "urn:example:extension"
+            ["ext"] = "urn:example:extension",
+            ["xs"] = "http://www.w3.org/2001/XMLSchema"
         };
         return new FilingProfile
         {
@@ -130,6 +135,10 @@ public sealed class TaxonomyConceptIndexStoreTests : IDisposable
             DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
             {
                 ["ext:RegionAxis"] = new[] { "ext:Domestic", "ext:International" }
+            },
+            TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+            {
+                ["ext:TypedAxis"] = new("ext:TypedDomain", "xs:string")
             },
             PresentationLinks = new[]
             {

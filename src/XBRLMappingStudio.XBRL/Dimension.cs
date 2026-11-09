@@ -14,6 +14,14 @@ public static class XbrlArcRoles
 }
 
 /// <summary>
+/// Versioned metadata for a typed dimension's global typed-domain element.
+/// The initial supported datatype subset is deliberately limited to xs:string.
+/// </summary>
+public sealed record TypedDimensionDomainMetadata(
+    string DomainElementQName,
+    string DataTypeQName);
+
+/// <summary>
 /// A dimensional aspect carried by a fact (XBR04). Explicit dimensions pair a dimension
 /// concept with a member concept. Imported typed dimensions may retain an opaque canonical
 /// value for reverse-mapping evidence; this does not make them valid for generated reports.

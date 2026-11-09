@@ -16,7 +16,7 @@ public sealed record TaxonomyIndexLoadResult(TaxonomyIndex Index, bool ReusedCac
 /// </summary>
 public sealed class TaxonomyConceptIndexStore
 {
-    private const int CacheSchema = 3;
+    private const int CacheSchema = 4;
     private const int MaximumConceptCount = 250_000;
     private const int MaximumSnapshotBytes = 64 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -39,6 +39,11 @@ public sealed class TaxonomyConceptIndexStore
 
     private sealed record DimensionSnapshot(string DimensionQName, string[] MemberQNames);
 
+    private sealed record TypedDimensionSnapshot(
+        string DimensionQName,
+        string DomainElementQName,
+        string DataTypeQName);
+
     private sealed record ProfileSnapshot(
         int CacheSchema,
         string ProfileId,
@@ -51,6 +56,7 @@ public sealed class TaxonomyConceptIndexStore
         SortedDictionary<string, string> PackageHashes,
         string[] RequiredChecks,
         DimensionSnapshot[] DimensionDomains,
+        TypedDimensionSnapshot[] TypedDimensionDomains,
         PresentationLink[] PresentationLinks,
         CalculationLink[] CalculationLinks,
         DefinitionLink[] DefinitionLinks,
@@ -162,6 +168,12 @@ public sealed class TaxonomyConceptIndexStore
                 pair.Key,
                 pair.Value.Order(StringComparer.Ordinal).ToArray()))
             .ToArray(),
+        profile.TypedDimensionDomains.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => new TypedDimensionSnapshot(
+                pair.Key,
+                pair.Value.DomainElementQName,
+                pair.Value.DataTypeQName))
+            .ToArray(),
         FilingProfileManifestDigest.SortedPresentationLinks(profile.PresentationLinks).ToArray(),
         FilingProfileManifestDigest.SortedCalculationLinks(profile.CalculationLinks).ToArray(),
         FilingProfileManifestDigest.SortedDefinitionLinks(profile.DefinitionLinks).ToArray(),
@@ -201,6 +213,10 @@ public sealed class TaxonomyConceptIndexStore
         DimensionDomains = snapshot.DimensionDomains.ToDictionary(
             domain => domain.DimensionQName,
             domain => (IReadOnlyList<string>)domain.MemberQNames,
+            StringComparer.Ordinal),
+        TypedDimensionDomains = snapshot.TypedDimensionDomains.ToDictionary(
+            domain => domain.DimensionQName,
+            domain => new TypedDimensionDomainMetadata(domain.DomainElementQName, domain.DataTypeQName),
             StringComparer.Ordinal),
         PresentationLinks = snapshot.PresentationLinks,
         CalculationLinks = snapshot.CalculationLinks,

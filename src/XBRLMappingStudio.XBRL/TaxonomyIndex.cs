@@ -311,6 +311,8 @@ public sealed class TaxonomyIndex
         : _profile.TaxonomyVersion;
     public IReadOnlySet<string> SupportedUnits => _profile.SupportedUnits;
     public IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains => _profile.DimensionDomains;
+    /// <summary>Digest-bound typed dimension metadata declared by the selected profile manifest.</summary>
+    public IReadOnlyDictionary<string, TypedDimensionDomainMetadata> TypedDimensionDomains => _profile.TypedDimensionDomains;
     public IReadOnlyList<ConceptMetadata> AllConcepts => _orderedConcepts;
 
     public ConceptMetadata? Get(string qualifiedName) =>

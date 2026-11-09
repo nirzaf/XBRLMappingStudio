@@ -464,6 +464,9 @@ public sealed class FilingProfile
     /// <summary>Dimension QName to its allowed member QNames, when declared by the package.</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<string>> DimensionDomains { get; init; }
         = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+    /// <summary>Typed dimension QName to manifest-declared domain element and supported value type.</summary>
+    public IReadOnlyDictionary<string, TypedDimensionDomainMetadata> TypedDimensionDomains { get; init; }
+        = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal);
     /// <summary>Ordered, role-specific presentation arcs for this exact taxonomy version.</summary>
     public IReadOnlyList<PresentationLink> PresentationLinks { get; init; } = Array.Empty<PresentationLink>();
     /// <summary>Ordered summation-item arcs for this exact taxonomy version.</summary>
