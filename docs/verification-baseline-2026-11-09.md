@@ -137,3 +137,20 @@ passed on both platforms, as did the repeated Windows worker-cancellation checks
 pinned Arelle worker integration, and repository hygiene. This is deterministic
 working-state budgeting, not a process-wide memory cap; general set-graph spilling,
 within-key spill, and native desktop acceptance remain open.
+
+## ENG-02 physical spool page-cap follow-up
+
+Commit `dc41307e57dc84a14dee41961632279ac93cf333` derives SQLite's
+`max_page_count` from `MaxSpoolBytes` and translates `SQLITE_FULL` into the
+existing fail-closed spool-budget outcome. The cap applies to the private spool's
+main database file, including group/join tables and indexes; it does not cap
+SQLite temporary sort files or total process disk use. A direct regression
+reached the page limit during fact writes and verified the database stayed at or
+below **128 KiB**. The two direct spool-budget cases passed **2/2**, and the
+partitioned grouping/join integration set passed **87/87** on Windows Release.
+Exact-head CI [42662981902](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42662981902)
+passed all four jobs. Windows and Ubuntu each passed **1,995 tests** with **6**
+environment-gated Arelle skips; all five streaming/snapshot memory qualifications
+passed on both platforms, along with the repeated Windows worker-cancellation
+checks, pinned Arelle integration, and repository hygiene. Broader set-graph
+spilling and all non-database temporary-disk accounting remain open.
