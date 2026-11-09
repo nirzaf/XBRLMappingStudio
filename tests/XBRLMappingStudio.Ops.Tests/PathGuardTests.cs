@@ -98,6 +98,20 @@ public class PathGuardTests : IDisposable
         Assert.Contains("<redacted>", redacted);
     }
 
+    [Theory]
+    [InlineData("assigned to alex.analyst@example.com", "alex.analyst@example.com")]
+    [InlineData(@"source C:\Users\mohamed\clients\Northwind Private\FY2026.xlsx", @"C:\Users\mohamed\clients\Northwind Private\FY2026.xlsx")]
+    [InlineData("source C:/Users/mohamed/clients/Northwind Private/FY2026.xlsx", "C:/Users/mohamed/clients/Northwind Private/FY2026.xlsx")]
+    [InlineData(@"source \\fileserver\finance\Northwind Private\FY2026.xlsx", @"\\fileserver\finance\Northwind Private\FY2026.xlsx")]
+    [InlineData("source /home/mohamed/clients/Northwind Private/FY2026.xlsx", "/home/mohamed/clients/Northwind Private/FY2026.xlsx")]
+    public void Redaction_MasksEmailAddressesAndLocalPaths(string line, string sensitiveValue)
+    {
+        var redacted = SupportBundle.Redact(line);
+
+        Assert.DoesNotContain(sensitiveValue, redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(sensitiveValue.Contains('@') ? "<email>" : "<local-path>", redacted);
+    }
+
     [Fact]
     public void Redaction_LeavesOrdinaryTextAlone()
     {
@@ -167,19 +181,36 @@ public class SupportBundleTests
         try
         {
             var journal = new RunJournal(Path.Combine(dir, "journal"));
-            var dest = Path.Combine(dir, "out.json");
+            var dest = Path.Combine(dir, "client-secret-name-report.json");
+            var projectPath = Path.Combine(dir, "project.xmap");
+            var project = new XBRLMappingStudio.Project.MappingProject
+            {
+                ProjectId = "support-project",
+                Name = "NORTHWIND_CLIENT_CANARY",
+                ProfileId = "synthetic-oim-v1",
+                ProfileDigest = "sha256:support-bundle-test"
+            };
+            File.WriteAllText(projectPath, XBRLMappingStudio.Project.ProjectSerializer.Serialize(project));
             var receipt = new PublicationService(journal).Publish(
                 dest, System.Text.Encoding.UTF8.GetBytes("{}"), runId: "run-b1");
 
-            var bundle = SupportBundle.Build(dest, "run-b1", journal, new[]
+            var bundle = SupportBundle.Build(projectPath, "run-b1", journal, new[]
             {
                 "INFO  connecting with password=SEEDCANARY999 to legacy bridge",
+                @"INFO source C:\Users\mohamed\clients\Northwind Private\FY2026.xlsx alex.analyst@example.com",
                 $"digest {receipt.FinalDigest}",
             });
 
             Assert.Contains("run-b1", bundle);
             Assert.Contains("journal-state: Finalized", bundle);
             Assert.Contains(receipt.FinalDigest, bundle);
+            Assert.Contains("profile: synthetic-oim-v1", bundle);
+            Assert.Contains("destination: <redacted>", bundle);
+            Assert.DoesNotContain(dest, bundle, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("NORTHWIND_CLIENT_CANARY", bundle, StringComparison.Ordinal);
+            Assert.DoesNotContain("Northwind Private", bundle, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("FY2026.xlsx", bundle, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("alex.analyst@example.com", bundle, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("SEEDCANARY999", bundle);
             Assert.Contains("<redacted>", bundle);
         }

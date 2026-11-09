@@ -6,10 +6,10 @@ using XBRLMappingStudio.Project;
 namespace XBRLMappingStudio.Application;
 
 /// <summary>
-/// Redacts credential-looking values and builds a shareable diagnostic bundle (OPS04,
-/// OPS08). Any <c>password=</c>, <c>token=</c> or <c>secret=</c> assignment in
-/// a rendered line is masked before it leaves the process; the bundle carries the run
-/// journal receipt, a project summary and bounded, redacted log lines — never raw payloads.
+/// Redacts credential-looking values, email addresses and local paths while building a
+/// shareable diagnostic bundle (OPS04, OPS08, OPS09). Project names and destination
+/// paths are omitted; the bundle retains profile identity, run state, receipt digests,
+/// and bounded log lines, never executable graph content or raw report payloads.
 /// Scheduler deployment remains an operator-owned environment qualification.
 /// </summary>
 public static partial class SupportBundle
@@ -23,9 +23,19 @@ public static partial class SupportBundle
     [GeneratedRegex(@"\b(password|token|secret)\b\s*[=:]\s*\S+", RegexOptions.IgnoreCase)]
     private static partial Regex SecretPattern();
 
-    /// <summary>Mask credential assignments in a single line of text.</summary>
-    public static string Redact(string line) =>
-        SecretPattern().Replace(line, "$1=<redacted>");
+    [GeneratedRegex(@"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", RegexOptions.IgnoreCase)]
+    private static partial Regex EmailPattern();
+
+    [GeneratedRegex(@"(?:[A-Z]:[\\/]|\\\\[^\\/\r\n]+[\\/][^\\/\r\n]+[\\/]|(?<![A-Za-z0-9])/(?:Users|home|tmp|var/tmp|mnt|media)/)[^\r\n]*", RegexOptions.IgnoreCase)]
+    private static partial Regex LocalPathPattern();
+
+    /// <summary>Mask credentials, email addresses and common local filesystem paths in text.</summary>
+    public static string Redact(string line)
+    {
+        var redacted = SecretPattern().Replace(line, "$1=<redacted>");
+        redacted = EmailPattern().Replace(redacted, "<email>");
+        return LocalPathPattern().Replace(redacted, "<local-path>");
+    }
 
     /// <summary>Read a bounded UTF-8 tail without materializing the complete log or any unbounded line.</summary>
     public static IReadOnlyList<string> ReadBoundedLogTail(string path)
@@ -90,12 +100,13 @@ public static partial class SupportBundle
         sb.Append("XBRL Mapping Studio support bundle\n");
         sb.Append("generated-utc: ").Append(DateTimeOffset.UtcNow.ToString("O")).Append('\n');
 
-        // Project summary (metadata only — the mapping graph itself stays private).
+        // Keep the selected profile/revision for useful diagnostics, but don't export
+        // the customer-controlled project name or mapping graph.
         try
         {
             var pm = new ProjectManager(projectPath);
             var project = pm.Load();
-            sb.Append("project: ").Append(project.Name)
+            sb.Append("project: <redacted>")
               .Append(" profile: ").Append(project.ProfileId)
               .Append(" semantic-revision: ").Append(project.SemanticRevision)
               .Append('\n');
@@ -114,7 +125,7 @@ public static partial class SupportBundle
         else
         {
             sb.Append("journal-state: ").Append(entry.State).Append('\n');
-            sb.Append("destination: ").Append(entry.DestinationPath).Append('\n');
+            sb.Append("destination: <redacted>\n");
             sb.Append("staged-digest: ").Append(entry.StagedDigest ?? "-").Append('\n');
             sb.Append("final-digest: ").Append(entry.FinalDigest ?? "-").Append('\n');
             sb.Append("lock-token: ").Append(entry.LockToken ?? "-").Append('\n');
