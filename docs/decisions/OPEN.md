@@ -31,6 +31,11 @@ certification.
   commercially distribute taxonomy materials unless the required written rights
   are documented. If those rights are not confirmed, customers must obtain the
   package independently where legally permitted.
+- **AI development baseline:** Continue with the existing offline architecture,
+  synthetic taxonomy fixtures, and local retrieval. Do not enable outbound model
+  providers or add provider-specific dependencies as part of this implementation
+  phase. This is a development-scope choice; it does not select the provider or
+  data policy for a customer deployment.
 
 ## Decisions still open
 
@@ -119,9 +124,12 @@ this source review. Publication, human approval and licensing gates remain uncha
 ## Model Provider
 
 - **Blocks:** AI01 (managed mode), AI03 (concrete adapter), AI07, AI08.
-- **Decision needed:** Which of offline-only, Azure OpenAI, or local-model
-  (e.g., Ollama) is approved for the first deployment? Endpoint, deployment
-  identity, retention, and token budget.
+- **Selected for current development:** Offline-only, using the local retrieval
+  ranker and synthetic fixtures. No outbound model provider is enabled.
+- **Still open for deployment:** Whether the first customer deployment remains
+  offline-only or enables a managed/local model; if enabled, record the approved
+  endpoint, deployment identity, residency, retention, and token budget before
+  wiring or activating that provider.
 - **Rationale:** Provider differs on structured-output support, residency,
   cost, and privacy terms.
 

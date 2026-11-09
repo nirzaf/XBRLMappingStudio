@@ -19,7 +19,7 @@ the named owner.
 | Target direction | Emit xBRL-JSON and (from G2) xBRL-XML from a source. Report→record import is supported as an internal operation. | Recorded. |
 | Qualified reviewer | None appointed. Financial oracles in this repository are authored by the engineering team and explicitly labeled as internal (see `TestFixtures.GoldenRevenueFacts`). | **OPEN — blocks AI07 evaluation and XBR09 sign-off.** A reporting specialist must adjudicate held-out cases before pilot rollout. |
 | Representative fixture plan | Synthetic revenue workbook with current/prior year, zero and blank cells, one instant balance, QAR-thousands heading, and one duration fact. Located at `tests/XBRLMappingStudio.Fixtures/TestFixtures.cs`. | Recorded for synthetic development; a customer fixture must be added once IO07 closes. |
-| Model provider | None registered. `AiPolicy.Offline` is the default; only `LocalRetrievalRanker` runs. | **OPEN — blocks AI03 (managed), AI07, AI08.** Microsoft.Extensions.AI is not wired to a concrete provider in this build. |
+| Model provider | Offline-only development is selected; `AiPolicy.Offline` and `LocalRetrievalRanker` run with synthetic fixtures. No outbound provider is enabled. | **OPEN for deployment — blocks managed AI03, AI07, AI08.** The first production deployment's provider/data policy, endpoint, identity and retention are not approved; Microsoft.Extensions.AI is not wired to a concrete provider in this build. |
 | Data residency | Local-only; no outbound network calls in engine, adapters, project, or worker (asserted by tests). | **OPEN — blocks AI01 (managed mode), IO07–09.** Residency agreement required before cloud inference or hosted databases are enabled. |
 
 ## What is closed by this record
