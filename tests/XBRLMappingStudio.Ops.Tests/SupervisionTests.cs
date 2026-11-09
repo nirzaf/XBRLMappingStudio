@@ -186,8 +186,12 @@ public class SupervisionTests
         var activeScript = OperatingSystem.IsWindows()
             ? $"$marker = Join-Path {quotedWorkspace} ('active-' + $PID); " +
               "[System.IO.File]::WriteAllText($marker, [string]$PID); " +
-              "Start-Sleep -Milliseconds 1400; Remove-Item -LiteralPath $marker -Force"
-            : $"marker={quotedWorkspace}/active-$$; : > \"$marker\"; sleep 1.4; rm -f \"$marker\"";
+              $"$release = Join-Path {quotedWorkspace} 'release'; " +
+              "while (-not (Test-Path -LiteralPath $release)) { Start-Sleep -Milliseconds 10 }; " +
+              "Remove-Item -LiteralPath $marker -Force"
+            : $"marker={quotedWorkspace}/active-$$; : > \"$marker\"; " +
+              $"release={quotedWorkspace}/release; while [ ! -f \"$release\" ]; do sleep 0.01; done; " +
+              "rm -f \"$marker\"";
         var queuedScript = OperatingSystem.IsWindows()
             ? $"$marker = Join-Path {quotedWorkspace} 'queued'; " +
               "[System.IO.File]::WriteAllText($marker, 'started')"
@@ -213,11 +217,13 @@ public class SupervisionTests
             Assert.Equal(SupervisedOutcome.TimedOut, queued.Outcome);
             Assert.Equal(DiagnosticCodes.WkrTimeout, queued.Failure!.Code);
             Assert.False(File.Exists(Path.Combine(workspace, "queued")));
+            File.WriteAllText(Path.Combine(workspace, "release"), "release workers");
             var activeResults = await Task.WhenAll(activeRuns).WaitAsync(TimeSpan.FromSeconds(10));
             Assert.All(activeResults, result => Assert.Equal(SupervisedOutcome.Completed, result.Outcome));
         }
         finally
         {
+            try { File.WriteAllText(Path.Combine(workspace, "release"), "release workers"); } catch (IOException) { }
             try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
         }
     }

@@ -237,7 +237,8 @@ internal static class Program
     private static int CrashAtJournalBoundary(string[] args)
     {
         var stage = args[0];
-        if (stage is not ("journal-mid-write" or "journal-after-stage" or "journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
+        if (stage is not ("journal-mid-write" or "journal-after-flush" or "journal-after-stage"
+            or "journal-wait-lock" or "journal-before-replace" or "journal-after-replace"))
             return 2;
         var service = new PublicationService(new RunJournal(databasePath: Path.GetFullPath(args[1])));
         service.Publish(Path.GetFullPath(args[2]), CrashPublicationContract.JournalReportBytes(args[4]), args[3],
@@ -245,6 +246,7 @@ internal static class Program
             lockTimeout: TimeSpan.FromMinutes(2),
             validateStagedArtifactAsync: (path, _) => Task.FromResult(DestinationLock.DigestFile(path)),
             afterAtomicReplaceForTest: stage == "journal-after-replace" ? _ => KillCurrentProcess() : null,
+            afterStageFlushForTest: stage == "journal-after-flush" ? _ => KillCurrentProcess() : null,
             afterStagedJournalForTest: stage == "journal-after-stage" ? _ => KillCurrentProcess() : null,
             afterPartialStageWriteForTest: stage == "journal-mid-write" ? KillCurrentProcess : null);
         return 0;

@@ -81,6 +81,72 @@ public sealed class JournalCrashRecoveryTests
     }
 
     [Theory]
+    [InlineData("json")]
+    [InlineData("xml")]
+    [InlineData("csv-v1")]
+    [InlineData("csv-v2")]
+    [InlineData("xlsx-v1")]
+    [InlineData("xlsx-v2")]
+    [InlineData("json-record-v1")]
+    [InlineData("xml-record-v1")]
+    public async Task AbruptTerminationAfterDurableStageFlush_AbortsBeforeDestinationPublication(string format)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xms-journal-flush-crash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        try
+        {
+            var state = Path.Combine(root, "state.db");
+            var destination = Path.Combine(root, "report.out");
+            var runId = "durable-stage-" + Guid.NewGuid().ToString("N");
+            var prior = Encoding.UTF8.GetBytes("previous accepted bytes");
+            var intended = CrashPublicationContract.JournalReportBytes(format);
+            await File.WriteAllBytesAsync(destination, prior);
+            var journal = new RunJournal(databasePath: state);
+
+            child = StartHarness("journal-after-flush", state, destination, runId, format);
+            var stdout = child.StandardOutput.ReadToEndAsync();
+            var stderr = child.StandardError.ReadToEndAsync();
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.NotEqual(0, child.ExitCode);
+            _ = await stdout;
+            _ = await stderr;
+
+            var stagePath = destination + ".xbsl-staging-" + runId;
+            var interrupted = Assert.IsType<JournalEntry>(journal.Load(runId));
+            Assert.Equal(JournalState.Writing, interrupted.State);
+            Assert.Null(interrupted.StagedDigest);
+            Assert.Null(interrupted.LockToken);
+            Assert.True(File.Exists(stagePath));
+            Assert.Equal(DestinationLock.DigestBytes(intended), DestinationLock.DigestFile(stagePath));
+            Assert.Equal(prior, await File.ReadAllBytesAsync(destination));
+
+            var recovered = new RunJournal(databasePath: state);
+            var action = Assert.Single(recovered.RecoverUnfinalized());
+
+            Assert.Equal(RecoveryDecision.Aborted, action.Decision);
+            Assert.Equal(JournalState.Aborted, recovered.Load(runId)!.State);
+            Assert.False(File.Exists(stagePath));
+            Assert.Equal(prior, await File.ReadAllBytesAsync(destination));
+            Assert.Equal(0L, ReceiptCount(state, runId));
+            Assert.Empty(recovered.RecoverUnfinalized());
+        }
+        finally
+        {
+            if (child is not null)
+            {
+                if (!child.HasExited)
+                {
+                    child.Kill(entireProcessTree: true);
+                    await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                child.Dispose();
+            }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
     [MemberData(nameof(CrashCases))]
     public async Task AbruptTermination_RecoversOnlyLockedValidatedBytes(string format, string stage, string prior)
     {

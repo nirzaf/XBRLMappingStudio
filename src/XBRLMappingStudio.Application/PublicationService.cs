@@ -181,7 +181,8 @@ public sealed class PublicationService
         bool refuseDifferentExisting = false,
         Action<string>? afterAtomicReplaceForTest = null,
         Action<string>? afterStagedJournalForTest = null,
-        Action? afterPartialStageWriteForTest = null)
+        Action? afterPartialStageWriteForTest = null,
+        Action<string>? afterStageFlushForTest = null)
         => PublishCoreAsync(destinationPath,
             async (stream, token) =>
             {
@@ -198,7 +199,8 @@ public sealed class PublicationService
             RunManifest.ComputeSha256(payload), payload.LongLength, runId, validateStagedArtifactAsync,
             cancellationToken, beforeReplaceFault, lockTimeout, refuseDifferentExisting,
             afterAtomicReplaceForTest, afterStagedJournalForTest: afterStagedJournalForTest,
-            afterPartialStageWriteForTest: afterPartialStageWriteForTest).GetAwaiter().GetResult();
+            afterPartialStageWriteForTest: afterPartialStageWriteForTest,
+            afterStageFlushForTest: afterStageFlushForTest).GetAwaiter().GetResult();
 
     private async Task<PublicationReceipt> PublishCoreAsync(
         string destinationPath,
@@ -214,7 +216,8 @@ public sealed class PublicationService
         Action<string>? afterAtomicReplaceForTest = null,
         Action? authorizeBeforeReplace = null,
         Action<string>? afterStagedJournalForTest = null,
-        Action? afterPartialStageWriteForTest = null)
+        Action? afterPartialStageWriteForTest = null,
+        Action<string>? afterStageFlushForTest = null)
     {
         runId ??= "run-" + Guid.NewGuid().ToString("N");
         var full = Path.GetFullPath(destinationPath);
@@ -259,7 +262,12 @@ public sealed class PublicationService
             {
                 ownsStagingFile = true;
                 await writePayloadAsync(output, cancellationToken).ConfigureAwait(false);
+                // Force the complete staged payload through the OS file cache before
+                // its digest is recorded as durable recovery evidence. If this fails,
+                // publication aborts before validation or destination replacement.
+                output.Flush(flushToDisk: true);
             }
+            afterStageFlushForTest?.Invoke(stagedPath);
             stagedDigest = DestinationLock.DigestFile(stagedPath);
         }
         catch (OperationCanceledException)
