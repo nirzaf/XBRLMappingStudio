@@ -1,6 +1,6 @@
 # Verification baseline — 2026-11-09
 
-Checkout: `main` at `21f4672cffde7f9487c21f710b0c98018889a68c` for the latest code and CI evidence below. Earlier local verification remains labeled by its original checkout where applicable.
+The original full-suite baseline below was captured at `21f4672cffde7f9487c21f710b0c98018889a68c`; later exact-head follow-ups are recorded at the end of this file. Earlier local verification remains labeled by its original checkout where applicable.
 
 ## Release verification
 
@@ -12,7 +12,7 @@ Checkout: `main` at `21f4672cffde7f9487c21f710b0c98018889a68c` for the latest co
 
 ## DST-08 additions
 
-The checkout supports mixed file/SQLite publication for xBRL-JSON/XML, CSV v1/v2, XLSX v1/v2, record-JSON v1, and record-XML v1. Real child-process termination tests cover the durable file-confirmed/SQLite-in-progress and SQLite-commit/local-confirmation-loss boundaries for the six generic record contracts and xBRL-XML. Adapter round trips cover escaped text, embedded quotes and newlines, leading-zero identifiers, invariant decimal lexemes, and namespaced XML values. These are synthetic-fixture results. Adapter-internal process loss, lexical edge values through the mixed CLI journey, exhaustive reconciliation, and filesystem power-loss durability remain open.
+The checkout supports mixed file/SQLite publication for xBRL-JSON/XML, CSV v1/v2, XLSX v1/v2, record-JSON v1, and record-XML v1. Real child-process termination tests cover mixed-state recovery before the file publisher writes staging bytes, file-confirmed/SQLite-in-progress, first-time atomic file move, and SQLite-commit/local-confirmation-loss boundaries across supported contracts. Adapter round trips and six mixed-publication CLI format journeys cover escaped text, embedded quotes and newlines, leading-zero identifiers, invariant decimal lexemes, and namespaced XML values. These are synthetic-fixture results. Adapter-internal serializer interruption, exhaustive reconciliation, and filesystem power-loss durability remain open.
 
 ## Native desktop boundary
 
@@ -53,3 +53,7 @@ Exact-head CI [42545993025](https://github.com/nirzaf/XBRLMappingStudio/actions/
 ## OPS worker-capacity observation race follow-up
 
 The documentation-only commit `6786684044ed1b5ee707cfc77a3ef7a99fa38d91` exposed a Windows-only failure in `ConcurrentWorkers_AreBoundedAcrossSupervisorInstances`: the child processes completed successfully, but the test observed zero active markers because each marker existed for only 350 ms. The test now holds workers at a release barrier, samples the active count while they remain running, waits briefly to detect excess starts, then releases them. The focused test passed eight consecutive local runs and the complete local Ops project passed **445/445**. Exact-head CI [42548631301](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42548631301) passed all four jobs on `6c59fc6510361f00e81f0cecbf9634b7a47903a1`: Windows and Ubuntu each passed **1,887 tests** with **6** gated Arelle skips; all five memory qualifications, repeated Windows worker-cancellation checks, Arelle integration, repository hygiene, and SPDX/dependency inventory passed.
+
+## XBR06 mapped-aspect diagnostic evidence
+
+Commit `575aa4a5306e785d73ca7dd40a9dd6b8a72a1a39` strengthens the dynamic XBRL report-import regression to verify the exact FactConstruct port and source locator for invalid mapped concepts, units, dimensions, decimals, and languages. The Engine Release suite passed **156/156** locally. Exact-head CI [42572016556](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42572016556) passed Windows, Ubuntu, pinned Arelle integration, and repository hygiene. This does not close XBR06's existing-target-row, tuple, typed-dimension-generation, or large-input streaming limitations.
