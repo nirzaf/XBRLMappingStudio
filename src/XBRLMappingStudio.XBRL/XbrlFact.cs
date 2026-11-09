@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 using System.Xml;
 using XBRLMappingStudio.Diagnostics;
@@ -301,7 +303,8 @@ public sealed class XbrlFact
         var dims = string.Join(",", Dimensions
             .OrderBy(d => d.Name, System.StringComparer.Ordinal)
             .Select(d => $"{EscapeSemanticComponent(d.Name, "|,=")}="
-                + $"{EscapeSemanticComponent(d.MemberName, "|,=")}:{d.IsExplicit}"));
+                + $"{EscapeSemanticComponent(d.MemberName, "|,=")}:{d.IsExplicit}:"
+                + (d.TypedValueJson is null ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(d.TypedValueJson))))));
         var val = IsNil ? "nil"
             : Value is not null ? "n:" + Value.Value.ToString(CultureInfo.InvariantCulture)
             : TextValue is not null ? "s:" + EscapeSemanticComponent(TextValue, "|")

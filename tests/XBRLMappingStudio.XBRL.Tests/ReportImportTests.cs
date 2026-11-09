@@ -429,7 +429,7 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
-    public async Task TypedDimensionInReportIsReportedAsUnsupported()
+    public async Task TypedDimensionInReportIsPreservedForReverseMappingButStillCannotBeXbrlSerialized()
     {
         var xml = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { Revenue("QAR", 1m) }));
         XNamespace xbrli = "http://www.xbrl.org/2003/instance";
@@ -444,14 +444,33 @@ public sealed class ReportImportTests : IDisposable
         var adapter = new XbrlReportAdapter();
         var connection = new SourceConnection("report", adapter.Kind, path);
         var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+        var rows = new List<DataRecord>();
+        await foreach (var row in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) rows.Add(row);
+        var typedRow = Assert.Single(rows);
+        Assert.Equal("synthetic:TypedAxis=<typed>", typedRow["dimensions"].AsString());
+        using var dimensions = JsonDocument.Parse(typedRow["dimensionsJson"].AsString());
+        var dimension = Assert.Single(dimensions.RootElement.EnumerateArray());
+        Assert.False(dimension.GetProperty("IsExplicit").GetBoolean());
+        Assert.Contains("typed value", dimension.GetProperty("TypedValueJson").GetString(), StringComparison.Ordinal);
 
-        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        var fact = Assert.Single(XmlSerializer.ReadFacts(xml.ToString()));
+        Assert.NotNull(Assert.Single(fact.Dimensions).TypedValueJson);
+        Assert.False(fact.ValidateAgainst(Profile.FindConcept(fact.ConceptName)!, out var reason));
+        Assert.Contains("Typed dimensions", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.Serialize(Profile, new[] { fact }));
+
+        var filteredConnection = new SourceConnection("filtered-report", adapter.Kind, path,
+            new Dictionary<string, string>
+            {
+                ["dimensionAxis"] = "synthetic:TypedAxis",
+                ["dimensionMember"] = "synthetic:TypedMember"
+            });
+        var filteredSchema = await adapter.InspectSchemaAsync(filteredConnection, CancellationToken.None);
+        var filterError = await Assert.ThrowsAsync<AdapterException>(async () =>
         {
-            await foreach (var _ in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) { }
+            await foreach (var _ in adapter.ReadFullAsync(filteredConnection, filteredSchema, CancellationToken.None)) { }
         });
-
-        Assert.Equal(DiagnosticCodes.IoUnsupportedEncoding, error.Code);
-        Assert.Contains("typed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, filterError.Code);
     }
 
     [Fact]

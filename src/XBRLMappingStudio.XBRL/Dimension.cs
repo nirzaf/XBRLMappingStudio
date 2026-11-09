@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace XBRLMappingStudio.XBRL;
 
 /// <summary>Standard XBRL Dimensions arcrole identifiers used by profile metadata.</summary>
@@ -13,18 +15,25 @@ public static class XbrlArcRoles
 
 /// <summary>
 /// A dimensional aspect carried by a fact (XBR04). Explicit dimensions pair a dimension
-/// concept with a member concept; the synthetic profile exercises explicit dimensions
-/// only (typed dimensions are out of scope for the offline slice).
+/// concept with a member concept. Imported typed dimensions may retain an opaque canonical
+/// value for reverse-mapping evidence; this does not make them valid for generated reports.
 /// </summary>
 public sealed record Dimension(
     string Name,
     string MemberName,
     bool IsExplicit = true)
 {
+    /// <summary>
+    /// Canonical XML-infoset JSON for an imported typed member value. Null for explicit
+    /// dimensions. It is evidence only and is intentionally not interpreted as taxonomy data.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TypedValueJson { get; init; }
+
     /// <summary>OIM-style key: the bracketed dimension qualified name.</summary>
     public string Key => Name;
 
-    public override string ToString() => $"{Name}={MemberName}";
+    public override string ToString() => IsExplicit ? $"{Name}={MemberName}" : $"{Name}=<typed>";
 }
 
 /// <summary>

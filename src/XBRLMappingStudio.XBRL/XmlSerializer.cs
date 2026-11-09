@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
 using XBRLMappingStudio.Diagnostics;
@@ -16,6 +17,9 @@ namespace XBRLMappingStudio.XBRL;
 /// </summary>
 public static class XmlSerializer
 {
+    private const int MaximumTypedDimensionDepth = 128;
+    private const int MaximumTypedDimensionValueCharacters = 1_000_000;
+
     private static readonly XNamespace Xbrli = "http://www.xbrl.org/2003/instance";
     private static readonly XNamespace Link = "http://www.xbrl.org/2003/linkbase";
     private static readonly XNamespace Xbrldi = "http://xbrl.org/2006/xbrldi";
@@ -503,9 +507,6 @@ public static class XmlSerializer
         var identifier = (string?)ident ?? "";
 
         var dims = new List<Dimension>();
-        if (entityElement.Descendants(Xbrldi + "typedMember").Any())
-            throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
-                "Typed dimensions are not supported by this report model.");
         var dimensionNames = new HashSet<ExpandedConceptName>();
         foreach (var segment in entityElement.Elements(Xbrli + "segment"))
         {
@@ -513,6 +514,27 @@ public static class XmlSerializer
             EnsureNoSignificantText(segment, "Entity segment");
             foreach (var child in segment.Elements())
             {
+                if (child.Name == Xbrldi + "typedMember")
+                {
+                    EnsureOnlyAttributes(child, "dimension");
+                    EnsureNoSignificantText(child, "Typed dimension member");
+                    var typedDimName = (string?)child.Attribute("dimension") ?? "";
+                    var expandedTypedDimension = ResolveExpandedQName(child, typedDimName);
+                    var typedValues = child.Elements().ToArray();
+                    if (typedValues.Length != 1)
+                        throw Unsupported("A typed dimension member must contain exactly one typed value element.");
+                    if (dims.Count >= FactDimensionParser.MaximumDimensions)
+                        throw Unsupported($"A fact may have at most {FactDimensionParser.MaximumDimensions} taxonomy-defined dimensions.");
+                    if (!dimensionNames.Add(expandedTypedDimension))
+                        throw Unsupported($"Dimension '{typedDimName}' duplicates another dimension on the fact.");
+                    if (profile is not null)
+                        typedDimName = CanonicalProfileQName(child, typedDimName, profile);
+                    dims.Add(new Dimension(typedDimName, "", IsExplicit: false)
+                    {
+                        TypedValueJson = CanonicalizeTypedValue(typedValues[0])
+                    });
+                    continue;
+                }
                 if (child.Name != Xbrldi + "explicitMember")
                     throw new XbrlExportException(DiagnosticCodes.XbrUnsupportedConstruct,
                         $"Entity segment child '{child.Name}' is unsupported by this report model.");
@@ -706,6 +728,78 @@ public static class XmlSerializer
 
     // ---- helpers --------------------------------------------------------------------
 
+    private sealed record CanonicalTypedAttribute(string Name, string Value);
+
+    private sealed record CanonicalTypedContent(
+        string Kind,
+        string? Value = null,
+        string? Target = null,
+        string? Data = null,
+        CanonicalTypedElement? Element = null);
+
+    private sealed record CanonicalTypedElement(
+        string Name,
+        IReadOnlyList<CanonicalTypedAttribute> Attributes,
+        IReadOnlyList<CanonicalTypedContent> Content);
+
+    private static string CanonicalizeTypedValue(XElement element)
+    {
+        static string ExpandedName(XName name) => $"{{{name.NamespaceName}}}{name.LocalName}";
+
+        var retainedCharacters = 0;
+        void CountCharacters(int count)
+        {
+            retainedCharacters = checked(retainedCharacters + count);
+            if (retainedCharacters > MaximumTypedDimensionValueCharacters)
+                throw Unsupported($"Typed dimension value exceeds the {MaximumTypedDimensionValueCharacters}-character evidence limit.");
+        }
+
+        CanonicalTypedElement CanonicalElement(XElement value, int depth)
+        {
+            if (depth > MaximumTypedDimensionDepth)
+                throw Unsupported($"Typed dimension value exceeds the {MaximumTypedDimensionDepth}-element nesting limit.");
+            var name = ExpandedName(value.Name);
+            CountCharacters(name.Length);
+            var attributes = new List<CanonicalTypedAttribute>();
+            foreach (var attribute in value.Attributes().Where(attribute => !attribute.IsNamespaceDeclaration)
+                         .OrderBy(attribute => attribute.Name.NamespaceName, StringComparer.Ordinal)
+                         .ThenBy(attribute => attribute.Name.LocalName, StringComparer.Ordinal))
+            {
+                CountCharacters(ExpandedName(attribute.Name).Length + attribute.Value.Length);
+                attributes.Add(new CanonicalTypedAttribute(ExpandedName(attribute.Name), attribute.Value));
+            }
+
+            var content = new List<CanonicalTypedContent>();
+            foreach (var node in value.Nodes())
+            {
+                switch (node)
+                {
+                    case XElement child:
+                        content.Add(new CanonicalTypedContent("element", Element: CanonicalElement(child, depth + 1)));
+                        break;
+                    case XText text:
+                        CountCharacters(text.Value.Length);
+                        content.Add(new CanonicalTypedContent("text", text.Value));
+                        break;
+                    case XComment comment:
+                        CountCharacters(comment.Value.Length);
+                        content.Add(new CanonicalTypedContent("comment", comment.Value));
+                        break;
+                    case XProcessingInstruction instruction:
+                        CountCharacters(instruction.Target.Length + instruction.Data.Length);
+                        content.Add(new CanonicalTypedContent(
+                            "processing-instruction", Target: instruction.Target, Data: instruction.Data));
+                        break;
+                    default:
+                        throw Unsupported("Typed dimension value contains an unsupported XML node.");
+                }
+            }
+            return new CanonicalTypedElement(name, attributes, content);
+        }
+
+        return JsonSerializer.Serialize(CanonicalElement(element, 1));
+    }
+
     // Length-prefix every aspect so legal characters within xs:token identifiers
     // cannot become context separators or cause two distinct contexts to merge.
     private static string ContextKey(XbrlFact f)
@@ -722,6 +816,8 @@ public static class XmlSerializer
         {
             parts.Add(dimension.Name);
             parts.Add(dimension.MemberName);
+            parts.Add(dimension.IsExplicit ? "explicit" : "typed");
+            parts.Add(dimension.TypedValueJson ?? "");
         }
         return string.Concat(parts.Select(part => part.Length.ToString(CultureInfo.InvariantCulture) + ":" + part));
     }
