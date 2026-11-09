@@ -160,6 +160,18 @@ public sealed class AcceptanceScenarios : IAsyncLifetime
         Assert.Equal(expected.Decimals, actual.Decimals);
         Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, actual));
         Assert.Empty(IndependentAcceptanceFixtures.CompareSerializedOim(mappingOracle, result.XbrlJson));
+
+        var profile = SyntheticProfile.Build();
+        var xml = XmlSerializer.Serialize(profile, result.Facts);
+        var xmlFacts = XmlSerializer.ReadFacts(xml, profile);
+        var xmlFact = Assert.Single(xmlFacts);
+        Assert.Empty(IndependentAcceptanceFixtures.CompareFact(mappingOracle, xmlFact,
+            requireSourceEvidence: false));
+        Assert.Equal(actual.SemanticKey(), xmlFact.SemanticKey());
+        var xmlValue = System.Xml.Linq.XDocument.Parse(xml)
+            .Descendants(System.Xml.Linq.XName.Get("Revenue", profile.NamespaceUris["synthetic"]))
+            .Single().Value;
+        Assert.Equal(mappingOracle.ValueLexical, xmlValue);
     }
 
     [Fact]

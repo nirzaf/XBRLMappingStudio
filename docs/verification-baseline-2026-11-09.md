@@ -183,3 +183,16 @@ the visible project also reported `XBR017` because its synthetic development
 profile was not explicitly enabled. This is an environment-blocked native journey,
 not evidence of an application interaction failure. Native DST-04 acceptance remains
 open.
+
+## XBR-05 generated JSON/XML oracle parity
+
+The focused Windows Release Integration test
+`AcceptanceScenarios.FinancialCorrectness_RevenueMatchesGoldenOracle` passed **1/1**.
+One mapping run over the pinned hand-authored workbook is now checked in both
+generated xBRL-JSON and xBRL-XML against the same independent fact oracle. The test
+compares concept, entity, duration, unit, value, decimals and semantic key, and checks
+the exact XML value lexeme. Source locators remain validated against the in-memory
+mapped fact; they are intentionally excluded from the serialized XML comparison
+because they are application provenance, not XBRL aspects. This closes one synthetic
+cross-format journey only; real-profile acceptance and full OIM conformance remain
+open.
