@@ -471,14 +471,21 @@ bounded synthetic native evidence above is unchanged.
 
 ## XBR04 synthetic typed-dimension Arelle follow-on (2026-11-10)
 
-`ArelleExecutionTests.ArelleAcceptsProfileDeclaredXsStringTypedDimensionFromOfflineSyntheticTaxonomy`
-builds a local-only taxonomy with an `xs:string` typed axis/domain and a
-segment hypercube, serializes a profile-declared typed fact, and validates the
-staged XML through the pinned offline Arelle worker. The first CI run correctly
-rejected the test fixture's default Unix directory permissions; the fixture now
-uses the worker-required private `0700` staging directory. Exact-head CI
+`ArelleExecutionTests.ArelleReportsBlockingTypedDomainViolationForOfflineSyntheticTaxonomy`
+builds a local-only `xs:string` typed-axis taxonomy, pins the synthetic schema
+and Arelle-provided XBRL schema dependencies in a temporary profile manifest,
+serializes a profile-declared typed fact, and validates the staged XML through
+the offline worker. The valid instance completes without blocking diagnostics.
+Changing the typed-domain child to the wrong element also completes processor
+execution (`WorkerStatus.Success`) but returns the expected blocking XBRL
+diagnostic; the test asserts the finding rather than treating engine completion
+status as validation acceptance. The initial CI run
 [42715745703](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42715745703)
-passed all Windows, Ubuntu, Arelle and repository-hygiene jobs on
-`3598ce74dea784910eaefd063b8899db1101ae98`. This adds synthetic typed-axis
-processor evidence only; real taxonomy, complex typed domains and regulatory
-qualification remain gated.
+passed after the fixture adopted the worker-required private `0700` staging
+directory. The final exact-head CI
+[42721657834](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42721657834)
+passed Windows, Ubuntu, Arelle and repository-hygiene jobs on
+`570839424fa12225553b832be4c9f3d7f3773629`. This is synthetic typed-content
+processor evidence only; it does not qualify hypercube relationships, real
+taxonomy packages, complex typed domains or regulatory compliance. Taxonomy
+rights remain gated.
