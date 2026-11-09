@@ -196,3 +196,26 @@ mapped fact; they are intentionally excluded from the serialized XML comparison
 because they are application provenance, not XBRL aspects. This closes one synthetic
 cross-format journey only; real-profile acceptance and full OIM conformance remain
 open.
+
+## Exact-head CI rerun
+
+The original push-triggered run [42673384944](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42673384944)
+ended with a run-level failure while exposing only successful Windows and
+repository-hygiene jobs; the Ubuntu and Arelle jobs were absent, and no failed
+step logs were available. A fresh `workflow_dispatch` run [42675564032](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42675564032)
+on the same `main` SHA `93ddd87075b825eb5b90d4f5863af7be309ec65d` completed
+successfully with all four expected jobs: Windows and Ubuntu Release build/test,
+all five separate-process memory qualifications on each OS, repeated Windows
+worker-cancellation checks, pinned Arelle integration and repository hygiene.
+This confirms the pushed code at that SHA; it does not qualify the owner-gated
+production taxonomy or native desktop journeys.
+
+## Native desktop re-observation
+
+After refreshing the returned XBRLMappingStudio window selection, Computer Use
+captured the current window and accessibility tree even though activation had
+failed. The visible project remains unsaved `sample-main`; it reports a missing
+`Revenue` source-field binding and `XBR017` because synthetic-profile opt-in is
+not enabled. Preview and execution remain disabled. No UI action or project
+change was made; these preconditions prevent the requested native destination
+journey from producing acceptance evidence.
