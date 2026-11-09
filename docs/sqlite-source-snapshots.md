@@ -33,8 +33,13 @@ owner-only Unix permissions and an owner-only Windows directory ACL. Completed
 Unix files are owner-read-only. Existing bundle destinations are never replaced.
 Files are flushed before a same-parent directory rename publishes the bundle.
 Cancellation or a handled failure removes the staging directory. Abrupt process
-loss can leave an unpublished `.xms-snapshot-*` directory; automatic cleanup and
-power-loss/filesystem durability qualification remain open.
+loss can leave an unpublished `.xms-snapshot-*` directory. The application now
+provides a bounded preview/apply retention service for these unpublished staging
+directories only. It requires an explicit cutoff and an injected authorizer for
+the exact content digest; active captures are leased, cleanup is audited, and
+completed bundles are outside its scan. There is no default retention period,
+production authorizer, UI/CLI trigger, or automatic cleanup. Power-loss/filesystem
+durability qualification remains open.
 
 ## CLI workflow
 
@@ -136,9 +141,12 @@ A [bounded process-loss matrix](snapshot-process-loss.md) terminates real captur
 children at staging, row-copy, metadata and directory-publication boundaries for
 rollback-journal and WAL sources. It checks final-path absence before publication,
 complete replayable bundles after publication, retained private orphans, safe
-retries, and preservation of a competing accepted bundle. The public capture API
-and retained format are unchanged. Automatic orphan cleanup and power-loss
-qualification are not added.
+retries, and preservation of a competing accepted bundle. Approved orphan cleanup
+is available through `SqliteSnapshotStagingRetentionService`; focused tests verify
+active-capture exclusion, exact-plan authorization, tamper/stale refusal, immutable
+audit and preservation of completed bundles, reports and receipts. The service
+does not select a cutoff or approval policy. Power-loss qualification remains
+open.
 
 ## Verification and remaining work
 

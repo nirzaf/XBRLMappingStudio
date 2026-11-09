@@ -1,6 +1,10 @@
+using System.Collections.Concurrent;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using Microsoft.Data.Sqlite;
 using SQLitePCL;
 using XBRLMappingStudio.Adapters;
@@ -55,6 +59,7 @@ public static class SqliteSourceSnapshotStore
         var parent = Path.GetDirectoryName(destination)!;
         if (!Directory.Exists(parent)) throw new DirectoryNotFoundException("Snapshot parent directory must already exist.");
         var staging = Path.Combine(parent, ".xms-snapshot-" + Guid.NewGuid().ToString("N"));
+        using var stagingLease = SnapshotStagingLease.Create(staging);
         LocalApplicationDatabase.CreatePrivateDirectory(staging);
         try
         {
@@ -102,6 +107,7 @@ public static class SqliteSourceSnapshotStore
             cancellationToken.ThrowIfCancellationRequested();
             captureBoundaryForTest?.Invoke("before-publish", staging);
             Directory.Move(staging, destination);
+            stagingLease.DeleteLeaseFile();
             captureBoundaryForTest?.Invoke("after-publish", destination);
             return Path.Combine(destination, MetadataFile);
         }
@@ -114,6 +120,184 @@ public static class SqliteSourceSnapshotStore
         finally
         {
             if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Owns the cross-process lease that makes an unpublished snapshot staging
+    /// directory eligible for retention only after capture has stopped.
+    /// </summary>
+    internal sealed class SnapshotStagingLease : IDisposable
+    {
+        internal const string Suffix = ".lease";
+        private const int MarkerSchema = 1;
+        private static readonly ConcurrentDictionary<string, byte> Active = new(
+            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        private readonly string _leasePath;
+        private readonly FileStream _stream;
+        private bool _disposed;
+
+        private SnapshotStagingLease(string leasePath, FileStream stream)
+            => (_leasePath, _stream) = (leasePath, stream);
+
+        public static SnapshotStagingLease Create(string stagingPath)
+        {
+            var fullStagingPath = Path.GetFullPath(stagingPath);
+            var leasePath = fullStagingPath + Suffix;
+            var key = Path.GetFullPath(leasePath);
+            if (!Active.TryAdd(key, 0)) throw new IOException("A snapshot staging lease already exists.");
+            FileStream? stream = null;
+            try
+            {
+                var options = new FileStreamOptions
+                {
+                    Mode = FileMode.CreateNew,
+                    Access = FileAccess.ReadWrite,
+                    Share = FileShare.ReadWrite | FileShare.Delete,
+                    BufferSize = 4096,
+                    Options = FileOptions.WriteThrough
+                };
+                if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                stream = new FileStream(leasePath, options);
+                if (!TryLock(stream)) throw new IOException("Could not acquire the snapshot staging lease.");
+                JsonSerializer.Serialize(stream, new LeaseMarker(MarkerSchema, "sqlite-snapshot-staging", DateTimeOffset.UtcNow));
+                stream.Flush(flushToDisk: true);
+                stream.Position = 0;
+                return new SnapshotStagingLease(leasePath, stream);
+            }
+            catch
+            {
+                stream?.Dispose();
+                Active.TryRemove(key, out _);
+                try { File.Delete(leasePath); } catch { }
+                throw;
+            }
+        }
+
+        internal static FileStream? TryAcquire(string stagingPath)
+        {
+            var fullStagingPath = Path.GetFullPath(stagingPath);
+            var leasePath = fullStagingPath + Suffix;
+            if (!File.Exists(leasePath) || (File.GetAttributes(leasePath) & FileAttributes.ReparsePoint) != 0)
+                return null;
+            var key = Path.GetFullPath(leasePath);
+            if (!Active.TryAdd(key, 0)) return null;
+            FileStream? stream = null;
+            try
+            {
+                stream = new FileStream(leasePath, FileMode.Open, FileAccess.ReadWrite,
+                    FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.None);
+                if (!TryLock(stream))
+                {
+                    stream.Dispose();
+                    Active.TryRemove(key, out _);
+                    return null;
+                }
+                return stream;
+            }
+            catch (IOException)
+            {
+                stream?.Dispose();
+                Active.TryRemove(key, out _);
+                return null;
+            }
+            catch
+            {
+                stream?.Dispose();
+                Active.TryRemove(key, out _);
+                throw;
+            }
+        }
+
+        internal static DateTimeOffset ReadCreatedUtc(FileStream stream)
+        {
+            if (stream.Length is <= 0 or > 4096)
+                throw new InvalidDataException("Snapshot staging lease marker is outside its supported size.");
+            stream.Position = 0;
+            var marker = JsonSerializer.Deserialize<LeaseMarker>(stream)
+                ?? throw new InvalidDataException("Snapshot staging lease marker is malformed.");
+            stream.Position = 0;
+            if (marker.SchemaVersion != MarkerSchema
+                || !StringComparer.Ordinal.Equals(marker.Purpose, "sqlite-snapshot-staging")
+                || marker.CreatedUtc.Offset != TimeSpan.Zero)
+                throw new InvalidDataException("Snapshot staging lease marker has an unsupported identity.");
+            return marker.CreatedUtc;
+        }
+
+        public void DeleteLeaseFile()
+        {
+            try { File.Delete(_leasePath); }
+            catch (FileNotFoundException) { }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            var key = Path.GetFullPath(_leasePath);
+            try { Unlock(_stream); } catch (IOException) { }
+            finally
+            {
+                _stream.Dispose();
+                Active.TryRemove(key, out _);
+                try { File.Delete(_leasePath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        internal static void ReleaseAcquired(string stagingPath, FileStream stream)
+        {
+            var key = Path.GetFullPath(Path.GetFullPath(stagingPath) + Suffix);
+            try { Unlock(stream); } catch (IOException) { }
+            finally
+            {
+                stream.Dispose();
+                Active.TryRemove(key, out _);
+            }
+        }
+
+        internal static void DeleteLeaseFileUnderLock(string stagingPath)
+        {
+            try { File.Delete(Path.GetFullPath(stagingPath) + Suffix); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        private static bool TryLock(FileStream stream)
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                if (MacFileLock.Flock(stream.SafeFileHandle, MacFileLock.LockExclusive | MacFileLock.LockNonBlocking) == 0)
+                    return true;
+                var error = Marshal.GetLastPInvokeError();
+                if (error is 11 or 35) return false;
+                throw new IOException("Could not acquire the macOS snapshot staging lease.", new Win32Exception(error));
+            }
+            stream.Lock(0, 1);
+            return true;
+        }
+
+        private static void Unlock(FileStream stream)
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                if (MacFileLock.Flock(stream.SafeFileHandle, MacFileLock.LockUnlock) != 0)
+                    throw new IOException("Could not release the macOS snapshot staging lease.",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+                return;
+            }
+            stream.Unlock(0, 1);
+        }
+
+        private sealed record LeaseMarker(int SchemaVersion, string Purpose, DateTimeOffset CreatedUtc);
+
+        private static class MacFileLock
+        {
+            internal const int LockExclusive = 2;
+            internal const int LockNonBlocking = 4;
+            internal const int LockUnlock = 8;
+
+            [DllImport("libSystem.B.dylib", EntryPoint = "flock", SetLastError = true)]
+            internal static extern int Flock(SafeFileHandle file, int operation);
         }
     }
 

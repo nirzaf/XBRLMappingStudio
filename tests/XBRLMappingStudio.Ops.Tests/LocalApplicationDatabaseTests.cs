@@ -31,9 +31,9 @@ public sealed class LocalApplicationDatabaseTests
         using (var version = schema.CreateCommand())
         {
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(11L, version.ExecuteScalar());
-            version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence','pdf_review_audit','taxonomy_profile_index','mixed_publication_reconciliation','retention_audit','temporary_artifact_retention_audit')";
-            Assert.Equal(7L, version.ExecuteScalar());
+            Assert.Equal(12L, version.ExecuteScalar());
+            version.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('pdf_source_documents','pdf_source_evidence','pdf_review_audit','taxonomy_profile_index','mixed_publication_reconciliation','retention_audit','temporary_artifact_retention_audit','snapshot_staging_retention_audit')";
+            Assert.Equal(8L, version.ExecuteScalar());
         }
 
         var journal = new RunJournal(databasePath: path);
@@ -124,7 +124,7 @@ public sealed class LocalApplicationDatabaseTests
         { ValidatedDigest = "sha256:validated" };
         journal.Save(receiptEntry);
 
-        Assert.Equal(11, LocalApplicationDatabase.CurrentSchemaVersion);
+        Assert.Equal(12, LocalApplicationDatabase.CurrentSchemaVersion);
         var legacyEntry = journal.Load("legacy-v2");
         Assert.Equal("/workspace/report.json", legacyEntry?.DestinationPath);
         Assert.Equal(JournalState.Finalized, legacyEntry?.State);
@@ -135,7 +135,7 @@ public sealed class LocalApplicationDatabaseTests
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(11L, check.ExecuteScalar());
+        Assert.Equal(12L, check.ExecuteScalar());
         check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
         Assert.Equal("compact", check.ExecuteScalar());
         check.CommandText = "SELECT project_id FROM project_registry WHERE project_path='/workspace/legacy.xmap'";
@@ -193,7 +193,7 @@ public sealed class LocalApplicationDatabaseTests
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(11L, check.ExecuteScalar());
+        Assert.Equal(12L, check.ExecuteScalar());
         check.CommandText = "SELECT file_kind,file_state,sqlite_operation_key,sqlite_rows_written FROM mixed_publication_reconciliation WHERE operation_key='legacy-xml'";
         using var reader = check.ExecuteReader();
         Assert.True(reader.Read());
@@ -226,7 +226,7 @@ public sealed class LocalApplicationDatabaseTests
         check.CommandText = "SELECT value FROM app_settings WHERE key='density'";
         Assert.Equal("compact", check.ExecuteScalar());
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(11L, check.ExecuteScalar());
+        Assert.Equal(12L, check.ExecuteScalar());
         check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_source_evidence'";
         Assert.Equal(1L, check.ExecuteScalar());
         check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pdf_review_audit'";
@@ -273,7 +273,7 @@ public sealed class LocalApplicationDatabaseTests
         using var connection = database.OpenConnection();
         using var check = connection.CreateCommand();
         check.CommandText = "PRAGMA user_version";
-        Assert.Equal(11L, check.ExecuteScalar());
+        Assert.Equal(12L, check.ExecuteScalar());
         check.CommandText = "SELECT file_kind,file_state,file_digest FROM mixed_publication_reconciliation WHERE operation_key='legacy-mix'";
         using var reader = check.ExecuteReader();
         Assert.True(reader.Read());
