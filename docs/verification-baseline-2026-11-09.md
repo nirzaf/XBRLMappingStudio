@@ -162,4 +162,9 @@ Windows Release. It confirms that a committed setting still present in the live
 WAL is included in `BackupTo`, that the copied backup opens with a successful
 integrity check, and that later writes to the source do not change the restore.
 This verifies the local SQLite-aware backup/restore path; installed-release
-upgrade interruption, rollback and clean-machine recovery remain open.
+upgrade interruption, rollback and clean-machine recovery remain open. Exact-head
+CI [42665410467](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42665410467)
+passed all four jobs; Windows and Ubuntu each passed **1,996 tests** with **6**
+gated Arelle skips, the pinned Arelle integration and repository hygiene passed,
+all five memory qualifications passed on both platforms, and Windows worker
+cancellation regressions passed repeatedly.
