@@ -31,6 +31,22 @@ public static class FactDimensionParser
             profile.NamespaceUris, out dimensions, out error);
     }
 
+    /// <summary>
+    /// Parses the fact-inspector representation: legacy axis=member lines, or a
+    /// bounded JSON dimension array when typed values are needed.
+    /// </summary>
+    public static bool TryParseForProfile(
+        string? text,
+        FilingProfile profile,
+        out IReadOnlyList<Dimension> dimensions,
+        out string error)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        if (!string.IsNullOrWhiteSpace(text) && text.TrimStart().StartsWith("[", StringComparison.Ordinal))
+            return TryParseJson(text, profile, out dimensions, out error);
+        return TryParse(text, profile.DimensionDomains, out dimensions, out error);
+    }
+
     public static bool TryParseJson(
         string? json,
         IReadOnlyDictionary<string, IReadOnlyList<string>> dimensionDomains,
@@ -233,7 +249,16 @@ public static class FactDimensionParser
     }
 
     public static string Format(IEnumerable<Dimension> dimensions)
-        => string.Join("\n", dimensions
-            .OrderBy(dimension => dimension.Name, StringComparer.Ordinal)
-            .Select(dimension => $"{dimension.Name}={dimension.MemberName}"));
+    {
+        var ordered = dimensions.OrderBy(dimension => dimension.Name, StringComparer.Ordinal).ToArray();
+        if (ordered.Any(dimension => !dimension.IsExplicit))
+            return JsonSerializer.Serialize(ordered.Select(dimension => new
+            {
+                dimension.Name,
+                dimension.MemberName,
+                dimension.IsExplicit,
+                dimension.TypedValue
+            }));
+        return string.Join("\n", ordered.Select(dimension => $"{dimension.Name}={dimension.MemberName}"));
+    }
 }

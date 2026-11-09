@@ -4948,7 +4948,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        if (!FactDimensionParser.TryParse(SelectedFactDimensions, profile.DimensionDomains,
+        if (!FactDimensionParser.TryParseForProfile(SelectedFactDimensions, profile,
                 out var dimensions, out var dimensionError))
         {
             StatusText = $"XBR013: {dimensionError}";

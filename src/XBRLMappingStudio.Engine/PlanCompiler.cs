@@ -1990,7 +1990,7 @@ public sealed class PlanCompiler
                 var dimensionsValid = dimensionsJsonConnected
                     ? FactDimensionParser.TryParseJson(dimensionsText, profile,
                         out var dimensionsFromJson, out var dimensionJsonError)
-                    : FactDimensionParser.TryParse(dimensionsText, profile.DimensionDomains,
+                    : FactDimensionParser.TryParseForProfile(dimensionsText, profile,
                         out dimensionsFromJson, out dimensionJsonError);
                 var dimensions = dimensionsFromJson;
                 var dimensionError = dimensionJsonError;

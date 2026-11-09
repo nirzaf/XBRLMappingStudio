@@ -1733,6 +1733,53 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public void FactInspectorAuthorsProfileDeclaredTypedStringDimensions()
+    {
+        var source = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = source.ProfileId,
+            Digest = source.Digest,
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            DimensionDomains = source.DimensionDomains,
+            TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+            {
+                ["synthetic:TypedAxis"] = new("synthetic:TypedMember", "xs:string")
+            },
+            TaxonomyVersion = source.TaxonomyVersion,
+            OutputFormat = source.OutputFormat,
+            NamespaceUris = source.NamespaceUris.Concat(new[]
+            {
+                new KeyValuePair<string, string>("xs", "http://www.w3.org/2001/XMLSchema")
+            }).ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+            TaxonomyUrls = source.TaxonomyUrls,
+            PackageHashes = source.PackageHashes,
+            RequiredPlugins = source.RequiredPlugins,
+            RequiredChecks = source.RequiredChecks
+        };
+        var project = new MainWindowViewModel().Session.Project;
+        var viewModel = new MainWindowViewModel(project, null,
+            (_, _) => Task.FromException<XBRLMappingStudio.Adapters.ISourceSchema>(
+                new InvalidOperationException("Source inspection must not run.")),
+            new FilingProfileResolver(new[] { profile }));
+        viewModel.SelectedNode = viewModel.Nodes.Single(node => node.NodeId == "sample-fact");
+        viewModel.SelectedFactDimensions = FactDimensionParser.Format(
+            [new Dimension("synthetic:TypedAxis", "", IsExplicit: false) { TypedValue = "0017" }]);
+
+        viewModel.ApplyFactPropertiesCommand.Execute(null);
+
+        Assert.Contains("one undoable change", viewModel.StatusText, StringComparison.Ordinal);
+        var persisted = viewModel.Session.Project.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["dimensions"]!.ToString();
+        Assert.Contains("TypedValue", persisted, StringComparison.Ordinal);
+        Assert.Contains("0017", persisted, StringComparison.Ordinal);
+        var reopened = ProjectSerializer.Deserialize(ProjectSerializer.Serialize(viewModel.Session.Project));
+        Assert.Equal(persisted, reopened.Nodes.Single(node => node.NodeId == "sample-fact")
+            .Parameters["dimensions"]!.ToString());
+    }
+
+    [Fact]
     public void TextFactInspectorEditsSupportedLanguageAsOneUndoableChange()
     {
         var project = TextFactProject();

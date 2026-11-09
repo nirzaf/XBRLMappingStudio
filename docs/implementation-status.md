@@ -437,6 +437,14 @@ flattening. The XML report import test verifies exact-match selection, zero-matc
 refusal, and conflicting-filter rejection while continuing to verify that fact
 validation and XML serialization fail closed without qualified taxonomy metadata.
 
+The desktop fact inspector now preserves its existing `axis=member` entry format
+and accepts a profile-validated JSON dimension array for typed values. Its
+formatter keeps typed strings in executable project data while excluding opaque
+import evidence. Engine execution and the headless desktop editor verify that a
+QName-looking lexical string remains a typed value from project save through
+fact construction. Focused Release suites passed: XBRL 211/211, Engine 159/159,
+and Desktop 172/172.
+
 ## XBR04 profile-declared xs:string typed-dimension runtime (2026-11-10)
 
 `Dimension.TypedValue` carries the normalized simple value separately from

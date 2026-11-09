@@ -317,6 +317,55 @@ public class ExecutionPlanTests
     }
 
     [Fact]
+    public async Task FactConstructCarriesProfileDeclaredTypedStringFromInspectorJson()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "xbrl-typed-dimensions-" + Guid.NewGuid().ToString("N"));
+        var path = TestFixtures.MaterializeWorkbook(dir);
+        try
+        {
+            var (project, synthetic) = Prepare(path);
+            var factNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            factNode.Parameters["dimensions"] = FactDimensionParser.Format(
+                [new Dimension("synthetic:TypedAxis", "", IsExplicit: false)
+                    { TypedValue = "synthetic:QNameLookingText" }]);
+            var profile = new FilingProfile
+            {
+                ProfileId = synthetic.ProfileId,
+                Digest = synthetic.Digest,
+                Concepts = synthetic.Concepts,
+                SupportedUnits = synthetic.SupportedUnits,
+                DimensionDomains = synthetic.DimensionDomains,
+                TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+                {
+                    ["synthetic:TypedAxis"] = new("synthetic:TypedDomain", "xs:string")
+                },
+                TaxonomyVersion = synthetic.TaxonomyVersion,
+                OutputFormat = synthetic.OutputFormat,
+                NamespaceUris = synthetic.NamespaceUris.Concat(new[]
+                {
+                    new KeyValuePair<string, string>("xs", "http://www.w3.org/2001/XMLSchema")
+                }).ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+                TaxonomyUrls = synthetic.TaxonomyUrls,
+                PackageHashes = synthetic.PackageHashes,
+                RequiredChecks = synthetic.RequiredChecks
+            };
+            var compile = new PlanCompiler(FunctionCatalog.Default).Compile(new MappingGraph(project), profile);
+            Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(diagnostic => diagnostic.Message)));
+
+            var result = await compile.Plan!.ExecuteAsync(MakeContext(project, path));
+
+            var fact = Assert.Single(result.Facts);
+            var dimension = Assert.Single(fact!.Dimensions);
+            Assert.False(dimension.IsExplicit);
+            Assert.Equal("synthetic:QNameLookingText", dimension.TypedValue);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task FactConstructSupportsLanguageTaggedTextWithSourceProvenance()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xbrl-text-fact-" + Guid.NewGuid().ToString("N"));

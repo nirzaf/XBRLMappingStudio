@@ -75,4 +75,40 @@ public class FactDimensionParserTests
             Domains, out dimensions, out error));
         Assert.Contains("limit", error, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void FactInspectorAcceptsTypedStringJsonAndFormatsItWithoutOpaqueEvidence()
+    {
+        var source = SyntheticProfile.Build();
+        var profile = new FilingProfile
+        {
+            ProfileId = source.ProfileId,
+            Digest = source.Digest,
+            Concepts = source.Concepts,
+            SupportedUnits = source.SupportedUnits,
+            DimensionDomains = source.DimensionDomains,
+            NamespaceUris = source.NamespaceUris.Concat(new[]
+            {
+                new KeyValuePair<string, string>("xs", "http://www.w3.org/2001/XMLSchema")
+            }).ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+            TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+            {
+                ["synthetic:TypedAxis"] = new("synthetic:TypedMember", "xs:string")
+            }
+        };
+        const string json = "[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"synthetic:QNameLookingText\"}]";
+
+        Assert.True(FactDimensionParser.TryParseForProfile(json, profile, out var dimensions, out var error), error);
+        var typed = Assert.Single(dimensions);
+        Assert.False(typed.IsExplicit);
+        Assert.Equal("synthetic:QNameLookingText", typed.TypedValue);
+
+        var formatted = FactDimensionParser.Format(dimensions);
+        Assert.Contains("TypedValue", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("TypedValueJson", formatted, StringComparison.Ordinal);
+        Assert.True(FactDimensionParser.TryParseForProfile(formatted, profile, out var reparsed, out error), error);
+        Assert.Equal(typed, Assert.Single(reparsed));
+        Assert.False(FactDimensionParser.TryParseForProfile("[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"bad\\u0001\"}]",
+            profile, out _, out _));
+    }
 }
