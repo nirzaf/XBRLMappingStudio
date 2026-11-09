@@ -19,6 +19,7 @@ public static partial class SupportBundle
     public const int MaximumLogInputLines = 4096;
     public const int MaximumLogLineCharacters = 8 * 1024;
     public const int MaximumLogOutputCharacters = 64 * 1024;
+    private const int MaximumRunIdCharacters = 256;
 
     [GeneratedRegex(@"\b(password|token|secret)\b\s*[=:]\s*\S+", RegexOptions.IgnoreCase)]
     private static partial Regex SecretPattern();
@@ -118,8 +119,9 @@ public static partial class SupportBundle
         }
 
         // Journal receipt for the requested run.
-        var entry = journal.Load(runId);
-        sb.Append("run: ").Append(runId).Append('\n');
+        var safeRunId = SanitizeRunId(runId);
+        var entry = StringComparer.Ordinal.Equals(safeRunId, runId) ? journal.Load(runId) : null;
+        sb.Append("run: ").Append(safeRunId).Append('\n');
         if (entry is null)
             sb.Append("journal: no entry for run\n");
         else
@@ -167,5 +169,16 @@ public static partial class SupportBundle
         foreach (var line in tail) sb.Append(line).Append('\n');
 
         return sb.ToString();
+    }
+
+    private static string SanitizeRunId(string? runId)
+    {
+        if (string.IsNullOrEmpty(runId)) return "-";
+        var bounded = runId.Length > MaximumRunIdCharacters
+            ? runId[..MaximumRunIdCharacters]
+            : runId;
+        var normalized = new string(bounded.Select(character => char.IsControl(character) ? ' ' : character).ToArray());
+        var singleLine = string.Join(' ', normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return Redact(singleLine);
     }
 }

@@ -249,6 +249,25 @@ public class SupportBundleTests
     }
 
     [Fact]
+    public void Bundle_SanitizesRunIdentifierBeforeExport()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ops-bundle-runid-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var injectedRunId = "run-safe\r\npassword=RUN_IDENTIFIER_SECRET";
+            var bundle = SupportBundle.Build(
+                Path.Combine(dir, "missing.xmap"), injectedRunId,
+                new RunJournal(Path.Combine(dir, "journal")));
+
+            Assert.DoesNotContain("\npassword=RUN_IDENTIFIER_SECRET", bundle, StringComparison.Ordinal);
+            Assert.DoesNotContain("RUN_IDENTIFIER_SECRET", bundle, StringComparison.Ordinal);
+            Assert.Contains("run: run-safe password=<redacted>", bundle, StringComparison.Ordinal);
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+    }
+
+    [Fact]
     public void Bundle_BoundsEnumerationOfAnUnboundedLogSequence()
     {
         var dir = Path.Combine(Path.GetTempPath(), "ops-bundle-input-bound-" + Guid.NewGuid().ToString("N"));
