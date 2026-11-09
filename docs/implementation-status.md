@@ -280,3 +280,19 @@ the focused Integration and Desktop Release tests passed 1/1 each. Other
 source-reader constructs and installed-profile qualification remain open.
 
 Local DST-04 native Windows re-observation (2026-11-08): After the user unlocked the desktop, the current Release app displayed the expected missing `Revenue` source-column diagnostic and kept Preview/Execute disabled. Opening Destination > Choose SQLite database showed no selectable database in the fixture directory; Cancel closed the picker, left the destination unset, and caused no project or destination write. This confirms the current picker-cancel state only. The loaded `sample-main` project is not a valid full-run fixture because its source mapping is stale and its synthetic profile still requires explicit opt-in; prior disposable-fixture round-trip, approval-denial, cancel, and stale-target evidence remains the applicable DST-04 verification.
+
+## UX-08 graph proposal overlay follow-on (2026-11-09)
+
+Selected or checked, pending AI suggestions now appear on the mapping canvas as
+dashed amber proposal edges with a distinct diamond and concept label. These
+overlays are excluded from the executable graph and render only while the
+suggestion's project semantic digest matches the current project. The review
+panel displays the current digest, explains the overlay semantics, counts stale
+suggestions, and notes when the 32-overlay display bound is reached. Existing
+edit, reject, batch acceptance, audit, undo and stale-project gates remain in
+the suggestion session. `GraphProposalOverlay_IsDigestBoundReviewOnlyAndRejectDoesNotChangeGraph`
+verifies digest binding, review-only labeling, and that rejection leaves the
+semantic digest unchanged; the full isolated Windows Release solution suite
+passed 1,888 tests with 6 environment-gated Arelle cases skipped. This is
+headless workflow evidence, not native rendered/screen-reader acceptance; native
+GUI qualification remains open.

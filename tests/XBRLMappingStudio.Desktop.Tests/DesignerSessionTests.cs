@@ -1914,6 +1914,28 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task GraphProposalOverlay_IsDigestBoundReviewOnlyAndRejectDoesNotChangeGraph()
+    {
+        var viewModel = new MainWindowViewModel();
+        viewModel.AllowSyntheticProfile = true;
+        var digestBefore = viewModel.Session.Project.ComputeSemanticDigest();
+
+        await viewModel.SuggestConnectedMappingsAsync();
+
+        var proposal = Assert.Single(viewModel.AiSuggestions,
+            row => row.SourceFieldId == "sample-source:Revenue" && row.Concept == "synthetic:Revenue");
+        Assert.Same(proposal, Assert.Single(viewModel.GraphProposalSuggestions));
+        Assert.Contains(digestBefore, viewModel.SuggestionProposalScopeSummary, StringComparison.Ordinal);
+        Assert.Contains("not executable edges", viewModel.SuggestionProposalScopeSummary, StringComparison.Ordinal);
+
+        viewModel.RejectSelectedSuggestionCommand.Execute(null);
+
+        Assert.Equal(digestBefore, viewModel.Session.Project.ComputeSemanticDigest());
+        Assert.Equal(SuggestionState.Rejected, proposal.ReviewState);
+        Assert.Empty(viewModel.GraphProposalSuggestions);
+    }
+
+    [Fact]
     public async Task DesktopConnectedSuggestionBatch_AcceptsUndoAndRedoesOneSelectedMappingPerFact()
     {
         var seed = new MainWindowViewModel();
@@ -1984,6 +2006,8 @@ public sealed class DesignerSessionTests
         Assert.Contains("one validated, audited transaction", viewModel.StatusText);
         Assert.Equal(SuggestionState.Accepted, revenue.ReviewState);
         Assert.Equal(SuggestionState.Accepted, netIncome.ReviewState);
+        Assert.DoesNotContain("stale suggestion(s) are hidden", viewModel.SuggestionProposalScopeSummary,
+            StringComparison.Ordinal);
         Assert.Equal("synthetic:Revenue", viewModel.Session.Project.Nodes
             .Single(node => node.NodeId == "sample-fact").Parameters["concept"]?.ToString());
         Assert.Equal("synthetic:NetIncome", viewModel.Session.Project.Nodes
@@ -2018,6 +2042,9 @@ public sealed class DesignerSessionTests
         suggestion.IsBatchSelected = true;
         viewModel.Session.SetNodeParameter("sample-fact", "unit", "EUR");
         var currentDigest = viewModel.Session.Project.ComputeSemanticDigest();
+        Assert.Empty(viewModel.GraphProposalSuggestions);
+        Assert.Contains("stale suggestion(s) are hidden", viewModel.SuggestionProposalScopeSummary,
+            StringComparison.Ordinal);
         viewModel.AcceptSelectedSuggestionBatchCommand.Execute(null);
 
         Assert.Contains("project changed after these suggestions were generated", viewModel.StatusText);

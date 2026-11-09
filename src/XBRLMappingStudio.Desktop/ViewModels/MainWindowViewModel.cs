@@ -431,6 +431,7 @@ public sealed record AdapterCapabilityOption(
 public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 {
     private const int FactPreviewPageSize = LargeRunArtifact.MaximumFactsPerPage;
+    private const int MaximumGraphProposalOverlays = 32;
     private string _title = "XBRL Mapping Studio";
     private string _statusText = "Ready";
     private NodeViewModel? _selectedNode;
@@ -996,6 +997,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 if (value is null) ClearSelectedSuggestionEditor();
                 else LoadSelectedSuggestionEditor();
+                Raise(nameof(GraphProposalSuggestions));
+                Raise(nameof(SuggestionProposalScopeSummary));
             }
         }
     }
@@ -1015,6 +1018,39 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public bool CanAcceptSelectedSuggestionBatch =>
         !IsBusy && !IsSourceLoading && _suggestionSession is not null
         && AiSuggestions.Any(row => row.IsBatchSelected);
+    public IReadOnlyList<SuggestionRow> GraphProposalSuggestions
+    {
+        get
+        {
+            var currentDigest = Session.Project.ComputeSemanticDigest();
+            return AiSuggestions
+                .Where(row => row.ReviewState == SuggestionState.Pending
+                    && StringComparer.Ordinal.Equals(row.ProjectDigest, currentDigest)
+                    && (row.IsBatchSelected || ReferenceEquals(row, SelectedSuggestion)))
+                .OrderByDescending(row => ReferenceEquals(row, SelectedSuggestion))
+                .Take(MaximumGraphProposalOverlays)
+                .ToArray();
+        }
+    }
+    public string SuggestionProposalScopeSummary
+    {
+        get
+        {
+            var currentDigest = Session.Project.ComputeSemanticDigest();
+            var staleCount = AiSuggestions.Count(row => row.ReviewState == SuggestionState.Pending
+                && !StringComparer.Ordinal.Equals(row.ProjectDigest, currentDigest));
+            var selectedCount = AiSuggestions.Count(row => row.ReviewState == SuggestionState.Pending
+                && (row.IsBatchSelected || ReferenceEquals(row, SelectedSuggestion))
+                && StringComparer.Ordinal.Equals(row.ProjectDigest, currentDigest));
+            var visibleCount = Math.Min(selectedCount, MaximumGraphProposalOverlays);
+            var summary = $"Dashed amber graph overlays are review proposals only; they are not executable edges. Current project semantic digest: {currentDigest}. Showing {visibleCount} selected or checked proposal(s).";
+            if (selectedCount > visibleCount)
+                summary += $" {selectedCount - visibleCount} additional selected proposal(s) remain in the review list.";
+            if (staleCount > 0)
+                summary += $" {staleCount} stale suggestion(s) are hidden because their project digest differs; regenerate them before review.";
+            return summary;
+        }
+    }
     public string SelectedSuggestionConcept { get => _selectedSuggestionConcept; set => Set(ref _selectedSuggestionConcept, value); }
     public string SelectedSuggestionUnit { get => _selectedSuggestionUnit; set => Set(ref _selectedSuggestionUnit, value); }
     public string SelectedSuggestionPeriodType { get => _selectedSuggestionPeriodType; set => Set(ref _selectedSuggestionPeriodType, value); }
@@ -1788,6 +1824,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         SyncSelectedNodeWithSession();
         Raise(nameof(Nodes));
         Raise(nameof(Edges));
+        Raise(nameof(GraphProposalSuggestions));
+        Raise(nameof(SuggestionProposalScopeSummary));
         Raise(nameof(Session));
         Raise(nameof(SelectedNodeDisplayName));
         Raise(nameof(IsProjectDirty));
@@ -7059,15 +7097,27 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         RefreshSuggestionBatchSummary();
         Raise(nameof(AiSuggestions));
         Raise(nameof(CanAcceptSelectedSuggestionBatch));
+        Raise(nameof(GraphProposalSuggestions));
+        Raise(nameof(SuggestionProposalScopeSummary));
         AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
     }
 
     private void OnSuggestionRowPropertyChanged(object? sender, PropertyChangedEventArgs eventArgs)
     {
-        if (eventArgs.PropertyName != nameof(SuggestionRow.IsBatchSelected)) return;
-        RefreshSuggestionBatchSummary();
-        Raise(nameof(CanAcceptSelectedSuggestionBatch));
-        AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
+        if (eventArgs.PropertyName is nameof(SuggestionRow.IsBatchSelected)
+            or nameof(SuggestionRow.ReviewState)
+            or nameof(SuggestionRow.Concept)
+            or nameof(SuggestionRow.IsAnalystEdited))
+        {
+            Raise(nameof(GraphProposalSuggestions));
+            Raise(nameof(SuggestionProposalScopeSummary));
+        }
+        if (eventArgs.PropertyName == nameof(SuggestionRow.IsBatchSelected))
+        {
+            RefreshSuggestionBatchSummary();
+            Raise(nameof(CanAcceptSelectedSuggestionBatch));
+            AcceptSelectedSuggestionBatchCommand?.NotifyCanExecuteChanged();
+        }
     }
 
     private void RefreshSuggestionBatchSummary()

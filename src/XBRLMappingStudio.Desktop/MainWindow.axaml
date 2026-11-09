@@ -131,6 +131,9 @@
           <TextBlock DockPanel.Dock="Top" Text="{Binding SuggestionBatchSummary}"
                      TextWrapping="Wrap" MaxHeight="36" Margin="0,2,0,4"
                      AutomationProperties.Name="Batch suggestion selection status" />
+          <TextBlock DockPanel.Dock="Top" Text="{Binding SuggestionProposalScopeSummary}"
+                     TextWrapping="Wrap" MaxHeight="76" FontSize="10" Margin="0,0,0,6"
+                     AutomationProperties.Name="Graph proposal overlay scope and project digest" />
           <TextBlock DockPanel.Dock="Top" Text="{Binding SelectedSuggestion.TaxonomyEvidenceDisplay}"
                      TextWrapping="Wrap" MaxHeight="72" Margin="0,2,0,6"
                      AutomationProperties.Name="Selected concept taxonomy evidence" />
@@ -269,7 +272,8 @@
                                   Session="{Binding Session}"
                                   Nodes="{Binding Nodes}"
                                   Edges="{Binding Edges}"
-                                  AutomationProperties.Name="Mapping graph" />
+                                  ProposalSuggestions="{Binding GraphProposalSuggestions}"
+                                  AutomationProperties.Name="Mapping graph with review-only suggestion overlays" />
             <Border Grid.Row="1" BorderBrush="#33000000" BorderThickness="0,1,0,0" Padding="6">
               <Grid RowDefinitions="Auto,Auto,*">
                 <TextBlock Text="Preview facts and run results" FontWeight="Bold" />

@@ -20,6 +20,9 @@ public sealed class GraphCanvas : Control
     public static readonly StyledProperty<IReadOnlyList<EdgeViewModel>?> EdgesProperty =
         AvaloniaProperty.Register<GraphCanvas, IReadOnlyList<EdgeViewModel>?>(nameof(Edges));
 
+    public static readonly StyledProperty<IReadOnlyList<SuggestionRow>?> ProposalSuggestionsProperty =
+        AvaloniaProperty.Register<GraphCanvas, IReadOnlyList<SuggestionRow>?>(nameof(ProposalSuggestions));
+
     public static readonly StyledProperty<DesignerSession?> SessionProperty =
         AvaloniaProperty.Register<GraphCanvas, DesignerSession?>(nameof(Session));
 
@@ -33,6 +36,13 @@ public sealed class GraphCanvas : Control
     {
         get => GetValue(EdgesProperty);
         set => SetValue(EdgesProperty, value);
+    }
+
+    /// <summary>Review-only AI proposals; these are rendered separately from executable graph edges.</summary>
+    public IReadOnlyList<SuggestionRow>? ProposalSuggestions
+    {
+        get => GetValue(ProposalSuggestionsProperty);
+        set => SetValue(ProposalSuggestionsProperty, value);
     }
 
     public DesignerSession? Session
@@ -71,7 +81,7 @@ public sealed class GraphCanvas : Control
 
     static GraphCanvas()
     {
-        AffectsRender<GraphCanvas>(NodesProperty, EdgesProperty);
+        AffectsRender<GraphCanvas>(NodesProperty, EdgesProperty, ProposalSuggestionsProperty);
     }
 
     public GraphCanvas() => Focusable = true;
@@ -91,6 +101,12 @@ public sealed class GraphCanvas : Control
                     if (edge.From is null || edge.To is null) continue;
                     DrawEdge(ctx, edgePen, edge);
                 }
+            }
+
+            if (ProposalSuggestions is not null)
+            {
+                foreach (var proposal in ProposalSuggestions)
+                    DrawProposal(ctx, proposal);
             }
 
             if (_mode is Mode.Connect or Mode.Reconnect
@@ -117,6 +133,46 @@ public sealed class GraphCanvas : Control
     private static void DrawEdge(DrawingContext ctx, Pen pen, EdgeViewModel edge)
         => DrawBezier(ctx, pen,
             PortRight(edge.From!, edge.SourcePortName), PortLeft(edge.To!, edge.TargetPortName));
+
+    private void DrawProposal(DrawingContext ctx, SuggestionRow proposal)
+    {
+        var source = Nodes?.FirstOrDefault(node => StringComparer.Ordinal.Equals(node.NodeId, proposal.SourceNodeId));
+        var target = Nodes?.FirstOrDefault(node => StringComparer.Ordinal.Equals(node.NodeId, proposal.TargetNodeId));
+        if (source is null || target is null
+            || source.OutputPorts.Count == 0 || target.InputPorts.Count == 0) return;
+
+        var sourcePort = source.OutputPorts.FirstOrDefault(port => StringComparer.Ordinal.Equals(port.Name, "value"))
+            ?? source.OutputPorts[0];
+        var targetPort = target.InputPorts.FirstOrDefault(port => StringComparer.Ordinal.Equals(port.Name, "value"))
+            ?? target.InputPorts[0];
+        var from = PortRight(source, sourcePort.Name);
+        var to = PortLeft(target, targetPort.Name);
+        var pen = new Pen(new SolidColorBrush(Color.FromRgb(0xA8, 0x5B, 0x00)), 2)
+        { DashStyle = new DashStyle(new double[] { 6, 4 }, 0) };
+        DrawBezier(ctx, pen, from, to);
+
+        var center = new Point((from.X + to.X) / 2, (from.Y + to.Y) / 2);
+        DrawProposalDiamond(ctx, center);
+        var concept = proposal.Concept.Length <= 28 ? proposal.Concept : proposal.Concept[..25] + "…";
+        DrawText(ctx, $"PROPOSAL · {concept}", new Point(center.X + 8, center.Y - 15), 10,
+            Color.FromRgb(0x85, 0x49, 0x00));
+    }
+
+    private static void DrawProposalDiamond(DrawingContext ctx, Point center)
+    {
+        const double radius = 5;
+        var geometry = new StreamGeometry();
+        using (var path = geometry.Open())
+        {
+            path.BeginFigure(new Point(center.X, center.Y - radius), true);
+            path.LineTo(new Point(center.X + radius, center.Y));
+            path.LineTo(new Point(center.X, center.Y + radius));
+            path.LineTo(new Point(center.X - radius, center.Y));
+            path.EndFigure(true);
+        }
+        ctx.DrawGeometry(new SolidColorBrush(Color.FromRgb(0xF2, 0xC1, 0x6D)),
+            new Pen(new SolidColorBrush(Color.FromRgb(0x85, 0x49, 0x00)), 1), geometry);
+    }
 
     private static void DrawBezier(DrawingContext ctx, Pen pen, Point from, Point to)
     {
