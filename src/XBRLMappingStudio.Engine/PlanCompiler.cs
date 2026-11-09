@@ -787,22 +787,38 @@ public sealed class PlanCompiler
                     var index = new Dictionary<string, List<(Dictionary<string, DataValue> Fields, int ItemIndex)>>(StringComparer.Ordinal);
                     var rightOrder = new List<string>();
                     var unmatchedRightRows = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
+                    long joinWorkingBytes = 0;
+                    bool TryReserveJoinBytes(long bytes)
+                    {
+                        if (bytes < 0 || bytes == long.MaxValue || bytes > ctx.MaxGroupWorkingBytes
+                            || joinWorkingBytes > ctx.MaxGroupWorkingBytes - bytes)
+                        {
+                            diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                $"Join retained-state estimate exceeded MaxGroupWorkingBytes={ctx.MaxGroupWorkingBytes}; no additional rows were retained.",
+                                nodeId: nodeId);
+                            return false;
+                        }
+                        joinWorkingBytes += bytes;
+                        return true;
+                    }
                     foreach (var (rec, itemIndex) in right.Select((record, index) => (record, index)))
                     {
                         ctx.CancellationToken.ThrowIfCancellationRequested();
                         if (!TryRecordFields(rec, ctx.CancellationToken, out var fields)) continue;
                         if (!TryGetJoinKey(fields, rightKey, out var rk))
                         {
+                            if (!TryReserveJoinBytes(JoinWorkingSetEstimator.AddOverhead(
+                                    JoinWorkingSetEstimator.EstimateRecord(fields), 128)))
+                            {
+                                outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                                return outputs;
+                            }
                             unmatchedRightRows.Add((fields, itemIndex));
                             continue;
                         }
-                        if (!index.TryGetValue(rk, out var bucket))
-                        {
-                            bucket = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
-                            index[rk] = bucket;
-                            rightOrder.Add(rk);
-                        }
-                        if (bucket.Count > 0 && dupPolicy is "Fail" or "First")
+                        var hasBucket = index.TryGetValue(rk, out var bucket);
+                        if (hasBucket && bucket!.Count > 0 && dupPolicy is "Fail" or "First")
                         {
                             if (dupPolicy == "Fail")
                             {
@@ -814,7 +830,21 @@ public sealed class PlanCompiler
                             }
                             continue; // First: keep only the first per key
                         }
-                        bucket.Add((fields, itemIndex));
+                        var recordBytes = JoinWorkingSetEstimator.EstimateRecord(fields);
+                        var indexOverhead = 128L + (hasBucket ? 0 : 64L + rk.Length * 2L);
+                        var indexBytes = JoinWorkingSetEstimator.AddOverhead(recordBytes, indexOverhead);
+                        if (!TryReserveJoinBytes(indexBytes))
+                        {
+                            outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                            return outputs;
+                        }
+                        if (!hasBucket)
+                        {
+                            bucket = new List<(Dictionary<string, DataValue> Fields, int ItemIndex)>();
+                            index[rk] = bucket;
+                            rightOrder.Add(rk);
+                        }
+                        bucket!.Add((fields, itemIndex));
                     }
 
                     if (manyToManyPolicy == "Fail")
@@ -827,6 +857,11 @@ public sealed class PlanCompiler
                                 || !TryGetJoinKey(fields, leftKey, out var key))
                                 continue;
                             leftKeyCounts.TryGetValue(key, out var count);
+                            if (!TryReserveJoinBytes(count == 0 ? 128 + key.Length * 2L : 16))
+                            {
+                                outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                                return outputs;
+                            }
                             leftKeyCounts[key] = count + 1;
                         }
 
@@ -854,6 +889,7 @@ public sealed class PlanCompiler
                     }
 
                     var joined = new List<DataValue>();
+                    var joinedPaths = new List<Dictionary<string, IReadOnlyList<SourceTransformationPath>>>();
                     var matchedRights = new HashSet<string>(StringComparer.Ordinal);
                     bool AddRow(
                         Dictionary<string, DataValue>? l, int? leftItemIndex,
@@ -868,6 +904,16 @@ public sealed class PlanCompiler
                                 + "Publication is blocked before output.", nodeId: nodeId);
                             return false;
                         }
+                        if (joined.Count >= ctx.MaxCollectionItems)
+                        {
+                            diag.Error(DiagnosticCodes.MapCollectionBudgetExceeded, DiagnosticSubsystem.Mapping,
+                                DiagnosticStage.Execution,
+                                $"Join output exceeded MaxCollectionItems={ctx.MaxCollectionItems}; no additional rows were retained.",
+                                nodeId: nodeId);
+                            return false;
+                        }
+                        if (!TryReserveJoinBytes(JoinWorkingSetEstimator.EstimateJoinedRecord(l, r)))
+                            return false;
 
                         var merged = new Dictionary<string, DataValue>(StringComparer.Ordinal);
                         if (l is not null)
@@ -911,15 +957,14 @@ public sealed class PlanCompiler
                                 }
                             }
                         }
-                        var outputIndex = joined.Count;
-                        joined.Add(DataValue.Record(merged));
-
                         var leftJoinKeyPaths = leftItemIndex is { } leftIndex
                             ? ReadSetFieldPaths(leftEdge, leftIndex, leftKey)
                             : Array.Empty<SourceTransformationPath>();
                         var rightJoinKeyPaths = rightItemIndex is { } rightIndex
                             ? ReadSetFieldPaths(rightEdge, rightIndex, rightKey)
                             : Array.Empty<SourceTransformationPath>();
+                        var outputPaths = new Dictionary<string, IReadOnlyList<SourceTransformationPath>>(StringComparer.Ordinal);
+                        long provenanceBytes = 256;
                         foreach (var fieldName in merged.Keys)
                         {
                             ctx.CancellationToken.ThrowIfCancellationRequested();
@@ -945,9 +990,17 @@ public sealed class PlanCompiler
                             AddDistinctPaths(fieldPaths, leftJoinKeyPaths);
                             AddDistinctPaths(fieldPaths, rightJoinKeyPaths);
                             var extendedPaths = ExtendPaths(fieldPaths, nodeId);
-                            StoreSetPaths("rows", outputIndex, extendedPaths);
-                            StoreSetPaths("rows", outputIndex, extendedPaths, fieldName);
+                            outputPaths[fieldName] = extendedPaths;
+                            var oneFieldPaths = JoinWorkingSetEstimator.EstimatePaths(extendedPaths,
+                                ctx.CancellationToken);
+                            provenanceBytes = JoinWorkingSetEstimator.AddOverhead(provenanceBytes,
+                                oneFieldPaths > long.MaxValue / 3 ? long.MaxValue : oneFieldPaths * 3);
                         }
+                        if (!TryReserveJoinBytes(provenanceBytes)) return false;
+
+                        var outputIndex = joined.Count;
+                        joined.Add(DataValue.Record(merged));
+                        joinedPaths.Add(outputPaths);
                         return true;
                     }
 
@@ -964,9 +1017,15 @@ public sealed class PlanCompiler
                             foreach (var rrow in bucket)
                             {
                                 ctx.CancellationToken.ThrowIfCancellationRequested();
+                                if (!matchedRights.Contains(lk)
+                                    && !TryReserveJoinBytes(64 + lk.Length * 2L))
+                                {
+                                    outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
+                                    return outputs;
+                                }
                                 if (!AddRow(fields, itemIndex, rrow.Fields, rrow.ItemIndex))
                                 {
-                                    outputs["rows"] = DataValue.Collection(joined);
+                                    outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
                                     return outputs;
                                 }
                                 matchedRights.Add(lk);
@@ -976,7 +1035,7 @@ public sealed class PlanCompiler
                         {
                             if (!AddRow(fields, itemIndex, null, null))
                             {
-                                outputs["rows"] = DataValue.Collection(joined);
+                                outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
                                 return outputs;
                             }
                         }
@@ -994,7 +1053,7 @@ public sealed class PlanCompiler
                                 ctx.CancellationToken.ThrowIfCancellationRequested();
                                 if (!AddRow(null, null, rrow.Fields, rrow.ItemIndex))
                                 {
-                                    outputs["rows"] = DataValue.Collection(joined);
+                                    outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
                                     return outputs;
                                 }
                             }
@@ -1008,9 +1067,23 @@ public sealed class PlanCompiler
                             ctx.CancellationToken.ThrowIfCancellationRequested();
                             if (!AddRow(null, null, fields, itemIndex))
                             {
-                                outputs["rows"] = DataValue.Collection(joined);
+                                outputs["rows"] = DataValue.Collection(Array.Empty<DataValue>());
                                 return outputs;
                             }
+                        }
+                    }
+
+                    // Do not commit lineage for a partial join. If any budget or
+                    // policy check failed above, the temporary rows and paths were
+                    // discarded and no downstream record can observe partial facts.
+                    for (var outputIndex = 0; outputIndex < joinedPaths.Count; outputIndex++)
+                    {
+                        ctx.CancellationToken.ThrowIfCancellationRequested();
+                        foreach (var (fieldName, paths) in joinedPaths[outputIndex])
+                        {
+                            ctx.CancellationToken.ThrowIfCancellationRequested();
+                            StoreSetPaths("rows", outputIndex, paths);
+                            StoreSetPaths("rows", outputIndex, paths, fieldName);
                         }
                     }
 

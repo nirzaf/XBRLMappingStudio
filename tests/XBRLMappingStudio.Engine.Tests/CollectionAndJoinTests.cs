@@ -710,7 +710,7 @@ public class CollectionAndJoinTests
     }
 
     [Fact]
-    public void GroupBy_StopsBeforeExceedingCollectionOutputLimit()
+    public void Join_StopsBeforeExceedingCollectionOutputLimit()
     {
         const string Left = "L";
         const string Right = "R";
@@ -772,9 +772,9 @@ public class CollectionAndJoinTests
         var budgetDiagnostic = Assert.Single(result!.Diagnostics,
             d => d.Code == DiagnosticCodes.MapCollectionBudgetExceeded);
         Assert.True(budgetDiagnostic.IsBlocking);
-        Assert.Contains("GroupBy output exceeded MaxCollectionItems=2", budgetDiagnostic.Message,
+        Assert.Contains("Join output exceeded MaxCollectionItems=2", budgetDiagnostic.Message,
             StringComparison.Ordinal);
-        Assert.Equal(2, result.Facts.Count);
+        Assert.Empty(result.Facts);
     }
 
     [Fact]
@@ -1284,6 +1284,44 @@ public class CollectionAndJoinTests
         Assert.Contains(result!.Diagnostics, d => d.Code == "MAP015");
     }
 
+    [Fact]
+    public void JoinWorkingSetBudget_BlocksBeforeRetainingExpandedRows()
+    {
+        var result = RunJoinToGroupedFacts(
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(10m))) },
+            new[] { GraphHarness.Row(("k", S("1")), ("a", D(20m))) },
+            "Inner", "All", maxGroupWorkingBytes: 2_000);
+
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapCollectionBudgetExceeded
+                && diagnostic.IsBlocking
+                && diagnostic.Message.Contains("Join retained-state estimate", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
+    [Fact]
+    public void JoinWorkingSetOverflow_DiscardsEarlierRowsWithoutProducingFacts()
+    {
+        var left = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("a", D(10m))),
+            GraphHarness.Row(("k", S("2")), ("a", D(20m)))
+        };
+        var right = new[]
+        {
+            GraphHarness.Row(("k", S("1")), ("b", S("x"))),
+            GraphHarness.Row(("k", S("2")), ("b", S("y")))
+        };
+        var result = RunJoinToGroupedFacts(left, right, "Inner", "All",
+            manyToMany: "Fail", maxGroupWorkingBytes: 8_000);
+
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Code == DiagnosticCodes.MapCollectionBudgetExceeded
+                && diagnostic.IsBlocking
+                && diagnostic.Message.Contains("Join retained-state estimate", StringComparison.Ordinal));
+        Assert.Empty(result.Facts);
+    }
+
     private static ExecutionResult RunJoinToGroupedFacts(
         IReadOnlyList<DataRecord> leftRows,
         IReadOnlyList<DataRecord> rightRows,
@@ -1291,7 +1329,8 @@ public class CollectionAndJoinTests
         string duplicateKey,
         int maxJoinRows = 200_000,
         string fieldConflict = "Right",
-        string manyToMany = "Allow")
+        string manyToMany = "Allow",
+        long maxGroupWorkingBytes = 64L * 1024 * 1024)
     {
         const string leftBinding = "join-left";
         const string rightBinding = "join-right";
@@ -1333,7 +1372,7 @@ public class CollectionAndJoinTests
         {
             (leftBinding, leftRows),
             (rightBinding, rightRows)
-        }, maxJoinRows: maxJoinRows);
+        }, maxJoinRows: maxJoinRows, maxGroupWorkingBytes: maxGroupWorkingBytes);
 
         var result = GraphHarness.Run(project, context, out var compile);
         Assert.True(compile.Success, string.Join(" | ", compile.Diagnostics.Items.Select(item => item.Message)));

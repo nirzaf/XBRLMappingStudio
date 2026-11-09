@@ -234,8 +234,10 @@ public sealed class ExecutionContext
     public int MaxGroupCount { get; init; } = 100_000;
 
     /// <summary>
-    /// MAP05 resource budget: conservative retained-byte estimate for GroupBy state,
-    /// including keys and provenance paths. Exceeding it blocks before adding more state.
+    /// MAP05/MAP06 resource budget: conservative retained-byte estimate for GroupBy
+    /// and in-memory Join state, including keys and provenance paths. Exceeding it
+    /// blocks before retaining more state. This deterministic estimate is not a heap
+    /// measurement or a process-wide memory limit.
     /// </summary>
     public long MaxGroupWorkingBytes { get; init; } = 64L * 1024 * 1024;
 

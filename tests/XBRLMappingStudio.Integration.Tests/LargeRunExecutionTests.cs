@@ -1152,6 +1152,63 @@ public sealed partial class LargeRunExecutionTests
             await Assert.ThrowsAsync<AdapterException>(() => memoryLimitedService.PublishFileDestinationAsync(
                 project, memoryLimited, root, allowSyntheticProfile: true));
             Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
+
+            var joinProject = project;
+            var leftCollect = joinProject.Nodes.Single(node => node.NodeType == NodeTypeConstants.CollectRows);
+            var joinedGroup = joinProject.Nodes.Single(node => node.NodeType == NodeTypeConstants.GroupBy);
+            joinProject.Edges.RemoveAll(edge => edge.TargetNodeId == joinedGroup.NodeId
+                && edge.TargetPortName == "items");
+            var rightCollect = new MappingNode
+            {
+                NodeId = Id.New(), NodeType = NodeTypeConstants.CollectRows,
+                DisplayName = "Collect right-side rows",
+                Parameters = new() { ["binding"] = bindingId },
+                OutputPorts = new() { new PortDefinition("items", PortShape.Record, PortCardinality.Collection) }
+            };
+            var join = new MappingNode
+            {
+                NodeId = Id.New(), NodeType = NodeTypeConstants.Join,
+                DisplayName = "Join source rows",
+                Parameters = new()
+                {
+                    ["leftKey"] = "Id", ["rightKey"] = "Id", ["cardinality"] = "Inner",
+                    ["duplicateKey"] = "All", ["manyToMany"] = "Fail", ["fieldConflict"] = "Right"
+                },
+                InputPorts = new()
+                {
+                    new PortDefinition("left", PortShape.Record, PortCardinality.Collection),
+                    new PortDefinition("right", PortShape.Record, PortCardinality.Collection)
+                },
+                OutputPorts = new() { new PortDefinition("rows", PortShape.Record, PortCardinality.Collection) }
+            };
+            joinProject.Nodes.Add(rightCollect);
+            joinProject.Nodes.Add(join);
+            joinProject.Edges.AddRange(new[]
+            {
+                new MappingEdge { EdgeId = Id.New(), SourceNodeId = leftCollect.NodeId, SourcePortName = "items",
+                    TargetNodeId = join.NodeId, TargetPortName = "left" },
+                new MappingEdge { EdgeId = Id.New(), SourceNodeId = rightCollect.NodeId, SourcePortName = "items",
+                    TargetNodeId = join.NodeId, TargetPortName = "right" },
+                new MappingEdge { EdgeId = Id.New(), SourceNodeId = join.NodeId, SourcePortName = "rows",
+                    TargetNodeId = joinedGroup.NodeId, TargetPortName = "items" }
+            });
+            var joinWorker = new DigestOnlyArtifactWorker(profile);
+            var joinLimitedService = new MappingJobService(profile, joinWorker,
+                executionBudget: new ExecutionBudget(MaxGroupWorkingBytes: 1));
+            using var joinLimited = await joinLimitedService.RunAsync(joinProject,
+                Connections(joinProject, database), new Dictionary<string, string>(),
+                preview: false, CancellationToken.None);
+
+            Assert.False(joinLimited.IsPublishable);
+            Assert.Contains(joinLimited.Manifest.Diagnostics, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.MapCollectionBudgetExceeded
+                    && diagnostic.IsBlocking
+                    && diagnostic.Message.Contains("Join retained-state estimate", StringComparison.Ordinal));
+            Assert.Empty(joinLimited.Facts);
+            Assert.Equal(0, joinWorker.ValidationRequests);
+            await Assert.ThrowsAsync<AdapterException>(() => joinLimitedService.PublishFileDestinationAsync(
+                joinProject, joinLimited, root, allowSyntheticProfile: true));
+            Assert.Equal(priorBytes, await File.ReadAllBytesAsync(destination));
         }
         finally { TryDeleteDirectory(root); }
     }

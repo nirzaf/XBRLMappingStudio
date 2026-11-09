@@ -11,7 +11,7 @@ namespace XBRLMappingStudio.Application;
 /// Limits used by mapping execution. The probe limit includes all bindings, not a
 /// per-binding multiplier; the SQLite cache and batch size bound managed working
 /// memory after large mode is selected. Collection, group-count, estimated
-/// group-state-byte, and join limits also reach the engine's set-phase work.
+/// set-state-byte, and join limits also reach the engine's set-phase work.
 /// </summary>
 public sealed record ExecutionBudget(
     int InMemorySourceRecordLimit = 50_000,
