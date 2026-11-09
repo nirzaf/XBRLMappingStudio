@@ -64,4 +64,20 @@ Commit `84754f8f78d6bdf5c96d17ce97cfedc219c11765` made explicit pre-cancelled re
 
 ## OPS-09 active-spool lease and exact-head verification follow-up
 
-Commits `9c65acd` and `fdba4ca9387bea477ee39de1672e084a92360af8` add approved cleanup for owner-marked abandoned large-run spools and prevent in-process active or concurrently inspected spools from entering cleanup. The focused retention regression passed **4/4** after the lease-registry correction; the exact-head full Ops suite passed **535/535** in CI. Exact-head CI [42610355219](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42610355219) passed Windows and Ubuntu: each matrix passed **1,981 tests** with **6** gated Arelle skips, all five memory qualifications and Windows cancellation regression repeats passed, and the pinned Arelle integration and repository hygiene jobs passed. Suite totals were Adapters 309, AI 72, Desktop 171, Engine 156, Integration 510 (504 passed, 6 skipped), Ops 535, Project 32, and XBRL 202. The separate worker passed **82 Python tests** and **15 .NET Arelle execution tests**. Retention for source snapshots, PDF evidence, AI metadata and operational history remains unimplemented pending separate policy decisions; no automatic purge or default age is enabled.
+Commits `9c65acd` and `fdba4ca9387bea477ee39de1672e084a92360af8` add approved cleanup for owner-marked abandoned large-run spools and prevent in-process active or concurrently inspected spools from entering cleanup. The focused retention regression passed **4/4** after the lease-registry correction; the exact-head full Ops suite passed **535/535** in CI. Exact-head CI [42610355219](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42610355219) passed Windows and Ubuntu: each matrix passed **1,981 tests** with **6** gated Arelle skips, all five memory qualifications and Windows cancellation regression repeats passed, and the pinned Arelle integration and repository hygiene jobs passed. Suite totals were Adapters 309, AI 72, Desktop 171, Engine 156, Integration 510 (504 passed, 6 skipped), Ops 535, Project 32, and XBRL 202. The separate worker passed **82 Python tests** and **15 .NET Arelle execution tests**. PDF evidence, AI metadata and operational-history retention remain unimplemented pending separate policies; snapshot-staging retention was added and verified in the follow-up below. No automatic purge or default age is enabled.
+
+## OPS-09 SQLite snapshot-staging retention follow-up
+
+Commit `5f1aeab13a80f60afed9e6fa09161de97641627c` adds bounded, explicitly
+authorized cleanup for abandoned unpublished SQLite snapshot staging only. The
+focused regression set passed **59/59** and the full local Ops suite passed
+**540/540**. Exact-head CI [42617194161](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42617194161)
+passed Windows and Ubuntu; docs-only evidence commit
+`7126e7f47b2093da3ac08170bd7737392d3c84d4` also passed all four CI jobs in
+[42618938295](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42618938295).
+Each OS matrix passed **1,986 tests** with **6** environment-gated Arelle skips;
+all five memory qualifications and Windows cancellation repeats passed. The
+pinned worker job passed **82 Python tests** and **15 .NET Arelle execution
+tests**. The cleanup service has no default age, production authorizer, UI/CLI
+trigger, or automatic purge; completed snapshots, reports and receipts remain
+outside its candidate set.
