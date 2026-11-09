@@ -23,7 +23,7 @@ namespace XBRLMappingStudio.Integration.Tests;
 public sealed class ArelleExecutionTests
 {
     [RequiresArelleRuntimeFact]
-    public async Task ArelleAcceptsProfileDeclaredXsStringTypedDimensionFromOfflineSyntheticTaxonomy()
+    public async Task ArelleReportsBlockingTypedDomainViolationForOfflineSyntheticTaxonomy()
     {
         var python = Environment.GetEnvironmentVariable("XMS_ARELLE_PYTHON");
         Assert.False(string.IsNullOrWhiteSpace(python), "XMS_ARELLE_PYTHON must point to the pinned Python runtime.");
@@ -53,9 +53,9 @@ public sealed class ArelleExecutionTests
                            targetNamespace="urn:synthetic:typed-dimensions:1.0"
                            elementFormDefault="qualified">
                   <xs:import namespace="http://www.xbrl.org/2003/instance"
-                             schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+                             schemaLocation="xbrl-instance-2003-12-31.xsd"/>
                   <xs:import namespace="http://xbrl.org/2005/xbrldt"
-                             schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>
+                             schemaLocation="xbrldt-2005.xsd"/>
                   <xs:element name="Revenue" type="xbrli:monetaryItemType"
                               substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
                   <xs:element name="RegionAxis" type="xbrli:stringItemType"
@@ -66,57 +66,63 @@ public sealed class ArelleExecutionTests
                   <xs:element name="StatementTable" id="StatementTable" type="xbrli:stringItemType"
                               substitutionGroup="xbrli:item" xbrli:periodType="duration"
                               abstract="true" nillable="true"/>
-                  <xs:annotation>
-                    <xs:appinfo>
-                      <link:roleType id="StatementRole" roleURI="https://example.test/role/statement">
-                        <link:definition>Statement dimensional relationships</link:definition>
-                        <link:usedOn>link:definitionLink</link:usedOn>
-                      </link:roleType>
-                      <link:linkbaseRef xlink:type="simple"
-                                        xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"
-                                        xlink:href="typed-dimension-definition.xml"/>
-                    </xs:appinfo>
-                  </xs:annotation>
                 </xs:schema>
                 """;
             await File.WriteAllTextAsync(Path.Combine(taxonomyRoot, taxonomyFileName), taxonomy,
                 new UTF8Encoding(false));
-            const string definitionLinkbase = """
-                <?xml version="1.0" encoding="UTF-8"?>
-                <link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
-                               xmlns:xlink="http://www.w3.org/1999/xlink"
-                               xmlns:xbrldt="http://xbrl.org/2005/xbrldt">
-                  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/all"
-                                   xlink:type="simple"
-                                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#all"/>
-                  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
-                                   xlink:type="simple"
-                                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#hypercube-dimension"/>
-                  <link:roleRef roleURI="https://example.test/role/statement"
-                                xlink:type="simple"
-                                xlink:href="typed-dimension-taxonomy.xsd#StatementRole"/>
-                  <link:definitionLink xlink:type="extended"
-                                       xlink:role="https://example.test/role/statement">
-                    <link:loc xlink:type="locator" xlink:label="revenue"
-                              xlink:href="typed-dimension-taxonomy.xsd#Revenue"/>
-                    <link:loc xlink:type="locator" xlink:label="hypercube"
-                              xlink:href="typed-dimension-taxonomy.xsd#StatementTable"/>
-                    <link:loc xlink:type="locator" xlink:label="region"
-                              xlink:href="typed-dimension-taxonomy.xsd#RegionAxis"/>
-                    <link:definitionArc xlink:type="arc"
-                                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/all"
-                                        xlink:from="revenue" xlink:to="hypercube"
-                                        xbrldt:contextElement="segment" xbrldt:closed="false" order="1"/>
-                    <link:definitionArc xlink:type="arc"
-                                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
-                                        xlink:from="hypercube" xlink:to="region" order="1"/>
-                  </link:definitionLink>
-                </link:linkbase>
-                """;
-            await File.WriteAllTextAsync(Path.Combine(taxonomyRoot, "typed-dimension-definition.xml"),
-                definitionLinkbase, new UTF8Encoding(false));
-
+            var xbrlResourceNames = new[]
+            {
+                "xbrl-instance-2003-12-31.xsd",
+                "xbrl-linkbase-2003-12-31.xsd",
+                "xl-2003-12-31.xsd",
+                "xlink-2003-12-31.xsd",
+                "xbrldt-2005.xsd"
+            };
+            var xbrlResources = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var resourceName in xbrlResourceNames)
+            {
+                var resourceBytes = await ReadArelleTaxonomyResourceAsync(python!, resourceName);
+                if (resourceName == "xbrldt-2005.xsd")
+                {
+                    const string remoteInstanceSchema = "http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd";
+                    var resourceText = Encoding.UTF8.GetString(resourceBytes);
+                    Assert.Contains(remoteInstanceSchema, resourceText, StringComparison.Ordinal);
+                    resourceBytes = Encoding.UTF8.GetBytes(resourceText.Replace(
+                        remoteInstanceSchema, "xbrl-instance-2003-12-31.xsd", StringComparison.Ordinal));
+                }
+                xbrlResources.Add(resourceName, resourceBytes);
+                await File.WriteAllBytesAsync(Path.Combine(taxonomyRoot, resourceName), resourceBytes);
+            }
             var schemaDigest = RunManifest.ComputeSha256(Encoding.UTF8.GetBytes(taxonomy));
+            var profileManifest = new
+            {
+                schemaVersion = 5,
+                profileId = "synthetic-typed-dimension-e2e-v1",
+                version = "1.0",
+                profileDigest = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(taxonomy))).ToLowerInvariant(),
+                entryPoint = taxonomyFileName,
+                requiredPlugins = Array.Empty<string>(),
+                requiredChecks = Array.Empty<string>(),
+                concepts = Array.Empty<object>(),
+                packageFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [taxonomyFileName] = schemaDigest,
+                    ["xbrl-instance-2003-12-31.xsd"] = RunManifest.ComputeSha256(xbrlResources["xbrl-instance-2003-12-31.xsd"]),
+                    ["xbrl-linkbase-2003-12-31.xsd"] = RunManifest.ComputeSha256(xbrlResources["xbrl-linkbase-2003-12-31.xsd"]),
+                    ["xl-2003-12-31.xsd"] = RunManifest.ComputeSha256(xbrlResources["xl-2003-12-31.xsd"]),
+                    ["xlink-2003-12-31.xsd"] = RunManifest.ComputeSha256(xbrlResources["xlink-2003-12-31.xsd"]),
+                    ["xbrldt-2005.xsd"] = RunManifest.ComputeSha256(xbrlResources["xbrldt-2005.xsd"])
+                },
+                offlineReferences = new Dictionary<string, string>(StringComparer.Ordinal),
+                presentationLinks = Array.Empty<object>(),
+                calculationLinks = Array.Empty<object>(),
+                definitionLinks = Array.Empty<object>()
+            };
+            var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(profileManifest);
+            var manifestFileName = "profile-manifest.json";
+            var manifestPath = Path.Combine(taxonomyRoot, manifestFileName);
+            await File.WriteAllBytesAsync(manifestPath, manifestBytes);
+            var manifestDigest = RunManifest.ComputeSha256(manifestBytes);
             var profile = new FilingProfile
             {
                 ProfileId = "synthetic-typed-dimension-e2e-v1",
@@ -168,7 +174,11 @@ public sealed class ArelleExecutionTests
             {
                 workerScript,
                 "--taxonomy-root",
-                taxonomyRoot
+                taxonomyRoot,
+                "--profile-manifest",
+                manifestPath,
+                "--profile-manifest-sha256",
+                manifestDigest
             });
             using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new
             {
@@ -188,10 +198,8 @@ public sealed class ArelleExecutionTests
             };
 
             var response = await worker.RequestAsync(request, CancellationToken.None);
-            Assert.True(response.Status == WorkerStatus.Success,
-                $"Arelle status was {response.Status}. Error: {response.Error}. Diagnostics: "
-                + string.Join(Environment.NewLine, response.Diagnostics?.Select(diagnostic =>
-                    $"{diagnostic.Code}: {diagnostic.Message}") ?? Array.Empty<string>()));
+            Assert.Equal(WorkerStatus.Success, response.Status);
+            Assert.DoesNotContain(response.Diagnostics ?? Array.Empty<Diagnostic>(), diagnostic => diagnostic.IsBlocking);
 
             var invalidXml = xml
                 .Replace("<ex:RegionDomain>", "<ex:WrongDomain>", StringComparison.Ordinal)
@@ -210,11 +218,12 @@ public sealed class ArelleExecutionTests
                 DeadlineUtc = DateTimeOffset.UtcNow.AddMinutes(2),
                 Payload = invalidPayload.RootElement.Clone()
             }, CancellationToken.None);
-            Assert.True(invalidResponse.Status == WorkerStatus.DomainFailure,
-                $"Arelle accepted a typed member outside the declared domain. Status: {invalidResponse.Status}. "
-                + $"Error: {invalidResponse.Error}. Diagnostics: "
-                + string.Join(Environment.NewLine, invalidResponse.Diagnostics?.Select(diagnostic =>
-                    $"{diagnostic.Code}: {diagnostic.Message}") ?? Array.Empty<string>()));
+            Assert.Equal(WorkerStatus.Success, invalidResponse.Status);
+            Assert.Contains(invalidResponse.Diagnostics ?? Array.Empty<Diagnostic>(), diagnostic =>
+                diagnostic.IsBlocking
+                && diagnostic.Message.Contains(
+                    "typed dimension ex:RegionAxis has wrong content ex:WrongDomain",
+                    StringComparison.Ordinal));
         }
         finally
         {
@@ -1163,6 +1172,34 @@ public sealed class ArelleExecutionTests
         if (priorYearValue is not null)
             page.AddText(priorYearValue, 10, new PdfPoint(410, 680), font);
         return builder.Build();
+    }
+
+    private static async Task<byte[]> ReadArelleTaxonomyResourceAsync(string python, string fileName)
+    {
+        const string script = "import pathlib, sys, arelle; root = pathlib.Path(arelle.__file__).parent / 'resources' / 'cache' / 'http' / 'www.xbrl.org'; matches = sorted(root.rglob(sys.argv[1])); print(matches[0] if matches else '')";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = python,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add(script);
+        startInfo.ArgumentList.Add(fileName);
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start the pinned Python runtime.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var path = (await outputTask).Trim();
+        var error = (await errorTask).Trim();
+        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            throw new InvalidOperationException(
+                $"Could not locate Arelle's cached {fileName} resource. {error}");
+        return await File.ReadAllBytesAsync(path);
     }
 
     private sealed record ReviewedPdfFixture(string SourcePath, string ManifestPath, string SourceSha256);
