@@ -99,9 +99,10 @@ alongside `periodKind`, `instantDate`, `periodStart`, and `periodEnd` filters an
 the existing combined ISO period filter.
 Malformed ISO dates, unsupported period-kind values, mixed instant/duration
 filters, and non-positive bounded durations fail with `IO_SCHEMA_MISMATCH`
-before report reading. A synthetic XML occurrence fixture confirms a second
-entity with the same concept and period is excluded while duplicate facts for
-the selected entity remain distinct and retain source locators. The focused
+before report reading. A synthetic XML occurrence fixture confirms each entity
+filter independently and both together exclude a second entity with the same
+concept and period, while duplicate facts for the selected entity remain
+distinct and retain source locators. The focused
 reverse-mapping integration class passed **13/13**; after this entity-filter
 follow-up, the complete Windows Release Integration suite passed **514/514
 runnable tests** with **6** environment-gated Arelle skips. This does not complete destination

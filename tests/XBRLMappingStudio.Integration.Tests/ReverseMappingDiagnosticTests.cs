@@ -144,6 +144,23 @@ public sealed class ReverseMappingDiagnosticTests
                 Assert.Equal(new SourceReference("report", row.RowId), row.CellSources!["periodStart"]);
             });
 
+            foreach (var (filterKey, filterValue) in new[]
+            {
+                ("entityScheme", "https://example.test/entity"),
+                ("entityIdentifier", "ACME-1")
+            })
+            {
+                var entityConnection = new SourceConnection("report", adapter.Kind, reportPath,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { [filterKey] = filterValue });
+                var entitySchema = await adapter.InspectSchemaAsync(entityConnection, CancellationToken.None);
+                var entityRows = new List<DataRecord>();
+                await foreach (var row in adapter.ReadFullAsync(entityConnection, entitySchema, CancellationToken.None))
+                    entityRows.Add(row);
+
+                Assert.Equal(new[] { "report#f1", "report#f2", "report#f3", "report#f4" },
+                    entityRows.Select(row => row.RowId));
+            }
+
             var instantConnection = new SourceConnection("report", adapter.Kind, reportPath,
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
