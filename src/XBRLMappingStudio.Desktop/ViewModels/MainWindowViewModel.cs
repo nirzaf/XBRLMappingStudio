@@ -467,6 +467,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string? _selectedSourceColumn;
     private string? _selectedSourceTable;
     private string? _sqliteSourcePath;
+    private string _xbrlOccurrenceId = "";
+    private string _xbrlTargetRowId = "";
     private string _sourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
@@ -735,6 +737,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             Raise(nameof(CanRevalidateSourceSchema));
             RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
             NotifySqliteSnapshotCommands();
+            Raise(nameof(IsSelectedSourceXbrlReport));
+            ApplyXbrlOccurrenceSelectionCommand?.NotifyCanExecuteChanged();
+            ClearXbrlOccurrenceSelectionCommand?.NotifyCanExecuteChanged();
         }
     }
     public IReadOnlyList<AdapterCapabilityOption> SourceCapabilities { get; } = BuildSourceCapabilities();
@@ -830,6 +835,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         private set => Set(ref _sourceInspectionSummary, value);
     }
     public bool IsSelectedSourceSqlite => FindSelectedSqliteBinding() is not null;
+    public bool IsSelectedSourceXbrlReport => Session.Project.Bindings.Any(binding =>
+        StringComparer.Ordinal.Equals(binding.BindingId, SelectedSourceBindingId)
+        && StringComparer.Ordinal.Equals(binding.Kind, "xbrl-report"));
+    public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
+    public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
     public bool IsRetainedSqliteSnapshotSelected => FindSelectedSqliteBinding() is { } binding
         && _sqliteSourceSnapshotMetadataPaths.ContainsKey(binding.BindingId);
     public bool CanCaptureSqliteSourceSnapshot
@@ -1634,6 +1644,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public RelayCommand RollbackTaxonomyMigrationCommand { get; }
     public RelayCommand ChooseSourceCommand { get; }
     public RelayCommand RevalidateSourceSchemaCommand { get; }
+    public RelayCommand ApplyXbrlOccurrenceSelectionCommand { get; }
+    public RelayCommand ClearXbrlOccurrenceSelectionCommand { get; }
     public RelayCommand CaptureSqliteSourceSnapshotCommand { get; }
     public RelayCommand UseSqliteSourceSnapshotCommand { get; }
     public RelayCommand ClearSqliteSourceSnapshotCommand { get; }
@@ -1765,6 +1777,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         ChooseSourceCommand = new RelayCommand(async _ => await ChooseSourceAsync(), _ => !IsBusy && !IsSourceLoading);
         RevalidateSourceSchemaCommand = new RelayCommand(async _ => await RevalidateSourceSchemaAsync(),
             _ => CanRevalidateSourceSchema);
+        ApplyXbrlOccurrenceSelectionCommand = new RelayCommand(async _ => await ApplyXbrlOccurrenceSelectionAsync(),
+            _ => !IsBusy && !IsSourceLoading && IsSelectedSourceXbrlReport);
+        ClearXbrlOccurrenceSelectionCommand = new RelayCommand(_ => ClearXbrlOccurrenceSelection(),
+            _ => !IsBusy && !IsSourceLoading && IsSelectedSourceXbrlReport);
         CaptureSqliteSourceSnapshotCommand = new RelayCommand(async _ => await CaptureSqliteSourceSnapshotAsync(),
             _ => CanCaptureSqliteSourceSnapshot);
         UseSqliteSourceSnapshotCommand = new RelayCommand(async _ => await ChooseSqliteSourceSnapshotAsync(),
@@ -3806,6 +3822,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             Raise(nameof(SourceTables));
             Raise(nameof(HasSourceTables));
             var config = binding.Configuration.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.Ordinal);
+            if (kind == "xbrl-report")
+            {
+                XbrlOccurrenceId = config.GetValueOrDefault("occurrenceId", "");
+                XbrlTargetRowId = config.GetValueOrDefault("targetRowId", "");
+            }
             var connection = new SourceConnection(binding.BindingId, kind, safePath,
                 config);
             if (kind == "pdf-digital")
@@ -3871,6 +3892,102 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         {
             if (!sqliteTableLoadPending && generation == _sourceLoadGeneration) IsSourceLoading = false;
         }
+    }
+
+    public async Task ApplyXbrlOccurrenceSelectionAsync()
+    {
+        var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+            StringComparer.Ordinal.Equals(candidate.BindingId, SelectedSourceBindingId)
+            && StringComparer.Ordinal.Equals(candidate.Kind, "xbrl-report"));
+        if (binding is null || ProjectPath is null)
+        {
+            StatusText = "Select a loaded xBRL report source before configuring an occurrence.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(binding.Locator))
+        {
+            StatusText = "The xBRL report has no saved file location; occurrence selection was not changed.";
+            return;
+        }
+
+        var occurrenceId = XbrlOccurrenceId.Trim();
+        if (occurrenceId.Length == 0)
+        {
+            StatusText = "Enter an occurrence ID such as the selected report binding followed by #f1.";
+            return;
+        }
+
+        var root = WorkspaceRoot();
+        var path = Path.IsPathRooted(binding.Locator!)
+            ? Path.GetFullPath(binding.Locator!)
+            : Path.GetFullPath(Path.Combine(root, binding.Locator!));
+        if (!File.Exists(path))
+        {
+            StatusText = "The saved xBRL report is unavailable; occurrence selection was not changed.";
+            return;
+        }
+
+        try
+        {
+            var configuration = binding.Configuration.ToDictionary(
+                pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
+            var maximumBytes = XbrlReportInputReader.ResolveMaximumInputBytes(path,
+                configuration.GetValueOrDefault("maxInputBytes"));
+            var reportDigest = XbrlReportInputReader.ReadTextWithDigest(path, maximumBytes).Digest;
+            configuration["occurrenceId"] = occurrenceId;
+            configuration["reportDigest"] = reportDigest;
+            var targetRowId = XbrlTargetRowId.Trim();
+            if (targetRowId.Length == 0) configuration.Remove("targetRowId");
+            else configuration["targetRowId"] = targetRowId;
+
+            var connection = new SourceConnection(binding.BindingId, binding.Kind, path, configuration);
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var sample = await adapter.ReadSampleAsync(connection, schema, 1, CancellationToken.None);
+            if (sample.Rows.Count != 1
+                || !StringComparer.Ordinal.Equals(sample.Rows[0]["occurrenceId"].Raw as string, occurrenceId))
+            {
+                StatusText = "That occurrence is not present in the current report. The saved selection was not changed.";
+                return;
+            }
+
+            Session.SetBinding(binding with
+            {
+                Configuration = configuration.ToDictionary(pair => pair.Key,
+                    pair => (object?)pair.Value, StringComparer.Ordinal)
+            });
+            XbrlOccurrenceId = occurrenceId;
+            XbrlTargetRowId = targetRowId;
+            SourceInspectionSummary = $"Pinned {occurrenceId} to the current report bytes ({reportDigest})."
+                + (targetRowId.Length == 0 ? "" : " Existing-row update is enabled for this selected occurrence.");
+            StatusText = "Saved xBRL occurrence selection. Save the project to retain this revision-pinned selector.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"xBRL occurrence selection was rejected: {ex.Message}";
+        }
+    }
+
+    public void ClearXbrlOccurrenceSelection()
+    {
+        var binding = Session.Project.Bindings.FirstOrDefault(candidate =>
+            StringComparer.Ordinal.Equals(candidate.BindingId, SelectedSourceBindingId)
+            && StringComparer.Ordinal.Equals(candidate.Kind, "xbrl-report"));
+        if (binding is null) return;
+        var configuration = binding.Configuration.ToDictionary(
+            pair => pair.Key, pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
+        configuration.Remove("occurrenceId");
+        configuration.Remove("reportDigest");
+        configuration.Remove("targetRowId");
+        Session.SetBinding(binding with
+        {
+            Configuration = configuration.ToDictionary(pair => pair.Key,
+                pair => (object?)pair.Value, StringComparer.Ordinal)
+        });
+        XbrlOccurrenceId = "";
+        XbrlTargetRowId = "";
+        SourceInspectionSummary = "Cleared the occurrence and existing-row selectors; the report source now exposes all matching facts.";
+        StatusText = "Cleared xBRL occurrence selection. Save the project to retain this revision.";
     }
 
     private async Task LoadPdfDocumentAsync(

@@ -662,3 +662,19 @@ instead of leaking `JsonElement.GetString()`'s `InvalidOperationException`.
 The XBRL Release suite passed 221/221, including type-mismatch regressions for
 all four metadata locations. This does not broaden the importer's supported
 OIM subset.
+
+## XBR-07 desktop occurrence selector authoring follow-on (2026-11-10)
+
+The desktop source panel now exposes occurrence ID and optional existing-row
+`fact_key` digest fields for a selected xBRL report. Applying the selection reads
+the current report under its configured byte limit, computes the exact
+`sha256:` digest, and verifies the requested occurrence resolves before saving
+the binding configuration. A target-row selector remains constrained by the
+adapter's exact occurrence and report-digest requirements and the service's
+update-only SQLite authorization path. Clearing the selector removes all three
+selection values. The desktop test verifies saved configuration, digest pinning,
+changed-report refusal and clearing. The isolated Windows Release desktop suite
+passed 174/174; the Release desktop build passed with 0 warnings and 0 errors.
+This closes desktop authoring for a known occurrence ID, but native Windows
+journey acceptance, an interactive occurrence browser, tuples, complex typed
+domains and full loss accounting remain open.

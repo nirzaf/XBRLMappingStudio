@@ -7,6 +7,8 @@ using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.AI;
 using XBRLMappingStudio.Engine;
+using XBRLMappingStudio.Adapters;
+using XBRLMappingStudio.Adapters.Xbrl;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 
@@ -586,6 +588,72 @@ public sealed class DesignerSessionTests
         finally
         {
             Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopCanPinXbrlOccurrenceAndUpdateOnlyTargetRowToCurrentReportDigest()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-xbrl-selection-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var reportPath = Path.Combine(directory, "report.xbrl.json");
+        var projectPath = Path.Combine(directory, "mapping.xmap");
+        var profile = SyntheticProfile.Build();
+        var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        XbrlFact Revenue(decimal value) => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = period,
+            Unit = new XbrlUnit("QAR"),
+            Value = value
+        };
+
+        try
+        {
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile,
+                new[] { Revenue(12m), Revenue(99m) }));
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with { Kind = "xbrl-report" };
+            var viewModel = new MainWindowViewModel(project);
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadSourceAsync(reportPath);
+
+            Assert.True(viewModel.IsSelectedSourceXbrlReport);
+            viewModel.XbrlOccurrenceId = "source#f2";
+            viewModel.XbrlTargetRowId = "sha256:" + new string('a', 64);
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+
+            var binding = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.Equal("source#f2", binding.Configuration["occurrenceId"]?.ToString());
+            Assert.Equal(viewModel.Session.Project.Bindings[0].Configuration["reportDigest"]?.ToString(),
+                "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(reportPath)))
+                    .ToLowerInvariant());
+            Assert.Equal(viewModel.XbrlTargetRowId, binding.Configuration["targetRowId"]?.ToString());
+            Assert.Contains("Pinned source#f2", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile,
+                new[] { Revenue(777m), Revenue(12m) }));
+            var changedConnection = new SourceConnection(binding.BindingId, binding.Kind, reportPath,
+                binding.Configuration.ToDictionary(pair => pair.Key, pair => pair.Value?.ToString() ?? "",
+                    StringComparer.Ordinal));
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(changedConnection, CancellationToken.None);
+            await Assert.ThrowsAsync<AdapterException>(async () =>
+            {
+                await foreach (var _ in adapter.ReadFullAsync(changedConnection, schema, profile, CancellationToken.None)) { }
+            });
+
+            viewModel.ClearXbrlOccurrenceSelection();
+            var cleared = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.DoesNotContain("occurrenceId", cleared.Configuration.Keys);
+            Assert.DoesNotContain("reportDigest", cleared.Configuration.Keys);
+            Assert.DoesNotContain("targetRowId", cleared.Configuration.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
         }
     }
 

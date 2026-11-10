@@ -76,6 +76,24 @@
                   Command="{Binding RevalidateSourceSchemaCommand}"
                   x:Name="RevalidateSourceSchemaButton"
                   AutomationProperties.Name="Recheck the current source schema against the saved mapping" />
+          <StackPanel DockPanel.Dock="Top" Spacing="3" IsVisible="{Binding IsSelectedSourceXbrlReport}"
+                      Margin="0,5,0,5">
+            <TextBlock Text="xBRL occurrence selection" FontWeight="SemiBold" />
+            <TextBlock Text="Occurrence IDs use the report binding ID plus #fN. Applying a selection pins the current report SHA-256; changed report bytes fail closed."
+                       TextWrapping="Wrap" FontSize="10" />
+            <TextBox Text="{Binding XbrlOccurrenceId, Mode=TwoWay}"
+                     Watermark="report-binding#f1"
+                     AutomationProperties.Name="xBRL fact occurrence ID" />
+            <TextBox Text="{Binding XbrlTargetRowId, Mode=TwoWay}"
+                     Watermark="Optional sha256 fact_key for update-only target"
+                     AutomationProperties.Name="Existing SQLite target fact key digest" />
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <Button Content="Pin and apply" Command="{Binding ApplyXbrlOccurrenceSelectionCommand}"
+                      AutomationProperties.Name="Pin xBRL occurrence to current report and apply selection" />
+              <Button Content="Clear selection" Command="{Binding ClearXbrlOccurrenceSelectionCommand}"
+                      AutomationProperties.Name="Clear xBRL occurrence and target row selection" />
+            </StackPanel>
+          </StackPanel>
           <StackPanel DockPanel.Dock="Top" Spacing="3" IsVisible="{Binding IsSelectedSourceSqlite}">
             <TextBlock Text="{Binding SqliteSourceSnapshotStatus}" TextWrapping="Wrap"
                        x:Name="SqliteSourceSnapshotStatusText"
