@@ -785,4 +785,17 @@ regression combines one selected occurrence into a multi-occurrence fact while
 also fanning it into a second fact; it confirms the fan-out, unmapped, aggregate,
 and mapped-fact counters remain distinct. The isolated Release
 `ReverseMappingDiagnosticTests` suite passed 20/20. Full semantic value-change
-and actual target-write accounting remain open, as do unsupported XBRL constructs.
+and per-occurrence target lineage remain open, as do unsupported XBRL constructs.
+
+## ENG-07 confirmed target-write counts (2026-11-10)
+
+After a destination publish succeeds, the run's `IO034` accounting diagnostic is
+enriched with the destination kind, output fact count, confirmed target row count,
+and whether those counts match. SQLite uses the durable publisher receipt; file
+destinations count records only after the published artifact digest is confirmed.
+No target identifiers or values are added. The update-only XBRL-to-SQLite
+integration test verifies the pre-publication diagnostic has no write claim, then
+confirms one output fact and one durable target row after publication. The focused
+Release reverse-mapping and update-only publication tests passed 21/21 with
+isolated build artifacts. This records write totals, not semantic value equivalence
+or per-occurrence target lineage; those remain open.

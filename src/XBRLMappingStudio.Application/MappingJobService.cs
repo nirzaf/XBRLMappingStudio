@@ -188,6 +188,32 @@ public sealed class MappingJobService
             });
     }
 
+    private static void AddReverseMappingTargetWriteAccounting(
+        RunManifest manifest,
+        string destinationKind,
+        int outputFactCount,
+        int writtenRowCount)
+    {
+        manifest.Diagnostics = manifest.Diagnostics.Select(diagnostic =>
+        {
+            if (!StringComparer.Ordinal.Equals(diagnostic.Code, DiagnosticCodes.IoReverseMappingLossAccounting))
+                return diagnostic;
+
+            var details = new Dictionary<string, string>(diagnostic.Details ??
+                new Dictionary<string, string>(), StringComparer.Ordinal)
+            {
+                ["published_destination_kind"] = destinationKind,
+                ["published_output_fact_count"] = outputFactCount.ToString(CultureInfo.InvariantCulture),
+                ["published_target_row_count"] = writtenRowCount.ToString(CultureInfo.InvariantCulture),
+                ["published_write_complete"] = writtenRowCount == outputFactCount ? "true" : "false"
+            };
+            return diagnostic with
+            {
+                Details = details
+            };
+        }).ToArray();
+    }
+
     private static JobResult PreflightFailure(
         RunManifest manifest,
         RunOutcome outcome,
@@ -2124,6 +2150,8 @@ public sealed class MappingJobService
                 approvedDigest, approvedRevision, plan.Locator),
             updateExistingOnly: StringComparer.Ordinal.Equals(plan.WriteMode, "update-only"));
 
+        AddReverseMappingTargetWriteAccounting(manifest, plan.Kind, prepared.Records.Count, receipt.WrittenRows);
+
         manifest.Outputs = manifest.Outputs
             .Where(output => output.Kind != "db-receipt" || output.Path != prepared.Path)
             .Append(new OutputIdentity(prepared.Path, receipt.IntentFingerprint, 0, "db-receipt")
@@ -2551,6 +2579,8 @@ public sealed class MappingJobService
             if (finalDigest is null || !StringComparer.Ordinal.Equals(output.Digest, finalDigest))
                 throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
                     "Published file bytes do not match the staged adapter receipt.", manifest.RunId, destinationPath);
+
+            AddReverseMappingTargetWriteAccounting(manifest, plan.Kind, records.Count, records.Count);
 
             manifest.Outputs = manifest.Outputs
                 .Where(existing => !StringComparer.OrdinalIgnoreCase.Equals(existing.Path, destinationPath))

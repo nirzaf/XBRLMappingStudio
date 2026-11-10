@@ -177,6 +177,7 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal("0", accounting.Details["unmapped_selected_occurrence_count"]);
         Assert.Equal("1", accounting.Details["mapped_fact_count"]);
         Assert.Equal("0", accounting.Details["multi_occurrence_fact_count"]);
+        Assert.DoesNotContain("published_target_row_count", accounting.Details.Keys);
 
         var preview = await service.PreviewDestinationChangesAsync(project, result, _directory, CancellationToken.None);
         Assert.Equal(1, preview.Updates);
@@ -186,6 +187,12 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
 
         var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
         Assert.Equal(1, receipt.WrittenRows);
+        var publishedAccounting = Assert.Single(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
+        Assert.Equal("sqlite", publishedAccounting.Details!["published_destination_kind"]);
+        Assert.Equal("1", publishedAccounting.Details["published_output_fact_count"]);
+        Assert.Equal("1", publishedAccounting.Details["published_target_row_count"]);
+        Assert.Equal("true", publishedAccounting.Details["published_write_complete"]);
         Assert.Equal(new[] { targetRowId }, await ReadFactsAsync(_databasePath));
         await using (var read = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly"))
         {
