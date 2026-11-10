@@ -550,12 +550,25 @@ public sealed class ReverseMappingDiagnosticTests
                 new SourceTransformationPath(new SourceReference("report", "report#f999"), Array.Empty<string>())
             }
         };
+        var secondFact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Assets"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 7m,
+            SourceTransformationPaths = new[]
+            {
+                new SourceTransformationPath(new SourceReference("report", "report#f1"), Array.Empty<string>())
+            }
+        };
 
         MappingJobService.AddReverseMappingLossAccounting(diagnostics, "report",
             new SourceSelectionSummary(3, 3), new HashSet<string>(StringComparer.Ordinal)
             {
                 "report#f1", "report#f2", "report#f3"
-            }, new[] { fact }, "operation-456");
+            }, new[] { fact, secondFact }, "operation-456");
 
         var warning = Assert.Single(diagnostics.Items);
         Assert.Equal(DiagnosticCodes.IoReverseMappingLossAccounting, warning.Code);
@@ -567,6 +580,9 @@ public sealed class ReverseMappingDiagnosticTests
         Assert.Equal("2", warning.Details!["mapped_occurrence_count"]);
         Assert.Equal("1", warning.Details["unmapped_selected_occurrence_count"]);
         Assert.Equal("0", warning.Details["filtered_out_occurrence_count"]);
+        Assert.Equal("1", warning.Details["duplicated_selected_occurrence_count"]);
+        Assert.Equal("1", warning.Details["additional_fact_contribution_count"]);
+        Assert.Equal("2", warning.Details["mapped_fact_count"]);
         Assert.Equal("1", warning.Details["multi_occurrence_fact_count"]);
         Assert.DoesNotContain("report#f", string.Join(" ", warning.Details.Values), StringComparison.Ordinal);
         Assert.DoesNotContain("111", warning.Message, StringComparison.Ordinal);

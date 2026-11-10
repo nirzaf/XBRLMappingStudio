@@ -774,3 +774,15 @@ loss accounting; IO031
 continues to warn that original transaction detail cannot be recovered. Exact-head
 CI [42831841454](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42831841454)
 passed all four jobs for `65b2e4402b8d5505c724359c8c5d57b3f24621f6`.
+
+## ENG-07 reverse-mapping occurrence fan-out counts (2026-11-10)
+
+`IO034` now also reports how many selected source occurrences contribute to more
+than one output fact and the total number of additional fact contributions caused
+by that fan-out. These counts are derived from output-fact provenance, filtered to
+selected locators, and contain no occurrence IDs or source values. The synthetic
+regression combines one selected occurrence into a multi-occurrence fact while
+also fanning it into a second fact; it confirms the fan-out, unmapped, aggregate,
+and mapped-fact counters remain distinct. The isolated Release
+`ReverseMappingDiagnosticTests` suite passed 20/20. Full semantic value-change
+and actual target-write accounting remain open, as do unsupported XBRL constructs.

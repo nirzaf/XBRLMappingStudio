@@ -156,6 +156,12 @@ public sealed class MappingJobService
             .ToArray();
         var represented = perFactLocators.SelectMany(locators => locators)
             .ToHashSet(StringComparer.Ordinal);
+        var factCountByLocator = perFactLocators
+            .SelectMany(locators => locators)
+            .GroupBy(locator => locator, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var duplicatedOccurrences = factCountByLocator.Values.Count(count => count > 1);
+        var additionalFactContributions = factCountByLocator.Values.Sum(count => Math.Max(0, count - 1));
         var filteredOut = Math.Max(0, selection.SourceRecordCount - selection.SelectedRecordCount);
         var unmapped = Math.Max(0, selection.SelectedRecordCount - represented.Count);
         var mappedFacts = perFactLocators.Count(locators => locators.Length != 0);
@@ -165,7 +171,7 @@ public sealed class MappingJobService
             DiagnosticCodes.IoReverseMappingLossAccounting,
             DiagnosticSubsystem.Mapping,
             DiagnosticStage.Execution,
-            $"Reverse mapping selected {selection.SelectedRecordCount} of {selection.SourceRecordCount} reported fact occurrences; {filteredOut} were filtered out, {unmapped} selected occurrence(s) have no output fact provenance, and {multiOccurrenceFacts} output fact(s) combine multiple occurrences. Original transaction detail remains unavailable.",
+            $"Reverse mapping selected {selection.SelectedRecordCount} of {selection.SourceRecordCount} reported fact occurrences; {filteredOut} were filtered out, {unmapped} selected occurrence(s) have no output fact provenance, {duplicatedOccurrences} selected occurrence(s) contribute to multiple output facts, and {multiOccurrenceFacts} output fact(s) combine multiple occurrences. Original transaction detail remains unavailable.",
             source: new SourceReference(sourceId, "fact-occurrence-accounting"),
             operationId: operationId,
             details: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -175,6 +181,8 @@ public sealed class MappingJobService
                 ["filtered_out_occurrence_count"] = filteredOut.ToString(CultureInfo.InvariantCulture),
                 ["mapped_occurrence_count"] = represented.Count.ToString(CultureInfo.InvariantCulture),
                 ["unmapped_selected_occurrence_count"] = unmapped.ToString(CultureInfo.InvariantCulture),
+                ["duplicated_selected_occurrence_count"] = duplicatedOccurrences.ToString(CultureInfo.InvariantCulture),
+                ["additional_fact_contribution_count"] = additionalFactContributions.ToString(CultureInfo.InvariantCulture),
                 ["mapped_fact_count"] = mappedFacts.ToString(CultureInfo.InvariantCulture),
                 ["multi_occurrence_fact_count"] = multiOccurrenceFacts.ToString(CultureInfo.InvariantCulture)
             });
