@@ -1152,11 +1152,20 @@ public sealed class ReverseMappingDiagnosticTests
                 diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail);
             Assert.False(warning.IsBlocking);
             Assert.Equal("source-detail-not-present-in-report", warning.Details!["limitation"]);
+            var accounting = Assert.Single(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
+            Assert.DoesNotContain("published_target_row_count", accounting.Details!.Keys);
 
             var output = await service.PublishFileDestinationAsync(project, result, directory,
                 allowSyntheticProfile: true, CancellationToken.None);
             Assert.True(File.Exists(output.Path));
             Assert.Contains(result.Manifest.Outputs, item => item.Path == output.Path && item.Digest == output.Digest);
+            var publishedAccounting = Assert.Single(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
+            Assert.Equal(kind, publishedAccounting.Details!["published_destination_kind"]);
+            Assert.Equal("2", publishedAccounting.Details["published_output_fact_count"]);
+            Assert.Equal("2", publishedAccounting.Details["published_target_row_count"]);
+            Assert.Equal("true", publishedAccounting.Details["published_write_complete"]);
             IReadOnlyList<string> locators;
             if (kind == "json")
             {
