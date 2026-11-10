@@ -489,3 +489,18 @@ passed Windows, Ubuntu, Arelle and repository-hygiene jobs on
 processor evidence only; it does not qualify hypercube relationships, real
 taxonomy packages, complex typed domains or regulatory compliance. Taxonomy
 rights remain gated.
+
+## TAX-02 repeatable offline runtime resolution follow-on (2026-11-10)
+
+`test_profile_external_schema_loads_from_exact_hash_pinned_offline_reference_without_network_request`
+loads the same immutable, hash-pinned profile twice through Arelle using distinct
+operation IDs. Both loads return identical result metadata and normalized
+diagnostics, while a loopback HTTP canary observes no requests. The full pinned
+Python 3.12.11/Arelle 2.47.4 worker suite passed 82 tests locally with one
+Windows symlink-privilege skip. Exact-head CI
+[42725230694](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42725230694)
+passed repository hygiene, Ubuntu and Windows Release suites (including memory
+qualification and repeated worker-cancellation checks), and pinned Arelle
+integration on `ec9a7beb413dc0f193cdd2dfcbc89bf3fe3fdd05`. This strengthens
+deterministic offline-load evidence but does not qualify OS-level network
+isolation or an owner-authorized production taxonomy package.
