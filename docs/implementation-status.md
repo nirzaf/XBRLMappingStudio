@@ -622,6 +622,15 @@ are therefore background-window details, not an observed interactive application
 state. No clicks or project changes were made. DST-04 native acceptance remains
 blocked by desktop availability and still requires a valid isolated fixture.
 
+## DST-04 activation retry (2026-11-10)
+
+After the user again confirmed Windows was unlocked and visible, Computer Use
+listed the main Release application window but failed to activate it. Refreshing
+the returned window list and retrying activation produced the same
+`failed to activate captured window` error. No clicks, typing or project changes
+were made; no DST-04 assertions were run. Native acceptance remains blocked by
+desktop input availability and the need for an isolated valid fixture.
+
 ## XBR-05 malformed XML period lexical follow-on (2026-11-10)
 
 The supported xBRL-XML reader now accepts only exact `yyyy-MM-dd` period

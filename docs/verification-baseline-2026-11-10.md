@@ -60,3 +60,12 @@ dependency closure, redistribution rights, production rule completeness,
 regulator acceptance, signed installation, target-hardware performance or full
 native Windows accessibility. Those remain open in
 [`docs/decisions/OPEN.md`](decisions/OPEN.md) and the atomic status matrix.
+
+## DST-04 native retest
+
+The user confirmed Windows was unlocked and visible. Computer Use listed the
+main Release application window, but activation failed with
+`failed to activate captured window`; refreshing the window list and retrying
+failed the same way. No UI input or project changes occurred, so this attempt
+made no DST-04 assertions and does not extend native acceptance. The prior
+bounded synthetic native evidence remains the latest successful native run.
