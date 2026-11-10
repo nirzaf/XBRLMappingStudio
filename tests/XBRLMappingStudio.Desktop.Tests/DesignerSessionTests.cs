@@ -720,6 +720,18 @@ public sealed class DesignerSessionTests
             Assert.Equal(viewModel.XbrlDimensionFiltersJson, binding.Configuration["dimensionFilters"]?.ToString());
             Assert.Contains("Applied xBRL aspect filters", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
 
+            viewModel.SaveProjectTo(projectPath);
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = projectPath };
+            var reopened = new MainWindowViewModel(Project(), dialog);
+            await reopened.OpenProjectAsync();
+            Assert.False(reopened.IsProjectDirty);
+            Assert.Equal(viewModel.XbrlConceptFilter, reopened.XbrlConceptFilter);
+            Assert.Equal(viewModel.XbrlPeriodFilter, reopened.XbrlPeriodFilter);
+            Assert.Equal(viewModel.XbrlUnitFilter, reopened.XbrlUnitFilter);
+            Assert.Equal(viewModel.XbrlDimensionFiltersJson, reopened.XbrlDimensionFiltersJson);
+            Assert.Equal(binding.Configuration["reportDigest"]?.ToString(),
+                reopened.Session.Project.Bindings.Single().Configuration["reportDigest"]?.ToString());
+
             var configuration = binding.Configuration.ToDictionary(pair => pair.Key,
                 pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
             var connection = new SourceConnection(binding.BindingId, binding.Kind, reportPath, configuration);
