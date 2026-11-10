@@ -373,19 +373,21 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
-    public async Task ExistingTargetRowSelection_FailsClosedUntilDestinationRowsAreBound()
+    public async Task ExistingTargetRowSelection_RequiresDigestPinnedOccurrenceSelectors()
     {
         var path = Write("target-row.json", OimSerializer.Serialize(Profile, Report()));
         var adapter = new XbrlReportAdapter();
         var connection = new SourceConnection("report", adapter.Kind, path,
-            new Dictionary<string, string> { ["targetRowId"] = "facts:existing-row-1" });
+            new Dictionary<string, string>
+            {
+                ["targetRowId"] = "sha256:" + new string('a', 64)
+            });
 
         var error = await Assert.ThrowsAsync<AdapterException>(
             () => adapter.InspectSchemaAsync(connection, CancellationToken.None));
 
-        Assert.Equal(DiagnosticCodes.IoUnsupportedOperation, error.Code);
-        Assert.Contains("target-row selection is not supported", error.Message, StringComparison.Ordinal);
-        Assert.Contains("no destination rows are created", error.Message, StringComparison.Ordinal);
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        Assert.Contains("requires exact 'occurrenceId' and 'reportDigest' selectors", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
