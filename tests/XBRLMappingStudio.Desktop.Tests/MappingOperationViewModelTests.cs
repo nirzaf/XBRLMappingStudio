@@ -951,6 +951,9 @@ public sealed class MappingOperationViewModelTests
             Assert.True(viewModel.IsBusy);
             Assert.True(viewModel.CanCancelOperation);
             Assert.True(viewModel.CancelOperationCommand.CanExecute(null));
+            Assert.False(viewModel.PreviewCommand.CanExecute(null));
+            viewModel.PreviewCommand.Execute(null);
+            Assert.Equal(1, worker.HandshakeCount);
             viewModel.CancelOperationCommand.Execute(null);
             await operationStopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -1110,10 +1113,13 @@ public sealed class MappingOperationViewModelTests
 
     private sealed class CancellationWaitingWorker : IWorkerClient
     {
+        private int _handshakeCount;
         public TaskCompletionSource HandshakeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int HandshakeCount => Volatile.Read(ref _handshakeCount);
 
         public async Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
         {
+            Interlocked.Increment(ref _handshakeCount);
             HandshakeStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new InvalidOperationException("The canceled handshake unexpectedly continued.");
