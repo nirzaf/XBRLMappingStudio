@@ -763,12 +763,14 @@ occurrences. The report adapter attaches a bounded count summary to only the
 first selected record; the run diagnostic contains counts only, without report
 values, occurrence IDs or identifiers. Synthetic integration coverage verifies
 that selecting one of two report occurrences records one filtered occurrence,
-that a graph-filtered selected occurrence is counted as unmapped, and a
+that a graph-filtered selected occurrence is counted as unmapped, a
 two-occurrence aggregate reports one output fact with two contributing
-occurrences. The full `ReverseMappingDiagnosticTests` class and focused
-update-only reverse-mapping test passed 21/21 locally. This closes occurrence
-filter and aggregate contribution counts for supported XBRL-report runs, but
-not all semantic, target-write or unsupported-construct loss accounting; IO031
+occurrences, and repeated multidimensional occurrences retain their IDs in
+Excel, JSON, XML and SQLite outputs. The full `ReverseMappingDiagnosticTests`
+class and focused update-only reverse-mapping test passed 21/21 locally. This
+closes occurrence filter and aggregate contribution counts for supported
+XBRL-report runs, but not all semantic, target-write or unsupported-construct
+loss accounting; IO031
 continues to warn that original transaction detail cannot be recovered. Exact-head
 CI [42831841454](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42831841454)
 passed all four jobs for `65b2e4402b8d5505c724359c8c5d57b3f24621f6`.

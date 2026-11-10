@@ -1,10 +1,13 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Data.Sqlite;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Excel;
+using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Sqlite;
+using XBRLMappingStudio.Adapters.Xml;
 using XBRLMappingStudio.Adapters.Xbrl;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Diagnostics;
@@ -1097,6 +1100,16 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
                 dimension.GetProperty("Name").GetString() == departmentAxis
                 && dimension.GetProperty("MemberName").GetString() == operations);
         });
+
+        using (var jsonOutput = JsonDocument.Parse(new JsonOutputAdapter().Write(selectedRows)))
+        {
+            Assert.Equal(occurrenceOracle.Select(item => item.Locator),
+                jsonOutput.RootElement.EnumerateArray()
+                    .Select(record => record.GetProperty("occurrenceId").GetString()));
+        }
+        var xmlOutput = XDocument.Parse(Encoding.UTF8.GetString(new XmlOutputAdapter().Write(selectedRows)));
+        Assert.Equal(occurrenceOracle.Select(item => item.Locator),
+            xmlOutput.Descendants("occurrenceId").Select(element => element.Value));
 
         var sqliteTarget = new SourceConnection("report-output", "sqlite", _databasePath,
             new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = "report_occurrences" });
