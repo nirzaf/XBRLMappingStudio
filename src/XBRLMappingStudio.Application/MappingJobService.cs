@@ -174,8 +174,16 @@ public sealed class MappingJobService
                     .Select(path => path.Source)
                     .Distinct()
                     .ToArray();
+                var contributingSources = facts[index].ContributingSources
+                    .Distinct()
+                    .ToArray();
                 return locators.Length == 1 && factSources.Length == 1
                     && StringComparer.Ordinal.Equals(factSources[0].SourceId, sourceId)
+                    && StringComparer.Ordinal.Equals(factSources[0].Locator, locators[0])
+                    && (contributingSources.Length == 0
+                        || contributingSources.Length == 1
+                            && StringComparer.Ordinal.Equals(contributingSources[0].SourceId, sourceId)
+                            && StringComparer.Ordinal.Equals(contributingSources[0].Locator, locators[0]))
                     && selectedSourceRecords.TryGetValue(locators[0], out var record)
                     ? CompareReportScalarValue(record, facts[index])
                     : null;

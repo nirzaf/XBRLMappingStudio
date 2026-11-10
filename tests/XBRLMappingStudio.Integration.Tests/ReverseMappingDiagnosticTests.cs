@@ -614,6 +614,24 @@ public sealed class ReverseMappingDiagnosticTests
                 new SourceTransformationPath(new SourceReference("other-source", "other#r1"), Array.Empty<string>())
             }
         };
+        var incompletelyTracedFact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 333m,
+            ContributingSources = new[]
+            {
+                new SourceReference("report", "report#f6"),
+                new SourceReference("other-source", "other#r2")
+            },
+            SourceTransformationPaths = new[]
+            {
+                new SourceTransformationPath(new SourceReference("report", "report#f6"), Array.Empty<string>())
+            }
+        };
         DataRecord ReportRecord(string rowId, DataValue value, DataValue textValue, bool isNil) => new()
         {
             RowId = rowId,
@@ -626,36 +644,37 @@ public sealed class ReverseMappingDiagnosticTests
         };
 
         MappingJobService.AddReverseMappingLossAccounting(diagnostics, "report",
-            new SourceSelectionSummary(5, 5), new HashSet<string>(StringComparer.Ordinal)
+            new SourceSelectionSummary(6, 6), new HashSet<string>(StringComparer.Ordinal)
             {
-                "report#f1", "report#f2", "report#f3", "report#f4", "report#f5"
+                "report#f1", "report#f2", "report#f3", "report#f4", "report#f5", "report#f6"
             }, new Dictionary<string, DataRecord>(StringComparer.Ordinal)
             {
                 ["report#f1"] = ReportRecord("report#f1", DataValue.DecimalValue(111m), DataValue.Missing(), isNil: false),
                 ["report#f2"] = ReportRecord("report#f2", DataValue.DecimalValue(222m), DataValue.Missing(), isNil: false),
                 ["report#f3"] = ReportRecord("report#f3", DataValue.Missing(), DataValue.StringValue("synthetic note"), isNil: false),
                 ["report#f4"] = ReportRecord("report#f4", DataValue.Missing(), DataValue.Missing(), isNil: true),
-                ["report#f5"] = ReportRecord("report#f5", DataValue.DecimalValue(333m), DataValue.Missing(), isNil: false)
-            }, new[] { fact, secondFact, thirdFact, textFact, nilFact, combinedFact }, "operation-456");
+                ["report#f5"] = ReportRecord("report#f5", DataValue.DecimalValue(333m), DataValue.Missing(), isNil: false),
+                ["report#f6"] = ReportRecord("report#f6", DataValue.DecimalValue(333m), DataValue.Missing(), isNil: false)
+            }, new[] { fact, secondFact, thirdFact, textFact, nilFact, combinedFact, incompletelyTracedFact }, "operation-456");
 
         var warning = Assert.Single(diagnostics.Items);
         Assert.Equal(DiagnosticCodes.IoReverseMappingLossAccounting, warning.Code);
         Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
         Assert.False(warning.IsBlocking);
         Assert.Equal("operation-456", warning.OperationId);
-        Assert.Equal("5", warning.Details!["source_occurrence_count"]);
-        Assert.Equal("5", warning.Details["selected_occurrence_count"]);
-        Assert.Equal("5", warning.Details!["mapped_occurrence_count"]);
+        Assert.Equal("6", warning.Details!["source_occurrence_count"]);
+        Assert.Equal("6", warning.Details["selected_occurrence_count"]);
+        Assert.Equal("6", warning.Details!["mapped_occurrence_count"]);
         Assert.Equal("0", warning.Details["unmapped_selected_occurrence_count"]);
         Assert.Equal("0", warning.Details["filtered_out_occurrence_count"]);
         Assert.Equal("2", warning.Details["duplicated_selected_occurrence_count"]);
         Assert.Equal("2", warning.Details["additional_fact_contribution_count"]);
-        Assert.Equal("6", warning.Details["mapped_fact_count"]);
+        Assert.Equal("7", warning.Details["mapped_fact_count"]);
         Assert.Equal("1", warning.Details["multi_occurrence_fact_count"]);
         Assert.Equal("4", warning.Details["single_occurrence_scalar_value_comparison_count"]);
         Assert.Equal("3", warning.Details["single_occurrence_scalar_value_match_count"]);
         Assert.Equal("1", warning.Details["single_occurrence_scalar_value_difference_count"]);
-        Assert.Equal("2", warning.Details["uncompared_output_fact_count"]);
+        Assert.Equal("3", warning.Details["uncompared_output_fact_count"]);
         Assert.DoesNotContain("report#f", string.Join(" ", warning.Details.Values), StringComparison.Ordinal);
         var accountingText = warning.Message + " " + string.Join(" ", warning.Details.Values);
         Assert.DoesNotContain("111", accountingText, StringComparison.Ordinal);

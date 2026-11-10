@@ -815,3 +815,15 @@ and a multi-occurrence aggregate, and confirms source values and occurrence IDs 
 not enter the diagnostic. The focused Release `ReverseMappingDiagnosticTests`
 suite passed 20/20 with isolated build artifacts. This does not prove semantic
 equivalence of concepts, units, periods, dimensions or transformation policy.
+
+## ENG-07 require consistent provenance for scalar comparisons (2026-11-10)
+
+The count-only scalar comparison now requires the selected occurrence locator to
+match the output fact's sole source-transformation path. If the fact also has a
+contributing-source list, that list must be empty (legacy/unavailable) or identify
+the same single source and locator. Inconsistent provenance is counted as
+uncompared instead of being presented as a one-occurrence comparison. A synthetic
+regression adds a second contributing source omitted from the path list and checks
+that values remain redacted and comparison counts stay conservative. The isolated
+Windows Release `ReverseMappingDiagnosticTests` suite passed 20/20. This is a
+provenance consistency check; it does not establish semantic equivalence.
