@@ -88,6 +88,30 @@ public sealed class AuditPersistenceTests
     }
 
     [Fact]
+    public void AuditPersistence_RedactsUnvalidatedEditedConceptMetadata()
+    {
+        var sink = new RecordingSink();
+        var session = NewSession(sink);
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+
+        var outcome = session.Edit("s1", new DraftMapping("s1", "Sales",
+            "secret=seeded-canary 123456.78", "USD", "duration"));
+
+        Assert.True(outcome.Applied);
+        var row = Assert.Single(sink.Rows);
+        var persistedAudit = string.Join("\n", row.Record.Concept, row.Context.OriginalProposalJson,
+            row.Context.ApprovedEditJson);
+        Assert.DoesNotContain("seeded-canary", persistedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain("123456.78", persistedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret=", persistedAudit, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("synthetic:Revenue", persistedAudit, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Edit_Reject_Undo_EachPersistOneRow()
     {
         var sink = new RecordingSink();

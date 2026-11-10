@@ -97,11 +97,11 @@ public sealed class SuggestionSession
 
     private static string SerializeDraft(DraftMapping draft) => System.Text.Json.JsonSerializer.Serialize(new
     {
-        concept = draft.Concept,
-        unit = draft.Unit,
-        periodType = draft.PeriodType,
+        concept = AiMetadataSanitizer.Redact(draft.Concept),
+        unit = AiMetadataSanitizer.Redact(draft.Unit),
+        periodType = AiMetadataSanitizer.Redact(draft.PeriodType),
         decimals = draft.Decimals,
-        language = draft.Language,
+        language = AiMetadataSanitizer.Redact(draft.Language),
         sourceField = AiMetadataSanitizer.Redact(draft.SourceField),
     });
 

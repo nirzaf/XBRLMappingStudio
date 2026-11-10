@@ -107,7 +107,8 @@ public sealed class AuditLog
         var stamped = record with
         {
             Sequence = _sequence,
-            SourceField = AiMetadataSanitizer.Redact(record.SourceField)
+            SourceField = AiMetadataSanitizer.Redact(record.SourceField),
+            Concept = AiMetadataSanitizer.Redact(record.Concept)
         };
         _records.Add(stamped);
         if (_sink is null || _contextFactory is null) return;

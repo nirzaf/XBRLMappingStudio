@@ -853,3 +853,10 @@ The focused Windows Release `AuditPersistenceTests` suite passed 7/7. This
 closes the audit-cancellation failure mode for in-process session mutations; it
 does not establish multi-user reviewer identity or external audit-store
 availability.
+
+The governed audit surface also redacts unvalidated concept, unit, period-type,
+language and source-field text before persistence; numeric decimals remain typed
+precision metadata. An edit regression submits credential-like and value-like
+text as an invalid concept and confirms it is absent from both the audit record
+and serialized proposal while the valid original QName remains reviewable. The
+Windows Release AI suite passed 74/74.
