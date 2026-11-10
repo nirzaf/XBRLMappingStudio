@@ -665,7 +665,8 @@ OIM subset.
 
 ## XBR-07 desktop occurrence selector authoring follow-on (2026-11-10)
 
-The desktop source panel now exposes occurrence ID and optional existing-row
+The desktop source panel now exposes a bounded list of up to 200 report facts,
+showing occurrence ID, concept, period, unit and value, plus optional existing-row
 `fact_key` digest fields for a selected xBRL report. Applying the selection reads
 the current report under its configured byte limit, computes the exact
 `sha256:` digest, and verifies the requested occurrence resolves before saving
@@ -673,8 +674,9 @@ the binding configuration. A target-row selector remains constrained by the
 adapter's exact occurrence and report-digest requirements and the service's
 update-only SQLite authorization path. Clearing the selector removes all three
 selection values. The desktop test verifies saved configuration, digest pinning,
-changed-report refusal and clearing. The isolated Windows Release desktop suite
-passed 174/174; the Release desktop build passed with 0 warnings and 0 errors.
-This closes desktop authoring for a known occurrence ID, but native Windows
-journey acceptance, an interactive occurrence browser, tuples, complex typed
-domains and full loss accounting remain open.
+changed-report refusal, dropdown selection and clearing. The isolated Windows
+Release desktop suite passed 174/174; the Release desktop build passed with 0
+warnings and 0 errors. A report with more than 200 facts requires entering the
+known ID when the desired fact is outside the displayed sample. Native Windows
+journey acceptance, tuples, complex typed domains and full loss accounting remain
+open.

@@ -93,6 +93,8 @@ public sealed class DiagnosticRow : ViewModelBase
     public string? RelatedNodeId { get; init; }
 }
 
+public sealed record XbrlOccurrenceOption(string OccurrenceId, string Display);
+
 public sealed class FactRow : ViewModelBase
 {
     /// <summary>The semantic fact represented by this preview row, retained for full-aspect review.</summary>
@@ -469,6 +471,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string? _sqliteSourcePath;
     private string _xbrlOccurrenceId = "";
     private string _xbrlTargetRowId = "";
+    private XbrlOccurrenceOption? _selectedXbrlOccurrence;
     private string _sourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
     private int _sourceLoadGeneration;
     private bool _isSourceLoading;
@@ -840,6 +843,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         && StringComparer.Ordinal.Equals(binding.Kind, "xbrl-report"));
     public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
     public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
+    public ObservableCollection<XbrlOccurrenceOption> XbrlOccurrenceOptions { get; } = new();
+    public XbrlOccurrenceOption? SelectedXbrlOccurrence
+    {
+        get => _selectedXbrlOccurrence;
+        set
+        {
+            if (!Set(ref _selectedXbrlOccurrence, value)) return;
+            if (value is not null) XbrlOccurrenceId = value.OccurrenceId;
+        }
+    }
     public bool IsRetainedSqliteSnapshotSelected => FindSelectedSqliteBinding() is { } binding
         && _sqliteSourceSnapshotMetadataPaths.ContainsKey(binding.BindingId);
     public bool CanCaptureSqliteSourceSnapshot
@@ -3811,6 +3824,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             _sqliteSourcePath = kind == "sqlite" ? safePath : null;
             SourceTables.Clear();
             SourceColumns.Clear();
+            XbrlOccurrenceOptions.Clear();
+            SelectedXbrlOccurrence = null;
             SourceInspectionSummary = kind == "sqlite"
                 ? "Choose a SQLite table to inspect its primary key, decimal rules and read-only capabilities."
                 : kind == "pdf-digital"
@@ -3861,6 +3876,33 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var adapter = BuildSourceAdapter(connection);
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
             if (generation != _sourceLoadGeneration) return;
+            if (kind == "xbrl-report" && adapter is XbrlReportAdapter reportAdapter)
+            {
+                var discoveryConfiguration = config.TryGetValue("maxInputBytes", out var configuredMaximum)
+                    ? new Dictionary<string, string>(StringComparer.Ordinal) { ["maxInputBytes"] = configuredMaximum }
+                    : new Dictionary<string, string>(StringComparer.Ordinal);
+                var discoveryConnection = connection with { Configuration = discoveryConfiguration };
+                var discoverySample = _profile is null
+                    ? await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, CancellationToken.None)
+                    : await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, _profile, CancellationToken.None);
+                if (generation != _sourceLoadGeneration) return;
+                ReplaceItems(XbrlOccurrenceOptions, discoverySample.Rows.Select(row =>
+                {
+                    var occurrenceId = row["occurrenceId"].Raw as string ?? row.RowId;
+                    var concept = row["concept"].Raw as string ?? "(unknown concept)";
+                    var period = row["period"].Raw as string ?? "(unknown period)";
+                    var unit = row["unit"].Raw as string;
+                    var value = row["value"].Raw?.ToString() ?? row["textValue"].Raw?.ToString() ?? "(nil/text)";
+                    var display = $"{occurrenceId} · {concept} · {period}"
+                        + (unit is null ? "" : $" · {unit}") + $" · {value}";
+                    return new XbrlOccurrenceOption(occurrenceId, display);
+                }));
+                SelectedXbrlOccurrence = XbrlOccurrenceOptions.FirstOrDefault(option =>
+                    StringComparer.Ordinal.Equals(option.OccurrenceId, XbrlOccurrenceId));
+                Raise(nameof(XbrlOccurrenceOptions));
+                var limitNotice = discoverySample.IsTruncated ? " Showing the first 200 facts." : "";
+                SourceInspectionSummary = $"Loaded {XbrlOccurrenceOptions.Count} xBRL fact occurrences for selection.{limitNotice}";
+            }
             SourceColumns.Clear();
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint });

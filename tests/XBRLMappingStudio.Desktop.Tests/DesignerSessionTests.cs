@@ -621,7 +621,9 @@ public sealed class DesignerSessionTests
             await viewModel.LoadSourceAsync(reportPath);
 
             Assert.True(viewModel.IsSelectedSourceXbrlReport);
-            viewModel.XbrlOccurrenceId = "source#f2";
+            Assert.Equal(2, viewModel.XbrlOccurrenceOptions.Count);
+            viewModel.SelectedXbrlOccurrence = Assert.Single(viewModel.XbrlOccurrenceOptions,
+                option => option.OccurrenceId == "source#f2");
             viewModel.XbrlTargetRowId = "sha256:" + new string('a', 64);
             await viewModel.ApplyXbrlOccurrenceSelectionAsync();
 
