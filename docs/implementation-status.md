@@ -827,3 +827,14 @@ regression adds a second contributing source omitted from the path list and chec
 that values remain redacted and comparison counts stay conservative. The isolated
 Windows Release `ReverseMappingDiagnosticTests` suite passed 20/20. This is a
 provenance consistency check; it does not establish semantic equivalence.
+
+## Migration approval gate verification (2026-11-10)
+
+The label-only taxonomy migration regression now uses a host-trusted signed
+approval on the source revision and verifies that it passes the publication gate
+before migration. After `CreateDraft` advances the semantic revision and pins the
+target profile digest, the same historical approval is rejected with blocking
+`XBR016`. The focused Windows Release `TaxonomyMigrationServiceTests` suite passed
+7/7. This confirms the approval gate for a label-only migration; it does not
+resolve the separate real-taxonomy rights or production-profile qualification
+gates in `docs/decisions/OPEN.md`.

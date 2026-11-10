@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using XBRLMappingStudio.Application;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -78,7 +79,34 @@ public sealed class TaxonomyMigrationServiceTests
     {
         var oldProfile = Profile("sha256:taxonomy-v1");
         var project = Project(oldProfile);
-        AddApproval(project, oldProfile);
+        using var reviewerKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var approval = new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "reviewer@example.test",
+            ApprovedUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+            ExpiresUtc = DateTimeOffset.UtcNow.AddHours(1),
+            ProfileDigest = oldProfile.Digest,
+            Authority = "taxonomy-migration-test",
+            SigningKeyId = "migration-test-key",
+            SignatureAlgorithm = PublicationApprovalSignature.Algorithm
+        };
+        approval = approval with
+        {
+            SignatureBase64 = Convert.ToBase64String(reviewerKey.SignData(
+                PublicationApprovalSignature.CreatePayload(project, oldProfile, approval),
+                HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation))
+        };
+        project.Approvals.Add(approval);
+        var trustPolicy = new PublicationApprovalTrustPolicy(new[]
+        {
+            new TrustedPublicationReviewer("migration-test-key", "reviewer@example.test",
+                "taxonomy-migration-test", Convert.ToBase64String(reviewerKey.ExportSubjectPublicKeyInfo()))
+        });
+        Assert.False(PublicationGate.Evaluate(project, oldProfile, allowSyntheticProfile: false,
+            approvalTrustPolicy: trustPolicy).HasBlockingErrors);
         var targetProfile = Profile("sha256:taxonomy-v2", concepts: DefaultConcepts(label: "Revenue and other income"));
 
         var proposal = TaxonomyMigrationService.Analyze(project, oldProfile, targetProfile);
@@ -96,6 +124,11 @@ public sealed class TaxonomyMigrationServiceTests
             approval.SemanticRevision == draft.SemanticRevision
             && approval.ProfileDigest == draft.ProfileDigest
             && approval.SemanticDigest == draft.ComputeSemanticDigest());
+        var migratedGate = PublicationGate.Evaluate(draft, targetProfile, allowSyntheticProfile: false,
+            approvalTrustPolicy: trustPolicy);
+        Assert.Contains(migratedGate.Items, diagnostic =>
+            diagnostic.Code == XBRLMappingStudio.Diagnostics.DiagnosticCodes.XbrApprovalRequired
+            && diagnostic.IsBlocking);
         Assert.Equal(oldProfile.Digest, project.ProfileDigest);
     }
 
