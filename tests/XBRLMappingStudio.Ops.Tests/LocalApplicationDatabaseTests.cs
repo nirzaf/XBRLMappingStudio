@@ -261,6 +261,78 @@ public sealed class LocalApplicationDatabaseTests
     }
 
     [Fact]
+    public void FailedVersionTwelveMigrationRollsBackEarlierVersionEightMigrations()
+    {
+        using var workspace = new TemporaryDirectory();
+        var path = Path.Combine(workspace.Path, "rollback-v8-through-v12.db");
+        using (var legacy = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            legacy.Open();
+            using var create = legacy.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE mixed_publication_reconciliation (
+                    operation_key TEXT PRIMARY KEY NOT NULL,
+                    intent_fingerprint TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_digest TEXT NOT NULL,
+                    file_state TEXT NOT NULL,
+                    file_failure_code TEXT,
+                    sqlite_path TEXT NOT NULL,
+                    sqlite_table TEXT NOT NULL,
+                    sqlite_operation_key TEXT,
+                    sqlite_intent_fingerprint TEXT,
+                    sqlite_state TEXT NOT NULL,
+                    sqlite_rows_written INTEGER,
+                    sqlite_failure_code TEXT,
+                    updated_utc TEXT NOT NULL,
+                    file_kind TEXT NOT NULL DEFAULT 'xbrl-json'
+                        CHECK(file_kind IN ('xbrl-json','xbrl-xml'))
+                );
+                INSERT INTO mixed_publication_reconciliation(
+                    operation_key,intent_fingerprint,file_path,file_digest,file_state,
+                    sqlite_path,sqlite_table,sqlite_state,updated_utc,file_kind)
+                VALUES('preserve-through-v12','sha256:intent','/workspace/report.json','sha256:file','Confirmed',
+                    '/workspace/facts.db','facts','Pending','2026-11-01T00:00:00Z','xbrl-json');
+                CREATE TABLE snapshot_staging_retention_audit (legacy_marker TEXT NOT NULL);
+                INSERT INTO snapshot_staging_retention_audit VALUES('preserve-collision');
+                PRAGMA user_version=8;
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        Assert.Throws<SqliteException>(() => _ = new LocalApplicationDatabase(path));
+
+        using var verify = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        verify.Open();
+        using var check = verify.CreateCommand();
+        check.CommandText = "PRAGMA user_version";
+        Assert.Equal(8L, check.ExecuteScalar());
+        check.CommandText = "SELECT operation_key,file_state,file_kind FROM mixed_publication_reconciliation";
+        using (var reader = check.ExecuteReader())
+        {
+            Assert.True(reader.Read());
+            Assert.Equal("preserve-through-v12", reader.GetString(0));
+            Assert.Equal("Confirmed", reader.GetString(1));
+            Assert.Equal("xbrl-json", reader.GetString(2));
+            Assert.False(reader.Read());
+        }
+        check.CommandText = "SELECT legacy_marker FROM snapshot_staging_retention_audit";
+        Assert.Equal("preserve-collision", check.ExecuteScalar());
+        check.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='mixed_publication_reconciliation'";
+        var originalSchema = Assert.IsType<string>(check.ExecuteScalar());
+        Assert.Contains("CHECK(file_kind IN ('xbrl-json','xbrl-xml'))", originalSchema, StringComparison.Ordinal);
+        Assert.DoesNotContain("csv-records-v1", originalSchema, StringComparison.Ordinal);
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='retention_audit'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='retention_audit_no_delete'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='temporary_artifact_retention_audit'";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='snapshot_staging_retention_audit_no_delete'";
+        Assert.Equal(0L, check.ExecuteScalar());
+    }
+
+    [Fact]
     public void MigratesVersionThreeDatabaseWithoutChangingExistingSettings()
     {
         using var workspace = new TemporaryDirectory();

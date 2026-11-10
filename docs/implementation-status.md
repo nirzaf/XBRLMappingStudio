@@ -515,3 +515,15 @@ unchanged with no partially created migration table. The focused regression
 passed 1/1; the full Windows Release Ops suite passed 546/546. This adds rollback
 evidence for the v8-to-v12 migration chain and does not qualify native desktop
 profile-adoption or production taxonomy rights.
+
+## TAX-03 late migration failure rollback follow-on (2026-11-10)
+
+`LocalApplicationDatabaseTests.FailedVersionTwelveMigrationRollsBackEarlierVersionEightMigrations`
+starts at schema v8 and places a preserved legacy table at the v12 migration's
+target name so failure occurs after migrations v9-v11 have run inside the
+transaction. A read-only check verifies the version-8 row and colliding legacy
+table and original schema constraint remain intact, `user_version` remains 8,
+and v10-v12 audit tables/triggers were not partially installed. The focused
+Windows Release regression passed 1/1. This verifies rollback at the end of the
+migration chain; it does not qualify installed-release upgrade interruption,
+native desktop profile-adoption, or production taxonomy rights.
