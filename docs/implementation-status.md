@@ -860,3 +860,14 @@ precision metadata. An edit regression submits credential-like and value-like
 text as an invalid concept and confirms it is absent from both the audit record
 and serialized proposal while the valid original QName remains reviewable. The
 Windows Release AI suite passed 74/74.
+
+## ENG-02 minimum physical spool page (2026-11-10)
+
+The SQLite fact spool now refuses a `MaxSpoolBytes` value below its 4096-byte
+database page size before opening or creating the spool file. Previously, the
+page-count clamp still allocated one full page for smaller configured limits,
+contradicting the physical spool bound. Integration regressions cover limits of
+1 and 4095 bytes and assert the spool artifact is not created; the existing
+1024-byte full-run refusal still blocks before worker validation. The focused
+Windows Release set passed 3/3. This closes the below-page-size limit gap, not
+SQLite temporary-file accounting or process-wide disk qualification.

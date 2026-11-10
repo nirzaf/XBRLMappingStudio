@@ -188,6 +188,7 @@ public sealed class LargeRunArtifact : IDisposable
 /// </summary>
 internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisposable
 {
+    private const int SqlitePageSizeBytes = 4096;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.General);
     private readonly SqliteConnection _connection;
     private readonly string _databasePath;
@@ -221,6 +222,9 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
 
     public LargeRunFactStore(string databasePath, int cacheKiB, long maxBytes)
     {
+        if (maxBytes < SqlitePageSizeBytes)
+            throw new LargeRunBudgetExceededException(
+                $"Configured MaxSpoolBytes={maxBytes} is below SQLite's minimum page size of {SqlitePageSizeBytes} bytes.");
         _databasePath = databasePath;
         _maxBytes = maxBytes;
         _connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -233,7 +237,7 @@ internal sealed partial class LargeRunFactStore : IReadOnlyList<XbrlFact>, IDisp
         _connection.Open();
         try
         {
-            var maxPages = Math.Clamp(maxBytes / 4096, 1L, 2_147_483_646L);
+            var maxPages = Math.Clamp(maxBytes / SqlitePageSizeBytes, 1L, 2_147_483_646L);
             using (var pragma = _connection.CreateCommand())
             {
                 pragma.CommandText = $"PRAGMA page_size=4096; PRAGMA max_page_count={maxPages}; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-{cacheKiB};";

@@ -536,6 +536,25 @@ public sealed partial class LargeRunExecutionTests
         finally { TryDeleteDirectory(root); }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4095)]
+    public void LargeRunFactStore_RejectsSpoolLimitBelowMinimumSqlitePageBeforeCreatingFile(long spoolLimit)
+    {
+        var root = NewDirectory();
+        try
+        {
+            var path = Path.Combine(root, "facts.sqlite");
+
+            var error = Assert.Throws<LargeRunBudgetExceededException>(
+                () => new LargeRunFactStore(path, cacheKiB: 256, maxBytes: spoolLimit));
+
+            Assert.Contains("minimum page size of 4096 bytes", error.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(path));
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+
     [Fact]
     [Trait("Category", "ProcessMemory")]
     public async Task HundredThousandRows_StreamsExactOutputAndKeepsBatchWorkingSetBounded()
