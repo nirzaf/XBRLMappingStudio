@@ -1129,9 +1129,14 @@ public sealed class ArelleExecutionTests
                 while True:
                     time.sleep(1)
             elif mode == "progress":
-                print(json.dumps({"messageType": "progress", "operationId": request["operationId"],
-                                  "stage": "validatingReport"}), flush=True)
-                respond(request)
+                frames = [
+                    {"messageType": "progress", "operationId": request["operationId"],
+                     "stage": "validatingReport"},
+                    {"operationId": request["operationId"], "status": "success",
+                     "result": None, "diagnostics": []},
+                ]
+                sys.stdout.write("".join(json.dumps(frame) + "\n" for frame in frames))
+                sys.stdout.flush()
             elif mode == "child-hang":
                 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
                 with open(marker + ".tmp", "w", encoding="ascii") as output:

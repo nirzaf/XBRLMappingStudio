@@ -431,6 +431,9 @@ public sealed class ArelleWorker : IWorkerClient
     private readonly Process _process;
     private readonly StreamWriter _stdin;
     private readonly StreamReader _stdout;
+    private readonly char[] _stdoutBuffer = new char[4096];
+    private int _stdoutBufferOffset;
+    private int _stdoutBufferCount;
     private readonly WorkerProcessTree _processTree;
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly Task _stderrDrain;
@@ -696,26 +699,27 @@ public sealed class ArelleWorker : IWorkerClient
         catch (IOException) { }
     }
 
-    private static async Task<string?> ReadBoundedLineAsync(StreamReader reader, CancellationToken cancellationToken)
+    private async Task<string?> ReadBoundedLineAsync(StreamReader reader, CancellationToken cancellationToken)
     {
         var line = new StringBuilder();
-        var buffer = new char[4096];
         var bytes = 0;
         while (true)
         {
-            var count = await reader.ReadAsync(buffer.AsMemory(), cancellationToken);
-            if (count == 0) return line.Length == 0 ? null : line.ToString();
-            for (var i = 0; i < count; i++)
+            if (_stdoutBufferOffset >= _stdoutBufferCount)
             {
-                var ch = buffer[i];
-                if (ch == '\n') return line.Length > 0 && line[^1] == '\r'
-                    ? line.ToString(0, line.Length - 1)
-                    : line.ToString();
-                bytes += ch <= 0x7f ? 1 : ch <= 0x7ff || char.IsSurrogate(ch) ? 2 : 3;
-                if (bytes > WorkerProtocol.MaxMessageBytes)
-                    throw new InvalidOperationException($"Worker response exceeds {WorkerProtocol.MaxMessageBytes} bytes.");
-                line.Append(ch);
+                _stdoutBufferCount = await reader.ReadAsync(_stdoutBuffer.AsMemory(), cancellationToken);
+                _stdoutBufferOffset = 0;
+                if (_stdoutBufferCount == 0) return line.Length == 0 ? null : line.ToString();
             }
+
+            var ch = _stdoutBuffer[_stdoutBufferOffset++];
+            if (ch == '\n') return line.Length > 0 && line[^1] == '\r'
+                ? line.ToString(0, line.Length - 1)
+                : line.ToString();
+            bytes += ch <= 0x7f ? 1 : ch <= 0x7ff || char.IsSurrogate(ch) ? 2 : 3;
+            if (bytes > WorkerProtocol.MaxMessageBytes)
+                throw new InvalidOperationException($"Worker response exceeds {WorkerProtocol.MaxMessageBytes} bytes.");
+            line.Append(ch);
         }
     }
 }
