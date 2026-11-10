@@ -900,3 +900,14 @@ verifies the code and actionable message. The full Windows Release XBRL test
 project passed 226/226, including `ReportImportTests` 28/28. Tuple mapping
 remains unsupported and continues to fail closed; no tuple data is flattened or
 dropped.
+
+## DST-04 unlocked desktop picker-cancel retest (2026-11-10)
+
+After the user confirmed the desktop was unlocked, Computer Use activated the
+Release app. The only open workspace was a dirty `sample` project with a stale
+Revenue source mapping, so no run or publication was attempted. Opening the
+SQLite destination picker showed no selectable databases in the acceptance
+fixture directory; Cancel returned to the app with no destination selected.
+Schema confirmation, dry run and publish remained disabled. This verifies the
+picker-cancel/no-target state only; the full DST-04 destination round-trip still
+requires an isolated, valid source and mapping fixture.
