@@ -638,13 +638,35 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
-    public async Task RunAsync_ReportsReverseMappingLimitationWithoutBlockingValidFacts()
+    public async Task RunAsync_AccountsSelectedOccurrencesWithoutOutputProvenance()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-warning-success-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
-            var reportPath = IndependentAcceptanceFixtures.Materialize(directory, "revenue-report.json");
+            var templatePath = IndependentAcceptanceFixtures.Materialize(directory, "revenue-report.json");
+            var profile = SyntheticProfile.Build();
+            var templateFact = Assert.Single(OimSerializer.ReadFacts(await File.ReadAllTextAsync(templatePath)));
+            var secondFact = new XbrlFact
+            {
+                ConceptName = templateFact.ConceptName,
+                EntityScheme = templateFact.EntityScheme,
+                EntityIdentifier = templateFact.EntityIdentifier,
+                Period = XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1)),
+                Unit = templateFact.Unit,
+                CompoundUnit = templateFact.CompoundUnit,
+                Value = 99m,
+                TextValue = templateFact.TextValue,
+                IsNil = templateFact.IsNil,
+                Decimals = templateFact.Decimals,
+                Language = templateFact.Language,
+                Dimensions = templateFact.Dimensions,
+                ContributingSources = templateFact.ContributingSources,
+                TransformationIds = templateFact.TransformationIds,
+                SourceTransformationPaths = templateFact.SourceTransformationPaths
+            };
+            var reportPath = Path.Combine(directory, "two-occurrence-report.json");
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, new[] { templateFact, secondFact }));
             var project = TestFixtures.BuildRevenueMappingProject(reportPath);
             var binding = project.Bindings.Single();
             project.Bindings[0] = binding with
@@ -659,11 +681,11 @@ public sealed class ReverseMappingDiagnosticTests
             {
                 ["column"] = "value"
             };
-            parameters.Remove("rowFilterColumn");
-            parameters.Remove("rowFilterValue");
+            parameters["rowFilterColumn"] = "period";
+            parameters["rowFilterValue"] = "2025-01-01/2026-01-01";
             project.Nodes[fieldIndex] = field with { Parameters = parameters };
 
-            var result = await new MappingJobService(SyntheticProfile.Build(), new SuccessfulWorker()).RunAsync(
+            var result = await new MappingJobService(profile, new SuccessfulWorker()).RunAsync(
                 project,
                 new Dictionary<string, SourceConnection>
                 {
@@ -681,6 +703,15 @@ public sealed class ReverseMappingDiagnosticTests
             Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
             Assert.False(warning.IsBlocking);
             Assert.Equal(binding.BindingId, warning.Source?.SourceId);
+            var accounting = Assert.Single(result.Manifest.Diagnostics,
+                diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
+            Assert.Equal("2", accounting.Details!["source_occurrence_count"]);
+            Assert.Equal("2", accounting.Details["selected_occurrence_count"]);
+            Assert.Equal("0", accounting.Details["filtered_out_occurrence_count"]);
+            Assert.Equal("1", accounting.Details["mapped_occurrence_count"]);
+            Assert.Equal("1", accounting.Details["unmapped_selected_occurrence_count"]);
+            Assert.Equal("1", accounting.Details["mapped_fact_count"]);
+            Assert.Equal("0", accounting.Details["multi_occurrence_fact_count"]);
         }
         finally
         {
