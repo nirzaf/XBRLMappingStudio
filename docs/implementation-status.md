@@ -801,3 +801,17 @@ confirms one output fact and one durable target row after publication. The focus
 Release reverse-mapping and update-only publication tests passed 21/21 with
 isolated build artifacts. This records write totals, not semantic value equivalence
 or per-occurrence target lineage; those remain open.
+
+## ENG-07 selected-occurrence scalar value comparison (2026-11-10)
+
+`IO034` now compares an output fact's scalar value with its selected source report
+fact when exactly one selected occurrence contributes and the source value is a
+supported decimal, text, or nil value. It reports only comparison, match,
+difference and uncompared counts; a difference is informational and does not
+assume the mapping is incorrect, since an intentional transformation may change
+the value. Aggregates and unsupported values are counted as uncompared. Synthetic
+coverage includes an equal decimal, a changed decimal, matching text, matching nil,
+and a multi-occurrence aggregate, and confirms source values and occurrence IDs do
+not enter the diagnostic. The focused Release `ReverseMappingDiagnosticTests`
+suite passed 20/20 with isolated build artifacts. This does not prove semantic
+equivalence of concepts, units, periods, dimensions or transformation policy.

@@ -144,6 +144,7 @@ public sealed class MappingJobService
         string sourceId,
         SourceSelectionSummary selection,
         IReadOnlySet<string> selectedLocators,
+        IReadOnlyDictionary<string, DataRecord> selectedSourceRecords,
         IReadOnlyList<XbrlFact> facts,
         string operationId)
     {
@@ -166,12 +167,31 @@ public sealed class MappingJobService
         var unmapped = Math.Max(0, selection.SelectedRecordCount - represented.Count);
         var mappedFacts = perFactLocators.Count(locators => locators.Length != 0);
         var multiOccurrenceFacts = perFactLocators.Count(locators => locators.Length > 1);
+        var scalarComparisons = perFactLocators
+            .Select((locators, index) =>
+            {
+                var factSources = facts[index].SourceTransformationPaths
+                    .Select(path => path.Source)
+                    .Distinct()
+                    .ToArray();
+                return locators.Length == 1 && factSources.Length == 1
+                    && StringComparer.Ordinal.Equals(factSources[0].SourceId, sourceId)
+                    && selectedSourceRecords.TryGetValue(locators[0], out var record)
+                    ? CompareReportScalarValue(record, facts[index])
+                    : null;
+            })
+            .Where(result => result.HasValue)
+            .Select(result => result!.Value)
+            .ToArray();
+        var equalScalarValues = scalarComparisons.Count(matches => matches);
+        var differentScalarValues = scalarComparisons.Length - equalScalarValues;
+        var uncomparedOutputFacts = Math.Max(0, facts.Count - scalarComparisons.Length);
 
         diagnostics.Warn(
             DiagnosticCodes.IoReverseMappingLossAccounting,
             DiagnosticSubsystem.Mapping,
             DiagnosticStage.Execution,
-            $"Reverse mapping selected {selection.SelectedRecordCount} of {selection.SourceRecordCount} reported fact occurrences; {filteredOut} were filtered out, {unmapped} selected occurrence(s) have no output fact provenance, {duplicatedOccurrences} selected occurrence(s) contribute to multiple output facts, and {multiOccurrenceFacts} output fact(s) combine multiple occurrences. Original transaction detail remains unavailable.",
+            $"Reverse mapping selected {selection.SelectedRecordCount} of {selection.SourceRecordCount} reported fact occurrences; {filteredOut} were filtered out, {unmapped} selected occurrence(s) have no output fact provenance, {duplicatedOccurrences} selected occurrence(s) contribute to multiple output facts, and {multiOccurrenceFacts} output fact(s) combine multiple occurrences. Among {scalarComparisons.Length} output facts linked to one selected occurrence, {equalScalarValues} scalar values match and {differentScalarValues} differ; {uncomparedOutputFacts} output fact(s) were not compared because their provenance is not one report occurrence or their scalar value is unsupported. Original transaction detail remains unavailable.",
             source: new SourceReference(sourceId, "fact-occurrence-accounting"),
             operationId: operationId,
             details: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -184,8 +204,30 @@ public sealed class MappingJobService
                 ["duplicated_selected_occurrence_count"] = duplicatedOccurrences.ToString(CultureInfo.InvariantCulture),
                 ["additional_fact_contribution_count"] = additionalFactContributions.ToString(CultureInfo.InvariantCulture),
                 ["mapped_fact_count"] = mappedFacts.ToString(CultureInfo.InvariantCulture),
-                ["multi_occurrence_fact_count"] = multiOccurrenceFacts.ToString(CultureInfo.InvariantCulture)
+                ["multi_occurrence_fact_count"] = multiOccurrenceFacts.ToString(CultureInfo.InvariantCulture),
+                ["single_occurrence_scalar_value_comparison_count"] = scalarComparisons.Length.ToString(CultureInfo.InvariantCulture),
+                ["single_occurrence_scalar_value_match_count"] = equalScalarValues.ToString(CultureInfo.InvariantCulture),
+                ["single_occurrence_scalar_value_difference_count"] = differentScalarValues.ToString(CultureInfo.InvariantCulture),
+                ["uncompared_output_fact_count"] = uncomparedOutputFacts.ToString(CultureInfo.InvariantCulture)
             });
+    }
+
+    private static bool? CompareReportScalarValue(DataRecord source, XbrlFact output)
+    {
+        if (source["nil"].Presence == ValuePresence.Present && source["nil"].AsBoolean())
+            return output.IsNil;
+
+        var numeric = source["value"];
+        if (numeric.Presence == ValuePresence.Present)
+            return !output.IsNil && output.Value is { } outputValue && output.TextValue is null
+                && numeric.AsDecimal() == outputValue;
+
+        var text = source["textValue"];
+        if (text.Presence is ValuePresence.Present or ValuePresence.Blank)
+            return !output.IsNil && output.Value is null && output.TextValue is not null
+                && StringComparer.Ordinal.Equals(text.AsString(), output.TextValue);
+
+        return null;
     }
 
     private static void AddReverseMappingTargetWriteAccounting(
@@ -853,8 +895,20 @@ public sealed class MappingJobService
                         .Where(source => StringComparer.Ordinal.Equals(source.SourceId, connection.SourceId))
                         .Select(source => source.Locator)
                         .ToHashSet(StringComparer.Ordinal);
+                    var selectedSourceRecords = sourceReaders[binding.BindingId].Buffer
+                        .Select(record => new
+                        {
+                            Record = record,
+                            Locator = record.CellSources?.Values
+                                .Where(source => StringComparer.Ordinal.Equals(source.SourceId, connection.SourceId)
+                                    && selectedLocators.Contains(source.Locator))
+                                .Select(source => source.Locator)
+                                .FirstOrDefault()
+                        })
+                        .Where(item => item.Locator is not null)
+                        .ToDictionary(item => item.Locator!, item => item.Record, StringComparer.Ordinal);
                     AddReverseMappingLossAccounting(context.Diagnostics, connection.SourceId, selection,
-                        selectedLocators, facts, opId);
+                        selectedLocators, selectedSourceRecords, facts, opId);
                 }
             }
         }
