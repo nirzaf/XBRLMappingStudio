@@ -39,7 +39,7 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         "occurrenceId", "reportDigest", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
         "unit", "lang", "nil", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
-        "maxInputBytes", "targetRowId", "targetRows"
+        "maxInputBytes", "targetRowId", "targetRows", "targetAspectMatch"
     };
     private const int MaximumTargetRowsJsonCharacters = 4_000_000;
     private const int MaximumTargetRowMappings = 10_000;
@@ -96,6 +96,22 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
     {
         await foreach (var record in ReadFullCore(connection, schema, profile, cancellationToken))
             yield return record;
+    }
+
+    /// <summary>Returns the exact stable occurrence IDs selected from the report.
+    /// Used by update-only reverse publication to prove a one-to-one source/output
+    /// mapping before aspect-derived fact keys are treated as target row identities.</summary>
+    public IReadOnlyList<string> ReadSelectedOccurrenceIds(
+        SourceConnection connection,
+        FilingProfile profile,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        cancellationToken.ThrowIfCancellationRequested();
+        var report = Read(connection, cancellationToken, profile);
+        return Select(connection, report.Facts, report.Digest, profile)
+            .Select(item => $"{connection.SourceId}#f{item.Index + 1}")
+            .ToArray();
     }
 
     private async IAsyncEnumerable<DataRecord> ReadFullCore(SourceConnection connection, ISourceSchema schema,
@@ -354,6 +370,14 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
                 throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                     "Existing target-row selection requires exact 'occurrenceId' and 'reportDigest' selectors.");
         }
+
+        var targetAspectMatch = Get("targetAspectMatch");
+        if (targetAspectMatch is not null && targetAspectMatch is not ("true" or "false"))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'targetAspectMatch' must be exactly 'true' or 'false'.");
+        if (targetAspectMatch == "true" && (targetRowId is not null || targetRows.Count != 0))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "Aspect-derived target matching cannot be combined with explicit 'targetRowId' or 'targetRows'.");
 
         return new ReportSelection(Get("occurrenceId"), reportDigest, Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,

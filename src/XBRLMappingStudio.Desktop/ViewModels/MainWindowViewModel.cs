@@ -473,6 +473,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string _xbrlOccurrenceId = "";
     private string _xbrlTargetRowId = "";
     private string _xbrlTargetRowsJson = "";
+    private bool _xbrlTargetAspectMatch;
     private string _xbrlConceptFilter = "";
     private string _xbrlEntitySchemeFilter = "";
     private string _xbrlEntityIdentifierFilter = "";
@@ -869,6 +870,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
     public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
     public string XbrlTargetRowsJson { get => _xbrlTargetRowsJson; set => Set(ref _xbrlTargetRowsJson, value); }
+    public bool XbrlTargetAspectMatch { get => _xbrlTargetAspectMatch; set => Set(ref _xbrlTargetAspectMatch, value); }
     public string XbrlConceptFilter { get => _xbrlConceptFilter; set => Set(ref _xbrlConceptFilter, value); }
     public string XbrlEntitySchemeFilter { get => _xbrlEntitySchemeFilter; set => Set(ref _xbrlEntitySchemeFilter, value); }
     public string XbrlEntityIdentifierFilter { get => _xbrlEntityIdentifierFilter; set => Set(ref _xbrlEntityIdentifierFilter, value); }
@@ -3910,6 +3912,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 XbrlOccurrenceId = config.GetValueOrDefault("occurrenceId", "");
                 XbrlTargetRowId = config.GetValueOrDefault("targetRowId", "");
                 XbrlTargetRowsJson = config.GetValueOrDefault("targetRows", "");
+                XbrlTargetAspectMatch = StringComparer.Ordinal.Equals(config.GetValueOrDefault("targetAspectMatch"), "true");
                 XbrlConceptFilter = config.GetValueOrDefault("concept", "");
                 XbrlEntitySchemeFilter = config.GetValueOrDefault("entityScheme", "");
                 XbrlEntityIdentifierFilter = config.GetValueOrDefault("entityIdentifier", "");
@@ -4051,6 +4054,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 
         var occurrenceId = XbrlOccurrenceId.Trim();
         var targetRowsJson = XbrlTargetRowsJson.Trim();
+        var targetAspectMatch = XbrlTargetAspectMatch;
         var root = WorkspaceRoot();
         var path = Path.IsPathRooted(binding.Locator!)
             ? Path.GetFullPath(binding.Locator!)
@@ -4062,6 +4066,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         var targetRowId = XbrlTargetRowId.Trim();
+        if (targetAspectMatch && (targetRowId.Length > 0 || targetRowsJson.Length > 0))
+        {
+            StatusText = "Aspect-derived target matching cannot be combined with explicit target-row mappings.";
+            return;
+        }
         var requestedFilters = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["concept"] = XbrlConceptFilter.Trim(),
@@ -4091,7 +4100,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             occurrenceId = "";
             targetRowId = "";
         }
-        if (occurrenceId.Length == 0 && targetRowId.Length == 0 && targetRowsJson.Length == 0
+        if (occurrenceId.Length == 0 && targetRowId.Length == 0 && targetRowsJson.Length == 0 && !targetAspectMatch
             && !hasExistingAspectFilter && !requestedFilters.Values.Any(value => value.Length > 0))
         {
             StatusText = "Choose an occurrence or enter at least one aspect filter before applying the selection.";
@@ -4112,6 +4121,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             else configuration["targetRowId"] = targetRowId;
             if (targetRowsJson.Length == 0) configuration.Remove("targetRows");
             else configuration["targetRows"] = targetRowsJson;
+            if (targetAspectMatch) configuration["targetAspectMatch"] = "true";
+            else configuration.Remove("targetAspectMatch");
             foreach (var (key, value) in requestedFilters)
             {
                 if (value.Length == 0) configuration.Remove(key);
@@ -4121,7 +4132,21 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var connection = new SourceConnection(binding.BindingId, binding.Kind, path, configuration);
             var adapter = new XbrlReportAdapter();
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
-            if (targetRowsJson.Length > 0)
+            if (targetAspectMatch)
+            {
+                var destination = Session.Project.Destination;
+                if (destination?.Kind != "sqlite" || destination.WriteMode != "update-only"
+                    || destination.BusinessKey is not { Count: 1 } || destination.BusinessKey[0] != "fact_key")
+                {
+                    StatusText = "Aspect-derived matching requires a SQLite update-only destination keyed by fact_key.";
+                    return;
+                }
+                var rows = _profile is null
+                    ? adapter.ReadFullAsync(connection, schema, CancellationToken.None)
+                    : adapter.ReadFullAsync(connection, schema, _profile, CancellationToken.None);
+                await foreach (var _ in rows) { }
+            }
+            else if (targetRowsJson.Length > 0)
             {
                 var targetRows = XbrlReportAdapter.ParseTargetRows(binding.BindingId, targetRowsJson);
                 var matched = new HashSet<string>(StringComparer.Ordinal);
@@ -4165,9 +4190,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             XbrlOccurrenceId = occurrenceId;
             XbrlTargetRowId = targetRowId;
             XbrlTargetRowsJson = targetRowsJson;
+            XbrlTargetAspectMatch = targetAspectMatch;
             SourceInspectionSummary = occurrenceId.Length > 0
                 ? $"Pinned {occurrenceId} to the current report bytes ({reportDigest})."
                     + (targetRowId.Length == 0 ? "" : " Existing-row update is enabled for this selected occurrence.")
+                : targetAspectMatch
+                    ? $"Enabled aspect-derived fact_key matching for update-only SQLite; target rows must already exist ({reportDigest})."
                 : targetRowsJson.Length > 0
                     ? $"Validated {XbrlReportAdapter.ParseTargetRows(binding.BindingId, targetRowsJson).Count} occurrence-to-row mappings against the current report bytes ({reportDigest})."
                 : $"Applied xBRL aspect filters to the current report bytes ({reportDigest}); matching occurrences remain subject to full validation.";
@@ -4191,6 +4219,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         configuration.Remove("reportDigest");
         configuration.Remove("targetRowId");
         configuration.Remove("targetRows");
+        configuration.Remove("targetAspectMatch");
         configuration.Remove("concept");
         configuration.Remove("period");
         configuration.Remove("unit");
@@ -4215,6 +4244,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         XbrlOccurrenceId = "";
         XbrlTargetRowId = "";
         XbrlTargetRowsJson = "";
+        XbrlTargetAspectMatch = false;
         XbrlConceptFilter = "";
         XbrlEntitySchemeFilter = "";
         XbrlEntityIdentifierFilter = "";

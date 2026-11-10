@@ -30,6 +30,9 @@ public sealed class MappingOperationViewModelTests
             Assert.Equal("Multiple existing SQLite target rows JSON", AutomationProperties.GetName(editor));
             Assert.True(editor.AcceptsReturn);
             Assert.Equal("Wrap", editor.TextWrapping.ToString());
+            var aspectMatch = Assert.IsType<CheckBox>(window.FindControl<CheckBox>("XbrlTargetAspectMatchCheckBox"));
+            Assert.Equal("Match SQLite target rows by XBRL aspects", AutomationProperties.GetName(aspectMatch));
+            Assert.False(aspectMatch.IsThreeState);
         }
         finally
         {

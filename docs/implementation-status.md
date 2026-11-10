@@ -613,6 +613,22 @@ suite passed 177/177. Native visual acceptance remains open. Tuple mapping,
 general aspect-aware target matching, and complex typed-domain flattening remain
 open.
 
+## XBR-07 deterministic aspect-derived update matching (2026-11-10)
+
+The desktop xBRL selector can enable aspect-derived target matching. The mode
+pins the exact report digest, requires a SQLite update-only destination whose
+sole business key is `fact_key`, and cannot be combined with explicit target
+row IDs. Before preview or publication, the service resolves the selected
+occurrence set from the replayable report and verifies a one-to-one mapping to
+unique fact records. It retains the existing deterministic aspect-derived
+`fact_key`; the publisher updates matching rows only, so a missing target is a
+conflict and cannot be inserted. The integration test covers a successful
+existing-row update and missing-row refusal with no facts or receipt written.
+The Desktop Release suite passed 178/178 and the focused SQLite workflow suite
+passed 30/30. This implements aspect-derived matching for XBRL report reverse
+mapping; arbitrary ledger joins, broader target-key policies, tuples, real
+taxonomy qualification, and native visual acceptance remain open.
+
 ## XBR-07 report-source revision-pinned occurrence selection (2026-11-10)
 
 `XbrlReportInputReader.ReadTextWithDigest` computes SHA-256 over the exact input

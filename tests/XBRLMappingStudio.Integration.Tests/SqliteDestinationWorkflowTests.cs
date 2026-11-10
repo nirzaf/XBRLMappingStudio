@@ -206,6 +206,82 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AspectDerivedXbrlKeys_UpdateExistingRowsAndRefuseMissingRows()
+    {
+        var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
+        var reportDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
+        var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+        var binding = Assert.Single(project.Bindings);
+        project.Bindings[0] = binding with
+        {
+            Kind = "xbrl-report",
+            Configuration = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["reportDigest"] = reportDigest,
+                ["targetAspectMatch"] = "true"
+            },
+            SchemaFingerprint = null
+        };
+        var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+        var field = project.Nodes[fieldIndex];
+        var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal) { ["column"] = "value" };
+        parameters.Remove("rowFilterColumn");
+        parameters.Remove("rowFilterValue");
+        project.Nodes[fieldIndex] = field with { Parameters = parameters };
+        project.Destination = new DestinationPlan
+        {
+            Kind = DestinationPlanValidator.SupportedKind, Locator = "destination.db", Table = "facts",
+            BusinessKey = new List<string> { "fact_key" }, WriteMode = "update-only"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision, SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer", ApprovedUtc = DateTimeOffset.UtcNow, ProfileDigest = _profile.Digest
+        });
+
+        var service = NewService();
+        using var result = await service.RunAsync(project, Connections(project, reportPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Contains(result.Manifest.Outcome, new[] { RunOutcome.Success, RunOutcome.SuccessWithWarnings });
+        var expectedKey = Assert.Single(XbrlFactRecordMapper.ToRecords(result.Facts, _profile.Digest))
+            .Fields["fact_key"].Raw as string;
+        Assert.False(string.IsNullOrWhiteSpace(expectedKey));
+
+        await InsertExistingTargetFactAsync(_databasePath, expectedKey!);
+        var preview = await service.PreviewDestinationChangesAsync(project, result, _directory, CancellationToken.None);
+        Assert.Equal(1, preview.Updates);
+        Assert.Equal(0, preview.Inserts);
+        Assert.Equal(0, preview.Conflicts);
+        var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
+        Assert.Equal(1, receipt.WrittenRows);
+        Assert.Equal(new[] { expectedKey }, await ReadFactsAsync(_databasePath));
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+
+        var missingDatabase = Path.Combine(_directory, "missing-target.db");
+        await CreateDestinationDatabase(missingDatabase);
+        var missingProject = TestFixtures.BuildRevenueMappingProject(reportPath);
+        missingProject.Bindings[0] = project.Bindings[0];
+        missingProject.Nodes.Clear();
+        missingProject.Nodes.AddRange(project.Nodes);
+        missingProject.Edges.Clear();
+        missingProject.Edges.AddRange(project.Edges);
+        missingProject.Destination = project.Destination! with { Locator = "missing-target.db" };
+        missingProject.Approvals.Clear();
+        missingProject.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = missingProject.SemanticRevision, SemanticDigest = missingProject.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer", ApprovedUtc = DateTimeOffset.UtcNow, ProfileDigest = _profile.Digest
+        });
+        using var missingResult = await service.RunAsync(missingProject, Connections(missingProject, reportPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        var missingPreview = await service.PreviewDestinationChangesAsync(missingProject, missingResult, _directory, CancellationToken.None);
+        Assert.Equal(1, missingPreview.Conflicts);
+        await Assert.ThrowsAsync<AdapterException>(() => service.PublishDestinationAsync(missingProject, missingResult, _directory, true));
+        Assert.Empty(await ReadFactsAsync(missingDatabase));
+        Assert.Equal(0, await ReadReceiptCountAsync(missingDatabase));
+    }
+
+    [Fact]
     public async Task DigestPinnedXbrlOccurrences_UpdateOnlyTheirExplicitExistingRows()
     {
         var templatePath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");

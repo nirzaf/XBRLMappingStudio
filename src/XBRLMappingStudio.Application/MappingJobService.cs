@@ -2120,7 +2120,7 @@ public sealed class MappingJobService
         if (changedInput is not null)
             return BlockedDestinationPreview(0, $"{DiagnosticCodes.IoInputIdentityChanged}: {SourceIdentityMismatchMessage(changedInput)}");
 
-        var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
+        var prepared = PrepareSqliteDestination(project, result, workspaceRoot, cancellationToken);
         SqliteTargetTableSchema schema;
         try
         {
@@ -2170,7 +2170,7 @@ public sealed class MappingJobService
         CancellationToken cancellationToken = default,
         Action<string, string>? onIntentPrepared = null)
     {
-        var prepared = PrepareSqliteDestination(project, result, workspaceRoot);
+        var prepared = PrepareSqliteDestination(project, result, workspaceRoot, cancellationToken);
         var plan = prepared.Plan;
         var manifest = result.Manifest;
         var gate = PublicationGate.Evaluate(project, _profile, allowSyntheticProfile, manifest.OperationId, _approvalTrustPolicy);
@@ -2241,7 +2241,8 @@ public sealed class MappingJobService
     private PreparedSqliteDestination PrepareSqliteDestination(
         MappingProject project,
         JobResult result,
-        string workspaceRoot)
+        string workspaceRoot,
+        CancellationToken cancellationToken)
     {
         var plan = project.Destination ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
@@ -2305,7 +2306,8 @@ public sealed class MappingJobService
         var targetRowBindings = project.Bindings
             .Where(binding => binding.Configuration is not null
                 && (binding.Configuration.ContainsKey("targetRowId")
-                    || binding.Configuration.ContainsKey("targetRows")))
+                    || binding.Configuration.ContainsKey("targetRows")
+                    || binding.Configuration.ContainsKey("targetAspectMatch")))
             .ToArray();
         if (targetRowBindings.Length > 1)
             throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
@@ -2333,7 +2335,46 @@ public sealed class MappingJobService
                     "XBRL target-row selection reportDigest does not match the replayable source report recorded for this run.",
                     manifest.RunId, plan.Locator);
 
-            if (configuration.ContainsKey("targetRows"))
+            if (StringComparer.Ordinal.Equals(ConfigurationString(configuration.GetValueOrDefault("targetAspectMatch")), "true"))
+            {
+                if (configuration.ContainsKey("targetRowId") || configuration.ContainsKey("targetRows"))
+                    throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                        "Aspect-derived target matching cannot be combined with explicit target-row mappings.", DiagnosticStage.Validation);
+                var sourcePath = reportInputIdentity.OriginalPath;
+                if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "The digest-pinned XBRL source report is unavailable for aspect-derived target matching.", DiagnosticStage.Validation);
+                var sourceConfiguration = configuration.ToDictionary(pair => pair.Key,
+                    pair => ConfigurationString(pair.Value) ?? "", StringComparer.Ordinal);
+                var source = new SourceConnection(binding.BindingId, binding.Kind, sourcePath, sourceConfiguration);
+                var selectedOccurrences = new XbrlReportAdapter().ReadSelectedOccurrenceIds(source, _profile, cancellationToken);
+                if (result.Facts.Count != selectedOccurrences.Count || records.Count != selectedOccurrences.Count)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Every selected XBRL occurrence must map to exactly one fact before aspect-derived update-only publication.", DiagnosticStage.Validation);
+                var expected = selectedOccurrences.ToHashSet(StringComparer.Ordinal);
+                var consumed = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var fact in result.Facts)
+                {
+                    var locators = fact.SourceTransformationPaths
+                        .Where(path => StringComparer.Ordinal.Equals(path.Source.SourceId, binding.BindingId))
+                        .Select(path => path.Source.Locator).Distinct(StringComparer.Ordinal).ToArray();
+                    if (locators.Length != 1)
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            "Each mapped fact must identify exactly one selected XBRL source occurrence.", DiagnosticStage.Validation);
+                    var occurrenceId = binding.BindingId + "#f" + NormalizeReportOccurrenceOrdinal(locators[0]);
+                    if (!expected.Contains(occurrenceId) || !consumed.Add(occurrenceId))
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            "Mapped facts must correspond one-to-one with the selected XBRL occurrences.", DiagnosticStage.Validation);
+                }
+                if (consumed.Count != expected.Count)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Some selected XBRL occurrences did not produce a mapped fact; update-only publication was refused.", DiagnosticStage.Validation);
+                if (records.Select(record => record.Fields.GetValueOrDefault("fact_key")?.Raw as string)
+                    .Where(key => key is not null).Distinct(StringComparer.Ordinal).Count() != records.Count)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Aspect-derived fact keys are not unique; update-only publication was refused.", DiagnosticStage.Validation);
+            }
+            else if (configuration.ContainsKey("targetRows"))
             {
                 var targetRowsJson = ConfigurationString(configuration.GetValueOrDefault("targetRows"));
                 if (targetRowsJson is null)

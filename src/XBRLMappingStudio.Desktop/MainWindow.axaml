@@ -104,6 +104,13 @@
                      AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
                      x:Name="XbrlTargetRowsJsonTextBox"
                      AutomationProperties.Name="Multiple existing SQLite target rows JSON" />
+            <CheckBox Content="Match existing SQLite rows by XBRL aspects (fact_key)"
+                      IsChecked="{Binding XbrlTargetAspectMatch, Mode=TwoWay}"
+                      IsThreeState="False"
+                      x:Name="XbrlTargetAspectMatchCheckBox"
+                      AutomationProperties.Name="Match SQLite target rows by XBRL aspects" />
+            <TextBlock Text="Uses deterministic aspect-derived fact_key values. Requires update-only SQLite; missing target rows are never inserted."
+                       TextWrapping="Wrap" FontSize="10" />
             <Expander Header="Optional fact aspect filters" IsExpanded="False">
               <StackPanel Spacing="3" Margin="0,4,0,0">
                 <TextBox Text="{Binding XbrlConceptFilter, Mode=TwoWay}"
