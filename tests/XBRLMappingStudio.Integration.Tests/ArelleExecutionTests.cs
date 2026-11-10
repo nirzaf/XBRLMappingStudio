@@ -760,8 +760,8 @@ public sealed class ArelleExecutionTests
             await worker.HandshakeAsync(CancellationToken.None);
             var events = new List<WorkerProgressEvent>();
             var reporter = new InlineWorkerProgress(events);
-            var response = await worker.RequestAsync(TestWorkerRequest("progress-op"), reporter,
-                CancellationToken.None);
+            var response = await worker.RequestAsync(
+                TestWorkerRequest("progress-op", TimeSpan.FromSeconds(30)), reporter, CancellationToken.None);
 
             Assert.Equal(WorkerStatus.Success, response.Status);
             Assert.Equal(new[] { new WorkerProgressEvent("progress-op", WorkerProgressStage.ValidatingReport) }, events);
