@@ -32,7 +32,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     {
         "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
-        "unit", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
+        "unit", "lang", "nil", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
         "maxInputBytes"
     };
 
@@ -104,6 +104,9 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             .Where(item => selection.Unit is null
                 || StringComparer.Ordinal.Equals(item.Fact.Unit?.ToString(), selection.Unit)
                 || StringComparer.Ordinal.Equals(item.Fact.CompoundUnit?.CanonicalKey, selection.Unit))
+            .Where(item => selection.Language is null
+                || StringComparer.Ordinal.Equals(item.Fact.Language, selection.Language))
+            .Where(item => selection.IsNil is null || item.Fact.IsNil == selection.IsNil)
             .Where(item => selection.Dimensions.All(filter => item.Fact.Dimensions.Any(dimension => dimension.IsExplicit
                 && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
                 && StringComparer.Ordinal.Equals(dimension.MemberName, filter.Value))))
@@ -170,6 +173,15 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         if (periodStart is not null && periodEnd is not null && periodStart >= periodEnd)
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report selection 'periodStart' must be before 'periodEnd'.");
+
+        bool? isNil = Get("nil") switch
+        {
+            null => null,
+            "true" => true,
+            "false" => false,
+            _ => throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'nil' must be exactly 'true' or 'false'.")
+        };
 
         var dimensions = new Dictionary<string, string>(StringComparer.Ordinal);
         if (configuration.TryGetValue("dimensionFilters", out var dimensionFilters))
@@ -272,7 +284,7 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
         return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,
-            instantDate, periodStart, periodEnd, Get("unit"), dimensions, typedDimensions);
+            instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions);
     }
 
     private static IReadOnlyList<XbrlFact> Read(SourceConnection connection, CancellationToken cancellationToken)
@@ -374,6 +386,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         DateOnly? PeriodStart,
         DateOnly? PeriodEnd,
         string? Unit,
+        string? Language,
+        bool? IsNil,
         IReadOnlyDictionary<string, string> Dimensions,
         IReadOnlyDictionary<string, string> TypedDimensions)
     {
@@ -381,10 +395,11 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             => OccurrenceId is not null || Concept is not null || EntityScheme is not null
                 || EntityIdentifier is not null || Period is not null || PeriodKind is not null
                 || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
-                || Unit is not null || Dimensions.Count != 0 || TypedDimensions.Count != 0;
+                || Unit is not null || Language is not null || IsNil is not null
+                || Dimensions.Count != 0 || TypedDimensions.Count != 0;
 
         public static ReportSelection Empty { get; }
-            = new(null, null, null, null, null, null, null, null, null, null,
+            = new(null, null, null, null, null, null, null, null, null, null, null, null,
                 new Dictionary<string, string>(StringComparer.Ordinal),
                 new Dictionary<string, string>(StringComparer.Ordinal));
     }

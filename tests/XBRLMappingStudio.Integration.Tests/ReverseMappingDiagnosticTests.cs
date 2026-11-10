@@ -91,6 +91,82 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
+    public async Task XbrlReportAdapter_FiltersByLanguageAndNilState()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-language-nil-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var reportPath = Path.Combine(directory, "language-nil.json");
+            var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            var facts = new[]
+            {
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+                    EntityScheme = "https://example.test/entity", EntityIdentifier = "ACME-1",
+                    Period = period, TextValue = "Example entity", Language = "en"
+                },
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
+                    EntityScheme = "https://example.test/entity", EntityIdentifier = "ACME-1",
+                    Period = period, TextValue = "Entité exemple", Language = "fr"
+                },
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("Revenue"),
+                    EntityScheme = "https://example.test/entity", EntityIdentifier = "ACME-1",
+                    Period = period, Unit = new XbrlUnit("QAR"), IsNil = true
+                },
+                new XbrlFact
+                {
+                    ConceptName = SyntheticProfile.Qualified("Revenue"),
+                    EntityScheme = "https://example.test/entity", EntityIdentifier = "ACME-1",
+                    Period = period, Unit = new XbrlUnit("QAR"), Value = 0m
+                }
+            };
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, facts));
+
+            var adapter = new XbrlReportAdapter();
+            async Task<IReadOnlyList<DataRecord>> ReadRows(Dictionary<string, string> filters)
+            {
+                var connection = new SourceConnection("report", adapter.Kind, reportPath, filters);
+                var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+                var rows = new List<DataRecord>();
+                await foreach (var row in adapter.ReadFullAsync(connection, schema, CancellationToken.None))
+                    rows.Add(row);
+                return rows;
+            }
+
+            var englishRows = await ReadRows(new(StringComparer.Ordinal) { ["lang"] = "en" });
+            var english = Assert.Single(englishRows);
+            Assert.Equal("report#f1", english.RowId);
+            Assert.Equal("en", english["lang"].AsString());
+
+            var nilRows = await ReadRows(new(StringComparer.Ordinal) { ["nil"] = "true" });
+            var nil = Assert.Single(nilRows);
+            Assert.Equal(SyntheticProfile.Qualified("Revenue"), nil["concept"].AsString());
+            Assert.True(nil["nil"].AsBoolean());
+
+            var nonNilRows = await ReadRows(new(StringComparer.Ordinal) { ["nil"] = "false" });
+            Assert.Equal(3, nonNilRows.Count);
+            Assert.All(nonNilRows, row => Assert.False(row["nil"].AsBoolean()));
+
+            var invalid = new SourceConnection("report", adapter.Kind, reportPath,
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["nil"] = "yes" });
+            var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+                await adapter.InspectSchemaAsync(invalid, CancellationToken.None));
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task XbrlReportAdapter_FiltersByStructuredPeriodPartsAndPreservesRepeatedOccurrences()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-period-filter-" + Guid.NewGuid().ToString("N"));
