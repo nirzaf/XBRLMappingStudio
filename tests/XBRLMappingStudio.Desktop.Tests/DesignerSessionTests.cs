@@ -722,6 +722,70 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task DesktopCanSaveReopenAndClearAspectDerivedUpdateOnlySelection()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-xbrl-aspect-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var reportPath = Path.Combine(directory, "report.xbrl.json");
+        var projectPath = Path.Combine(directory, "mapping.xmap");
+        var profile = SyntheticProfile.Build();
+        var report = OimSerializer.Serialize(profile, new[]
+        {
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "https://example.test/entity",
+                EntityIdentifier = "ACME-1",
+                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Unit = new XbrlUnit("QAR"),
+                Value = 12m
+            }
+        });
+        try
+        {
+            await File.WriteAllTextAsync(reportPath, report);
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with { Kind = "xbrl-report" };
+            project.Destination = new DestinationPlan
+            {
+                Kind = DestinationPlanValidator.SupportedKind,
+                Locator = "target.db",
+                Table = "facts",
+                BusinessKey = new List<string> { "fact_key" },
+                WriteMode = "update-only"
+            };
+            var viewModel = new MainWindowViewModel(project);
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadSourceAsync(reportPath);
+            viewModel.XbrlTargetAspectMatch = true;
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+
+            var binding = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.True(binding.Configuration.ContainsKey("targetAspectMatch"), viewModel.StatusText);
+            Assert.Equal("true", binding.Configuration["targetAspectMatch"]?.ToString());
+            Assert.Equal("sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(reportPath))).ToLowerInvariant(),
+                binding.Configuration["reportDigest"]?.ToString());
+            Assert.Contains("aspect-derived fact_key", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+            viewModel.SaveProjectTo(projectPath);
+
+            var dialog = new TestProjectFileDialog(null) { ProjectOpenPath = projectPath };
+            var reopened = new MainWindowViewModel(Project(), dialog);
+            await reopened.OpenProjectAsync();
+            Assert.True(reopened.XbrlTargetAspectMatch);
+            Assert.Equal("true", Assert.Single(reopened.Session.Project.Bindings).Configuration["targetAspectMatch"]?.ToString());
+            Assert.False(reopened.IsProjectDirty);
+
+            reopened.ClearXbrlOccurrenceSelection();
+            Assert.False(reopened.XbrlTargetAspectMatch);
+            Assert.DoesNotContain("targetAspectMatch", Assert.Single(reopened.Session.Project.Bindings).Configuration.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DesktopCanAuthorAspectFiltersForMultipleXbrlOccurrences()
     {
         var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-xbrl-aspects-" + Guid.NewGuid().ToString("N"));

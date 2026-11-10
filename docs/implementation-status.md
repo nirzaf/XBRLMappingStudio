@@ -624,8 +624,10 @@ unique fact records. It retains the existing deterministic aspect-derived
 `fact_key`; the publisher updates matching rows only, so a missing target is a
 conflict and cannot be inserted. The integration test covers a successful
 existing-row update and missing-row refusal with no facts or receipt written.
-The Desktop Release suite passed 178/178 and the focused SQLite workflow suite
-passed 30/30. This implements aspect-derived matching for XBRL report reverse
+The Desktop Release suite passed 178/178 before the persistence follow-up; the
+new focused save/reopen/clear regression passed 1/1, bringing the Desktop suite
+to 179 tests when combined. The focused SQLite workflow suite passed 30/30.
+This implements aspect-derived matching for XBRL report reverse
 mapping; arbitrary ledger joins, broader target-key policies, tuples, real
 taxonomy qualification, and native visual acceptance remain open.
 
