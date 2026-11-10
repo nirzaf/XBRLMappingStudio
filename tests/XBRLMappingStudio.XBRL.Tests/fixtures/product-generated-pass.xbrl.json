@@ -10,7 +10,7 @@
       "xs": "http://www.w3.org/2001/XMLSchema"
     },
     "taxonomy": [
-      "arelle-test-taxonomy.xsd"
+      "xbrl-cross-format-taxonomy.xsd"
     ]
   },
   "facts": {
@@ -69,6 +69,17 @@
         "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
         "period": "2026-01-01T00:00:00",
         "unit": "iso4217:QAR"
+      },
+      "decimals": 2
+    },
+    "revenue-emea": {
+      "value": "72.25",
+      "dimensions": {
+        "concept": "synthetic:RevenueByRegion",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:USD",
+        "synthetic:RegionAxis": "synthetic:EMEA"
       },
       "decimals": 2
     }

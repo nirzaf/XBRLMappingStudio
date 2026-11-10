@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+               xmlns:xlink="http://www.w3.org/1999/xlink"
+               xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
+               xmlns:synthetic="urn:synthetic:finance:1.0">
+  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/all"
+                   xlink:type="simple"
+                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#all"/>
+  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
+                   xlink:type="simple"
+                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#hypercube-dimension"/>
+  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/dimension-domain"
+                   xlink:type="simple"
+                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#dimension-domain"/>
+  <link:arcroleRef arcroleURI="http://xbrl.org/int/dim/arcrole/domain-member"
+                   xlink:type="simple"
+                   xlink:href="http://www.xbrl.org/2005/xbrldt-2005.xsd#domain-member"/>
+  <link:definitionLink xlink:type="extended"
+                       xlink:role="http://www.xbrl.org/2003/role/link">
+    <link:loc xlink:type="locator" xlink:href="xbrl-cross-format-taxonomy.xsd#RevenueByRegion" xlink:label="revenue"/>
+    <link:loc xlink:type="locator" xlink:href="xbrl-cross-format-taxonomy.xsd#RevenueByRegionTable" xlink:label="hypercube"/>
+    <link:loc xlink:type="locator" xlink:href="xbrl-cross-format-taxonomy.xsd#RegionAxis" xlink:label="axis"/>
+    <link:loc xlink:type="locator" xlink:href="xbrl-cross-format-taxonomy.xsd#RegionDomain" xlink:label="domain"/>
+    <link:loc xlink:type="locator" xlink:href="xbrl-cross-format-taxonomy.xsd#EMEA" xlink:label="emea"/>
+    <link:definitionArc xlink:type="arc"
+                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/all"
+                        xlink:from="revenue" xlink:to="hypercube" order="1"
+                        xbrldt:contextElement="segment" xbrldt:closed="false"/>
+    <link:definitionArc xlink:type="arc"
+                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/hypercube-dimension"
+                        xlink:from="hypercube" xlink:to="axis" order="1"/>
+    <link:definitionArc xlink:type="arc"
+                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/dimension-domain"
+                        xlink:from="axis" xlink:to="domain" order="1"/>
+    <link:definitionArc xlink:type="arc"
+                        xlink:arcrole="http://xbrl.org/int/dim/arcrole/domain-member"
+                        xlink:from="domain" xlink:to="emea" order="1"/>
+  </link:definitionLink>
+</link:linkbase>

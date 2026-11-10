@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:xbrli="http://www.xbrl.org/2003/instance"
+           xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
+           xmlns:link="http://www.xbrl.org/2003/linkbase"
+           xmlns:xlink="http://www.w3.org/1999/xlink"
+           targetNamespace="urn:synthetic:finance:1.0"
+           xmlns:synthetic="urn:synthetic:finance:1.0"
+           elementFormDefault="qualified">
+  <xs:import namespace="http://www.xbrl.org/2003/instance"
+             schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <xs:import namespace="http://xbrl.org/2005/xbrldt"
+             schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>
+  <xs:annotation>
+    <xs:appinfo>
+      <link:linkbaseRef xlink:type="simple"
+                        xlink:href="xbrl-cross-format-taxonomy-def.xml"
+                        xlink:role="http://www.xbrl.org/2003/role/definitionLinkbaseRef"
+                        xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+    </xs:appinfo>
+  </xs:annotation>
+  <xs:element name="Assets" id="Assets" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
+  <xs:element name="Liabilities" id="Liabilities" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
+  <xs:element name="Revenue" id="Revenue" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="RevenueByRegion" id="RevenueByRegion" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="Expenses" id="Expenses" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="NetIncome" id="NetIncome" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="EntityRegistrantName" id="EntityRegistrantName" type="xbrli:stringItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="RegionAxis" id="RegionAxis" type="xbrli:stringItemType"
+              substitutionGroup="xbrldt:dimensionItem" xbrli:periodType="duration"
+              abstract="true" nillable="true"/>
+  <xs:element name="RegionDomain" id="RegionDomain" type="xbrli:stringItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+              abstract="true" nillable="true"/>
+  <xs:element name="EMEA" id="EMEA" type="xbrli:stringItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <xs:element name="RevenueByRegionTable" id="RevenueByRegionTable" type="xbrli:stringItemType"
+              substitutionGroup="xbrldt:hypercubeItem" xbrli:periodType="duration"
+              abstract="true" nillable="true"/>
+</xs:schema>

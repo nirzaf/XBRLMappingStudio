@@ -1709,7 +1709,7 @@ print("offline-network-denied")
         self.assertNotEqual(path, observed["path"])
         self.assertTrue(observed["taxonomy_exists"])
         schema_ref = observed["root"].find("{http://www.xbrl.org/2003/linkbase}schemaRef")
-        self.assertEqual("arelle-test-taxonomy.xsd",
+        self.assertEqual("xbrl-cross-format-taxonomy.xsd",
                          schema_ref.get("{http://www.w3.org/1999/xlink}href"))
 
     def test_staged_xml_path_rejects_outside_directory_and_bad_digest(self):
@@ -1814,8 +1814,10 @@ print("offline-network-denied")
             workspace = Path(temporary)
             report_path = workspace / "product-generated-pass.xbrl.xml"
             shutil.copyfile(FIXTURES / "product-generated-pass.xbrl.xml", report_path)
-            shutil.copyfile(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd",
-                            workspace / "arelle-test-taxonomy.xsd")
+            shutil.copyfile(TAXONOMY_ROOT / "xbrl-cross-format-taxonomy.xsd",
+                            workspace / "xbrl-cross-format-taxonomy.xsd")
+            shutil.copyfile(TAXONOMY_ROOT / "xbrl-cross-format-taxonomy-def.xml",
+                            workspace / "xbrl-cross-format-taxonomy-def.xml")
 
             ok, logs, concept_count, _loaded_plugins = arelle_worker.run_arelle(report_path, self.args)
 
@@ -1837,8 +1839,10 @@ print("offline-network-denied")
 
             xml_path = workspace / "product-generated-pass.xbrl.xml"
             shutil.copyfile(FIXTURES / "product-generated-pass.xbrl.xml", xml_path)
-            shutil.copyfile(TAXONOMY_ROOT / "arelle-test-taxonomy.xsd",
-                            workspace / "arelle-test-taxonomy.xsd")
+            shutil.copyfile(TAXONOMY_ROOT / "xbrl-cross-format-taxonomy.xsd",
+                            workspace / "xbrl-cross-format-taxonomy.xsd")
+            shutil.copyfile(TAXONOMY_ROOT / "xbrl-cross-format-taxonomy-def.xml",
+                            workspace / "xbrl-cross-format-taxonomy-def.xml")
 
             def occurrences(report_path):
                 options = arelle_worker.RuntimeOptions(
@@ -1851,7 +1855,7 @@ print("offline-network-denied")
                     logs = session.get_log_messages()
                     self.assertTrue(ok, logs)
                     facts = [fact for model in session.get_models() for fact in model.facts]
-                    self.assertEqual(6, len(facts), logs)
+                    self.assertEqual(7, len(facts), logs)
 
                     def qname_key(qname):
                         return qname.namespaceURI, qname.localName
@@ -1914,6 +1918,13 @@ print("offline-network-denied")
              ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
              ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
              "123.450", "3", False, None, ()),
+            (("urn:synthetic:finance:1.0", "RevenueByRegion"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
+             "72.25", "2", False, None,
+             ((('urn:synthetic:finance:1.0', 'RegionAxis'),
+               ('urn:synthetic:finance:1.0', 'EMEA')),)),
         ], json_occurrences)
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,

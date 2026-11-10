@@ -530,15 +530,17 @@ native desktop profile-adoption, or production taxonomy rights.
 
 ## XBR-05 multi-aspect Arelle cross-format follow-on (2026-11-10)
 
-The paired Arelle-validated product fixtures now cover six supported fact
+The paired Arelle-validated product fixtures now cover seven supported fact
 occurrences: text with language, two repeated numeric facts with exact lexical
-precision, numeric zero, nil, and an instant monetary fact. The JSON/XML Arelle
+precision, numeric zero, nil, an instant monetary fact, and a duration monetary
+fact carrying the explicit `RegionAxis=EMEA` dimension. The paired synthetic
+taxonomy declares the dimensional hypercube and member network. The JSON/XML Arelle
 oracle compares expanded concept and entity, normalized period, unit, value,
 decimals, language, nil state, and dimensions; nil values are normalized by the
 nil flag. The fixture's JSON instant uses the next-day midnight boundary that
 corresponds to an XML date-only instant, per [XBRL date semantics](https://www.xbrl.org/dates-in-xbrl/).
 The C# fixture test also compares both imported forms and freshly serialized
-forms to the same six-occurrence oracle. The focused Arelle test passed 1/1, the
+forms to the same seven-occurrence oracle. The focused Arelle test passed 1/1, the
 full pinned Python worker suite passed 82 tests with one Windows symlink
 privilege skip, and the full XBRL Release suite passed 211/211. These remain
 synthetic-profile results; real-taxonomy and full OIM conformance gates remain

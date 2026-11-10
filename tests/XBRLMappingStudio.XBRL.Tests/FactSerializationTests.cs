@@ -752,11 +752,17 @@ public sealed class FactSerializationTests
         {
             ProfileId = basis.ProfileId,
             Digest = basis.Digest,
-            Concepts = basis.Concepts,
+            Concepts = basis.Concepts.Append(new ConceptMetadata(
+                "synthetic:RevenueByRegion", "urn:synthetic:finance:1.0", "RevenueByRegion",
+                "Revenue by Region", "monetary", "duration", false)).ToArray(),
             SupportedUnits = basis.SupportedUnits,
             NamespaceUris = basis.NamespaceUris,
-            TaxonomyUrls = new[] { "arelle-test-taxonomy.xsd" },
-            PackageHashes = basis.PackageHashes
+            TaxonomyUrls = new[] { "xbrl-cross-format-taxonomy.xsd" },
+            PackageHashes = basis.PackageHashes,
+            DimensionDomains = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                ["synthetic:RegionAxis"] = new[] { "synthetic:EMEA" }
+            }
         };
         var duration = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
         var facts = new[]
@@ -818,6 +824,20 @@ public sealed class FactSerializationTests
                 Unit = new XbrlUnit("QAR"),
                 Value = 500.00m,
                 Decimals = 2
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("RevenueByRegion"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = duration,
+                Unit = new XbrlUnit("USD"),
+                Value = 72.25m,
+                Decimals = 2,
+                Dimensions = new[]
+                {
+                    new Dimension("synthetic:RegionAxis", "synthetic:EMEA")
+                }
             }
         };
 

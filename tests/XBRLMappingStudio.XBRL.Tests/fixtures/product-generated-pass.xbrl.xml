@@ -3,9 +3,10 @@
              xmlns:link="http://www.xbrl.org/2003/linkbase"
              xmlns:xlink="http://www.w3.org/1999/xlink"
              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
              xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
              xmlns:synthetic="urn:synthetic:finance:1.0">
-  <link:schemaRef xlink:type="simple" xlink:href="arelle-test-taxonomy.xsd" />
+  <link:schemaRef xlink:type="simple" xlink:href="xbrl-cross-format-taxonomy.xsd" />
   <xbrli:context id="c1">
     <xbrli:entity>
       <xbrli:identifier scheme="http://standards.iso.org/iso/17442">00EHHQ2ZHDCFXJCPCL49</xbrli:identifier>
@@ -23,6 +24,18 @@
       <xbrli:instant>2025-12-31</xbrli:instant>
     </xbrli:period>
   </xbrli:context>
+  <xbrli:context id="c3">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://standards.iso.org/iso/17442">00EHHQ2ZHDCFXJCPCL49</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="synthetic:RegionAxis">synthetic:EMEA</xbrldi:explicitMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
   <xbrli:unit id="u1">
     <xbrli:measure>iso4217:USD</xbrli:measure>
   </xbrli:unit>
@@ -35,4 +48,5 @@
   <synthetic:NetIncome contextRef="c1" unitRef="u1" decimals="0">0</synthetic:NetIncome>
   <synthetic:Expenses contextRef="c1" unitRef="u2" xsi:nil="true" />
   <synthetic:Assets contextRef="c2" unitRef="u2" decimals="2">500.00</synthetic:Assets>
+  <synthetic:RevenueByRegion contextRef="c3" unitRef="u1" decimals="2">72.25</synthetic:RevenueByRegion>
 </xbrli:xbrl>
