@@ -596,5 +596,18 @@ occurrence values remain unchanged, preserving saved-project compatibility.
 `XbrlReportAdapter_BindsOccurrenceSelectionToExactReportBytes` verifies initial
 selection and changed-input refusal. All 17 `ReverseMappingDiagnosticTests`
 passed, and the Windows Release Integration suite passed 525 tests with 7
-environment-gated Arelle skips. Target-row joins/updates, tuple mapping, complex
-typed-domain flattening, and complete loss accounting remain open.
+environment-gated Arelle skips. Exact-head CI
+[42753928284](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42753928284)
+passed repository hygiene, Windows and Ubuntu Release suites, Windows memory and
+cancellation qualifications, and pinned Arelle worker integration on
+`dbcec0ccc6181bff7b3cf0ac0398a6fd2497ab61`. Target-row joins/updates, tuple
+mapping, complex typed-domain flattening, and complete loss accounting remain
+open.
+
+## DST-04 native retest availability (2026-11-10)
+
+The user confirmed the Windows desktop was unlocked, but the next computer-use
+observation showed the Windows lock screen. No application controls were
+available, so no DST-04 UI actions or assertions were made. Native acceptance
+remains open; the previously recorded bounded synthetic native evidence above
+is unchanged.
