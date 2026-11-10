@@ -15,12 +15,12 @@ public sealed class AuditPersistenceTests
     private sealed class RecordingSink : IAuditSink
     {
         public List<(AuditRecord Record, AuditContext Context)> Rows { get; } = new();
-        public bool Throw;
+        public Exception? Failure;
         public bool Cancel;
         public void Append(AuditRecord record, AuditContext context)
         {
-            if (Cancel) throw new OperationCanceledException("simulated sink cancellation");
-            if (Throw) throw new IOException("simulated sink failure");
+            if (Cancel) throw new OperationCanceledException("secret=/private/customer/seed 123456.78");
+            if (Failure is not null) throw Failure;
             Rows.Add((record, context));
         }
     }
@@ -120,7 +120,7 @@ public sealed class AuditPersistenceTests
     [Fact]
     public void SinkFault_IsCapturedOnLog_AndRollsBackTheAcceptedDraft()
     {
-        var sink = new RecordingSink { Throw = true };
+        var sink = new RecordingSink { Failure = new IOException("simulated sink failure") };
         var session = NewSession(sink);
         session.LoadSuggestions(new[]
         {
@@ -136,7 +136,7 @@ public sealed class AuditPersistenceTests
         Assert.False(session.CanUndo);
         Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
         Assert.Single(session.Audit.PersistenceFaults);
-        Assert.Contains("simulated sink failure", session.Audit.PersistenceFaults[0]);
+        Assert.Equal(nameof(IOException), session.Audit.PersistenceFaults[0]);
     }
 
     [Fact]
@@ -158,13 +158,15 @@ public sealed class AuditPersistenceTests
         Assert.False(session.CanUndo);
         Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
         Assert.Single(session.Audit.PersistenceFaults);
-        Assert.Contains("simulated sink cancellation", session.Audit.PersistenceFaults[0]);
+        Assert.Equal(nameof(OperationCanceledException), session.Audit.PersistenceFaults[0]);
+        Assert.DoesNotContain("/private/customer/seed", session.Audit.PersistenceFaults[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("123456.78", session.Audit.PersistenceFaults[0], StringComparison.Ordinal);
     }
 
     [Fact]
     public void BatchSinkFault_RollsBackEveryDraftAndDisposition()
     {
-        var sink = new RecordingSink { Throw = true };
+        var sink = new RecordingSink { Failure = new IOException("simulated sink failure") };
         var session = NewSession(sink);
         session.LoadSuggestions(new[]
         {

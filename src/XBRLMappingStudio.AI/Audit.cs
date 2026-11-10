@@ -74,7 +74,7 @@ public sealed class AuditLog
     private readonly IAuditSink? _sink;
     private readonly Func<AuditRecord, AuditContext?>? _contextFactory;
 
-    /// <summary>AI06: sinks that threw during Append; each entry is the exception message.
+    /// <summary>AI06: sinks that threw during Append; entries contain only exception types.
     /// The in-memory log is still authoritative, but a non-empty list means durable audit
     /// history is incomplete and must be reported in the run manifest / support bundle.</summary>
     public IReadOnlyList<string> PersistenceFaults => _persistenceFaults;
@@ -125,7 +125,9 @@ public sealed class AuditLog
             // as a persistence fault so the governed SuggestionSession can roll back
             // the associated state mutation instead of leaking it past the fail-closed
             // audit gate.
-            _persistenceFaults.Add(ex.Message);
+            // Provider exception text can contain paths or other untrusted data. Keep
+            // the failure observable without persisting the provider's message.
+            _persistenceFaults.Add(ex.GetType().Name);
         }
     }
 
