@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using XBRLMappingStudio.Adapters.Json;
 using XBRLMappingStudio.Adapters.Xml;
@@ -9,25 +10,20 @@ namespace XBRLMappingStudio.Adapters.Xbrl;
 /// <summary>Shared byte-bounded reader for xBRL report adapters and CLI validation.</summary>
 public static class XbrlReportInputReader
 {
-    public static long ResolveMaximumInputBytes(string path, string? configuredMaximumBytes = null)
-    {
-        var isXml = string.Equals(Path.GetExtension(path), ".xml", StringComparison.OrdinalIgnoreCase);
-        var defaultLimit = isXml ? XmlAdapter.DefaultMaximumInputBytes : JsonAdapter.DefaultMaximumInputBytes;
-        if (configuredMaximumBytes is null) return defaultLimit;
-
-        var absoluteLimit = JsonAdapter.Options.AbsoluteMaximumInputBytes;
-        if (!long.TryParse(configuredMaximumBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-            || value < 1 || value > absoluteLimit)
-            throw new AdapterException(DiagnosticCodes.IoInputBudgetExceeded,
-                $"Configured XBRL report input limit must be between 1 and {absoluteLimit} bytes.",
-                isInputBudgetExceeded: true);
-        return value;
-    }
-
-    public static string ReadText(
+    public static (string Text, string Digest) ReadTextWithDigest(
         string path,
         long maximumBytes,
         CancellationToken cancellationToken = default)
+    {
+        var input = ReadCore(path, maximumBytes, includeDigest: true, cancellationToken: cancellationToken);
+        return (input.Text, input.Digest!);
+    }
+
+    private static (string Text, string? Digest) ReadCore(
+        string path,
+        long maximumBytes,
+        bool includeDigest,
+        CancellationToken cancellationToken)
     {
         var absoluteLimit = JsonAdapter.Options.AbsoluteMaximumInputBytes;
         if (maximumBytes is < 1 || maximumBytes > absoluteLimit)
@@ -52,11 +48,36 @@ public static class XbrlReportInputReader
             content.Write(buffer, 0, read);
         }
 
+        var digest = includeDigest
+            ? "sha256:" + Convert.ToHexString(
+                SHA256.HashData(content.GetBuffer().AsSpan(0, checked((int)content.Length)))).ToLowerInvariant()
+            : null;
         content.Position = 0;
         using var reader = new StreamReader(content, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
             bufferSize: 4096, leaveOpen: true);
-        return reader.ReadToEnd();
+        return (reader.ReadToEnd(), digest);
     }
+
+    public static long ResolveMaximumInputBytes(string path, string? configuredMaximumBytes = null)
+    {
+        var isXml = string.Equals(Path.GetExtension(path), ".xml", StringComparison.OrdinalIgnoreCase);
+        var defaultLimit = isXml ? XmlAdapter.DefaultMaximumInputBytes : JsonAdapter.DefaultMaximumInputBytes;
+        if (configuredMaximumBytes is null) return defaultLimit;
+
+        var absoluteLimit = JsonAdapter.Options.AbsoluteMaximumInputBytes;
+        if (!long.TryParse(configuredMaximumBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+            || value < 1 || value > absoluteLimit)
+            throw new AdapterException(DiagnosticCodes.IoInputBudgetExceeded,
+                $"Configured XBRL report input limit must be between 1 and {absoluteLimit} bytes.",
+                isInputBudgetExceeded: true);
+        return value;
+    }
+
+    public static string ReadText(
+        string path,
+        long maximumBytes,
+        CancellationToken cancellationToken = default)
+        => ReadCore(path, maximumBytes, includeDigest: false, cancellationToken: cancellationToken).Text;
 
     public static string ReadText(string path, CancellationToken cancellationToken = default)
         => ReadText(path, ResolveMaximumInputBytes(path), cancellationToken);

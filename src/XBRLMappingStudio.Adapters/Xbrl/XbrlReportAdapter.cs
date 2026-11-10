@@ -35,7 +35,7 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
 
     private static readonly HashSet<string> SupportedSelectionKeys = new(StringComparer.Ordinal)
     {
-        "occurrenceId", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
+        "occurrenceId", "reportDigest", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
         "unit", "lang", "nil", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
         "maxInputBytes"
@@ -72,7 +72,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         int maxRows, FilingProfile? profile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection, cancellationToken, profile), profile);
+        var report = Read(connection, cancellationToken, profile);
+        var facts = Select(connection, report.Facts, report.Digest, profile);
         bool truncated = facts.Count > maxRows;
         var rows = facts.Take(maxRows).Select(item => ToRecord(connection, item.Fact, item.Index)).ToList();
         return Task.FromResult(new DataSample(schema, rows, truncated));
@@ -96,7 +97,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         FilingProfile? profile, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection, cancellationToken, profile), profile);
+        var report = Read(connection, cancellationToken, profile);
+        var facts = Select(connection, report.Facts, report.Digest, profile);
         for (int i = 0; i < facts.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -108,10 +110,13 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
     private static IReadOnlyList<(XbrlFact Fact, int Index)> Select(
         SourceConnection connection,
         IReadOnlyList<XbrlFact> facts,
+        string reportDigest,
         FilingProfile? profile)
     {
         var selection = ParseSelection(connection);
         var matched = facts.Select((fact, index) => (Fact: fact, Index: index))
+            .Where(item => selection.ReportDigest is null
+                || StringComparer.Ordinal.Equals(reportDigest, selection.ReportDigest))
             .Where(item => selection.OccurrenceId is null
                 || StringComparer.Ordinal.Equals(
                     $"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId))
@@ -310,31 +315,41 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report selection cannot apply explicit-member and typed-value filters to the same dimension axis.");
 
-        return new ReportSelection(Get("occurrenceId"), Get("concept"), Get("entityScheme"),
+        var reportDigest = Get("reportDigest");
+        if (reportDigest is not null && !IsSha256Digest(reportDigest))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'reportDigest' must be a lowercase sha256 digest.");
+
+        return new ReportSelection(Get("occurrenceId"), reportDigest, Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,
             instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions);
     }
 
-    private static IReadOnlyList<XbrlFact> Read(
+    private static bool IsSha256Digest(string value)
+        => value.Length == 71 && value.StartsWith("sha256:", StringComparison.Ordinal)
+            && value.AsSpan(7).IndexOfAnyExcept("0123456789abcdef") < 0;
+
+    private static (IReadOnlyList<XbrlFact> Facts, string Digest) Read(
         SourceConnection connection, CancellationToken cancellationToken, FilingProfile? profile)
     {
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
             $"XBRL report connection '{connection.SourceId}' has no file path.");
-        var text = XbrlReportInputReader.ReadText(path, GetMaximumInputBytes(connection), cancellationToken);
+        var input = XbrlReportInputReader.ReadTextWithDigest(path, GetMaximumInputBytes(connection), cancellationToken);
         var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
         try
         {
-            return ext switch
+            var facts = ext switch
             {
                 // XML parsing retains typed-member XML as opaque evidence with its expanded
                 // axis name. FactDimensionParser may promote only the bounded xs:string
                 // subset after the graph supplies the resolved profile.
-                ".xml" => XmlSerializer.ReadFacts(text),
+                ".xml" => XmlSerializer.ReadFacts(input.Text),
                 _ => profile is null
-                    ? OimSerializer.ReadFacts(text)
-                    : OimSerializer.ReadFacts(text, profile)
+                    ? OimSerializer.ReadFacts(input.Text)
+                    : OimSerializer.ReadFacts(input.Text, profile)
             };
+            return (facts, input.Digest);
         }
         catch (Exception ex) when (ex is InvalidOperationException or XbrlExportException or System.Text.Json.JsonException)
         {
@@ -457,6 +472,7 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
 
     private sealed record ReportSelection(
         string? OccurrenceId,
+        string? ReportDigest,
         string? Concept,
         string? EntityScheme,
         string? EntityIdentifier,
@@ -473,13 +489,14 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
     {
         public bool HasAspectFilters
             => OccurrenceId is not null || Concept is not null || EntityScheme is not null
+                || ReportDigest is not null
                 || EntityIdentifier is not null || Period is not null || PeriodKind is not null
                 || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
                 || Unit is not null || Language is not null || IsNil is not null
                 || Dimensions.Count != 0 || TypedDimensions.Count != 0;
 
         public static ReportSelection Empty { get; }
-            = new(null, null, null, null, null, null, null, null, null, null, null, null,
+        = new(null, null, null, null, null, null, null, null, null, null, null, null, null,
                 new Dictionary<string, string>(StringComparer.Ordinal),
                 new Dictionary<string, string>(StringComparer.Ordinal));
     }

@@ -308,6 +308,63 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
+    public async Task XbrlReportAdapter_BindsOccurrenceSelectionToExactReportBytes()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-report-digest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var path = Path.Combine(directory, "report.json");
+            var firstPeriod = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            var secondPeriod = XbrlPeriod.OfDuration(new DateOnly(2024, 1, 1), new DateOnly(2025, 1, 1));
+            XbrlFact Revenue(decimal value, XbrlPeriod period) => new()
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "https://example.test/entity",
+                EntityIdentifier = "ACME-1",
+                Period = period,
+                Unit = new XbrlUnit("QAR"),
+                Value = value
+            };
+
+            await File.WriteAllTextAsync(path,
+                OimSerializer.Serialize(profile, new[] { Revenue(12m, firstPeriod), Revenue(99m, secondPeriod) }));
+            var digest = "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path)))
+                .ToLowerInvariant();
+            var configuration = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["occurrenceId"] = "report#f1",
+                ["reportDigest"] = digest
+            };
+            var connection = new SourceConnection("report", "xbrl-report", path, configuration);
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var rows = new List<DataRecord>();
+            await foreach (var row in adapter.ReadFullAsync(connection, schema, profile, CancellationToken.None))
+                rows.Add(row);
+
+            var selected = Assert.Single(rows);
+            Assert.Equal("99", selected["value"].LexicalSource);
+            Assert.DoesNotContain(schema.Columns, column => column.Name == "reportDigest");
+
+            // An unchanged ordinal in different report bytes must not select a new fact.
+            await File.WriteAllTextAsync(path,
+                OimSerializer.Serialize(profile, new[] { Revenue(777m, secondPeriod), Revenue(12m, firstPeriod) }));
+            var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+            {
+                await foreach (var _ in adapter.ReadFullAsync(connection, schema, profile, CancellationToken.None)) { }
+            });
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+            Assert.Contains("matched no fact occurrences", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ReportSource_RecordsNonBlockingReconstructionLimitation()
     {
         var diagnostics = new DiagnosticBag();
