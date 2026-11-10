@@ -79,7 +79,7 @@
           <StackPanel DockPanel.Dock="Top" Spacing="3" IsVisible="{Binding IsSelectedSourceXbrlReport}"
                       Margin="0,5,0,5">
             <TextBlock Text="xBRL occurrence selection" FontWeight="SemiBold" />
-            <TextBlock Text="Occurrence IDs use the report binding ID plus #fN. Applying a selection pins the current report SHA-256; changed report bytes fail closed."
+            <TextBlock Text="Choose an occurrence or filter by exact fact aspects. Applying a selection pins the current report SHA-256; changed report bytes fail closed."
                        TextWrapping="Wrap" FontSize="10" />
             <ComboBox ItemsSource="{Binding XbrlOccurrenceOptions}"
                       SelectedItem="{Binding SelectedXbrlOccurrence, Mode=TwoWay}"
@@ -97,11 +97,34 @@
             <TextBox Text="{Binding XbrlTargetRowId, Mode=TwoWay}"
                      Watermark="Optional sha256 fact_key for update-only target"
                      AutomationProperties.Name="Existing SQLite target fact key digest" />
+            <Expander Header="Optional fact aspect filters" IsExpanded="False">
+              <StackPanel Spacing="3" Margin="0,4,0,0">
+                <TextBox Text="{Binding XbrlConceptFilter, Mode=TwoWay}"
+                         Watermark="Exact concept QName, e.g. ifrs-full:Revenue"
+                         AutomationProperties.Name="Exact xBRL concept filter" />
+                <TextBox Text="{Binding XbrlPeriodFilter, Mode=TwoWay}"
+                         Watermark="Exact ISO period, e.g. 2025-01-01/2026-01-01"
+                         AutomationProperties.Name="Exact xBRL reporting period filter" />
+                <TextBox Text="{Binding XbrlUnitFilter, Mode=TwoWay}"
+                         Watermark="Exact unit, e.g. iso4217:QAR"
+                         AutomationProperties.Name="Exact xBRL unit filter" />
+                <TextBlock Text="Explicit dimensions: JSON object of axis QName to member QName."
+                           TextWrapping="Wrap" FontSize="10" />
+                <TextBox Text="{Binding XbrlDimensionFiltersJson, Mode=TwoWay}"
+                         Watermark="e.g. {&quot;ex:RegionAxis&quot;:&quot;ex:Domestic&quot;}"
+                         AutomationProperties.Name="Explicit xBRL dimension filters JSON" />
+                <TextBlock Text="Typed dimensions: JSON object of axis QName to exact retained evidence."
+                           TextWrapping="Wrap" FontSize="10" />
+                <TextBox Text="{Binding XbrlTypedDimensionFiltersJson, Mode=TwoWay}"
+                         Watermark="e.g. {&quot;ex:AccountAxis&quot;:&quot;...&quot;}"
+                         AutomationProperties.Name="Typed xBRL dimension filters JSON" />
+              </StackPanel>
+            </Expander>
             <StackPanel Orientation="Horizontal" Spacing="4">
-              <Button Content="Pin and apply" Command="{Binding ApplyXbrlOccurrenceSelectionCommand}"
-                      AutomationProperties.Name="Pin xBRL occurrence to current report and apply selection" />
+              <Button Content="Apply selection" Command="{Binding ApplyXbrlOccurrenceSelectionCommand}"
+                      AutomationProperties.Name="Pin occurrence or apply xBRL aspect filters to the current report" />
               <Button Content="Clear selection" Command="{Binding ClearXbrlOccurrenceSelectionCommand}"
-                      AutomationProperties.Name="Clear xBRL occurrence and target row selection" />
+                      AutomationProperties.Name="Clear xBRL occurrence, aspect filters and target row selection" />
             </StackPanel>
           </StackPanel>
           <StackPanel DockPanel.Dock="Top" Spacing="3" IsVisible="{Binding IsSelectedSourceSqlite}">

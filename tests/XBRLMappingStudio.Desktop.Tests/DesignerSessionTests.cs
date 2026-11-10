@@ -660,6 +660,98 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task DesktopCanAuthorAspectFiltersForMultipleXbrlOccurrences()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-xbrl-aspects-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var reportPath = Path.Combine(directory, "report.xbrl.json");
+        var projectPath = Path.Combine(directory, "mapping.xmap");
+        var profile = SyntheticProfile.Build();
+        var axis = SyntheticProfile.Qualified("RegionAxis");
+        var north = SyntheticProfile.Qualified("NorthMember");
+        var south = SyntheticProfile.Qualified("SouthMember");
+        var selectedPeriod = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        var alternatePeriod = XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1));
+        XbrlFact Revenue(decimal value, string unit, XbrlPeriod period, string member) => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = period,
+            Unit = new XbrlUnit(unit),
+            Value = value,
+            Dimensions = [new Dimension(axis, member)]
+        };
+
+        var facts = new[]
+        {
+            Revenue(12m, "QAR", selectedPeriod, north),
+            Revenue(13m, "QAR", selectedPeriod, south),
+            Revenue(14m, "USD", selectedPeriod, north),
+            Revenue(15m, "QAR", alternatePeriod, north)
+        };
+
+        try
+        {
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile, facts));
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with { Kind = "xbrl-report" };
+            var viewModel = new MainWindowViewModel(project);
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadSourceAsync(reportPath);
+
+            viewModel.SelectedXbrlOccurrence = viewModel.XbrlOccurrenceOptions[0];
+            viewModel.XbrlOccurrenceId = "";
+            viewModel.XbrlConceptFilter = SyntheticProfile.Qualified("Revenue");
+            viewModel.XbrlPeriodFilter = selectedPeriod.ToIsoString();
+            viewModel.XbrlUnitFilter = "QAR";
+            viewModel.XbrlDimensionFiltersJson = System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, string> { [axis] = north });
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+
+            var binding = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.DoesNotContain("occurrenceId", binding.Configuration.Keys);
+            Assert.Null(viewModel.SelectedXbrlOccurrence);
+            Assert.Equal("sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(reportPath)))
+                .ToLowerInvariant(), binding.Configuration["reportDigest"]?.ToString());
+            Assert.Equal(SyntheticProfile.Qualified("Revenue"), binding.Configuration["concept"]?.ToString());
+            Assert.Equal(selectedPeriod.ToIsoString(), binding.Configuration["period"]?.ToString());
+            Assert.Equal("QAR", binding.Configuration["unit"]?.ToString());
+            Assert.Equal(viewModel.XbrlDimensionFiltersJson, binding.Configuration["dimensionFilters"]?.ToString());
+            Assert.Contains("Applied xBRL aspect filters", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
+
+            var configuration = binding.Configuration.ToDictionary(pair => pair.Key,
+                pair => pair.Value?.ToString() ?? "", StringComparer.Ordinal);
+            var connection = new SourceConnection(binding.BindingId, binding.Kind, reportPath, configuration);
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var sample = await adapter.ReadSampleAsync(connection, schema, 10, profile, CancellationToken.None);
+            var selected = Assert.Single(sample.Rows);
+            Assert.Equal("source#f1", selected.RowId);
+            Assert.Equal("12", selected["value"].Raw?.ToString());
+
+            var savedSelection = ProjectSerializer.Serialize(viewModel.Session.Project);
+            viewModel.XbrlDimensionFiltersJson = "{\"" + axis + "\":1}";
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+            Assert.Equal(savedSelection, ProjectSerializer.Serialize(viewModel.Session.Project));
+            Assert.Contains("selection was rejected", viewModel.StatusText, StringComparison.Ordinal);
+
+            viewModel.ClearXbrlOccurrenceSelection();
+            var cleared = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.Null(viewModel.SelectedXbrlOccurrence);
+            Assert.DoesNotContain("reportDigest", cleared.Configuration.Keys);
+            Assert.DoesNotContain("concept", cleared.Configuration.Keys);
+            Assert.DoesNotContain("period", cleared.Configuration.Keys);
+            Assert.DoesNotContain("unit", cleared.Configuration.Keys);
+            Assert.DoesNotContain("dimensionFilters", cleared.Configuration.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task LegacyProfileAdoptionCreatesNewFileOnlyAfterExplicitSyntheticOptIn()
     {
         var dir = Path.Combine(Path.GetTempPath(), "xms-legacy-profile-adoption", Guid.NewGuid().ToString("n"));

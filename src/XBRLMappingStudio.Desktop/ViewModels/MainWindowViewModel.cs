@@ -471,6 +471,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string? _sqliteSourcePath;
     private string _xbrlOccurrenceId = "";
     private string _xbrlTargetRowId = "";
+    private string _xbrlConceptFilter = "";
+    private string _xbrlPeriodFilter = "";
+    private string _xbrlUnitFilter = "";
+    private string _xbrlDimensionFiltersJson = "";
+    private string _xbrlTypedDimensionFiltersJson = "";
     private XbrlOccurrenceOption? _selectedXbrlOccurrence;
     private string _sourceInspectionSummary = "Choose a source file to inspect its schema, row identity and adapter capabilities.";
     private int _sourceLoadGeneration;
@@ -843,6 +848,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         && StringComparer.Ordinal.Equals(binding.Kind, "xbrl-report"));
     public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
     public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
+    public string XbrlConceptFilter { get => _xbrlConceptFilter; set => Set(ref _xbrlConceptFilter, value); }
+    public string XbrlPeriodFilter { get => _xbrlPeriodFilter; set => Set(ref _xbrlPeriodFilter, value); }
+    public string XbrlUnitFilter { get => _xbrlUnitFilter; set => Set(ref _xbrlUnitFilter, value); }
+    public string XbrlDimensionFiltersJson { get => _xbrlDimensionFiltersJson; set => Set(ref _xbrlDimensionFiltersJson, value); }
+    public string XbrlTypedDimensionFiltersJson { get => _xbrlTypedDimensionFiltersJson; set => Set(ref _xbrlTypedDimensionFiltersJson, value); }
     public ObservableCollection<XbrlOccurrenceOption> XbrlOccurrenceOptions { get; } = new();
     public XbrlOccurrenceOption? SelectedXbrlOccurrence
     {
@@ -3841,6 +3851,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 XbrlOccurrenceId = config.GetValueOrDefault("occurrenceId", "");
                 XbrlTargetRowId = config.GetValueOrDefault("targetRowId", "");
+                XbrlConceptFilter = config.GetValueOrDefault("concept", "");
+                XbrlPeriodFilter = config.GetValueOrDefault("period", "");
+                XbrlUnitFilter = config.GetValueOrDefault("unit", "");
+                XbrlDimensionFiltersJson = config.GetValueOrDefault("dimensionFilters", "");
+                XbrlTypedDimensionFiltersJson = config.GetValueOrDefault("typedDimensionFilters", "");
             }
             var connection = new SourceConnection(binding.BindingId, kind, safePath,
                 config);
@@ -3953,19 +3968,33 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         var occurrenceId = XbrlOccurrenceId.Trim();
-        if (occurrenceId.Length == 0)
-        {
-            StatusText = "Enter an occurrence ID such as the selected report binding followed by #f1.";
-            return;
-        }
-
         var root = WorkspaceRoot();
         var path = Path.IsPathRooted(binding.Locator!)
             ? Path.GetFullPath(binding.Locator!)
             : Path.GetFullPath(Path.Combine(root, binding.Locator!));
         if (!File.Exists(path))
         {
-            StatusText = "The saved xBRL report is unavailable; occurrence selection was not changed.";
+            StatusText = "The saved xBRL report is unavailable; selection was not changed.";
+            return;
+        }
+
+        var targetRowId = XbrlTargetRowId.Trim();
+        var requestedFilters = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["concept"] = XbrlConceptFilter.Trim(),
+            ["period"] = XbrlPeriodFilter.Trim(),
+            ["unit"] = XbrlUnitFilter.Trim(),
+            ["dimensionFilters"] = XbrlDimensionFiltersJson.Trim(),
+            ["typedDimensionFilters"] = XbrlTypedDimensionFiltersJson.Trim()
+        };
+        var hasExistingAspectFilter = binding.Configuration.Any(pair =>
+            (pair.Key is "entityScheme" or "entityIdentifier" or "periodKind" or "instantDate"
+                or "periodStart" or "periodEnd" or "lang" or "nil" or "dimensionAxis" or "dimensionMember")
+            && !string.IsNullOrWhiteSpace(pair.Value?.ToString()));
+        if (occurrenceId.Length == 0 && targetRowId.Length == 0
+            && !hasExistingAspectFilter && !requestedFilters.Values.Any(value => value.Length > 0))
+        {
+            StatusText = "Choose an occurrence or enter at least one aspect filter before applying the selection.";
             return;
         }
 
@@ -3976,20 +4005,34 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var maximumBytes = XbrlReportInputReader.ResolveMaximumInputBytes(path,
                 configuration.GetValueOrDefault("maxInputBytes"));
             var reportDigest = XbrlReportInputReader.ReadTextWithDigest(path, maximumBytes).Digest;
-            configuration["occurrenceId"] = occurrenceId;
+            if (occurrenceId.Length == 0) configuration.Remove("occurrenceId");
+            else configuration["occurrenceId"] = occurrenceId;
             configuration["reportDigest"] = reportDigest;
-            var targetRowId = XbrlTargetRowId.Trim();
             if (targetRowId.Length == 0) configuration.Remove("targetRowId");
             else configuration["targetRowId"] = targetRowId;
+            foreach (var (key, value) in requestedFilters)
+            {
+                if (value.Length == 0) configuration.Remove(key);
+                else configuration[key] = value;
+            }
 
             var connection = new SourceConnection(binding.BindingId, binding.Kind, path, configuration);
             var adapter = new XbrlReportAdapter();
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
-            var sample = await adapter.ReadSampleAsync(connection, schema, 1, CancellationToken.None);
-            if (sample.Rows.Count != 1
-                || !StringComparer.Ordinal.Equals(sample.Rows[0]["occurrenceId"].Raw as string, occurrenceId))
+            var sample = _profile is null
+                ? await adapter.ReadSampleAsync(connection, schema, 2, CancellationToken.None)
+                : await adapter.ReadSampleAsync(connection, schema, 2, _profile, CancellationToken.None);
+            if (sample.Rows.Count == 0)
             {
-                StatusText = "That occurrence is not present in the current report. The saved selection was not changed.";
+                StatusText = occurrenceId.Length > 0
+                    ? "That occurrence and its aspect filters do not match the current report. The saved selection was not changed."
+                    : "The aspect filters matched no occurrences in the current report. The saved selection was not changed.";
+                return;
+            }
+            if (occurrenceId.Length > 0 && (sample.Rows.Count != 1
+                || !StringComparer.Ordinal.Equals(sample.Rows[0]["occurrenceId"].Raw as string, occurrenceId)))
+            {
+                StatusText = "That occurrence is not present in the current report under the supplied aspect filters. The saved selection was not changed.";
                 return;
             }
 
@@ -3998,11 +4041,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 Configuration = configuration.ToDictionary(pair => pair.Key,
                     pair => (object?)pair.Value, StringComparer.Ordinal)
             });
+            if (occurrenceId.Length == 0) SelectedXbrlOccurrence = null;
             XbrlOccurrenceId = occurrenceId;
             XbrlTargetRowId = targetRowId;
-            SourceInspectionSummary = $"Pinned {occurrenceId} to the current report bytes ({reportDigest})."
-                + (targetRowId.Length == 0 ? "" : " Existing-row update is enabled for this selected occurrence.");
-            StatusText = "Saved xBRL occurrence selection. Save the project to retain this revision-pinned selector.";
+            SourceInspectionSummary = occurrenceId.Length > 0
+                ? $"Pinned {occurrenceId} to the current report bytes ({reportDigest})."
+                    + (targetRowId.Length == 0 ? "" : " Existing-row update is enabled for this selected occurrence.")
+                : $"Applied xBRL aspect filters to the current report bytes ({reportDigest}); matching occurrences remain subject to full validation.";
+            StatusText = "Saved xBRL selection. Save the project to retain this digest-pinned configuration.";
         }
         catch (Exception ex)
         {
@@ -4021,15 +4067,36 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         configuration.Remove("occurrenceId");
         configuration.Remove("reportDigest");
         configuration.Remove("targetRowId");
+        configuration.Remove("concept");
+        configuration.Remove("period");
+        configuration.Remove("unit");
+        configuration.Remove("dimensionFilters");
+        configuration.Remove("typedDimensionFilters");
+        configuration.Remove("entityScheme");
+        configuration.Remove("entityIdentifier");
+        configuration.Remove("periodKind");
+        configuration.Remove("instantDate");
+        configuration.Remove("periodStart");
+        configuration.Remove("periodEnd");
+        configuration.Remove("lang");
+        configuration.Remove("nil");
+        configuration.Remove("dimensionAxis");
+        configuration.Remove("dimensionMember");
         Session.SetBinding(binding with
         {
             Configuration = configuration.ToDictionary(pair => pair.Key,
                 pair => (object?)pair.Value, StringComparer.Ordinal)
         });
+        SelectedXbrlOccurrence = null;
         XbrlOccurrenceId = "";
         XbrlTargetRowId = "";
-        SourceInspectionSummary = "Cleared the occurrence and existing-row selectors; the report source now exposes all matching facts.";
-        StatusText = "Cleared xBRL occurrence selection. Save the project to retain this revision.";
+        XbrlConceptFilter = "";
+        XbrlPeriodFilter = "";
+        XbrlUnitFilter = "";
+        XbrlDimensionFiltersJson = "";
+        XbrlTypedDimensionFiltersJson = "";
+        SourceInspectionSummary = "Cleared the occurrence, aspect filters and existing-row selector; the report source now exposes all matching facts.";
+        StatusText = "Cleared xBRL selection. Save the project to retain this revision.";
     }
 
     private async Task LoadPdfDocumentAsync(
