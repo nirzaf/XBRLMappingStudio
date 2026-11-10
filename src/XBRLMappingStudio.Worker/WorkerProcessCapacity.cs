@@ -63,6 +63,16 @@ public sealed class BoundedWorkerClient : IWorkerClient
         return await inner.RequestAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<WorkerResponse> RequestAsync(
+        WorkerRequest request,
+        IProgress<WorkerProgressEvent>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var inner = await GetClientAsync(cancellationToken).ConfigureAwait(false);
+        return await inner.RequestAsync(request, progress, cancellationToken).ConfigureAwait(false);
+    }
+
     private async ValueTask<IWorkerClient> GetClientAsync(CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(

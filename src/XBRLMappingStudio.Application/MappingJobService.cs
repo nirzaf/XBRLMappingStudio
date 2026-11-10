@@ -22,6 +22,22 @@ namespace XBRLMappingStudio.Application;
 /// <summary>Observable stage progress for a mapping job. Worker work may be indeterminate.</summary>
 public sealed record MappingJobProgress(string Stage, int? Current = null, int? Total = null);
 
+internal sealed class WorkerProgressRelay(IProgress<MappingJobProgress>? destination)
+    : IProgress<WorkerProgressEvent>
+{
+    public void Report(WorkerProgressEvent value)
+    {
+        var stage = value.Stage switch
+        {
+            WorkerProgressStage.LoadingTaxonomy => "Loading filing taxonomy",
+            WorkerProgressStage.ValidatingReport => "Validating report",
+            WorkerProgressStage.CollectingResults => "Collecting validation results",
+            _ => "Validation worker is progressing"
+        };
+        destination?.Report(new MappingJobProgress(stage));
+    }
+}
+
 /// <summary>
 /// Shared application service used by Desktop and CLI (OPS01). Executes the same
 /// graph in-process; callers supply the parameters and destinations.
@@ -296,7 +312,7 @@ public sealed class MappingJobService
                 ProfileDigest: _profile.Digest,
                 DeadlineUtc: DateTimeOffset.UtcNow.AddMinutes(2),
                 Payload: JsonSerializer.SerializeToElement(new { taxonomyPath = taxonomyEntryPoint })),
-                cancellationToken);
+                new WorkerProgressRelay(progress), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -801,7 +817,8 @@ public sealed class MappingJobService
             ValidationRequirements = CreateValidationRequirements()
         };
         progress?.Report(new MappingJobProgress("Validating generated report in validation worker"));
-        var workerResp = await _worker.RequestAsync(validateReq, cancellationToken);
+        var workerResp = await _worker.RequestAsync(validateReq,
+            new WorkerProgressRelay(progress), cancellationToken);
 
         // XBR05 fail-closed worker adjudication: a run may be labelled successful only
         // when the worker explicitly reports Success AND returns no blocking diagnostics.
@@ -3204,4 +3221,5 @@ public sealed record JobResult(
             NodeOutputPreviews = nodeOutputPreviews ?? Array.Empty<NodeOutputPreview>()
         };
     }
+
 }

@@ -17,6 +17,12 @@ public interface IWorkerClient : IAsyncDisposable
 {
     Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken);
     Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken);
+
+    Task<WorkerResponse> RequestAsync(
+        WorkerRequest request,
+        IProgress<WorkerProgressEvent>? progress,
+        CancellationToken cancellationToken)
+        => RequestAsync(request, cancellationToken);
 }
 
 /// <summary>
@@ -493,7 +499,7 @@ public sealed class ArelleWorker : IWorkerClient
                 minimumProtocolVersion = WorkerProtocol.MinimumVersion,
                 maximumProtocolVersion = WorkerProtocol.CurrentVersion
             }));
-        var resp = await SendAsync(req, cancellationToken);
+        var resp = await SendAsync(req, progress: null, cancellationToken);
         if (resp.Status != WorkerStatus.Success)
             throw new WorkerStartupException(resp.Status,
                 resp.Error ?? "Worker returned a non-success status during handshake.",
@@ -546,12 +552,19 @@ public sealed class ArelleWorker : IWorkerClient
         Message = message
     };
 
-    public async Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
-    {
-        return await SendAsync(request, cancellationToken);
-    }
+    public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+        => SendAsync(request, progress: null, cancellationToken);
 
-    private async Task<WorkerResponse> SendAsync(WorkerRequest req, CancellationToken ct)
+    public Task<WorkerResponse> RequestAsync(
+        WorkerRequest request,
+        IProgress<WorkerProgressEvent>? progress,
+        CancellationToken cancellationToken)
+        => SendAsync(request, progress, cancellationToken);
+
+    private async Task<WorkerResponse> SendAsync(
+        WorkerRequest req,
+        IProgress<WorkerProgressEvent>? progress,
+        CancellationToken ct)
     {
         try { await _requestLock.WaitAsync(ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -578,25 +591,48 @@ public sealed class ArelleWorker : IWorkerClient
             {
                 await _stdin.WriteAsync(msg.AsMemory(), linked.Token);
                 await _stdin.FlushAsync(linked.Token);
-                var line = await ReadBoundedLineAsync(_stdout, linked.Token);
-                if (line is null)
+                var progressCount = 0;
+                while (true)
                 {
-                    // EOF can arrive just before Process.HasExited becomes true.
-                    // Wait within the same request deadline so crash reports keep
-                    // the exact exit code without turning a closed-pipe hang into
-                    // an unbounded wait.
-                    await _process.WaitForExitAsync(linked.Token);
-                    return Failure(req.OperationId, WorkerStatus.Crash,
-                        $"Worker terminated without a response (exit code {_process.ExitCode}).");
+                    var line = await ReadBoundedLineAsync(_stdout, linked.Token);
+                    if (line is null)
+                    {
+                        // EOF can arrive just before Process.HasExited becomes true.
+                        // Wait within the same request deadline so crash reports keep
+                        // the exact exit code without turning a closed-pipe hang into
+                        // an unbounded wait.
+                        await _process.WaitForExitAsync(linked.Token);
+                        return Failure(req.OperationId, WorkerStatus.Crash,
+                            $"Worker terminated without a response (exit code {_process.ExitCode}).");
+                    }
+
+                    using var frame = JsonDocument.Parse(line);
+                    if (frame.RootElement.ValueKind != JsonValueKind.Object)
+                        throw new JsonException("Worker frame must be a JSON object.");
+                    if (frame.RootElement.TryGetProperty("messageType", out var messageType))
+                    {
+                        if (messageType.ValueKind != JsonValueKind.String
+                            || !StringComparer.Ordinal.Equals(messageType.GetString(), "progress"))
+                            throw new JsonException("Worker emitted an unsupported frame type.");
+                        var progressEvent = WorkerProgressEvent.Decode(frame.RootElement);
+                        if (!StringComparer.Ordinal.Equals(progressEvent.OperationId, req.OperationId))
+                            throw new JsonException("Worker progress operation ID does not match the request.");
+                        if (++progressCount > WorkerProtocol.MaxProgressEventsPerRequest)
+                            throw new JsonException("Worker exceeded the progress-event limit for one request.");
+                        progress?.Report(progressEvent);
+                        continue;
+                    }
+
+                    var response = WorkerResponse.Decode(line);
+                    if (!string.Equals(response.OperationId, req.OperationId, StringComparison.Ordinal))
+                    {
+                        await TerminateAsync();
+                        return Failure(req.OperationId, WorkerStatus.Crash,
+                            "Worker response operation ID does not match the request.");
+                    }
+                    if (response.Status == WorkerStatus.Crash) await TerminateAsync();
+                    return response;
                 }
-                var response = WorkerResponse.Decode(line);
-                if (!string.Equals(response.OperationId, req.OperationId, StringComparison.Ordinal))
-                {
-                    await TerminateAsync();
-                    return Failure(req.OperationId, WorkerStatus.Crash, "Worker response operation ID does not match the request.");
-                }
-                if (response.Status == WorkerStatus.Crash) await TerminateAsync();
-                return response;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested || deadline.IsCancellationRequested)
             {

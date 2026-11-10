@@ -156,7 +156,7 @@ class ArelleWorkerTests(unittest.TestCase):
                 self.args,
             )
         self.assertEqual("success", result["status"])
-        self.assertEqual(2, result["result"]["protocolVersion"])
+        self.assertEqual(3, result["result"]["protocolVersion"])
         self.assertIn("validate-report", result["result"]["capabilities"])
 
     def test_handshake_rejects_v1_without_validation_completion_contract(self):

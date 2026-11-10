@@ -746,6 +746,38 @@ public sealed class ArelleExecutionTests
     }
 
     [RequiresPythonFact]
+    public async Task WorkerStreamsBoundedProgressBeforeTerminalResponse()
+    {
+        var python = PythonExecutable();
+        var workspace = Path.Combine(Path.GetTempPath(), "xms-worker-progress-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var scriptPath = Path.Combine(workspace, "fake_worker.py");
+        await File.WriteAllTextAsync(scriptPath, FakeProtocolWorkerScript);
+        try
+        {
+            await using var worker = new ArelleWorker(python!,
+                FakeWorkerArgs(scriptPath, "progress", "progress-profile", "sha256:progress"));
+            await worker.HandshakeAsync(CancellationToken.None);
+            var events = new List<WorkerProgressEvent>();
+            var reporter = new InlineWorkerProgress(events);
+            var response = await worker.RequestAsync(TestWorkerRequest("progress-op"), reporter,
+                CancellationToken.None);
+
+            Assert.Equal(WorkerStatus.Success, response.Status);
+            Assert.Equal(new[] { new WorkerProgressEvent("progress-op", WorkerProgressStage.ValidatingReport) }, events);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private sealed class InlineWorkerProgress(List<WorkerProgressEvent> events) : IProgress<WorkerProgressEvent>
+    {
+        public void Report(WorkerProgressEvent value) => events.Add(value);
+    }
+
+    [RequiresPythonFact]
     public async Task CancellingArelleRequestKillsTheWorkerProcess()
     {
         var python = PythonExecutable();
@@ -1073,7 +1105,7 @@ public sealed class ArelleExecutionTests
         for raw in sys.stdin:
             request = json.loads(raw)
             if request["operation"] == "handshake":
-                respond(request, {"protocolVersion": 2, "engineVersion": "test", "capabilities": ["validate-report"],
+                respond(request, {"protocolVersion": 3, "engineVersion": "test", "capabilities": ["validate-report"],
                                   "arelleAvailable": True, "profileSchemaVersion": 3, "profileId": profile_id,
                                   "profileVersion": "1", "profileDigest": profile_digest,
                                   "taxonomyEntryPoint": "taxonomy.xsd", "requiredPlugins": [], "requiredChecks": []})
@@ -1096,6 +1128,10 @@ public sealed class ArelleExecutionTests
             elif mode == "hang":
                 while True:
                     time.sleep(1)
+            elif mode == "progress":
+                print(json.dumps({"messageType": "progress", "operationId": request["operationId"],
+                                  "stage": "validatingReport"}), flush=True)
+                respond(request)
             elif mode == "child-hang":
                 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
                 with open(marker + ".tmp", "w", encoding="ascii") as output:

@@ -54,6 +54,27 @@ public sealed record WorkerResponse(
            ?? throw new InvalidOperationException("Malformed worker response.");
 }
 
+/// <summary>Coarse, non-PII progress phases streamed while a worker request is active.</summary>
+public enum WorkerProgressStage
+{
+    LoadingTaxonomy,
+    ValidatingReport,
+    CollectingResults
+}
+
+public sealed record WorkerProgressEvent(string OperationId, WorkerProgressStage Stage)
+{
+    public static WorkerProgressEvent Decode(JsonElement frame)
+    {
+        var value = JsonSerializer.Deserialize<WorkerProgressEvent>(frame.GetRawText(), WorkerJson.Options)
+            ?? throw new JsonException("Malformed worker progress frame.");
+        if (string.IsNullOrWhiteSpace(value.OperationId)
+            || !Enum.IsDefined(value.Stage))
+            throw new JsonException("Worker progress frame is missing a valid operation ID or stage.");
+        return value;
+    }
+}
+
 public enum WorkerStatus
 {
     Success,
@@ -292,11 +313,12 @@ public sealed class WorkerStartupException : Exception
 
 public static class WorkerProtocol
 {
-    // Version 2 adds exact required-check/plugin requirements and mandatory
-    // validation-completion evidence to validate-report.
-    public const int CurrentVersion = 2;
-    public const int MinimumVersion = 2;
+    // Version 2 adds required-check/plugin completion evidence. Version 3 adds
+    // bounded progress frames before the terminal response on the same request.
+    public const int CurrentVersion = 3;
+    public const int MinimumVersion = 3;
     public const int MaxMessageBytes = 4 * 1024 * 1024; // 4 MiB bound per section 2
+    public const int MaxProgressEventsPerRequest = 128;
     /// <summary>Maximum per-fact finding details returned by a worker before a summary row.</summary>
     public const int MaxResponseDiagnostics = 128;
 

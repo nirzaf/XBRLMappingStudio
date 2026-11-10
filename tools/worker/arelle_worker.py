@@ -26,7 +26,7 @@ from urllib.request import url2pathname
 from xml.parsers import expat
 from xml.etree import ElementTree
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 SUPPORTED_PROFILE_SCHEMA_VERSIONS = (2, 3, 4, 5, 6)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_DIAGNOSTICS = 128
@@ -1504,7 +1504,7 @@ def _copy_verified_taxonomy_snapshot(entry_point, relative_paths, taxonomy_root,
 
 
 def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root, package_files, args,
-                                      relationship_metadata_consumer=None):
+                                      relationship_metadata_consumer=None, progress=None):
     """Keep a verified private dependency snapshot alive for the complete Arelle load."""
     with tempfile.TemporaryDirectory(prefix="xms-taxonomy-") as snapshot_directory:
         os.chmod(snapshot_directory, 0o700)
@@ -1520,9 +1520,14 @@ def run_arelle_with_verified_taxonomy(entry_point, relative_paths, taxonomy_root
             run_args.plugin = list(getattr(args, "plugin", []) or [])
             run_args.plugin.append(str(mapping_plugin))
         if relationship_metadata_consumer is None:
-            return run_arelle(snapshot_entry, run_args)
+            return (run_arelle(snapshot_entry, run_args) if progress is None
+                    else run_arelle(snapshot_entry, run_args, progress=progress))
+        if progress is None:
+            return run_arelle(snapshot_entry, run_args,
+                              relationship_metadata_consumer=relationship_metadata_consumer)
         return run_arelle(snapshot_entry, run_args,
-                          relationship_metadata_consumer=relationship_metadata_consumer)
+                          relationship_metadata_consumer=relationship_metadata_consumer,
+                          progress=progress)
 
 
 def safe_taxonomy_urls(report, taxonomy_root, offline_references=None, package_files=None,
@@ -2145,7 +2150,8 @@ def extract_taxonomy_relationships(models, profile):
     }
 
 
-def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_consumer=None):
+def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_consumer=None,
+               progress=None):
     if not ARELLE_AVAILABLE:
         raise RuntimeError("arelle-release is not installed in this worker environment")
     options = RuntimeOptions(
@@ -2166,6 +2172,8 @@ def run_arelle(entrypoint, args, temporary_path=None, relationship_metadata_cons
         models = []
         try:
             ok = session.run(options, logHandler=log_handler)
+            if progress is not None:
+                progress("collectingResults")
             logs = log_handler.messages
             loaded_plugins = loaded_plugin_identifiers()
             models = session.get_models()
@@ -2367,7 +2375,7 @@ def required_plugin_load_failures(logs, required_plugins):
     return failures
 
 
-def handle(req, args):
+def handle(req, args, progress=None):
     candidate = req.get("operationId") if isinstance(req, dict) else None
     op_id = candidate if isinstance(candidate, str) and len(candidate) <= 128 else "-"
     if not valid_request(req):
@@ -2422,6 +2430,8 @@ def handle(req, args):
         if not isinstance(payload, dict) or not isinstance(payload.get("taxonomyPath"), str):
             return response(op_id, "domainFailure", error="Missing taxonomyPath")
         try:
+            if progress is not None:
+                progress("loadingTaxonomy")
             if args.taxonomy_root is None:
                 raise ValueError("A configured taxonomy root is required")
             if getattr(args, "profile_error", None):
@@ -2444,11 +2454,13 @@ def handle(req, args):
                 relationship_metadata = []
                 ok, logs, concept_count, loaded_plugins = run_arelle_with_verified_taxonomy(
                     relative, dependency_paths, args.taxonomy_root, profile["packageFiles"], args,
-                    relationship_metadata_consumer=relationship_metadata.append)
+                    relationship_metadata_consumer=relationship_metadata.append, progress=progress)
                 relative_entry_point = relative
             else:
                 taxonomy_path = within_root(payload["taxonomyPath"], args.taxonomy_root)
-                ok, logs, concept_count, loaded_plugins = run_arelle(taxonomy_path, args)
+                ok, logs, concept_count, loaded_plugins = (
+                    run_arelle(taxonomy_path, args) if progress is None
+                    else run_arelle(taxonomy_path, args, progress=progress))
                 relationship_metadata = []
                 relative_entry_point = os.path.relpath(
                     taxonomy_path, Path(args.taxonomy_root).resolve(strict=True)).replace(os.sep, "/")
@@ -2571,6 +2583,8 @@ def handle(req, args):
                 and (not isinstance(report_text, str) or not report_text):
             return response(op_id, "domainFailure", error="Missing xBRL-JSON report text")
         try:
+            if progress is not None:
+                progress("validatingReport")
             if getattr(args, "profile_error", None):
                 raise ValueError(args.profile_error)
             profile = getattr(args, "profile_manifest_data", None)
@@ -2662,7 +2676,9 @@ def handle(req, args):
                     run_args = copy.copy(args)
                     run_args.plugin = list(getattr(args, "plugin", []) or [])
                     run_args.plugin.append(str(mapping_plugin))
-                ok, logs, concept_count, loaded_plugins = run_arelle(path, run_args, workdir)
+                ok, logs, concept_count, loaded_plugins = (
+                    run_arelle(path, run_args, workdir) if progress is None
+                    else run_arelle(path, run_args, workdir, progress=progress))
                 plugin_failures = required_plugin_load_failures(logs, required_plugins)
                 plugin_completions = required_plugin_completions(
                     required_plugins, loaded_plugins, failures=plugin_failures)
@@ -2728,7 +2744,20 @@ def main():
             return
         try:
             req = json.loads(raw.decode("utf-8"))
-            result = handle(req, args)
+            operation_id = req.get("operationId", "-") if isinstance(req, dict) else "-"
+            progress_count = 0
+            last_stage = None
+
+            def report_progress(stage):
+                nonlocal progress_count, last_stage
+                if stage == last_stage or progress_count >= 128:
+                    return
+                last_stage = stage
+                progress_count += 1
+                emit({"messageType": "progress", "operationId": operation_id,
+                      "stage": stage})
+
+            result = handle(req, args, report_progress)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as ex:
             result = response("-", "domainFailure", error="Malformed request: " + str(ex)[:500])
         emit(result)
