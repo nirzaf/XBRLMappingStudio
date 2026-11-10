@@ -838,3 +838,16 @@ target profile digest, the same historical approval is rejected with blocking
 7/7. This confirms the approval gate for a label-only migration; it does not
 resolve the separate real-taxonomy rights or production-profile qualification
 gates in `docs/decisions/OPEN.md`.
+
+## AIM-01 audit-cancellation rollback (2026-11-10)
+
+`AuditLog.Record` now captures every synchronous audit-sink exception, including
+`OperationCanceledException`. Audit append has no caller cancellation token; a
+sink-originated cancellation is therefore a persistence failure and must reach
+the governed `SuggestionSession` rollback path instead of escaping after draft
+mutation. The regression verifies the suggestion remains pending, the draft
+stays unchanged, no undo entry is retained, and the persistence fault is visible.
+The focused Windows Release `AuditPersistenceTests` suite passed 7/7. This
+closes the audit-cancellation failure mode for in-process session mutations; it
+does not establish multi-user reviewer identity or external audit-store
+availability.

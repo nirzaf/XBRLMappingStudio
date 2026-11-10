@@ -118,8 +118,13 @@ public sealed class AuditLog
             var context = _contextFactory(stamped);
             if (context is not null) _sink.Append(stamped, context);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            // Audit append is synchronous and has no caller cancellation token. Treat
+            // every sink failure, including a sink-originated cancellation exception,
+            // as a persistence fault so the governed SuggestionSession can roll back
+            // the associated state mutation instead of leaking it past the fail-closed
+            // audit gate.
             _persistenceFaults.Add(ex.Message);
         }
     }

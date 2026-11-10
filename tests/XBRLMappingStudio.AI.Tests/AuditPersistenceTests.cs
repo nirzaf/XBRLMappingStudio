@@ -16,8 +16,10 @@ public sealed class AuditPersistenceTests
     {
         public List<(AuditRecord Record, AuditContext Context)> Rows { get; } = new();
         public bool Throw;
+        public bool Cancel;
         public void Append(AuditRecord record, AuditContext context)
         {
+            if (Cancel) throw new OperationCanceledException("simulated sink cancellation");
             if (Throw) throw new IOException("simulated sink failure");
             Rows.Add((record, context));
         }
@@ -135,6 +137,28 @@ public sealed class AuditPersistenceTests
         Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
         Assert.Single(session.Audit.PersistenceFaults);
         Assert.Contains("simulated sink failure", session.Audit.PersistenceFaults[0]);
+    }
+
+    [Fact]
+    public void SinkCancellation_IsCapturedAndRollsBackTheAcceptedDraft()
+    {
+        var sink = new RecordingSink { Cancel = true };
+        var session = NewSession(sink);
+        session.LoadSuggestions(new[]
+        {
+            new Suggestion("s1", "Sales",
+                new DraftMapping("s1", "Sales", "synthetic:Revenue", "USD", "duration"), "t", 9),
+        });
+
+        var outcome = session.Accept("s1");
+
+        Assert.False(outcome.Applied);
+        Assert.Equal(SuggestionState.Pending, session.StateOf("s1"));
+        Assert.Empty(session.Draft.Nodes);
+        Assert.False(session.CanUndo);
+        Assert.Contains("rolled back", outcome.Reason!.ToLowerInvariant());
+        Assert.Single(session.Audit.PersistenceFaults);
+        Assert.Contains("simulated sink cancellation", session.Audit.PersistenceFaults[0]);
     }
 
     [Fact]
