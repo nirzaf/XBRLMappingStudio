@@ -288,8 +288,8 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest completed exact-head CI [42787270095](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42787270095)
-verified `f59f6b7dc9c3eb3775c158ea837267a9b204aad0`. Repository hygiene, Windows and
+Latest completed exact-head CI [42790242372](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42790242372)
+verified `5c0fd19defc6e0ed5d78186aa3401611ffc88b72`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate memory qualifications per OS, and five repeated Windows
 worker-cancellation checks passed. Each OS matrix recorded **2,048 passed, 0 failed,

@@ -4,7 +4,7 @@
 
 - Repository: `nirzaf/XBRLMappingStudio`
 - Branch: `main`
-- Exact commit: `f59f6b7dc9c3eb3775c158ea837267a9b204aad0`
+- Exact commit: `5c0fd19defc6e0ed5d78186aa3401611ffc88b72`
 - `HEAD` and `origin/main` matched when captured.
 - The only untracked repository file was the pre-existing
   `tests/XBRLMappingStudio.Fixtures/AcceptanceFixtures/mapping.xmap`; it was not
@@ -13,7 +13,7 @@
 
 ## Exact-head CI
 
-[GitHub Actions run 42787270095](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42787270095)
+[GitHub Actions run 42790242372](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42790242372)
 completed successfully on the exact commit above. Repository hygiene, Windows,
 Ubuntu and pinned Arelle jobs all passed.
 
@@ -55,6 +55,10 @@ inventory successfully.
   rejects malformed filter JSON without changing the saved configuration, and
   clears the selectors. The full suite ran with isolated build artifacts because
   the shared Release output was held open by the desktop process.
+- Latest exact-head CI also passed all four jobs on `5c0fd19`; the matrix records
+  2,048 passed, 0 failed and 7 environment-gated Arelle skips per OS. The desktop
+  test now composes entity, period-kind/boundary, nil, unit and explicit-dimension
+  selectors in the same save/reopen and zero-mutation refusal journey.
 
 The local run did not execute the entire eight-project solution; the exact-head
 CI matrix is the evidence for that scope.
