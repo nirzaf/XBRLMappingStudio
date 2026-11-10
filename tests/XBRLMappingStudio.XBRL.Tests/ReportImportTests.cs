@@ -112,6 +112,27 @@ public sealed class ReportImportTests : IDisposable
     }
 
     [Fact]
+    public async Task XmlTupleConstruct_PreservesUnsupportedConstructDiagnostic()
+    {
+        XNamespace synthetic = SyntheticProfile.Namespace;
+        var xml = XDocument.Parse(XmlSerializer.Serialize(Profile, Report()));
+        xml.Root!.Add(new XElement(synthetic + "DisclosureTuple",
+            new XElement(synthetic + "TupleChild", "detail")));
+        var connection = new SourceConnection("report", "xbrl-report",
+            Write("tuple-report.xml", xml.ToString()));
+        var adapter = new XbrlReportAdapter();
+        var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+
+        var error = await Assert.ThrowsAsync<AdapterException>(async () =>
+        {
+            await foreach (var _ in adapter.ReadFullAsync(connection, schema, CancellationToken.None)) { }
+        });
+
+        Assert.Equal(DiagnosticCodes.XbrUnsupportedConstruct, error.Code);
+        Assert.Contains("unsupported XBRL construct", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task JsonReport_RejectsInputAboveConfiguredByteBudget()
     {
         var path = Write("over-budget.json", OimSerializer.Serialize(Profile, Report()));

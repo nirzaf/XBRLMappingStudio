@@ -444,7 +444,15 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
             };
             return (facts, input.Digest);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or XbrlExportException or System.Text.Json.JsonException)
+        catch (XbrlExportException ex)
+        {
+            // Preserve the parser's stable unsupported-construct code (for example,
+            // tuple content) so callers can distinguish valid-but-unmodeled XBRL from
+            // malformed or unsupported report encodings.
+            throw new AdapterException(ex.Code,
+                $"Report '{path}' contains an unsupported XBRL construct: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Text.Json.JsonException)
         {
             throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding,
                 $"Report '{path}' could not be parsed as xBRL-JSON or xBRL-XML: {ex.Message}");

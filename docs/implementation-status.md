@@ -871,3 +871,14 @@ contradicting the physical spool bound. Integration regressions cover limits of
 1024-byte full-run refusal still blocks before worker validation. The focused
 Windows Release set passed 3/3. This closes the below-page-size limit gap, not
 SQLite temporary-file accounting or process-wide disk qualification.
+
+## XBR-07 preserve unsupported-construct diagnostics (2026-11-10)
+
+The xBRL-XML report adapter now preserves `XbrlExportException.Code` when
+wrapping parser failures as adapter errors. Unsupported tuple content therefore
+reaches callers as the stable `XBR011` diagnostic instead of being mislabeled as
+generic unsupported encoding `IO005`. A synthetic tuple report regression
+verifies the code and actionable message. The full Windows Release XBRL test
+project passed 226/226, including `ReportImportTests` 28/28. Tuple mapping
+remains unsupported and continues to fail closed; no tuple data is flattened or
+dropped.
