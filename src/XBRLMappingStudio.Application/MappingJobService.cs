@@ -2581,6 +2581,7 @@ public sealed class MappingJobService
                     "Published file bytes do not match the staged adapter receipt.", manifest.RunId, destinationPath);
 
             AddReverseMappingTargetWriteAccounting(manifest, plan.Kind, records.Count, records.Count);
+            output = output with { RowsWritten = records.Count };
 
             manifest.Outputs = manifest.Outputs
                 .Where(existing => !StringComparer.OrdinalIgnoreCase.Equals(existing.Path, destinationPath))

@@ -793,7 +793,9 @@ After a destination publish succeeds, the run's `IO034` accounting diagnostic is
 enriched with the destination kind, output fact count, confirmed target row count,
 and whether those counts match. SQLite uses the durable publisher receipt; file
 destinations count records only after the published artifact digest is confirmed.
-No target identifiers or values are added. The update-only XBRL-to-SQLite
+Each confirmed file `OutputIdentity` also retains its own `RowsWritten` count, so
+per-destination file counts remain available when a run has multiple outputs. No
+target identifiers or values are added. The update-only XBRL-to-SQLite
 integration test verifies the pre-publication diagnostic has no write claim, then
 confirms one output fact and one durable target row after publication. The focused
 Release reverse-mapping and update-only publication tests passed 21/21 with

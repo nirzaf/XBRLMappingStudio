@@ -177,7 +177,7 @@ public sealed record OutputIdentity(
     long Bytes,
     string Kind)        // "xbrl-json", "xbrl-xml", file artifact kind, or "db-receipt"
 {
-    /// <summary>Rows affected by a durable database publication receipt.</summary>
+    /// <summary>Rows or fact records confirmed in this published destination.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? RowsWritten { get; init; }
 

@@ -1159,7 +1159,9 @@ public sealed class ReverseMappingDiagnosticTests
             var output = await service.PublishFileDestinationAsync(project, result, directory,
                 allowSyntheticProfile: true, CancellationToken.None);
             Assert.True(File.Exists(output.Path));
+            Assert.Equal(2, output.RowsWritten);
             Assert.Contains(result.Manifest.Outputs, item => item.Path == output.Path && item.Digest == output.Digest);
+            Assert.Contains(result.Manifest.Outputs, item => item.Path == output.Path && item.RowsWritten == 2);
             var publishedAccounting = Assert.Single(result.Manifest.Diagnostics,
                 diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
             Assert.Equal(kind, publishedAccounting.Details!["published_destination_kind"]);
