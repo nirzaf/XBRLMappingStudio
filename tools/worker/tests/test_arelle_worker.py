@@ -1851,7 +1851,7 @@ print("offline-network-denied")
                     logs = session.get_log_messages()
                     self.assertTrue(ok, logs)
                     facts = [fact for model in session.get_models() for fact in model.facts]
-                    self.assertEqual(2, len(facts), logs)
+                    self.assertEqual(6, len(facts), logs)
 
                     def qname_key(qname):
                         return qname.namespaceURI, qname.localName
@@ -1873,7 +1873,8 @@ print("offline-network-denied")
                         ))
                         return (
                             qname_key(fact.qname), context.entityIdentifier, period, unit,
-                            fact.value, None if fact.decimals is None else str(fact.decimals),
+                            None if fact.isNil else fact.value,
+                            None if fact.decimals is None else str(fact.decimals),
                             bool(fact.isNil), fact.xmlLang, dimensions,
                         )
 
@@ -1884,15 +1885,35 @@ print("offline-network-denied")
 
         self.assertEqual(json_occurrences, xml_occurrences)
         self.assertEqual([
+            (("urn:synthetic:finance:1.0", "Assets"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("instant", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "QAR"),), ()),
+             "500.00", "2", False, None, ()),
             (("urn:synthetic:finance:1.0", "EntityRegistrantName"),
              ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
              ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"), None,
              "ABC INC", None, False, "en", ()),
+            (("urn:synthetic:finance:1.0", "Expenses"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "QAR"),), ()),
+             None, None, True, None, ()),
+            (("urn:synthetic:finance:1.0", "NetIncome"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
+             "0", "0", False, None, ()),
             (("urn:synthetic:finance:1.0", "Revenue"),
              ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
              ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
              ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
              "123.45", "2", False, None, ()),
+            (("urn:synthetic:finance:1.0", "Revenue"),
+             ("http://standards.iso.org/iso/17442", "00EHHQ2ZHDCFXJCPCL49"),
+             ("duration", "2025-01-01T00:00:00", "2026-01-01T00:00:00"),
+             ((("http://www.xbrl.org/2003/iso4217", "USD"),), ()),
+             "123.450", "3", False, None, ()),
         ], json_occurrences)
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,

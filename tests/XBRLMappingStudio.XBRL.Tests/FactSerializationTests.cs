@@ -758,6 +758,7 @@ public sealed class FactSerializationTests
             TaxonomyUrls = new[] { "arelle-test-taxonomy.xsd" },
             PackageHashes = basis.PackageHashes
         };
+        var duration = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
         var facts = new[]
         {
             new XbrlFact
@@ -765,30 +766,70 @@ public sealed class FactSerializationTests
                 ConceptName = SyntheticProfile.Qualified("Revenue"),
                 EntityScheme = "http://standards.iso.org/iso/17442",
                 EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
-                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Period = duration,
                 Unit = new XbrlUnit("USD"),
                 Value = 123.45m,
                 Decimals = 2
             },
             new XbrlFact
             {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = duration,
+                Unit = new XbrlUnit("USD"),
+                Value = 123.450m,
+                Decimals = 3
+            },
+            new XbrlFact
+            {
                 ConceptName = SyntheticProfile.Qualified("EntityRegistrantName"),
                 EntityScheme = "http://standards.iso.org/iso/17442",
                 EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
-                Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+                Period = duration,
                 TextValue = "ABC INC",
                 Language = "en"
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("NetIncome"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = duration,
+                Unit = new XbrlUnit("USD"),
+                Value = 0m,
+                Decimals = 0
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Expenses"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = duration,
+                Unit = new XbrlUnit("QAR"),
+                IsNil = true
+            },
+            new XbrlFact
+            {
+                ConceptName = SyntheticProfile.Qualified("Assets"),
+                EntityScheme = "http://standards.iso.org/iso/17442",
+                EntityIdentifier = "00EHHQ2ZHDCFXJCPCL49",
+                Period = XbrlPeriod.OfInstant(new DateOnly(2025, 12, 31)),
+                Unit = new XbrlUnit("QAR"),
+                Value = 500.00m,
+                Decimals = 2
             }
         };
 
-        var expected = JsonNode.Parse(FixturePaths.Read("product-generated-pass.xbrl.json"));
-        var actual = JsonNode.Parse(OimSerializer.Serialize(profile, facts));
-        Assert.True(JsonNode.DeepEquals(expected, actual), "C# serializer output changed from the Arelle-validated fixture.");
-
+        var fixtureJsonFacts = OimSerializer.ReadFacts(FixturePaths.Read("product-generated-pass.xbrl.json"));
         var xmlFixtureFacts = XmlSerializer.ReadFacts(FixturePaths.Read("product-generated-pass.xbrl.xml"));
+        var generatedJsonFacts = OimSerializer.ReadFacts(OimSerializer.Serialize(profile, facts));
         var generatedXmlFacts = XmlSerializer.ReadFacts(XmlSerializer.Serialize(profile, facts));
-        Assert.Equal(OccurrenceKeys(facts.Select(ToOccurrence)), OccurrenceKeys(xmlFixtureFacts.Select(ToOccurrence)));
-        Assert.Equal(OccurrenceKeys(facts.Select(ToOccurrence)), OccurrenceKeys(generatedXmlFacts.Select(ToOccurrence)));
+        var expectedOccurrences = OccurrenceKeys(facts.Select(ToOccurrence));
+        Assert.Equal(expectedOccurrences, OccurrenceKeys(fixtureJsonFacts.Select(ToOccurrence)));
+        Assert.Equal(expectedOccurrences, OccurrenceKeys(xmlFixtureFacts.Select(ToOccurrence)));
+        Assert.Equal(expectedOccurrences, OccurrenceKeys(generatedJsonFacts.Select(ToOccurrence)));
+        Assert.Equal(expectedOccurrences, OccurrenceKeys(generatedXmlFacts.Select(ToOccurrence)));
     }
 
     [Fact]

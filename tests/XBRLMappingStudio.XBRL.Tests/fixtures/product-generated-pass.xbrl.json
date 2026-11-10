@@ -32,6 +32,45 @@
         "unit": "iso4217:USD"
       },
       "decimals": 2
+    },
+    "repeated-revenue-2": {
+      "value": "123.450",
+      "dimensions": {
+        "concept": "synthetic:Revenue",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:USD"
+      },
+      "decimals": 3
+    },
+    "net-income-zero": {
+      "value": "0",
+      "dimensions": {
+        "concept": "synthetic:NetIncome",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:USD"
+      },
+      "decimals": 0
+    },
+    "expenses-nil": {
+      "value": null,
+      "dimensions": {
+        "concept": "synthetic:Expenses",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2025-01-01T00:00:00/2026-01-01T00:00:00",
+        "unit": "iso4217:QAR"
+      }
+    },
+    "assets-instant": {
+      "value": "500.00",
+      "dimensions": {
+        "concept": "synthetic:Assets",
+        "entity": "entity:00EHHQ2ZHDCFXJCPCL49",
+        "period": "2026-01-01T00:00:00",
+        "unit": "iso4217:QAR"
+      },
+      "decimals": 2
     }
   }
 }
