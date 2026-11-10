@@ -667,6 +667,47 @@ public sealed class FactSerializationTests
     }
 
     [Theory]
+    [InlineData("report")]
+    [InlineData("documentInfo")]
+    [InlineData("fact")]
+    public void OimJson_RejectsUnpreservedExtensionProperties(string location)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { GoldenFacts()[0] }))!.AsObject();
+        const string extensionName = "acme:sourceAnnotation";
+        root["documentInfo"]!["namespaces"]!["acme"] = "urn:example:report-extension";
+        switch (location)
+        {
+            case "report":
+                root[extensionName] = "transaction details";
+                break;
+            case "documentInfo":
+                root["documentInfo"]![extensionName] = "source package metadata";
+                break;
+            case "fact":
+                root["facts"]!.AsObject().First().Value![extensionName] = "original ledger row";
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(location));
+        }
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+
+        Assert.Contains("not supported by this mapping model", error.Message, StringComparison.Ordinal);
+        Assert.Contains(extensionName, error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OimJson_RejectsUnsupportedStandardDocumentInfoFeatures()
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { GoldenFacts()[0] }))!.AsObject();
+        root["documentInfo"]!["features"] = new JsonObject();
+
+        var error = Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+
+        Assert.Contains("documentInfo property 'features'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(-30)]
     [InlineData(30)]
     public void OimJson_ReadsSupportedDecimalsRangeBoundaries(int decimals)

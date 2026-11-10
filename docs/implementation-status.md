@@ -625,3 +625,12 @@ slice passed 21/21. The full Operations suite passed 552 tests and had one
 that same test passed 1/1 when rerun alone. Retention duration, production
 authorization, automatic purge and coverage of other diagnostic secret formats
 remain open; no retention policy was inferred.
+
+## XBR-07 refuse unpreserved xBRL-JSON extension data (2026-11-10)
+
+`OimSerializer.ReadFactEntries` now rejects report-, `documentInfo`-, or fact-level
+properties outside the explicitly supported mapping subset. This prevents
+extension annotations and unsupported document metadata (including standard
+`features` metadata) from disappearing silently during reverse mapping; fact
+links and note IDs continue to fail closed.
+The boundary follows the [XBRL International xBRL-JSON 1.0 extensibility rules](https://www.xbrl.org/Specification/xbrl-json/REC-2021-10-13/xbrl-json-REC-2021-10-13.html#sec-extensibility), while keeping the parser's supported property subset narrower than the full standard. Synthetic extension-property regressions cover all three extension points. The XBRL Release suite passed 217/217 and the isolated-output Windows reverse-mapping integration suite passed 17/17. Full OIM feature/link/note preservation, tuple handling, and target-row update semantics remain unsupported and fail closed.

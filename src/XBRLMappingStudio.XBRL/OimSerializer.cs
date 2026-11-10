@@ -18,6 +18,18 @@ public static class OimSerializer
     private const string DocumentType = "https://xbrl.org/2021/xbrl-json";
     private const string Iso4217 = "http://www.xbrl.org/2003/iso4217";
     private const string Xbrli = "http://www.xbrl.org/2003/instance";
+    private static readonly HashSet<string> SupportedReportMembers = new(StringComparer.Ordinal)
+    {
+        "documentInfo", "facts"
+    };
+    private static readonly HashSet<string> SupportedDocumentInfoMembers = new(StringComparer.Ordinal)
+    {
+        "documentType", "namespaces", "taxonomy"
+    };
+    private static readonly HashSet<string> SupportedFactMembers = new(StringComparer.Ordinal)
+    {
+        "value", "decimals", "dimensions", "links"
+    };
 
     public static string Serialize(FilingProfile profile, IReadOnlyList<XbrlFact> facts)
     {
@@ -306,6 +318,8 @@ public static class OimSerializer
             || !info.TryGetProperty("documentType", out var documentType)
             || documentType.GetString() != DocumentType)
             throw Unsupported("Document is not an xBRL-JSON 1.0 report.");
+        RejectUnsupportedMembers(root, SupportedReportMembers, "report");
+        RejectUnsupportedMembers(info, SupportedDocumentInfoMembers, "documentInfo");
         if (!info.TryGetProperty("namespaces", out var namespacesNode)
             || namespacesNode.ValueKind != JsonValueKind.Object)
             throw Unsupported("xBRL-JSON report has no namespace map.");
@@ -330,6 +344,7 @@ public static class OimSerializer
                 || dimensions.ValueKind != JsonValueKind.Object
                 || !fact.TryGetProperty("value", out var value))
                 throw Unsupported($"Fact '{property.Name}' is incomplete.");
+            RejectUnsupportedMembers(fact, SupportedFactMembers, $"fact '{property.Name}'");
             if (fact.TryGetProperty("links", out _)
                 || dimensions.TryGetProperty("noteId", out _))
                 throw Unsupported("Fact notes and links are not supported by this mapping model.");
@@ -599,6 +614,19 @@ public static class OimSerializer
         else if (element.ValueKind == JsonValueKind.Array)
         {
             foreach (var value in element.EnumerateArray()) EnsureUniqueKeys(value);
+        }
+    }
+
+    private static void RejectUnsupportedMembers(
+        JsonElement value,
+        HashSet<string> supportedMembers,
+        string location)
+    {
+        foreach (var property in value.EnumerateObject())
+        {
+            if (!supportedMembers.Contains(property.Name))
+                throw Unsupported(
+                    $"xBRL-JSON {location} property '{property.Name}' is not supported by this mapping model; import refused to avoid silently dropping report data.");
         }
     }
 
