@@ -552,9 +552,9 @@ public sealed class ReverseMappingDiagnosticTests
         };
 
         MappingJobService.AddReverseMappingLossAccounting(diagnostics, "report",
-            new SourceSelectionSummary(2, 2), new HashSet<string>(StringComparer.Ordinal)
+            new SourceSelectionSummary(3, 3), new HashSet<string>(StringComparer.Ordinal)
             {
-                "report#f1", "report#f2"
+                "report#f1", "report#f2", "report#f3"
             }, new[] { fact }, "operation-456");
 
         var warning = Assert.Single(diagnostics.Items);
@@ -562,7 +562,10 @@ public sealed class ReverseMappingDiagnosticTests
         Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
         Assert.False(warning.IsBlocking);
         Assert.Equal("operation-456", warning.OperationId);
+        Assert.Equal("3", warning.Details!["source_occurrence_count"]);
+        Assert.Equal("3", warning.Details["selected_occurrence_count"]);
         Assert.Equal("2", warning.Details!["mapped_occurrence_count"]);
+        Assert.Equal("1", warning.Details["unmapped_selected_occurrence_count"]);
         Assert.Equal("0", warning.Details["filtered_out_occurrence_count"]);
         Assert.Equal("1", warning.Details["multi_occurrence_fact_count"]);
         Assert.DoesNotContain("report#f", string.Join(" ", warning.Details.Values), StringComparison.Ordinal);
