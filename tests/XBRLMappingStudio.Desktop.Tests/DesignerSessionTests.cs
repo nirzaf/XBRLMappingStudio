@@ -758,6 +758,17 @@ public sealed class DesignerSessionTests
             viewModel.SaveProjectTo(projectPath);
             await viewModel.LoadSourceAsync(reportPath);
             viewModel.XbrlTargetAspectMatch = true;
+            viewModel.Session.Project.Destination = viewModel.Session.Project.Destination! with { WriteMode = "upsert" };
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+            Assert.DoesNotContain("targetAspectMatch", Assert.Single(viewModel.Session.Project.Bindings).Configuration.Keys);
+            Assert.Contains("requires a SQLite update-only destination", viewModel.StatusText, StringComparison.Ordinal);
+
+            viewModel.Session.Project.Destination = viewModel.Session.Project.Destination! with { WriteMode = "update-only" };
+            viewModel.XbrlTargetRowId = "sha256:" + new string('a', 64);
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+            Assert.DoesNotContain("targetAspectMatch", Assert.Single(viewModel.Session.Project.Bindings).Configuration.Keys);
+            Assert.Contains("cannot be combined with explicit target-row mappings", viewModel.StatusText, StringComparison.Ordinal);
+            viewModel.XbrlTargetRowId = "";
             await viewModel.ApplyXbrlOccurrenceSelectionAsync();
 
             var binding = Assert.Single(viewModel.Session.Project.Bindings);
