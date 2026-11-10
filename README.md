@@ -288,17 +288,20 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest completed exact-head CI [42639813409](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42639813409)
-verified `1105f2f1970db1d29836c7ca37cc9e16884c3fdc`. Repository hygiene, Windows and
+Latest completed exact-head CI [42777551773](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42777551773)
+verified `925609ff5cac5a93429ead2828db166a108b5d52`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
-generation, five separate memory qualifications, and repeated Windows worker-cancellation
-checks passed. Each OS matrix passed **1,992 tests**, skipped **6** environment-gated
-Arelle subprocess cases, and had **0 failures**. The eight suite counts were Adapters
-309, AI 72, Desktop 171, Engine 156, Integration 515 (509 passed, 6 skipped), Ops
-541, Project 32, and XBRL 202. The pinned worker passed 82 Python tests and 15 .NET
-Arelle execution tests. This CI verifies the synthetic/offline implementation; it does
-not qualify the selected IFRS package, its rights, a regulator filing profile, or
-native desktop accessibility.
+generation, five separate memory qualifications per OS, and five repeated Windows
+worker-cancellation checks passed. Each OS matrix recorded **2,047 passed, 0 failed,
+7 not executed**; the seven are environment-gated Arelle subprocess tests. The eight
+suite counts per OS were Adapters 310, AI 72, Desktop 174, Engine 159, Integration
+529 (522 passed, 7 not executed), Ops 553, Project 32, and XBRL 225. The dedicated
+worker job passed 82 Python worker tests, 16 .NET Arelle execution tests and 15
+dependency-inventory tests. The full evidence and limits are in the
+[November 10 verification baseline](docs/verification-baseline-2026-11-10.md).
+This CI verifies the synthetic/offline implementation; it does not qualify the
+selected IFRS package or its rights, regulator-specific filing, or native desktop
+accessibility.
 
 The captured baseline run [42192658514](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42192658514) verified source commit `563f74d260af0a0f5e5066db11f135814d1ddbec`: repository hygiene and the Windows/Ubuntu Release build/test matrix passed. Each .NET matrix passed **612 tests** and skipped **5** Arelle-gated subprocess cases, with no failures. The pinned worker job passed **46 Python tests** and **11 .NET Arelle execution tests**, including all 5 gated cases. Its historical per-suite totals remain in [`docs/verification-baseline-2026-11-06.md`](docs/verification-baseline-2026-11-06.md).
 
