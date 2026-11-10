@@ -2983,12 +2983,14 @@ public sealed class DesignerSessionTests
         File.WriteAllText(csv, "currentField\nvalue\n");
         var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseSchema = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken staleSchemaToken = default;
         try
         {
             async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
                 XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
             {
                 schemaEntered.TrySetResult();
+                staleSchemaToken = cancellationToken;
                 await releaseSchema.Task.WaitAsync(cancellationToken);
                 return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
                     .InspectSchemaAsync(connection, cancellationToken);
@@ -3007,6 +3009,8 @@ public sealed class DesignerSessionTests
             Assert.True(viewModel.CanShowCancellationControl);
             Assert.True(viewModel.CanCancelOperation);
             await viewModel.LoadSourceAsync(csv);
+            Assert.True(staleSchemaToken.IsCancellationRequested,
+                "Selecting a newer source must cancel the superseded SQLite schema read.");
             releaseSchema.TrySetResult();
             await staleLoad;
             Assert.Contains("currentField", viewModel.SourceColumns);
