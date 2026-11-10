@@ -703,8 +703,14 @@ public sealed class DesignerSessionTests
             viewModel.SelectedXbrlOccurrence = viewModel.XbrlOccurrenceOptions[0];
             viewModel.XbrlOccurrenceId = "";
             viewModel.XbrlConceptFilter = SyntheticProfile.Qualified("Revenue");
+            viewModel.XbrlEntitySchemeFilter = "https://example.test/entity";
+            viewModel.XbrlEntityIdentifierFilter = "ACME-1";
             viewModel.XbrlPeriodFilter = selectedPeriod.ToIsoString();
+            viewModel.XbrlPeriodKindFilter = "duration";
+            viewModel.XbrlPeriodStartFilter = "2025-01-01";
+            viewModel.XbrlPeriodEndFilter = "2026-01-01";
             viewModel.XbrlUnitFilter = "QAR";
+            viewModel.XbrlNilFilter = "false";
             viewModel.XbrlDimensionFiltersJson = System.Text.Json.JsonSerializer.Serialize(
                 new Dictionary<string, string> { [axis] = north });
             await viewModel.ApplyXbrlOccurrenceSelectionAsync();
@@ -715,8 +721,14 @@ public sealed class DesignerSessionTests
             Assert.Equal("sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(reportPath)))
                 .ToLowerInvariant(), binding.Configuration["reportDigest"]?.ToString());
             Assert.Equal(SyntheticProfile.Qualified("Revenue"), binding.Configuration["concept"]?.ToString());
+            Assert.Equal("https://example.test/entity", binding.Configuration["entityScheme"]?.ToString());
+            Assert.Equal("ACME-1", binding.Configuration["entityIdentifier"]?.ToString());
             Assert.Equal(selectedPeriod.ToIsoString(), binding.Configuration["period"]?.ToString());
+            Assert.Equal("duration", binding.Configuration["periodKind"]?.ToString());
+            Assert.Equal("2025-01-01", binding.Configuration["periodStart"]?.ToString());
+            Assert.Equal("2026-01-01", binding.Configuration["periodEnd"]?.ToString());
             Assert.Equal("QAR", binding.Configuration["unit"]?.ToString());
+            Assert.Equal("false", binding.Configuration["nil"]?.ToString());
             Assert.Equal(viewModel.XbrlDimensionFiltersJson, binding.Configuration["dimensionFilters"]?.ToString());
             Assert.Contains("Applied xBRL aspect filters", viewModel.SourceInspectionSummary, StringComparison.Ordinal);
 
@@ -726,8 +738,14 @@ public sealed class DesignerSessionTests
             await reopened.OpenProjectAsync();
             Assert.False(reopened.IsProjectDirty);
             Assert.Equal(viewModel.XbrlConceptFilter, reopened.XbrlConceptFilter);
+            Assert.Equal(viewModel.XbrlEntitySchemeFilter, reopened.XbrlEntitySchemeFilter);
+            Assert.Equal(viewModel.XbrlEntityIdentifierFilter, reopened.XbrlEntityIdentifierFilter);
             Assert.Equal(viewModel.XbrlPeriodFilter, reopened.XbrlPeriodFilter);
+            Assert.Equal(viewModel.XbrlPeriodKindFilter, reopened.XbrlPeriodKindFilter);
+            Assert.Equal(viewModel.XbrlPeriodStartFilter, reopened.XbrlPeriodStartFilter);
+            Assert.Equal(viewModel.XbrlPeriodEndFilter, reopened.XbrlPeriodEndFilter);
             Assert.Equal(viewModel.XbrlUnitFilter, reopened.XbrlUnitFilter);
+            Assert.Equal(viewModel.XbrlNilFilter, reopened.XbrlNilFilter);
             Assert.Equal(viewModel.XbrlDimensionFiltersJson, reopened.XbrlDimensionFiltersJson);
             Assert.Equal(binding.Configuration["reportDigest"]?.ToString(),
                 reopened.Session.Project.Bindings.Single().Configuration["reportDigest"]?.ToString());
@@ -753,8 +771,14 @@ public sealed class DesignerSessionTests
             Assert.Null(viewModel.SelectedXbrlOccurrence);
             Assert.DoesNotContain("reportDigest", cleared.Configuration.Keys);
             Assert.DoesNotContain("concept", cleared.Configuration.Keys);
+            Assert.DoesNotContain("entityScheme", cleared.Configuration.Keys);
+            Assert.DoesNotContain("entityIdentifier", cleared.Configuration.Keys);
             Assert.DoesNotContain("period", cleared.Configuration.Keys);
+            Assert.DoesNotContain("periodKind", cleared.Configuration.Keys);
+            Assert.DoesNotContain("periodStart", cleared.Configuration.Keys);
+            Assert.DoesNotContain("periodEnd", cleared.Configuration.Keys);
             Assert.DoesNotContain("unit", cleared.Configuration.Keys);
+            Assert.DoesNotContain("nil", cleared.Configuration.Keys);
             Assert.DoesNotContain("dimensionFilters", cleared.Configuration.Keys);
         }
         finally

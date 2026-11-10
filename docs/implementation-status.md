@@ -690,3 +690,24 @@ warnings and 0 errors. A report with more than 200 facts requires entering the
 known ID when the desired fact is outside the displayed sample. Native Windows
 journey acceptance, tuples, complex typed domains and full loss accounting remain
 open.
+
+## XBR-07 complete supported aspect-filter authoring follow-on (2026-11-10)
+
+The desktop source panel now exposes every currently supported `XbrlReportAdapter`
+selection key that narrows fact aspects: concept, entity scheme/identifier, full
+period or period kind and boundaries, unit, language, nil state, one explicit
+axis/member pair, multiple explicit dimensions, and typed-dimension evidence.
+Existing values load into the fields and clear removes all corresponding
+selection configuration. Applying any combination still parses the adapter
+contract against current report bytes before changing the project, stores the
+exact report digest, and leaves the saved configuration unchanged on invalid or
+zero-match filters. The synthetic Desktop regression verifies composed entity,
+period, unit, nil and dimension filters select the intended occurrence, saved
+values survive project reopen, invalid JSON is rejected without project mutation,
+and clearing removes the supported selection keys. The focused Release test
+passed 1/1 and the full Release Desktop suite passed 175/175 using isolated build
+artifacts. The filters remain exact selectors,
+not semantic mapping or filing validation; UI guidance points to adapter
+validation for contradictory combinations. Native DST-04 acceptance, tuple
+mapping, complex typed-domain normalization and full loss accounting remain
+open.

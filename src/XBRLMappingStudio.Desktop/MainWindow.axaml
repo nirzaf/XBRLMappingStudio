@@ -102,12 +102,42 @@
                 <TextBox Text="{Binding XbrlConceptFilter, Mode=TwoWay}"
                          Watermark="Exact concept QName, e.g. ifrs-full:Revenue"
                          AutomationProperties.Name="Exact xBRL concept filter" />
+                <TextBox Text="{Binding XbrlEntitySchemeFilter, Mode=TwoWay}"
+                         Watermark="Exact entity scheme URI"
+                         AutomationProperties.Name="Exact xBRL entity scheme filter" />
+                <TextBox Text="{Binding XbrlEntityIdentifierFilter, Mode=TwoWay}"
+                         Watermark="Exact entity identifier"
+                         AutomationProperties.Name="Exact xBRL entity identifier filter" />
                 <TextBox Text="{Binding XbrlPeriodFilter, Mode=TwoWay}"
                          Watermark="Exact ISO period, e.g. 2025-01-01/2026-01-01"
                          AutomationProperties.Name="Exact xBRL reporting period filter" />
+                <TextBox Text="{Binding XbrlPeriodKindFilter, Mode=TwoWay}"
+                         Watermark="instant or duration"
+                         AutomationProperties.Name="Exact xBRL period kind filter" />
+                <TextBox Text="{Binding XbrlInstantDateFilter, Mode=TwoWay}"
+                         Watermark="Instant date yyyy-MM-dd"
+                         AutomationProperties.Name="Exact xBRL instant date filter" />
+                <TextBox Text="{Binding XbrlPeriodStartFilter, Mode=TwoWay}"
+                         Watermark="Duration start yyyy-MM-dd"
+                         AutomationProperties.Name="Exact xBRL period start filter" />
+                <TextBox Text="{Binding XbrlPeriodEndFilter, Mode=TwoWay}"
+                         Watermark="Duration end yyyy-MM-dd"
+                         AutomationProperties.Name="Exact xBRL period end filter" />
                 <TextBox Text="{Binding XbrlUnitFilter, Mode=TwoWay}"
                          Watermark="Exact unit, e.g. iso4217:QAR"
                          AutomationProperties.Name="Exact xBRL unit filter" />
+                <TextBox Text="{Binding XbrlLanguageFilter, Mode=TwoWay}"
+                         Watermark="Exact language tag, e.g. en"
+                         AutomationProperties.Name="Exact xBRL language filter" />
+                <TextBox Text="{Binding XbrlNilFilter, Mode=TwoWay}"
+                         Watermark="true or false"
+                         AutomationProperties.Name="Exact xBRL nil filter" />
+                <TextBox Text="{Binding XbrlDimensionAxisFilter, Mode=TwoWay}"
+                         Watermark="One explicit dimension axis QName"
+                         AutomationProperties.Name="Exact xBRL explicit dimension axis filter" />
+                <TextBox Text="{Binding XbrlDimensionMemberFilter, Mode=TwoWay}"
+                         Watermark="Matching explicit dimension member QName"
+                         AutomationProperties.Name="Exact xBRL explicit dimension member filter" />
                 <TextBlock Text="Explicit dimensions: JSON object of axis QName to member QName."
                            TextWrapping="Wrap" FontSize="10" />
                 <TextBox Text="{Binding XbrlDimensionFiltersJson, Mode=TwoWay}"

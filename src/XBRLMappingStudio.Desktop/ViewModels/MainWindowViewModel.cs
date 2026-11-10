@@ -472,8 +472,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string _xbrlOccurrenceId = "";
     private string _xbrlTargetRowId = "";
     private string _xbrlConceptFilter = "";
+    private string _xbrlEntitySchemeFilter = "";
+    private string _xbrlEntityIdentifierFilter = "";
     private string _xbrlPeriodFilter = "";
+    private string _xbrlPeriodKindFilter = "";
+    private string _xbrlInstantDateFilter = "";
+    private string _xbrlPeriodStartFilter = "";
+    private string _xbrlPeriodEndFilter = "";
     private string _xbrlUnitFilter = "";
+    private string _xbrlLanguageFilter = "";
+    private string _xbrlNilFilter = "";
+    private string _xbrlDimensionAxisFilter = "";
+    private string _xbrlDimensionMemberFilter = "";
     private string _xbrlDimensionFiltersJson = "";
     private string _xbrlTypedDimensionFiltersJson = "";
     private XbrlOccurrenceOption? _selectedXbrlOccurrence;
@@ -849,8 +859,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
     public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
     public string XbrlConceptFilter { get => _xbrlConceptFilter; set => Set(ref _xbrlConceptFilter, value); }
+    public string XbrlEntitySchemeFilter { get => _xbrlEntitySchemeFilter; set => Set(ref _xbrlEntitySchemeFilter, value); }
+    public string XbrlEntityIdentifierFilter { get => _xbrlEntityIdentifierFilter; set => Set(ref _xbrlEntityIdentifierFilter, value); }
     public string XbrlPeriodFilter { get => _xbrlPeriodFilter; set => Set(ref _xbrlPeriodFilter, value); }
+    public string XbrlPeriodKindFilter { get => _xbrlPeriodKindFilter; set => Set(ref _xbrlPeriodKindFilter, value); }
+    public string XbrlInstantDateFilter { get => _xbrlInstantDateFilter; set => Set(ref _xbrlInstantDateFilter, value); }
+    public string XbrlPeriodStartFilter { get => _xbrlPeriodStartFilter; set => Set(ref _xbrlPeriodStartFilter, value); }
+    public string XbrlPeriodEndFilter { get => _xbrlPeriodEndFilter; set => Set(ref _xbrlPeriodEndFilter, value); }
     public string XbrlUnitFilter { get => _xbrlUnitFilter; set => Set(ref _xbrlUnitFilter, value); }
+    public string XbrlLanguageFilter { get => _xbrlLanguageFilter; set => Set(ref _xbrlLanguageFilter, value); }
+    public string XbrlNilFilter { get => _xbrlNilFilter; set => Set(ref _xbrlNilFilter, value); }
+    public string XbrlDimensionAxisFilter { get => _xbrlDimensionAxisFilter; set => Set(ref _xbrlDimensionAxisFilter, value); }
+    public string XbrlDimensionMemberFilter { get => _xbrlDimensionMemberFilter; set => Set(ref _xbrlDimensionMemberFilter, value); }
     public string XbrlDimensionFiltersJson { get => _xbrlDimensionFiltersJson; set => Set(ref _xbrlDimensionFiltersJson, value); }
     public string XbrlTypedDimensionFiltersJson { get => _xbrlTypedDimensionFiltersJson; set => Set(ref _xbrlTypedDimensionFiltersJson, value); }
     public ObservableCollection<XbrlOccurrenceOption> XbrlOccurrenceOptions { get; } = new();
@@ -3852,10 +3872,20 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 XbrlOccurrenceId = config.GetValueOrDefault("occurrenceId", "");
                 XbrlTargetRowId = config.GetValueOrDefault("targetRowId", "");
                 XbrlConceptFilter = config.GetValueOrDefault("concept", "");
+                XbrlEntitySchemeFilter = config.GetValueOrDefault("entityScheme", "");
+                XbrlEntityIdentifierFilter = config.GetValueOrDefault("entityIdentifier", "");
                 XbrlPeriodFilter = config.GetValueOrDefault("period", "");
+                XbrlPeriodKindFilter = config.GetValueOrDefault("periodKind", "");
+                XbrlInstantDateFilter = config.GetValueOrDefault("instantDate", "");
+                XbrlPeriodStartFilter = config.GetValueOrDefault("periodStart", "");
+                XbrlPeriodEndFilter = config.GetValueOrDefault("periodEnd", "");
                 XbrlUnitFilter = config.GetValueOrDefault("unit", "");
+                XbrlLanguageFilter = config.GetValueOrDefault("lang", "");
+                XbrlNilFilter = config.GetValueOrDefault("nil", "");
                 XbrlDimensionFiltersJson = config.GetValueOrDefault("dimensionFilters", "");
                 XbrlTypedDimensionFiltersJson = config.GetValueOrDefault("typedDimensionFilters", "");
+                XbrlDimensionAxisFilter = config.GetValueOrDefault("dimensionAxis", "");
+                XbrlDimensionMemberFilter = config.GetValueOrDefault("dimensionMember", "");
             }
             var connection = new SourceConnection(binding.BindingId, kind, safePath,
                 config);
@@ -3982,8 +4012,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         var requestedFilters = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["concept"] = XbrlConceptFilter.Trim(),
+            ["entityScheme"] = XbrlEntitySchemeFilter.Trim(),
+            ["entityIdentifier"] = XbrlEntityIdentifierFilter.Trim(),
             ["period"] = XbrlPeriodFilter.Trim(),
+            ["periodKind"] = XbrlPeriodKindFilter.Trim(),
+            ["instantDate"] = XbrlInstantDateFilter.Trim(),
+            ["periodStart"] = XbrlPeriodStartFilter.Trim(),
+            ["periodEnd"] = XbrlPeriodEndFilter.Trim(),
             ["unit"] = XbrlUnitFilter.Trim(),
+            ["lang"] = XbrlLanguageFilter.Trim(),
+            ["nil"] = XbrlNilFilter.Trim(),
+            ["dimensionAxis"] = XbrlDimensionAxisFilter.Trim(),
+            ["dimensionMember"] = XbrlDimensionMemberFilter.Trim(),
             ["dimensionFilters"] = XbrlDimensionFiltersJson.Trim(),
             ["typedDimensionFilters"] = XbrlTypedDimensionFiltersJson.Trim()
         };
@@ -4091,8 +4131,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         XbrlOccurrenceId = "";
         XbrlTargetRowId = "";
         XbrlConceptFilter = "";
+        XbrlEntitySchemeFilter = "";
+        XbrlEntityIdentifierFilter = "";
         XbrlPeriodFilter = "";
+        XbrlPeriodKindFilter = "";
+        XbrlInstantDateFilter = "";
+        XbrlPeriodStartFilter = "";
+        XbrlPeriodEndFilter = "";
         XbrlUnitFilter = "";
+        XbrlLanguageFilter = "";
+        XbrlNilFilter = "";
+        XbrlDimensionAxisFilter = "";
+        XbrlDimensionMemberFilter = "";
         XbrlDimensionFiltersJson = "";
         XbrlTypedDimensionFiltersJson = "";
         SourceInspectionSummary = "Cleared the occurrence, aspect filters and existing-row selector; the report source now exposes all matching facts.";
