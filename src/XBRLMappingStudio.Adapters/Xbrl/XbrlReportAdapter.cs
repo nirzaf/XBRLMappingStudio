@@ -78,7 +78,9 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         var report = Read(connection, cancellationToken, profile);
         var facts = Select(connection, report.Facts, report.Digest, profile);
         bool truncated = facts.Count > maxRows;
-        var rows = facts.Take(maxRows).Select(item => ToRecord(connection, item.Fact, item.Index)).ToList();
+        var summary = new SourceSelectionSummary(report.Facts.Count, facts.Count);
+        var rows = facts.Take(maxRows).Select((item, index) => ToRecord(connection, item.Fact, item.Index,
+            index == 0 ? summary : null)).ToList();
         return Task.FromResult(new DataSample(schema, rows, truncated));
     }
 
@@ -102,10 +104,11 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         cancellationToken.ThrowIfCancellationRequested();
         var report = Read(connection, cancellationToken, profile);
         var facts = Select(connection, report.Facts, report.Digest, profile);
+        var summary = new SourceSelectionSummary(report.Facts.Count, facts.Count);
         for (int i = 0; i < facts.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            yield return ToRecord(connection, facts[i].Fact, facts[i].Index);
+            yield return ToRecord(connection, facts[i].Fact, facts[i].Index, i == 0 ? summary : null);
             await Task.Yield();
         }
     }
@@ -493,7 +496,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         return XbrlReportInputReader.ResolveMaximumInputBytes(connection.Path ?? string.Empty, configured);
     }
 
-    private static DataRecord ToRecord(SourceConnection connection, XbrlFact f, int index)
+    private static DataRecord ToRecord(SourceConnection connection, XbrlFact f, int index,
+        SourceSelectionSummary? selectionSummary = null)
     {
         var src = new SourceReference(connection.SourceId, $"report#f{index + 1}");
         var fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
@@ -556,7 +560,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
             RowId = $"{connection.SourceId}#f{index + 1}",
             Fields = fields,
             CellSources = srcs,
-            HasStableRowIdentity = true
+            HasStableRowIdentity = true,
+            SelectionSummary = selectionSummary
         };
     }
 

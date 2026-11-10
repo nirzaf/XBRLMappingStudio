@@ -139,6 +139,47 @@ public sealed class MappingJobService
             });
     }
 
+    internal static void AddReverseMappingLossAccounting(
+        DiagnosticBag diagnostics,
+        string sourceId,
+        SourceSelectionSummary selection,
+        IReadOnlySet<string> selectedLocators,
+        IReadOnlyList<XbrlFact> facts,
+        string operationId)
+    {
+        var perFactLocators = facts.Select(fact => fact.SourceTransformationPaths
+                .Where(path => StringComparer.Ordinal.Equals(path.Source.SourceId, sourceId)
+                    && selectedLocators.Contains(path.Source.Locator))
+                .Select(path => path.Source.Locator)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray())
+            .ToArray();
+        var represented = perFactLocators.SelectMany(locators => locators)
+            .ToHashSet(StringComparer.Ordinal);
+        var filteredOut = Math.Max(0, selection.SourceRecordCount - selection.SelectedRecordCount);
+        var unmapped = Math.Max(0, selection.SelectedRecordCount - represented.Count);
+        var mappedFacts = perFactLocators.Count(locators => locators.Length != 0);
+        var multiOccurrenceFacts = perFactLocators.Count(locators => locators.Length > 1);
+
+        diagnostics.Warn(
+            DiagnosticCodes.IoReverseMappingLossAccounting,
+            DiagnosticSubsystem.Mapping,
+            DiagnosticStage.Execution,
+            $"Reverse mapping selected {selection.SelectedRecordCount} of {selection.SourceRecordCount} reported fact occurrences; {filteredOut} were filtered out, {unmapped} selected occurrence(s) have no output fact provenance, and {multiOccurrenceFacts} output fact(s) combine multiple occurrences. Original transaction detail remains unavailable.",
+            source: new SourceReference(sourceId, "fact-occurrence-accounting"),
+            operationId: operationId,
+            details: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["source_occurrence_count"] = selection.SourceRecordCount.ToString(CultureInfo.InvariantCulture),
+                ["selected_occurrence_count"] = selection.SelectedRecordCount.ToString(CultureInfo.InvariantCulture),
+                ["filtered_out_occurrence_count"] = filteredOut.ToString(CultureInfo.InvariantCulture),
+                ["mapped_occurrence_count"] = represented.Count.ToString(CultureInfo.InvariantCulture),
+                ["unmapped_selected_occurrence_count"] = unmapped.ToString(CultureInfo.InvariantCulture),
+                ["mapped_fact_count"] = mappedFacts.ToString(CultureInfo.InvariantCulture),
+                ["multi_occurrence_fact_count"] = multiOccurrenceFacts.ToString(CultureInfo.InvariantCulture)
+            });
+    }
+
     private static JobResult PreflightFailure(
         RunManifest manifest,
         RunOutcome outcome,
@@ -759,6 +800,29 @@ public sealed class MappingJobService
                 TransformationIds = pf.TransformationIds,
                 SourceTransformationPaths = pf.SourceTransformationPaths
             });
+        }
+
+        if (!preview)
+        {
+            foreach (var binding in project.Bindings)
+            {
+                if (!sourceConnections.TryGetValue(binding.BindingId, out var connection)
+                    || !StringComparer.OrdinalIgnoreCase.Equals(connection.Kind, "xbrl-report"))
+                    continue;
+                var selection = sourceReaders[binding.BindingId].Buffer
+                    .Select(record => record.SelectionSummary)
+                    .FirstOrDefault(summary => summary is not null);
+                if (selection is not null)
+                {
+                    var selectedLocators = sourceReaders[binding.BindingId].Buffer
+                        .SelectMany(record => record.CellSources?.Values ?? Array.Empty<SourceReference>())
+                        .Where(source => StringComparer.Ordinal.Equals(source.SourceId, connection.SourceId))
+                        .Select(source => source.Locator)
+                        .ToHashSet(StringComparer.Ordinal);
+                    AddReverseMappingLossAccounting(context.Diagnostics, connection.SourceId, selection,
+                        selectedLocators, facts, opId);
+                }
+            }
         }
 
         if (facts.Count == 0)

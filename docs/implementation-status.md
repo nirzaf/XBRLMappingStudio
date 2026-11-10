@@ -751,3 +751,21 @@ masquerade as an ordinary zero-match result. `XbrlReportAdapter_BindsOccurrenceS
 checks both forms, and the full `ReverseMappingDiagnosticTests` class passed
 19/19 locally. Exact-head CI [42824928457](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42824928457) passed all four jobs for source `d68d72c072f5283031c8c0603ba6eaadef8b519a`. Selection semantics,
 publication approval and update-only target gates are unchanged.
+
+## ENG-07 reverse-mapping occurrence loss counts (2026-11-10)
+
+Full non-preview runs over an XBRL report with at least one selected occurrence
+now emit non-blocking `IO034` counts for total report occurrences,
+source-selected occurrences, filtered occurrences,
+selected occurrences represented in output provenance, selected occurrences with
+no output provenance, mapped facts and facts combining multiple report
+occurrences. The report adapter attaches a bounded count summary to only the
+first selected record; the run diagnostic contains counts only, without report
+values, occurrence IDs or identifiers. Synthetic integration coverage verifies
+that selecting one of two report occurrences records one filtered occurrence,
+and a two-occurrence aggregate reports one output fact with two contributing
+occurrences. The full `ReverseMappingDiagnosticTests` class and focused
+update-only reverse-mapping test passed 21/21 locally. This closes occurrence
+filter and aggregate contribution counts for supported XBRL-report runs, but
+not all semantic, target-write or unsupported-construct loss accounting; IO031
+continues to warn that original transaction detail cannot be recovered.

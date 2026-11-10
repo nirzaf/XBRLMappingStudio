@@ -81,6 +81,7 @@ public static class DiagnosticCodes
     public const string IoReverseMappingCannotRecoverAbsentSourceDetail = "IO031";
     public const string IoInputBudgetExceeded = "IO032";
     public const string IoStringBudgetExceeded = "IO033";
+    public const string IoReverseMappingLossAccounting = "IO034";
 
     // XBR - XBRL and taxonomy
     public const string XbrConceptUnknown = "XBR001";

@@ -346,6 +346,7 @@ public sealed class ReverseMappingDiagnosticTests
 
             var selected = Assert.Single(rows);
             Assert.Equal("99", selected["value"].LexicalSource);
+            Assert.Equal(new SourceSelectionSummary(2, 1), selected.SelectionSummary);
             Assert.DoesNotContain(schema.Columns, column => column.Name == "reportDigest");
 
             // An unchanged ordinal in different report bytes must not select a new fact.
@@ -528,6 +529,44 @@ public sealed class ReverseMappingDiagnosticTests
         Assert.Equal(new SourceReference("report-binding", "fact-occurrences"), warning.Source);
         Assert.Equal("source-detail-not-present-in-report", warning.Details!["limitation"]);
         Assert.Contains("cannot reconstruct source detail absent from the report", warning.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReverseMappingLossAccounting_ReportsAggregatedOccurrenceCountsWithoutIdentifiers()
+    {
+        var diagnostics = new DiagnosticBag();
+        var fact = new XbrlFact
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1)),
+            Unit = new XbrlUnit("QAR"),
+            Value = 111m,
+            SourceTransformationPaths = new[]
+            {
+                new SourceTransformationPath(new SourceReference("report", "report#f1"), Array.Empty<string>()),
+                new SourceTransformationPath(new SourceReference("report", "report#f2"), Array.Empty<string>()),
+                new SourceTransformationPath(new SourceReference("report", "report#f999"), Array.Empty<string>())
+            }
+        };
+
+        MappingJobService.AddReverseMappingLossAccounting(diagnostics, "report",
+            new SourceSelectionSummary(2, 2), new HashSet<string>(StringComparer.Ordinal)
+            {
+                "report#f1", "report#f2"
+            }, new[] { fact }, "operation-456");
+
+        var warning = Assert.Single(diagnostics.Items);
+        Assert.Equal(DiagnosticCodes.IoReverseMappingLossAccounting, warning.Code);
+        Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
+        Assert.False(warning.IsBlocking);
+        Assert.Equal("operation-456", warning.OperationId);
+        Assert.Equal("2", warning.Details!["mapped_occurrence_count"]);
+        Assert.Equal("0", warning.Details["filtered_out_occurrence_count"]);
+        Assert.Equal("1", warning.Details["multi_occurrence_fact_count"]);
+        Assert.DoesNotContain("report#f", string.Join(" ", warning.Details.Values), StringComparison.Ordinal);
+        Assert.DoesNotContain("111", warning.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -256,6 +256,9 @@ public sealed class ExecutionContext
 /// </summary>
 public sealed record SampledTotal(string NodeId, string Label, decimal Value, bool IsPartial);
 
+/// <summary>Occurrence counts describing a source adapter's exact selection boundary.</summary>
+public sealed record SourceSelectionSummary(int SourceRecordCount, int SelectedRecordCount);
+
 /// <summary>
 /// One row/record from a source, with per-cell source references for provenance.
 /// </summary>
@@ -265,6 +268,7 @@ public sealed class DataRecord
     public required IReadOnlyDictionary<string, DataValue> Fields { get; init; }
     public IReadOnlyDictionary<string, SourceReference>? CellSources { get; init; }
     public bool HasStableRowIdentity { get; init; }
+    public SourceSelectionSummary? SelectionSummary { get; init; }
 
     public DataValue this[string column] => Fields.TryGetValue(column, out var v) ? v : DataValue.Missing();
 }

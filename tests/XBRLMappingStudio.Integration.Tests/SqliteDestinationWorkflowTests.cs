@@ -91,7 +91,29 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     [Fact]
     public async Task DigestPinnedXbrlOccurrence_UpdatesOnlyItsSelectedExistingTargetRow()
     {
-        var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
+        var templatePath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
+        var templateFact = Assert.Single(OimSerializer.ReadFacts(await File.ReadAllTextAsync(templatePath)));
+        var reportPath = Path.Combine(_directory, "two-occurrence-report.json");
+        var secondFact = new XbrlFact
+        {
+            ConceptName = templateFact.ConceptName,
+            EntityScheme = templateFact.EntityScheme,
+            EntityIdentifier = templateFact.EntityIdentifier,
+            Period = XbrlPeriod.OfDuration(new DateOnly(2026, 1, 1), new DateOnly(2027, 1, 1)),
+            Unit = templateFact.Unit,
+            CompoundUnit = templateFact.CompoundUnit,
+            Value = 99m,
+            TextValue = templateFact.TextValue,
+            IsNil = templateFact.IsNil,
+            Decimals = templateFact.Decimals,
+            Language = templateFact.Language,
+            Dimensions = templateFact.Dimensions,
+            ContributingSources = templateFact.ContributingSources,
+            TransformationIds = templateFact.TransformationIds,
+            SourceTransformationPaths = templateFact.SourceTransformationPaths
+        };
+        await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(_profile,
+            new[] { templateFact, secondFact }));
         var reportDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
         var targetRowId = RunManifest.ComputeSha256("reviewed-existing-ledger-row");
         var project = TestFixtures.BuildRevenueMappingProject(reportPath);
@@ -143,6 +165,15 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         var selectedFact = Assert.Single(result.Facts);
         Assert.Contains(selectedFact.SourceTransformationPaths, path =>
             path.Source.SourceId == binding.BindingId && path.Source.Locator == "report#f1");
+        var accounting = Assert.Single(result.Manifest.Diagnostics,
+            diagnostic => diagnostic.Code == DiagnosticCodes.IoReverseMappingLossAccounting);
+        Assert.Equal("2", accounting.Details!["source_occurrence_count"]);
+        Assert.Equal("1", accounting.Details["selected_occurrence_count"]);
+        Assert.Equal("1", accounting.Details["filtered_out_occurrence_count"]);
+        Assert.Equal("1", accounting.Details["mapped_occurrence_count"]);
+        Assert.Equal("0", accounting.Details["unmapped_selected_occurrence_count"]);
+        Assert.Equal("1", accounting.Details["mapped_fact_count"]);
+        Assert.Equal("0", accounting.Details["multi_occurrence_fact_count"]);
 
         var preview = await service.PreviewDestinationChangesAsync(project, result, _directory, CancellationToken.None);
         Assert.Equal(1, preview.Updates);
