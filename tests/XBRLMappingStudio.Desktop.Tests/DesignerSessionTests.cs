@@ -3004,6 +3004,8 @@ public sealed class DesignerSessionTests
             var staleLoad = viewModel.LoadSourceAsync(database);
             await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.False(staleLoad.IsCompleted);
+            Assert.True(viewModel.CanShowCancellationControl);
+            Assert.True(viewModel.CanCancelOperation);
             await viewModel.LoadSourceAsync(csv);
             releaseSchema.TrySetResult();
             await staleLoad;
@@ -3016,6 +3018,57 @@ public sealed class DesignerSessionTests
         finally
         {
             releaseSchema.TrySetResult();
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UserCanCancelActiveSqliteSourceInspection()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-source-cancel", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var database = System.IO.Path.Combine(dir, "wide.sqlite");
+        await using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE wide (value TEXT);";
+            await command.ExecuteNonQueryAsync();
+        }
+        var schemaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            async Task<XBRLMappingStudio.Adapters.ISourceSchema> LoadSchemaAsync(
+                XBRLMappingStudio.Adapters.SourceConnection connection, CancellationToken cancellationToken)
+            {
+                schemaEntered.TrySetResult();
+                using var registration = cancellationToken.Register(() => cancellationObserved.TrySetResult());
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return await new XBRLMappingStudio.Adapters.Sqlite.SqliteSourceAdapter()
+                    .InspectSchemaAsync(connection, cancellationToken);
+            }
+            var viewModel = new MainWindowViewModel(ProjectWithSource(), null, LoadSchemaAsync);
+            viewModel.SaveProjectTo(System.IO.Path.Combine(dir, "mapping.xmap"));
+
+            var load = viewModel.LoadSourceAsync(database);
+            await schemaEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(viewModel.CanShowCancellationControl);
+            Assert.True(viewModel.CanCancelOperation);
+            Assert.True(viewModel.CancelOperationCommand.CanExecute(null));
+            Assert.Equal("Cancel source inspection", viewModel.CancelOperationButtonText);
+
+            viewModel.CancelOperationCommand.Execute(null);
+            await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await load.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("SQLite source inspection canceled.", viewModel.StatusText);
+            Assert.False(viewModel.IsSourceLoading);
+            Assert.False(viewModel.CanShowCancellationControl);
+            Assert.False(viewModel.CanCancelOperation);
+        }
+        finally
+        {
             Directory.Delete(dir, recursive: true);
         }
     }

@@ -56,7 +56,7 @@
         <TextBlock Grid.Column="1" Text="{Binding StatusText}" VerticalAlignment="Center" Margin="8,0"
                    TextTrimming="CharacterEllipsis" AutomationProperties.Name="Operation status" />
         <Button Grid.Column="2" Content="{Binding CancelOperationButtonText}"
-                Command="{Binding CancelOperationCommand}" IsVisible="{Binding IsBusy}"
+                Command="{Binding CancelOperationCommand}" IsVisible="{Binding CanShowCancellationControl}"
                 IsEnabled="{Binding CanCancelOperation}" MinWidth="112" Padding="6,1" Margin="8,0,0,0"
                 AutomationProperties.Name="Cancel current operation" />
       </Grid>

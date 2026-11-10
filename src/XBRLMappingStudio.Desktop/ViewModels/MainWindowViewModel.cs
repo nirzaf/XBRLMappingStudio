@@ -459,6 +459,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private bool _isBusy;
     private ActiveMappingOperation? _activeMappingOperation;
     private CancellationTokenSource? _snapshotOperationCancellation;
+    private CancellationTokenSource? _sourceInspectionCancellation;
     private int _mappingOperationGeneration;
     private bool _allowSyntheticProfile;
     private string? _projectPath;
@@ -685,13 +686,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             }
         }
     }
-    public bool CanCancelOperation => IsBusy
+    public bool CanShowCancellationControl => IsBusy || IsSourceLoading;
+    public bool CanCancelOperation => (IsBusy
         && ((_activeMappingOperation is { } operation && !operation.Cancellation.IsCancellationRequested)
-            || (_snapshotOperationCancellation is { } snapshot && !snapshot.IsCancellationRequested));
+            || (_snapshotOperationCancellation is { } snapshot && !snapshot.IsCancellationRequested)))
+        || (IsSourceLoading && _sourceInspectionCancellation is { IsCancellationRequested: false });
     public string CancelOperationButtonText =>
         _snapshotOperationCancellation?.IsCancellationRequested == true
             ? "Cancelling snapshot…"
             : _snapshotOperationCancellation is not null ? "Cancel snapshot"
+            : _sourceInspectionCancellation?.IsCancellationRequested == true ? "Cancelling source inspection…"
+            : IsSourceLoading ? "Cancel source inspection"
             : _activeMappingOperation?.Cancellation.IsCancellationRequested == true ? "Cancelling…" : "Cancel operation";
     public bool IsSourceLoading
     {
@@ -700,6 +705,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         {
             if (Set(ref _isSourceLoading, value))
             {
+                Raise(nameof(CanShowCancellationControl));
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand?.NotifyCanExecuteChanged();
                 PreviewCommand?.NotifyCanExecuteChanged();
                 ExecuteCommand?.NotifyCanExecuteChanged();
                 RevalidateSourceSchemaCommand?.NotifyCanExecuteChanged();
@@ -959,8 +968,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 var generation = Interlocked.Increment(ref _sourceLoadGeneration);
                 InvalidateMappingOperationIfStale();
+                // Table discovery is part of the active source inspection. Reuse
+                // its token so a superseding source selection cancels both phases.
+                var cancellation = _sourceInspectionCancellation ?? BeginSourceInspection();
                 IsSourceLoading = true;
-                _sqliteTableLoadTask = LoadSqliteTableAsync(value, generation);
+                _sqliteTableLoadTask = LoadSqliteTableAsync(value, generation, cancellation);
             }
         }
     }
@@ -3729,6 +3741,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             CancelOperationCommand.NotifyCanExecuteChanged();
             return;
         }
+        if (IsSourceLoading && _sourceInspectionCancellation is { } sourceCancellation
+            && !sourceCancellation.IsCancellationRequested)
+        {
+            StatusText = "Source inspection cancellation requested; waiting for the current read to stop…";
+            sourceCancellation.Cancel();
+            Raise(nameof(CanCancelOperation));
+            Raise(nameof(CancelOperationButtonText));
+            CancelOperationCommand.NotifyCanExecuteChanged();
+            return;
+        }
         var operation = _activeMappingOperation;
         if (operation is null || operation.Cancellation.IsCancellationRequested) return;
         // Publish the transient state before signaling cancellation. The
@@ -3816,10 +3838,24 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         => string.Join("\u001f", SelectedDestinationKind.Kind, _destinationPath ?? "", _destinationTable ?? "",
             string.Join("\u001e", SelectedDestinationKey?.Columns ?? Array.Empty<string>()));
 
+    private CancellationTokenSource BeginSourceInspection()
+    {
+        _sourceInspectionCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _sourceInspectionCancellation = cancellation;
+        Raise(nameof(CanShowCancellationControl));
+        Raise(nameof(CanCancelOperation));
+        Raise(nameof(CancelOperationButtonText));
+        CancelOperationCommand?.NotifyCanExecuteChanged();
+        return cancellation;
+    }
+
     public async Task LoadSourceAsync(string path)
     {
         if (ProjectPath is null) { StatusText = "Save the project inside its workspace before adding a source."; return; }
         var generation = Interlocked.Increment(ref _sourceLoadGeneration);
+        var sourceCancellation = BeginSourceInspection();
+        var cancellationToken = sourceCancellation.Token;
         InvalidateMappingOperationIfStale();
         IsSourceSchemaDrifted = false;
         HasUnresolvedSourceFieldMappings = false;
@@ -3893,14 +3929,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 SelectedSourceBindingId = binding.BindingId;
                 Session.SetBinding(binding, clearBindingSchemasFromHistory: true);
-                await LoadPdfDocumentAsync(safePath, connection, binding, generation);
+                await LoadPdfDocumentAsync(safePath, connection, binding, generation, cancellationToken);
                 return;
             }
             if (kind == "sqlite")
             {
                 SelectedSourceBindingId = binding.BindingId;
                 var sqlite = new SqliteSourceAdapter();
-                var tables = await sqlite.DiscoverTablesAsync(connection, CancellationToken.None);
+                var tables = await sqlite.DiscoverTablesAsync(connection, cancellationToken);
                 if (generation != _sourceLoadGeneration) return;
                 ReplaceItems(SourceTables, tables);
                 Raise(nameof(SourceTables));
@@ -3919,7 +3955,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 return;
             }
             var adapter = BuildSourceAdapter(connection);
-            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var schema = await adapter.InspectSchemaAsync(connection, cancellationToken);
             if (generation != _sourceLoadGeneration) return;
             if (kind == "xbrl-report" && adapter is XbrlReportAdapter reportAdapter)
             {
@@ -3928,8 +3964,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                     : new Dictionary<string, string>(StringComparer.Ordinal);
                 var discoveryConnection = connection with { Configuration = discoveryConfiguration };
                 var discoverySample = _profile is null
-                    ? await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, CancellationToken.None)
-                    : await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, _profile, CancellationToken.None);
+                    ? await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, cancellationToken)
+                    : await reportAdapter.ReadSampleAsync(discoveryConnection, schema, 200, _profile, cancellationToken);
                 if (generation != _sourceLoadGeneration) return;
                 ReplaceItems(XbrlOccurrenceOptions, discoverySample.Rows.Select(row =>
                 {
@@ -3968,6 +4004,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 StatusText = $"Loaded {schema.Columns.Count} fields from {Path.GetFileName(safePath)}.";
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (generation == _sourceLoadGeneration)
+                StatusText = "Source inspection canceled.";
+        }
         catch (Exception ex)
         {
             if (generation != _sourceLoadGeneration) return;
@@ -3978,6 +4019,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         finally
         {
             if (!sqliteTableLoadPending && generation == _sourceLoadGeneration) IsSourceLoading = false;
+            if (!sqliteTableLoadPending && ReferenceEquals(_sourceInspectionCancellation, sourceCancellation))
+            {
+                _sourceInspectionCancellation = null;
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand?.NotifyCanExecuteChanged();
+            }
+            if (!sqliteTableLoadPending) sourceCancellation.Dispose();
         }
     }
 
@@ -4153,12 +4202,13 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         string path,
         SourceConnection connection,
         SourceBinding binding,
-        int generation)
+        int generation,
+        CancellationToken cancellationToken)
     {
         ResetPdfReviewState();
         _pdfSourcePath = path;
         PdfReviewStatus = "Digital text extraction is a proposal for review. It is not a verified report or approved financial data.";
-        var document = await _pdfDocumentLoader(path, CancellationToken.None);
+        var document = await _pdfDocumentLoader(path, cancellationToken);
         if (generation != _sourceLoadGeneration) return;
 
         _pdfDocument = document;
@@ -4184,7 +4234,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         try
         {
             var pdfAdapter = new PdfSourceAdapter(_pdfEvidenceStoreFactory());
-            var manifest = pdfAdapter.ReadReviewedSourceManifest(connection, CancellationToken.None);
+            var manifest = pdfAdapter.ReadReviewedSourceManifest(connection, cancellationToken);
             if (!RestorePdfReviewManifest(manifest))
                 throw new InvalidDataException("The approved sidecar does not match the current declared template and extracted values.");
             if (generation != _sourceLoadGeneration) return;
@@ -4201,7 +4251,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 return;
             }
 
-            var schema = await pdfAdapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var schema = await pdfAdapter.InspectSchemaAsync(connection, cancellationToken);
             if (generation != _sourceLoadGeneration) return;
             ReplaceItems(SourceColumns, schema.Columns.Select(column => column.Name));
             Session.SetBinding(binding with { SchemaFingerprint = schema.Fingerprint }, clearBindingSchemasFromHistory: true);
@@ -4940,8 +4990,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         throw new IOException("Could not create a unique PDF review sidecar without replacing an existing review.");
     }
 
-    private async Task LoadSqliteTableAsync(string table, int generation)
+    private async Task LoadSqliteTableAsync(string table, int generation, CancellationTokenSource cancellation)
     {
+        var cancellationToken = cancellation.Token;
         try
         {
             if (_sqliteSourcePath is null) return;
@@ -4956,7 +5007,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                 if (!BuildConnections(WorkspaceRoot()).TryGetValue(binding.BindingId, out var expected))
                     throw new InvalidOperationException("The selected SQLite binding could not be resolved.");
                 connection = await SqliteSourceSnapshotStore.OpenAsync(
-                    metadataPath!, expected, CancellationToken.None);
+                    metadataPath!, expected, cancellationToken);
                 if (!StringComparer.Ordinal.Equals(config.GetValueOrDefault("table"), table))
                     throw new InvalidOperationException("This retained snapshot is bound to the saved SQLite table selection. Return to the live source before changing tables.");
             }
@@ -4969,7 +5020,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             }
             config["table"] = table;
             connection = connection with { Configuration = config };
-            var schema = await _sqliteSchemaLoader(connection, CancellationToken.None);
+            var schema = await _sqliteSchemaLoader(connection, cancellationToken);
             if (generation != _sourceLoadGeneration || table != SelectedSourceTable
                 || (!isRetainedSnapshot && connection.Path != _sqliteSourcePath)) return;
             var descriptor = SqliteSourceAdapter.Describe(connection, schema);
@@ -5017,6 +5068,11 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             IsSourceSchemaDrifted = false;
             NotifySqliteSnapshotCommands();
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (generation == _sourceLoadGeneration)
+                StatusText = "SQLite source inspection canceled.";
+        }
         catch (Exception ex)
         {
             if (generation != _sourceLoadGeneration) return;
@@ -5028,6 +5084,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         finally
         {
             if (generation == _sourceLoadGeneration) IsSourceLoading = false;
+            if (ReferenceEquals(_sourceInspectionCancellation, cancellation))
+            {
+                _sourceInspectionCancellation = null;
+                Raise(nameof(CanCancelOperation));
+                Raise(nameof(CancelOperationButtonText));
+                CancelOperationCommand?.NotifyCanExecuteChanged();
+            }
+            cancellation.Dispose();
         }
     }
 
@@ -6236,6 +6300,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private void ClearSourceAndRunResults()
     {
         Interlocked.Increment(ref _sourceLoadGeneration);
+        _sourceInspectionCancellation?.Cancel();
         if (_snapshotOperationCancellation is { } snapshotCancellation)
         {
             snapshotCancellation.Cancel();
@@ -7119,6 +7184,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         _session.Changed -= OnSessionChanged;
         _session.SelectionChanged -= OnSessionSelectionChanged;
         _snapshotOperationCancellation?.Cancel();
+        _sourceInspectionCancellation?.Cancel();
         _activeMappingOperation?.Cancellation.Cancel();
         _previewLargeArtifact?.Dispose();
         _previewLargeArtifact = null;
