@@ -1455,6 +1455,8 @@ print("offline-network-denied")
                 request["payload"] = {"taxonomyPath": "entry.xsd"}
 
                 result = arelle_worker.handle(request, self.args)
+                repeat_request = {**request, "operationId": "offline-profile-repeat"}
+                repeated = arelle_worker.handle(repeat_request, self.args)
         finally:
             canary.shutdown()
             canary.server_close()
@@ -1464,6 +1466,12 @@ print("offline-network-denied")
         self.assertTrue(result["result"]["completed"])
         self.assertEqual(2, result["result"]["conceptCount"])
         self.assertFalse(any(item["isBlocking"] for item in result["diagnostics"]))
+        self.assertEqual("success", repeated["status"], repeated["error"])
+        self.assertEqual(result["result"], repeated["result"])
+        comparable_diagnostics = lambda response: sorted(
+            (item["code"], item["severity"], item["isBlocking"], item["message"])
+            for item in response["diagnostics"])
+        self.assertEqual(comparable_diagnostics(result), comparable_diagnostics(repeated))
         self.assertEqual([], requests, "Arelle attempted an HTTP request instead of using its pinned local file.")
 
     @unittest.skipUnless(arelle_worker.ARELLE_AVAILABLE,
