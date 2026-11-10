@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Xml;
 
@@ -10,7 +11,7 @@ public static class FactDimensionParser
     public const int MaximumJsonLength = 256 * 1024;
     public const int MaximumTypedValueCharacters = XbrlFact.MaximumTypedDimensionValueCharacters;
 
-    /// <summary>Parses the bounded explicit-dimension JSON emitted by report adapters.</summary>
+    /// <summary>Parses bounded dimension JSON emitted by report adapters.</summary>
     public static bool TryParseJson(
         string? json,
         IReadOnlyDictionary<string, IReadOnlyList<string>> dimensionDomains,
@@ -83,6 +84,7 @@ public static class FactDimensionParser
             var lines = new List<string>(array.GetArrayLength());
             var typed = new List<Dimension>();
             var seenAxes = new HashSet<string>(StringComparer.Ordinal);
+            var resolvedAxes = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in array.EnumerateArray())
             {
                 if (item.ValueKind != JsonValueKind.Object)
@@ -91,6 +93,9 @@ public static class FactDimensionParser
                 string? member = null;
                 bool? isExplicit = null;
                 string? typedValue = null;
+                string? typedValueJson = null;
+                string? axisExpandedName = null;
+                string? memberExpandedName = null;
                 foreach (var property in item.EnumerateObject())
                 {
                     switch (property.Name)
@@ -109,6 +114,18 @@ public static class FactDimensionParser
                             && property.Value.ValueKind == JsonValueKind.String:
                             typedValue = property.Value.GetString();
                             break;
+                        case "TypedValueJson" or "typedValueJson" when typedValueJson is null
+                            && property.Value.ValueKind == JsonValueKind.String:
+                            typedValueJson = property.Value.GetString();
+                            break;
+                        case "AxisExpandedName" or "axisExpandedName" when axisExpandedName is null
+                            && property.Value.ValueKind == JsonValueKind.String:
+                            axisExpandedName = property.Value.GetString();
+                            break;
+                        case "MemberExpandedName" or "memberExpandedName" when memberExpandedName is null
+                            && property.Value.ValueKind == JsonValueKind.String:
+                            memberExpandedName = property.Value.GetString();
+                            break;
                         default:
                             return Fail($"Dimension JSON property '{property.Name}' is unsupported or malformed.", out dimensions, out error);
                     }
@@ -117,19 +134,43 @@ public static class FactDimensionParser
                     return Fail("Each dimension requires a unique, non-empty Name.", out dimensions, out error);
                 if (isExplicit == false)
                 {
-                    if (!string.IsNullOrEmpty(member) || typedValue is null
-                        || typedValue.Length > MaximumTypedValueCharacters
+                    if (!string.IsNullOrEmpty(member))
+                        return Fail($"Typed dimensions such as '{name}' require a supported xs:string domain and a bounded TypedValue.", out dimensions, out error);
+                    if (typedValueJson is not null)
+                    {
+                        if (!TryReadCanonicalXsString(typedValueJson, axisExpandedName,
+                                typedDimensionDomains, namespaceUris, out var evidenceValue)
+                            || typedValue is not null && !StringComparer.Ordinal.Equals(typedValue, evidenceValue))
+                            return Fail($"Typed dimension evidence for '{name}' does not match the selected profile's simple xs:string domain.", out dimensions, out error);
+                        typedValue ??= evidenceValue;
+                    }
+                    if (typedValue is null || typedValue.Length > MaximumTypedValueCharacters
                         || !HasValidXmlCharacters(typedValue)
-                        || !typedDimensionDomains.TryGetValue(name, out var typedMetadata)
+                        || !TryFindTypedDimension(name, axisExpandedName, typedDimensionDomains,
+                            namespaceUris, out var canonicalAxisName, out var typedMetadata)
                         || !IsSupportedXsString(typedMetadata, namespaceUris))
                         return Fail($"Typed dimensions such as '{name}' require a supported xs:string domain and a bounded TypedValue.", out dimensions, out error);
-                    typed.Add(new Dimension(name, string.Empty, IsExplicit: false) { TypedValue = typedValue });
+                    if (!resolvedAxes.Add(canonicalAxisName))
+                        return Fail($"Dimension axis '{canonicalAxisName}' is duplicated after profile namespace resolution.", out dimensions, out error);
+                    typed.Add(new Dimension(canonicalAxisName, string.Empty, IsExplicit: false) { TypedValue = typedValue });
                     continue;
                 }
-                if (typedValue is not null && isExplicit != false)
-                    return Fail("Explicit dimensions cannot also carry TypedValue.", out dimensions, out error);
+                if (typedValue is not null || typedValueJson is not null)
+                    return Fail("Explicit dimensions cannot carry typed-value data.", out dimensions, out error);
                 if (string.IsNullOrWhiteSpace(member))
                     return Fail("Each explicit dimension requires Name and MemberName QNames.", out dimensions, out error);
+                if ((axisExpandedName is null) != (memberExpandedName is null))
+                    return Fail("Expanded-name evidence for an explicit dimension must include both axis and member names.", out dimensions, out error);
+                if (axisExpandedName is not null)
+                {
+                    if (!TryResolveExplicitNames(name, member, axisExpandedName, memberExpandedName!,
+                            dimensionDomains, namespaceUris, out var canonicalAxisName, out var canonicalMemberName))
+                        return Fail("Expanded-name evidence does not resolve to one member in the selected filing profile.", out dimensions, out error);
+                    name = canonicalAxisName;
+                    member = canonicalMemberName;
+                }
+                if (!resolvedAxes.Add(name))
+                    return Fail($"Dimension axis '{name}' is duplicated after profile namespace resolution.", out dimensions, out error);
                 lines.Add($"{name}={member}");
             }
             if (typed.Count + lines.Count > MaximumDimensions)
@@ -161,6 +202,196 @@ public static class FactDimensionParser
             && namespaceUris.TryGetValue(metadata.DataTypeQName[..separator], out var uri)
             && StringComparer.Ordinal.Equals(uri, "http://www.w3.org/2001/XMLSchema")
             && StringComparer.Ordinal.Equals(metadata.DataTypeQName[(separator + 1)..], "string");
+    }
+
+    private static bool TryFindTypedDimension(
+        string importedAxisName,
+        string? axisExpandedName,
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata> typedDimensionDomains,
+        IReadOnlyDictionary<string, string> namespaceUris,
+        out string canonicalAxisName,
+        out TypedDimensionDomainMetadata metadata)
+    {
+        canonicalAxisName = string.Empty;
+        metadata = null!;
+        if (typedDimensionDomains.TryGetValue(importedAxisName, out var direct))
+        {
+            if (axisExpandedName is not null
+                && (!TryExpandProfileQName(importedAxisName, namespaceUris, out var directExpanded)
+                    || !StringComparer.Ordinal.Equals(directExpanded, axisExpandedName)))
+                return false;
+            canonicalAxisName = importedAxisName;
+            metadata = direct;
+            return true;
+        }
+        if (axisExpandedName is null) return false;
+
+        var matches = typedDimensionDomains
+            .Where(entry => TryExpandProfileQName(entry.Key, namespaceUris, out var expanded)
+                && StringComparer.Ordinal.Equals(expanded, axisExpandedName))
+            .ToArray();
+        if (matches.Length != 1) return false;
+        canonicalAxisName = matches[0].Key;
+        metadata = matches[0].Value;
+        return true;
+    }
+
+    private static bool TryResolveExplicitNames(
+        string importedAxisName,
+        string importedMemberName,
+        string axisExpandedName,
+        string memberExpandedName,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> dimensionDomains,
+        IReadOnlyDictionary<string, string> namespaceUris,
+        out string canonicalAxisName,
+        out string canonicalMemberName)
+    {
+        canonicalAxisName = string.Empty;
+        canonicalMemberName = string.Empty;
+        var axisMatches = dimensionDomains.Keys
+            .Where(axis => TryExpandProfileQName(axis, namespaceUris, out var expanded)
+                && StringComparer.Ordinal.Equals(expanded, axisExpandedName))
+            .ToArray();
+        if (axisMatches.Length != 1) return false;
+        var memberMatches = dimensionDomains[axisMatches[0]]
+            .Where(member => TryExpandProfileQName(member, namespaceUris, out var expanded)
+                && StringComparer.Ordinal.Equals(expanded, memberExpandedName))
+            .ToArray();
+        if (memberMatches.Length != 1) return false;
+
+        // When the importer's lexical names already match the profile, require the
+        // namespace evidence to agree. Aliased source prefixes are canonicalized above.
+        if (StringComparer.Ordinal.Equals(importedAxisName, axisMatches[0])
+            && StringComparer.Ordinal.Equals(importedMemberName, memberMatches[0]))
+        {
+            canonicalAxisName = importedAxisName;
+            canonicalMemberName = importedMemberName;
+        }
+        else
+        {
+            canonicalAxisName = axisMatches[0];
+            canonicalMemberName = memberMatches[0];
+        }
+        return true;
+    }
+
+    private static bool TryReadCanonicalXsString(
+        string evidenceJson,
+        string? axisExpandedName,
+        IReadOnlyDictionary<string, TypedDimensionDomainMetadata> typedDimensionDomains,
+        IReadOnlyDictionary<string, string> namespaceUris,
+        out string? typedValue)
+    {
+        typedValue = null;
+        if (axisExpandedName is null || evidenceJson.Length > MaximumJsonLength) return false;
+        var metadataMatches = typedDimensionDomains
+            .Where(entry => TryExpandProfileQName(entry.Key, namespaceUris, out var expanded)
+                && StringComparer.Ordinal.Equals(expanded, axisExpandedName))
+            .ToArray();
+        if (metadataMatches.Length != 1
+            || !IsSupportedXsString(metadataMatches[0].Value, namespaceUris)
+            || !TryExpandProfileQName(metadataMatches[0].Value.DomainElementQName, namespaceUris,
+                out var expectedElementName))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(evidenceJson, new JsonDocumentOptions { MaxDepth = 8 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return false;
+            string? elementName = null;
+            JsonElement attributes = default;
+            JsonElement content = default;
+            bool hasAttributes = false;
+            bool hasContent = false;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                switch (property.Name)
+                {
+                    case "Name" when elementName is null && property.Value.ValueKind == JsonValueKind.String:
+                        elementName = property.Value.GetString();
+                        break;
+                    case "Attributes" when !hasAttributes && property.Value.ValueKind == JsonValueKind.Array:
+                        attributes = property.Value;
+                        hasAttributes = true;
+                        break;
+                    case "Content" when !hasContent && property.Value.ValueKind == JsonValueKind.Array:
+                        content = property.Value;
+                        hasContent = true;
+                        break;
+                    default:
+                        return false;
+                }
+            }
+            if (!StringComparer.Ordinal.Equals(elementName, expectedElementName)
+                || !hasAttributes || attributes.GetArrayLength() != 0 || !hasContent)
+                return false;
+
+            var value = new StringBuilder();
+            foreach (var node in content.EnumerateArray())
+            {
+                if (node.ValueKind != JsonValueKind.Object) return false;
+                string? kind = null;
+                string? text = null;
+                bool hasTarget = false;
+                bool hasData = false;
+                bool hasElement = false;
+                foreach (var property in node.EnumerateObject())
+                {
+                    if (property.Name == "Kind" && kind is null && property.Value.ValueKind == JsonValueKind.String)
+                        kind = property.Value.GetString();
+                    else if (property.Name == "Value" && text is null && property.Value.ValueKind == JsonValueKind.String)
+                        text = property.Value.GetString();
+                    else if (property.Name == "Target" && !hasTarget
+                        && property.Value.ValueKind == JsonValueKind.Null)
+                        hasTarget = true;
+                    else if (property.Name == "Data" && !hasData
+                        && property.Value.ValueKind == JsonValueKind.Null)
+                        hasData = true;
+                    else if (property.Name == "Element" && !hasElement
+                        && property.Value.ValueKind == JsonValueKind.Null)
+                        hasElement = true;
+                    else
+                        return false;
+                }
+                if (!StringComparer.Ordinal.Equals(kind, "text") || text is null
+                    || !hasTarget || !hasData || !hasElement) return false;
+                value.Append(text);
+                if (value.Length > MaximumTypedValueCharacters) return false;
+            }
+            var normalized = value.ToString();
+            if (!HasValidXmlCharacters(normalized)) return false;
+            typedValue = normalized;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryExpandProfileQName(
+        string qname,
+        IReadOnlyDictionary<string, string> namespaceUris,
+        out string expandedName)
+    {
+        expandedName = string.Empty;
+        var separator = qname.IndexOf(':');
+        if (separator <= 0 || separator != qname.LastIndexOf(':') || separator == qname.Length - 1)
+            return false;
+        var prefix = qname[..separator];
+        var localName = qname[(separator + 1)..];
+        if (!namespaceUris.TryGetValue(prefix, out var namespaceUri)) return false;
+        try
+        {
+            XmlConvert.VerifyNCName(prefix);
+            XmlConvert.VerifyNCName(localName);
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
+        expandedName = $"{{{namespaceUri}}}{localName}";
+        return true;
     }
 
     private static bool HasValidXmlCharacters(string value)

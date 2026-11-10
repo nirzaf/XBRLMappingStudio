@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.XBRL.Tests;
@@ -79,8 +81,101 @@ public class FactDimensionParserTests
     [Fact]
     public void FactInspectorAcceptsTypedStringJsonAndFormatsItWithoutOpaqueEvidence()
     {
+        var profile = TypedStringProfile();
+        const string json = "[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"synthetic:QNameLookingText\"}]";
+
+        Assert.True(FactDimensionParser.TryParseForProfile(json, profile, out var dimensions, out var error), error);
+        var typed = Assert.Single(dimensions);
+        Assert.False(typed.IsExplicit);
+        Assert.Equal("synthetic:QNameLookingText", typed.TypedValue);
+
+        var formatted = FactDimensionParser.Format(dimensions);
+        Assert.Contains("TypedValue", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("TypedValueJson", formatted, StringComparison.Ordinal);
+        Assert.True(FactDimensionParser.TryParseForProfile(formatted, profile, out var reparsed, out error), error);
+        Assert.Equal(typed, Assert.Single(reparsed));
+        Assert.False(FactDimensionParser.TryParseForProfile("[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"bad\\u0001\"}]",
+            profile, out _, out _));
+    }
+
+    [Fact]
+    public void PromotesImportedTypedXmlEvidenceOnlyForMatchingProfileAxisAndDomain()
+    {
+        var profile = TypedStringProfile();
+        var evidence = JsonSerializer.Serialize(new
+        {
+            Name = "{urn:synthetic:finance:1.0}TypedMember",
+            Attributes = Array.Empty<object>(),
+            Content = new[] { new { Kind = "text", Value = "North", Target = (string?)null, Data = (string?)null, Element = (object?)null } }
+        });
+        var dimensionsJson = JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                Name = "source:TypedAxis",
+                MemberName = "",
+                IsExplicit = false,
+                TypedValueJson = evidence,
+                AxisExpandedName = "{urn:synthetic:finance:1.0}TypedAxis"
+            }
+        }, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
+
+        Assert.True(FactDimensionParser.TryParseJson(dimensionsJson, profile, out var dimensions, out var error), error);
+        var dimension = Assert.Single(dimensions);
+        Assert.Equal("synthetic:TypedAxis", dimension.Name);
+        Assert.False(dimension.IsExplicit);
+        Assert.Equal("North", dimension.TypedValue);
+        Assert.Null(dimension.TypedValueJson);
+    }
+
+    [Fact]
+    public void RejectsTypedEvidenceWithWrongDomainOrConflictingNormalizedValue()
+    {
+        var profile = TypedStringProfile();
+        var wrongDomain = JsonSerializer.Serialize(new
+        {
+            Name = "{urn:synthetic:finance:1.0}WrongElement",
+            Attributes = Array.Empty<object>(),
+            Content = new[] { new { Kind = "text", Value = "North", Target = (string?)null, Data = (string?)null, Element = (object?)null } }
+        });
+        var conflicting = JsonSerializer.Serialize(new
+        {
+            Name = "{urn:synthetic:finance:1.0}TypedMember",
+            Attributes = Array.Empty<object>(),
+            Content = new[] { new { Kind = "text", Value = "South", Target = (string?)null, Data = (string?)null, Element = (object?)null } }
+        });
+
+        Assert.False(TryParseEvidence(wrongDomain, profile, out var error));
+        Assert.Contains("does not match", error, StringComparison.OrdinalIgnoreCase);
+        Assert.False(TryParseEvidence(conflicting, profile, out error, normalizedValue: "North"));
+        Assert.Contains("does not match", error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseEvidence(
+        string evidence,
+        FilingProfile profile,
+        out string error,
+        string? normalizedValue = null)
+    {
+        var dimensionsJson = JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                Name = "source:TypedAxis",
+                MemberName = "",
+                IsExplicit = false,
+                TypedValue = normalizedValue,
+                TypedValueJson = evidence,
+                AxisExpandedName = "{urn:synthetic:finance:1.0}TypedAxis"
+            }
+        }, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
+        return FactDimensionParser.TryParseJson(dimensionsJson, profile, out _, out error);
+    }
+
+    private static FilingProfile TypedStringProfile()
+    {
         var source = SyntheticProfile.Build();
-        var profile = new FilingProfile
+        return new FilingProfile
         {
             ProfileId = source.ProfileId,
             Digest = source.Digest,
@@ -96,19 +191,5 @@ public class FactDimensionParserTests
                 ["synthetic:TypedAxis"] = new("synthetic:TypedMember", "xs:string")
             }
         };
-        const string json = "[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"synthetic:QNameLookingText\"}]";
-
-        Assert.True(FactDimensionParser.TryParseForProfile(json, profile, out var dimensions, out var error), error);
-        var typed = Assert.Single(dimensions);
-        Assert.False(typed.IsExplicit);
-        Assert.Equal("synthetic:QNameLookingText", typed.TypedValue);
-
-        var formatted = FactDimensionParser.Format(dimensions);
-        Assert.Contains("TypedValue", formatted, StringComparison.Ordinal);
-        Assert.DoesNotContain("TypedValueJson", formatted, StringComparison.Ordinal);
-        Assert.True(FactDimensionParser.TryParseForProfile(formatted, profile, out var reparsed, out error), error);
-        Assert.Equal(typed, Assert.Single(reparsed));
-        Assert.False(FactDimensionParser.TryParseForProfile("[{\"Name\":\"synthetic:TypedAxis\",\"IsExplicit\":false,\"TypedValue\":\"bad\\u0001\"}]",
-            profile, out _, out _));
     }
 }

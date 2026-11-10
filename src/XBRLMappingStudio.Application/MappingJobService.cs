@@ -502,7 +502,10 @@ public sealed class MappingJobService
                 }
                 sourceConnections.Add(binding.BindingId, conn);
                 sourceSchemas.Add(binding.BindingId, schema);
-                sourceReadersOwner.Add(binding.BindingId, adapter.ReadFullAsync(conn, schema, cancellationToken), cancellationToken);
+                var sourceRows = adapter is IProfileAwareSourceAdapter profileAwareAdapter
+                    ? profileAwareAdapter.ReadFullAsync(conn, schema, _profile, cancellationToken)
+                    : adapter.ReadFullAsync(conn, schema, cancellationToken);
+                sourceReadersOwner.Add(binding.BindingId, sourceRows, cancellationToken);
             }
             catch (AdapterException ex)
             {

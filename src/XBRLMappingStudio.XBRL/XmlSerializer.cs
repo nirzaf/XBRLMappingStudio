@@ -572,7 +572,8 @@ public static class XmlSerializer
                     dims.Add(new Dimension(typedDimName, "", IsExplicit: false)
                     {
                         TypedValue = normalizedValue,
-                        TypedValueJson = CanonicalizeTypedValue(typedEvidence)
+                        TypedValueJson = CanonicalizeTypedValue(typedEvidence),
+                        AxisExpandedName = $"{{{expandedTypedDimension.NamespaceUri}}}{expandedTypedDimension.LocalName}"
                     });
                     continue;
                 }
@@ -585,7 +586,7 @@ public static class XmlSerializer
                 var dimName = (string?)child.Attribute("dimension") ?? "";
                 var memberName = child.Value;
                 var expandedDimension = ResolveExpandedQName(child, dimName);
-                _ = ResolveExpandedQName(child, memberName);
+                var expandedMember = ResolveExpandedQName(child, memberName);
                 if (dims.Count >= FactDimensionParser.MaximumDimensions)
                     throw Unsupported($"A fact may have at most {FactDimensionParser.MaximumDimensions} taxonomy-defined dimensions.");
                 if (!dimensionNames.Add(expandedDimension))
@@ -595,7 +596,11 @@ public static class XmlSerializer
                     dimName = CanonicalProfileQName(child, dimName, profile);
                     memberName = CanonicalProfileQName(child, memberName, profile);
                 }
-                dims.Add(new Dimension(dimName, memberName));
+                dims.Add(new Dimension(dimName, memberName)
+                {
+                    AxisExpandedName = $"{{{expandedDimension.NamespaceUri}}}{expandedDimension.LocalName}",
+                    MemberExpandedName = $"{{{expandedMember.NamespaceUri}}}{expandedMember.LocalName}"
+                });
             }
         }
 
@@ -858,6 +863,7 @@ public static class XmlSerializer
             parts.Add(dimension.Name);
             parts.Add(dimension.MemberName);
             parts.Add(dimension.IsExplicit ? "explicit" : "typed");
+            parts.Add(dimension.TypedValue ?? "");
             parts.Add(dimension.TypedValueJson ?? "");
         }
         return string.Concat(parts.Select(part => part.Length.ToString(CultureInfo.InvariantCulture) + ":" + part));

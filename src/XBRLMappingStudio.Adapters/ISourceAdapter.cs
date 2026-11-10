@@ -1,6 +1,7 @@
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
+using XBRLMappingStudio.XBRL;
 
 namespace XBRLMappingStudio.Adapters;
 
@@ -98,6 +99,27 @@ public interface ISourceAdapter
     IAsyncEnumerable<DataRecord> ReadFullAsync(
         SourceConnection connection,
         ISourceSchema schema,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Optional profile-aware report reader. Execution passes the already-resolved
+/// filing profile so adapters can interpret taxonomy-dependent aspects without
+/// promoting unqualified source evidence.
+/// </summary>
+public interface IProfileAwareSourceAdapter : ISourceAdapter
+{
+    Task<DataSample> ReadSampleAsync(
+        SourceConnection connection,
+        ISourceSchema schema,
+        int maxRows,
+        FilingProfile profile,
+        CancellationToken cancellationToken);
+
+    IAsyncEnumerable<DataRecord> ReadFullAsync(
+        SourceConnection connection,
+        ISourceSchema schema,
+        FilingProfile profile,
         CancellationToken cancellationToken);
 }
 

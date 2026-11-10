@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using XBRLMappingStudio.Diagnostics;
 using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Project;
@@ -14,12 +15,16 @@ namespace XBRLMappingStudio.Adapters.Xbrl;
 /// downstream graph can map reported facts back into rows. Repeated facts, several units
 /// and multiple languages are preserved as distinct records.
 /// </summary>
-public sealed class XbrlReportAdapter : ISourceAdapter
+public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
 {
     public string Kind => "xbrl-report";
     public AdapterCapabilities Capabilities => AdapterCapabilities.ReadOnly;
     private const int MaximumTypedDimensionEvidenceCharacters = 6_004_096;
     private const int MaximumTypedDimensionFilterJsonCharacters = 40_000_000;
+    private static readonly JsonSerializerOptions DimensionJsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
 
     private static readonly string[] Columns =
     {
@@ -57,9 +62,17 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     public Task<DataSample> ReadSampleAsync(SourceConnection connection, ISourceSchema schema,
         int maxRows, CancellationToken cancellationToken)
+        => ReadSampleCore(connection, schema, maxRows, profile: null, cancellationToken);
+
+    public Task<DataSample> ReadSampleAsync(SourceConnection connection, ISourceSchema schema,
+        int maxRows, FilingProfile profile, CancellationToken cancellationToken)
+        => ReadSampleCore(connection, schema, maxRows, profile, cancellationToken);
+
+    private Task<DataSample> ReadSampleCore(SourceConnection connection, ISourceSchema schema,
+        int maxRows, FilingProfile? profile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection, cancellationToken));
+        var facts = Select(connection, Read(connection, cancellationToken, profile), profile);
         bool truncated = facts.Count > maxRows;
         var rows = facts.Take(maxRows).Select(item => ToRecord(connection, item.Fact, item.Index)).ToList();
         return Task.FromResult(new DataSample(schema, rows, truncated));
@@ -68,8 +81,22 @@ public sealed class XbrlReportAdapter : ISourceAdapter
     public async IAsyncEnumerable<DataRecord> ReadFullAsync(SourceConnection connection, ISourceSchema schema,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        await foreach (var record in ReadFullCore(connection, schema, profile: null, cancellationToken))
+            yield return record;
+    }
+
+    public async IAsyncEnumerable<DataRecord> ReadFullAsync(SourceConnection connection, ISourceSchema schema,
+        FilingProfile profile, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var record in ReadFullCore(connection, schema, profile, cancellationToken))
+            yield return record;
+    }
+
+    private async IAsyncEnumerable<DataRecord> ReadFullCore(SourceConnection connection, ISourceSchema schema,
+        FilingProfile? profile, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
-        var facts = Select(connection, Read(connection, cancellationToken));
+        var facts = Select(connection, Read(connection, cancellationToken, profile), profile);
         for (int i = 0; i < facts.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -80,7 +107,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
 
     private static IReadOnlyList<(XbrlFact Fact, int Index)> Select(
         SourceConnection connection,
-        IReadOnlyList<XbrlFact> facts)
+        IReadOnlyList<XbrlFact> facts,
+        FilingProfile? profile)
     {
         var selection = ParseSelection(connection);
         var matched = facts.Select((fact, index) => (Fact: fact, Index: index))
@@ -108,10 +136,10 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                 || StringComparer.Ordinal.Equals(item.Fact.Language, selection.Language))
             .Where(item => selection.IsNil is null || item.Fact.IsNil == selection.IsNil)
             .Where(item => selection.Dimensions.All(filter => item.Fact.Dimensions.Any(dimension => dimension.IsExplicit
-                && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
-                && StringComparer.Ordinal.Equals(dimension.MemberName, filter.Value))))
+                && DimensionQNameMatches(filter.Key, dimension.Name, dimension.AxisExpandedName, profile)
+                && DimensionQNameMatches(filter.Value, dimension.MemberName, dimension.MemberExpandedName, profile))))
             .Where(item => selection.TypedDimensions.All(filter => item.Fact.Dimensions.Any(dimension => !dimension.IsExplicit
-                && StringComparer.Ordinal.Equals(dimension.Name, filter.Key)
+                && DimensionQNameMatches(filter.Key, dimension.Name, dimension.AxisExpandedName, profile)
                 && StringComparer.Ordinal.Equals(dimension.TypedValueJson, filter.Value))))
             .ToArray();
 
@@ -287,7 +315,8 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions);
     }
 
-    private static IReadOnlyList<XbrlFact> Read(SourceConnection connection, CancellationToken cancellationToken)
+    private static IReadOnlyList<XbrlFact> Read(
+        SourceConnection connection, CancellationToken cancellationToken, FilingProfile? profile)
     {
         var path = connection.Path ?? throw new AdapterException(
             DiagnosticCodes.IoUnsupportedOperation,
@@ -298,8 +327,13 @@ public sealed class XbrlReportAdapter : ISourceAdapter
         {
             return ext switch
             {
+                // XML parsing retains typed-member XML as opaque evidence with its expanded
+                // axis name. FactDimensionParser may promote only the bounded xs:string
+                // subset after the graph supplies the resolved profile.
                 ".xml" => XmlSerializer.ReadFacts(text),
-                _ => OimSerializer.ReadFacts(text)
+                _ => profile is null
+                    ? OimSerializer.ReadFacts(text)
+                    : OimSerializer.ReadFacts(text, profile)
             };
         }
         catch (Exception ex) when (ex is InvalidOperationException or XbrlExportException or System.Text.Json.JsonException)
@@ -307,6 +341,42 @@ public sealed class XbrlReportAdapter : ISourceAdapter
             throw new AdapterException(DiagnosticCodes.IoUnsupportedEncoding,
                 $"Report '{path}' could not be parsed as xBRL-JSON or xBRL-XML: {ex.Message}");
         }
+    }
+
+    private static bool DimensionQNameMatches(
+        string requested,
+        string actual,
+        string? actualExpandedName,
+        FilingProfile? profile)
+    {
+        if (StringComparer.Ordinal.Equals(requested, actual)) return true;
+        if (profile is null || !TryExpandProfileQName(requested, profile.NamespaceUris, out var requestedExpanded))
+            return false;
+        if (actualExpandedName is not null)
+            return StringComparer.Ordinal.Equals(actualExpandedName, requestedExpanded);
+        return TryExpandProfileQName(actual, profile.NamespaceUris, out var actualExpanded)
+            && StringComparer.Ordinal.Equals(actualExpanded, requestedExpanded);
+    }
+
+    private static bool TryExpandProfileQName(string qname, IReadOnlyDictionary<string, string> namespaceUris,
+        out string expandedName)
+    {
+        expandedName = string.Empty;
+        var separator = qname.IndexOf(':');
+        if (separator <= 0 || separator != qname.LastIndexOf(':') || separator == qname.Length - 1
+            || !namespaceUris.TryGetValue(qname[..separator], out var namespaceUri))
+            return false;
+        try
+        {
+            System.Xml.XmlConvert.VerifyNCName(qname[..separator]);
+            System.Xml.XmlConvert.VerifyNCName(qname[(separator + 1)..]);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return false;
+        }
+        expandedName = $"{{{namespaceUri}}}{qname[(separator + 1)..]}";
+        return true;
     }
 
     private static long GetMaximumInputBytes(SourceConnection connection)
@@ -361,7 +431,17 @@ public sealed class XbrlReportAdapter : ISourceAdapter
                 string.Join(";", f.Dimensions.Select(d => d.ToString())), src),
             ["dimensionsJson"] = DataValue.StringValue(JsonSerializer.Serialize(f.Dimensions
                 .OrderBy(dimension => dimension.Name, StringComparer.Ordinal)
-                .ThenBy(dimension => dimension.MemberName, StringComparer.Ordinal)), src)
+                .ThenBy(dimension => dimension.MemberName, StringComparer.Ordinal)
+                .Select(dimension => new
+                {
+                    dimension.Name,
+                    dimension.MemberName,
+                    dimension.IsExplicit,
+                    dimension.TypedValue,
+                    dimension.TypedValueJson,
+                    dimension.AxisExpandedName,
+                    dimension.MemberExpandedName
+                }), DimensionJsonOptions), src)
         };
         var srcs = new Dictionary<string, SourceReference>(StringComparer.Ordinal);
         foreach (var k in fields.Keys) srcs[k] = src;

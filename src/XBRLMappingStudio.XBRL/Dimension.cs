@@ -42,6 +42,14 @@ public sealed record Dimension(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TypedValue { get; init; }
 
+    /// <summary>Expanded name evidence for the imported axis, when retained by a report reader.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AxisExpandedName { get; init; }
+
+    /// <summary>Expanded name evidence for an imported explicit member, when present.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MemberExpandedName { get; init; }
+
     /// <summary>OIM-style key: the bracketed dimension qualified name.</summary>
     public string Key => Name;
 

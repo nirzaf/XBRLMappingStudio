@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 using XBRLMappingStudio.Adapters;
@@ -441,6 +443,137 @@ public sealed class ReverseMappingDiagnosticTests
         }
     }
 
+    [Theory]
+    [InlineData("xml")]
+    [InlineData("json")]
+    public async Task RunAsync_ReversesProfileDeclaredTypedStringDimensionsFromReport(string format)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-typed-string-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = TypedStringReverseProfile();
+            var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            var sourceFacts = new[]
+            {
+                CreateReverseRevenueFact(10m, period, "North"),
+                CreateReverseRevenueFact(20m, period, "South")
+            };
+            var reportPath = Path.Combine(directory, $"typed-report.{format}");
+            var reportContent = format == "xml"
+                ? XBRLMappingStudio.XBRL.XmlSerializer.Serialize(profile, sourceFacts)
+                : OimSerializer.Serialize(profile, sourceFacts);
+            await File.WriteAllTextAsync(reportPath, reportContent);
+
+            if (format == "xml")
+            {
+                var adapter = new XbrlReportAdapter();
+                var connection = new SourceConnection("typed-report", "xbrl-report", reportPath);
+                var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+                var sample = await adapter.ReadSampleAsync(connection, schema, 10, profile, CancellationToken.None);
+                var importedValues = sample.Rows.Select(row =>
+                {
+                    var evidence = (string)row.Fields["dimensionsJson"].Raw!;
+                    Assert.True(FactDimensionParser.TryParseJson(evidence, profile, out var parsed, out var evidenceError),
+                        $"{evidenceError} Evidence: {evidence}");
+                    return Assert.Single(parsed).TypedValue;
+                }).ToArray();
+                Assert.Equal(new[] { "North", "South" }, importedValues);
+            }
+
+            var baseline = TestFixtures.BuildRevenueMappingProject(reportPath);
+            var binding = baseline.Bindings.Single() with
+            {
+                Kind = "xbrl-report",
+                Locator = reportPath,
+                Configuration = new Dictionary<string, object?>(StringComparer.Ordinal),
+                SchemaFingerprint = null
+            };
+            var nodes = baseline.Nodes.Select(node => node.ShallowCopy()).ToList();
+            var revenueFieldIndex = nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+            var revenueField = nodes[revenueFieldIndex];
+            var revenueParameters = new Dictionary<string, object?>(revenueField.Parameters, StringComparer.Ordinal)
+            {
+                ["column"] = "value"
+            };
+            revenueParameters.Remove("rowFilterColumn");
+            revenueParameters.Remove("rowFilterValue");
+            nodes[revenueFieldIndex] = revenueField with { Parameters = revenueParameters };
+
+            var factIndex = nodes.FindIndex(node => node.NodeType == NodeTypeConstants.FactConstruct);
+            var factNode = nodes[factIndex];
+            nodes[factIndex] = factNode with
+            {
+                InputPorts = factNode.InputPorts.Append(
+                    new PortDefinition("dimensionsJson", PortShape.String, PortCardinality.Single)).ToList()
+            };
+            var dimensionsFieldId = Id.New();
+            nodes.Add(new MappingNode
+            {
+                NodeId = dimensionsFieldId,
+                NodeType = NodeTypeConstants.ExcelField,
+                DisplayName = "Imported report dimensions",
+                Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["bindingId"] = binding.BindingId,
+                    ["column"] = "dimensionsJson"
+                },
+                OutputPorts = new() { new PortDefinition("textValue", PortShape.String, PortCardinality.Single) }
+            });
+            var edges = baseline.Edges.ToList();
+            edges.Add(new MappingEdge
+            {
+                EdgeId = Id.New(),
+                SourceNodeId = dimensionsFieldId,
+                SourcePortName = "textValue",
+                TargetNodeId = factNode.NodeId,
+                TargetPortName = "dimensionsJson"
+            });
+            var project = new MappingProject
+            {
+                ProjectId = baseline.ProjectId,
+                Name = baseline.Name,
+                ProfileId = profile.ProfileId,
+                ProfileDigest = profile.Digest,
+                FunctionCatalogVersion = baseline.FunctionCatalogVersion,
+                Metadata = baseline.Metadata,
+                Bindings = new List<SourceBinding> { binding },
+                Nodes = nodes,
+                Edges = edges
+            };
+
+            var result = await new MappingJobService(profile, new ProfileMatchingWorker(profile)).RunAsync(
+                project,
+                new Dictionary<string, SourceConnection>(StringComparer.Ordinal)
+                {
+                    [binding.BindingId] = new SourceConnection(binding.BindingId, "xbrl-report", reportPath)
+                },
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                preview: true,
+                CancellationToken.None);
+
+            Assert.True(result.Manifest.IsPreview);
+            Assert.True(result.Manifest.Outcome == RunOutcome.SuccessWithWarnings,
+                string.Join(" | ", result.Manifest.Diagnostics.Select(diagnostic => $"{diagnostic.Code}: {diagnostic.Message}")));
+            Assert.Equal(2, result.Facts.Count);
+            Assert.Equal(new[] { "North", "South" }, result.Facts
+                .Select(fact => Assert.Single(fact.Dimensions).TypedValue));
+            Assert.All(result.Facts, fact =>
+            {
+                Assert.False(Assert.Single(fact.Dimensions).IsExplicit);
+                Assert.Contains(fact.ContributingSources,
+                    source => source.Locator.Contains("#f", StringComparison.Ordinal));
+            });
+            Assert.Contains(result.Manifest.Diagnostics, diagnostic =>
+                diagnostic.Code == DiagnosticCodes.IoReverseMappingCannotRecoverAbsentSourceDetail
+                && !diagnostic.IsBlocking);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task ReportPeriodFields_MapRepeatedAndAlternateDurationsIntoGeneratedFacts()
     {
@@ -783,6 +916,108 @@ public sealed class ReverseMappingDiagnosticTests
                 .Select(item => item.GetProperty("Locator").GetString()!)
                 .ToArray();
         }
+    }
+
+    private static XbrlFact CreateReverseRevenueFact(decimal? value, XbrlPeriod period, string typedValue) => new()
+    {
+        ConceptName = SyntheticProfile.Qualified("Revenue"),
+        EntityScheme = "https://example.test/entity",
+        EntityIdentifier = "ACME-1",
+        Period = period,
+        Unit = new XbrlUnit("QAR"),
+        Value = value,
+        Dimensions = new[]
+        {
+            new Dimension("synthetic:TypedAxis", "", IsExplicit: false) { TypedValue = typedValue }
+        }
+    };
+
+    private static FilingProfile TypedStringReverseProfile()
+    {
+        var baseline = SyntheticProfile.Build();
+        const string profileId = "synthetic-typed-reverse-v1";
+        var digest = "sha256:" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes("synthetic-typed-reverse-v1|TypedAxis|TypedMember|xs:string"))).ToLowerInvariant();
+        return new FilingProfile
+        {
+            ProfileId = profileId,
+            Digest = digest,
+            TaxonomyVersion = profileId,
+            Concepts = baseline.Concepts,
+            SupportedUnits = baseline.SupportedUnits,
+            DimensionDomains = baseline.DimensionDomains,
+            TypedDimensionDomains = new Dictionary<string, TypedDimensionDomainMetadata>(StringComparer.Ordinal)
+            {
+                ["synthetic:TypedAxis"] = new("synthetic:TypedMember", "xs:string")
+            },
+            NamespaceUris = baseline.NamespaceUris.Concat(new[]
+            {
+                new KeyValuePair<string, string>("xs", "http://www.w3.org/2001/XMLSchema")
+            }).ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+            OutputFormat = "xbrl-json",
+            RequiredChecks = new HashSet<string>(StringComparer.Ordinal),
+            TaxonomyUrls = new[] { "synthetic-typed-reverse-v1-entry.xsd" }
+        };
+    }
+
+    private sealed class ProfileMatchingWorker(FilingProfile profile) : IWorkerClient
+    {
+        private const int ProfileSchemaVersion = FilingProfileManifest.CurrentSchemaVersion;
+        private static readonly string[] Capabilities =
+        {
+            WorkerOperations.LoadTaxonomy,
+            WorkerOperations.ValidateReport
+        };
+        private readonly SuccessfulWorker _validationWorker = new();
+        private string EntryPoint => profile.TaxonomyUrls.Single();
+
+        public Task<WorkerHandshake> HandshakeAsync(CancellationToken cancellationToken)
+            => Task.FromResult(new WorkerHandshake(
+                WorkerProtocol.CurrentVersion,
+                "profile-matching-test/1.0",
+                Capabilities)
+            {
+                ProfileSchemaVersion = ProfileSchemaVersion,
+                ProfileId = profile.ProfileId,
+                ProfileVersion = profile.TaxonomyVersion,
+                ProfileDigest = profile.Digest,
+                TaxonomyEntryPoint = EntryPoint,
+                RequiredPlugins = profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray(),
+                RequiredChecks = profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray()
+            });
+
+        public Task<WorkerResponse> RequestAsync(WorkerRequest request, CancellationToken cancellationToken)
+        {
+            if (request.Operation != WorkerOperations.LoadTaxonomy)
+                return _validationWorker.RequestAsync(request, cancellationToken);
+
+            var plugins = profile.RequiredPlugins.Order(StringComparer.Ordinal).ToArray();
+            var checks = profile.RequiredChecks.Order(StringComparer.Ordinal).ToArray();
+            var loaded = new WorkerTaxonomyLoadResult(
+                "profile-matching-test",
+                "1.0",
+                Capabilities,
+                Completed: true,
+                ProfileSchemaVersion,
+                profile.ProfileId,
+                profile.TaxonomyVersion,
+                profile.Digest,
+                EntryPoint,
+                plugins,
+                profile.Concepts.Count)
+            {
+                RequiredChecks = checks,
+                LoadedPlugins = plugins
+            };
+            return Task.FromResult(new WorkerResponse(
+                request.OperationId,
+                WorkerStatus.Success,
+                JsonSerializer.SerializeToElement(loaded),
+                Diagnostics: Array.Empty<Diagnostic>(),
+                Error: null));
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class SuccessfulWorker : IWorkerClient
