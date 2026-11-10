@@ -356,7 +356,24 @@ public sealed class ReverseMappingDiagnosticTests
                 await foreach (var _ in adapter.ReadFullAsync(connection, schema, profile, CancellationToken.None)) { }
             });
             Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
-            Assert.Contains("matched no fact occurrences", error.Message, StringComparison.Ordinal);
+            Assert.Contains("digest does not match the current report bytes", error.Message, StringComparison.Ordinal);
+
+            // A report digest is an assertion about the source bytes even when the
+            // caller did not also pin an ordinal occurrence selector.
+            var digestOnlyConnection = new SourceConnection("report", "xbrl-report", path,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["reportDigest"] = digest
+                });
+            var digestOnlySchema = await adapter.InspectSchemaAsync(digestOnlyConnection, CancellationToken.None);
+            var digestOnlyError = await Assert.ThrowsAsync<AdapterException>(async () =>
+            {
+                await foreach (var _ in adapter.ReadFullAsync(digestOnlyConnection, digestOnlySchema, profile,
+                    CancellationToken.None)) { }
+            });
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, digestOnlyError.Code);
+            Assert.Contains("digest does not match the current report bytes", digestOnlyError.Message,
+                StringComparison.Ordinal);
         }
         finally
         {

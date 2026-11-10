@@ -117,9 +117,14 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         FilingProfile? profile)
     {
         var selection = ParseSelection(connection);
+        if (selection.ReportDigest is not null
+            && !StringComparer.Ordinal.Equals(reportDigest, selection.ReportDigest))
+        {
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "Configured XBRL report digest does not match the current report bytes; refresh the digest-bound selection.");
+        }
+
         var matched = facts.Select((fact, index) => (Fact: fact, Index: index))
-            .Where(item => selection.ReportDigest is null
-                || StringComparer.Ordinal.Equals(reportDigest, selection.ReportDigest))
             .Where(item => selection.TargetRows.Count == 0
                 || selection.TargetRows.ContainsKey($"{connection.SourceId}#f{item.Index + 1}"))
             .Where(item => selection.OccurrenceId is null
