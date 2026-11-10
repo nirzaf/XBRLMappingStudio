@@ -366,6 +366,8 @@ release qualification. New contracts cover [typed reusable functions](docs/decis
 [concept numeric policies](docs/concept-numeric-policies.md),
 [trusted publication approvals](docs/trusted-publication-approvals.md), and
 [unattended operations](docs/unattended-operations.md). The
+[xBRL report reverse-mapping contract](docs/xbrl-report-reverse-mapping.md)
+documents exact occurrence filters and report-byte digest pinning. The
 [bounded CSV execution contract](docs/csv-streaming-execution.md) extends the
 single-source large-run path while retaining unchanged-file checks.
 
