@@ -365,6 +365,60 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
+    public async Task XbrlReportAdapter_AllowsExistingTargetSelectionOnlyForDigestPinnedOccurrence()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-target-row-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var path = Path.Combine(directory, "report.json");
+            var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+            XbrlFact Revenue(decimal value) => new()
+            {
+                ConceptName = SyntheticProfile.Qualified("Revenue"),
+                EntityScheme = "https://example.test/entity",
+                EntityIdentifier = "ACME-1",
+                Period = period,
+                Unit = new XbrlUnit("QAR"),
+                Value = value
+            };
+            await File.WriteAllTextAsync(path, OimSerializer.Serialize(profile, new[] { Revenue(12m), Revenue(99m) }));
+            var digest = "sha256:" + Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path)))
+                .ToLowerInvariant();
+            var targetRowId = RunManifest.ComputeSha256("existing-ledger-row");
+            var connection = new SourceConnection("report", "xbrl-report", path,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["occurrenceId"] = "report#f2",
+                    ["reportDigest"] = digest,
+                    ["targetRowId"] = targetRowId
+                });
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var sample = await adapter.ReadSampleAsync(connection, schema, 10, profile, CancellationToken.None);
+            var row = Assert.Single(sample.Rows);
+            Assert.Equal("report#f2", row.RowId);
+            Assert.Equal("99", row["value"].LexicalSource);
+
+            var missingDigest = new SourceConnection("report", "xbrl-report", path,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["occurrenceId"] = "report#f2",
+                    ["targetRowId"] = targetRowId
+                });
+            var error = await Assert.ThrowsAsync<AdapterException>(() =>
+                adapter.InspectSchemaAsync(missingDigest, CancellationToken.None));
+            Assert.Equal(DiagnosticCodes.IoSchemaMismatch, error.Code);
+            Assert.Contains("reportDigest", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ReportSource_RecordsNonBlockingReconstructionLimitation()
     {
         var diagnostics = new DiagnosticBag();

@@ -1962,8 +1962,18 @@ public sealed class MappingJobService
 
         var destination = new SourceConnection("destination", DestinationPlanValidator.SupportedKind,
             prepared.Path, new Dictionary<string, string>(StringComparer.Ordinal) { ["table"] = prepared.Plan.Table });
-        return await new SqliteTargetPublisher().PreviewAsync(
-            destination, prepared.Records, prepared.Plan.BusinessKey, cancellationToken: cancellationToken);
+        var estimate = await new SqliteTargetPublisher().PreviewAsync(
+            destination, prepared.Records, prepared.Plan.BusinessKey, cancellationToken: cancellationToken,
+            updateExistingOnly: StringComparer.Ordinal.Equals(prepared.Plan.WriteMode, "update-only"));
+        if (StringComparer.Ordinal.Equals(prepared.Plan.WriteMode, "update-only") && estimate.Conflicts > 0)
+            return estimate with
+            {
+                SchemaDiscrepancies = new[]
+                {
+                    "Update-only destination selection includes a target row that does not exist; publication is blocked and will not create rows."
+                }
+            };
+        return estimate;
     }
 
     private static SqliteTargetChangePreview BlockedDestinationPreview(int candidateRows, string discrepancy)
@@ -2009,7 +2019,8 @@ public sealed class MappingJobService
         var effectiveIntent = SqliteTargetPublisher.ComputeEffectiveIntentFingerprint(
             destination, plan.Table, prepared.Records, plan.BusinessKey, operationFingerprint,
             prepared.Records.SelectMany(record => record.Fields.Keys)
-                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            updateExistingOnly: StringComparer.Ordinal.Equals(plan.WriteMode, "update-only"));
         onIntentPrepared?.Invoke(operationKey, effectiveIntent);
 
         await EnsureInputIdentityAsync(project, manifest, plan.Locator, cancellationToken);
@@ -2021,7 +2032,8 @@ public sealed class MappingJobService
             operationFingerprint,
             cancellationToken,
             beforeCommit: () => RecheckDestinationApproval(project, manifest, allowSyntheticProfile,
-                approvedDigest, approvedRevision, plan.Locator));
+                approvedDigest, approvedRevision, plan.Locator),
+            updateExistingOnly: StringComparer.Ordinal.Equals(plan.WriteMode, "update-only"));
 
         manifest.Outputs = manifest.Outputs
             .Where(output => output.Kind != "db-receipt" || output.Path != prepared.Path)
@@ -2111,7 +2123,63 @@ public sealed class MappingJobService
                 "An empty fact set cannot be published to the SQLite destination.",
                 DiagnosticStage.Validation);
 
+        var targetRowBindings = project.Bindings
+            .Where(binding => binding.Configuration?.ContainsKey("targetRowId") == true)
+            .ToArray();
+        if (targetRowBindings.Length > 1)
+            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                "A reverse-mapping run may select only one existing target row.", DiagnosticStage.Validation);
+        if (targetRowBindings.Length == 1)
+        {
+            var binding = targetRowBindings[0];
+            if (!StringComparer.Ordinal.Equals(binding.Kind, "xbrl-report")
+                || !StringComparer.Ordinal.Equals(plan.WriteMode, "update-only")
+                || plan.BusinessKey is not { Count: 1 } || !StringComparer.Ordinal.Equals(plan.BusinessKey[0], "fact_key"))
+                throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
+                    "XBRL target-row selection requires one xBRL report source, SQLite update-only mode, and the fact_key business key.",
+                    DiagnosticStage.Validation);
+            var configuration = binding.Configuration!;
+            var occurrenceId = configuration.GetValueOrDefault("occurrenceId") as string;
+            var targetRowId = configuration.GetValueOrDefault("targetRowId") as string;
+            var reportDigest = configuration.GetValueOrDefault("reportDigest") as string;
+            if (string.IsNullOrWhiteSpace(occurrenceId) || string.IsNullOrWhiteSpace(targetRowId)
+                || string.IsNullOrWhiteSpace(reportDigest))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL target-row selection requires an exact occurrenceId, reportDigest, and targetRowId.",
+                    DiagnosticStage.Validation);
+            var matchingFacts = result.Facts.Where(fact => fact.SourceTransformationPaths.Any(path =>
+                StringComparer.Ordinal.Equals(path.Source.SourceId, binding.BindingId)
+                && StringComparer.Ordinal.Equals(path.Source.Locator,
+                    NormalizeReportOccurrenceLocator(binding.BindingId, occurrenceId)))).ToArray();
+            if (result.Facts.Count != 1 || matchingFacts.Length != 1 || records.Count != 1)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "Existing target-row selection must produce exactly one fact from the revision-pinned selected XBRL occurrence.",
+                    DiagnosticStage.Validation);
+
+            var fields = records[0].Fields.ToDictionary(field => field.Key, field => field.Value,
+                StringComparer.Ordinal);
+            fields["fact_key"] = DataValue.StringValue(targetRowId);
+            records = new[]
+            {
+                new DataRecord
+                {
+                    RowId = targetRowId,
+                    Fields = fields,
+                    CellSources = records[0].CellSources,
+                    HasStableRowIdentity = true
+                }
+            };
+        }
+
         return new PreparedSqliteDestination(plan, destinationPath, records, jsonDigest);
+    }
+
+    private static string NormalizeReportOccurrenceLocator(string bindingId, string occurrenceId)
+    {
+        var bindingPrefix = bindingId + "#f";
+        if (occurrenceId.StartsWith(bindingPrefix, StringComparison.Ordinal))
+            return "report#f" + occurrenceId[bindingPrefix.Length..];
+        return occurrenceId;
     }
 
     private sealed record PreparedSqliteDestination(

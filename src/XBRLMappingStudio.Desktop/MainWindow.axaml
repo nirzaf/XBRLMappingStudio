@@ -846,6 +846,9 @@
                         </DataTemplate>
                       </ComboBox.ItemTemplate>
                     </ComboBox>
+                    <CheckBox Content="Update an existing fact row only (never insert)"
+                              IsChecked="{Binding UpdateExistingDestinationRowsOnly}"
+                              AutomationProperties.Name="Update existing SQLite fact row only" />
                   </StackPanel>
                   <TextBlock Text="{Binding DestinationSchemaStatus}"
                              TextWrapping="Wrap"

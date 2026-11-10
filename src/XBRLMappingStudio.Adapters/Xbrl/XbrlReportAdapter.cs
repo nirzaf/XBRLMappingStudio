@@ -38,7 +38,7 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         "occurrenceId", "reportDigest", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
         "unit", "lang", "nil", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
-        "maxInputBytes"
+        "maxInputBytes", "targetRowId"
     };
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
@@ -118,8 +118,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
             .Where(item => selection.ReportDigest is null
                 || StringComparer.Ordinal.Equals(reportDigest, selection.ReportDigest))
             .Where(item => selection.OccurrenceId is null
-                || StringComparer.Ordinal.Equals(
-                    $"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId))
+                || StringComparer.Ordinal.Equals($"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId)
+                || StringComparer.Ordinal.Equals($"report#f{item.Index + 1}", selection.OccurrenceId))
             .Where(item => selection.Concept is null
                 || StringComparer.Ordinal.Equals(item.Fact.ConceptName, selection.Concept))
             .Where(item => selection.EntityScheme is null
@@ -160,10 +160,6 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         var configuration = connection.Configuration;
         if (configuration is null || configuration.Count == 0)
             return ReportSelection.Empty;
-
-        if (configuration.ContainsKey("targetRowId"))
-            throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
-                "Existing destination target-row selection is not supported for an xBRL report source because the target dataset is not available to the source adapter; no destination rows are created or inferred.");
 
         var unsupported = configuration.Keys.Where(key => !SupportedSelectionKeys.Contains(key)).ToArray();
         if (unsupported.Length != 0)
@@ -320,9 +316,21 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
             throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
                 "XBRL report selection 'reportDigest' must be a lowercase sha256 digest.");
 
+        var targetRowId = Get("targetRowId");
+        if (targetRowId is not null)
+        {
+            if (!IsSha256Digest(targetRowId))
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL report selection 'targetRowId' must be a lowercase sha256 fact_key.");
+            if (Get("occurrenceId") is null || reportDigest is null)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "Existing target-row selection requires exact 'occurrenceId' and 'reportDigest' selectors.");
+        }
+
         return new ReportSelection(Get("occurrenceId"), reportDigest, Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,
-            instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions);
+            instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions,
+            targetRowId);
     }
 
     private static bool IsSha256Digest(string value)
@@ -485,7 +493,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         string? Language,
         bool? IsNil,
         IReadOnlyDictionary<string, string> Dimensions,
-        IReadOnlyDictionary<string, string> TypedDimensions)
+        IReadOnlyDictionary<string, string> TypedDimensions,
+        string? TargetRowId)
     {
         public bool HasAspectFilters
             => OccurrenceId is not null || Concept is not null || EntityScheme is not null
@@ -498,6 +507,6 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         public static ReportSelection Empty { get; }
         = new(null, null, null, null, null, null, null, null, null, null, null, null, null,
                 new Dictionary<string, string>(StringComparer.Ordinal),
-                new Dictionary<string, string>(StringComparer.Ordinal));
+                new Dictionary<string, string>(StringComparer.Ordinal), null);
     }
 }

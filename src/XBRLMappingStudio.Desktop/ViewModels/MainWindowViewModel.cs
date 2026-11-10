@@ -509,6 +509,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private SqliteTargetTableSchema? _destinationTableSchema;
     private IReadOnlyList<string>? _preferredDestinationKey;
     private bool _isDestinationLoading;
+    private bool _updateExistingDestinationRowsOnly;
     private bool _destinationSchemaIsValid;
     private bool _isDestinationSchemaConfirmed;
     private string _destinationSchemaStatus = "Choose an existing SQLite database to inspect its tables.";
@@ -778,6 +779,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
     public bool IsSqliteDestination => StringComparer.Ordinal.Equals(SelectedDestinationKind.Kind, "sqlite");
+    public bool UpdateExistingDestinationRowsOnly
+    {
+        get => _updateExistingDestinationRowsOnly;
+        set
+        {
+            if (!Set(ref _updateExistingDestinationRowsOnly, value)) return;
+            InvalidateMappingOperationIfStale();
+            ResetDestinationPreviewSummary("The SQLite write mode changed; rerun the dry run to refresh its estimate.");
+            ValidateSelectedDestinationSchema();
+            NotifyDestinationCommands();
+        }
+    }
     public bool IsFileDestination => DestinationPlanValidator.IsFileKind(SelectedDestinationKind.Kind);
     private string SelectedFileDestinationFormat
         => SavedDestinationMatchesSelectedPath()
@@ -785,7 +798,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             : DestinationPlanValidator.FileFormatFor(SelectedDestinationKind.Kind) ?? string.Empty;
 
     public string DestinationFormatDisplay => IsSqliteDestination
-        ? "Contract: xbrl-facts-v1 · upsert"
+        ? $"Contract: xbrl-facts-v1 · {(UpdateExistingDestinationRowsOnly ? "update existing only" : "upsert") }"
         : $"Contract: {SelectedFileDestinationFormat} · replace";
     public string DestinationPickerButtonText => IsSqliteDestination
         ? "Choose SQLite database…"
@@ -3244,7 +3257,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
                     Kind = DestinationPlanValidator.SupportedKind,
                     Locator = _destinationPath,
                     Table = DestinationTable,
-                    BusinessKey = SelectedDestinationKey.Columns.ToList()
+                    BusinessKey = SelectedDestinationKey.Columns.ToList(),
+                    WriteMode = UpdateExistingDestinationRowsOnly ? "update-only" : "upsert"
                 };
         }
 
@@ -3315,6 +3329,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         Raise(nameof(CanPublishDestination));
         Raise(nameof(CanSelectDestinationKey));
         Raise(nameof(DestinationFormatDisplay));
+        Raise(nameof(UpdateExistingDestinationRowsOnly));
         Raise(nameof(DestinationPickerButtonText));
         Raise(nameof(DestinationPreviewButtonText));
         Raise(nameof(DestinationPublishButtonText));
@@ -6036,7 +6051,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             if (DestinationPlanValidator.IsFileKind(plan.Kind))
                 await LoadDestinationFileAsync(path);
             else
+            {
+                UpdateExistingDestinationRowsOnly = StringComparer.Ordinal.Equals(plan.WriteMode, "update-only");
                 await LoadDestinationDatabaseAsync(path, plan.Table, plan.BusinessKey?.ToArray());
+            }
         }
         catch (Exception ex)
         {

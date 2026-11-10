@@ -136,8 +136,8 @@ public static class DestinationPlanValidator
 
             if (!StringComparer.Ordinal.Equals(plan.Format, SupportedFormat))
                 Unsupported($"Destination format '{plan.Format}' is unsupported. SQLite requires '{SupportedFormat}'.");
-            if (!StringComparer.Ordinal.Equals(plan.WriteMode, "upsert"))
-                Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for SQLite; use 'upsert'.");
+            if (plan.WriteMode is not ("upsert" or "update-only"))
+                Unsupported($"Destination write mode '{plan.WriteMode}' is unsupported for SQLite; use 'upsert' or 'update-only'.");
         }
         else if (FileFormats.TryGetValue(plan.Kind, out var supportedFileFormats))
         {

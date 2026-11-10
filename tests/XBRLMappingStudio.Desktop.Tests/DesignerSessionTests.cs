@@ -3025,6 +3025,40 @@ public sealed class DesignerSessionTests
     }
 
     [Fact]
+    public async Task DesktopCanSaveSqliteUpdateOnlyModeInDestinationPlan()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-update-only", Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var workbook = TestFixtures.MaterializeWorkbook(dir);
+        var projectPath = System.IO.Path.Combine(dir, "mapping.xmap");
+        var database = System.IO.Path.Combine(dir, "target.sqlite");
+        await CreateFactDatabaseAsync(database);
+        var project = TestFixtures.BuildRevenueMappingProject(workbook, approved: true);
+        try
+        {
+            var viewModel = new MainWindowViewModel(project, new TestProjectFileDialog(database));
+            viewModel.AllowSyntheticProfile = true;
+            viewModel.SaveProjectTo(projectPath);
+            await viewModel.LoadDestinationAsync(database);
+
+            Assert.True(viewModel.DestinationSchemaIsValid);
+            viewModel.UpdateExistingDestinationRowsOnly = true;
+            Assert.Contains("update existing only", viewModel.DestinationFormatDisplay, StringComparison.Ordinal);
+            Assert.False(viewModel.CanSaveDestinationPlan);
+            viewModel.IsDestinationSchemaConfirmed = true;
+            Assert.True(viewModel.CanSaveDestinationPlan);
+
+            viewModel.SaveDestinationPlanCommand.Execute(null);
+
+            Assert.Equal("update-only", viewModel.Session.Project.Destination?.WriteMode);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DesktopFileDestinationRequiresPathReviewDryRunAndFinalConfirmation()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "xms-desktop-file-destination", Guid.NewGuid().ToString("n"));

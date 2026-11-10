@@ -56,7 +56,7 @@ public sealed class SqliteTargetPublisher
     public async Task<SqlitePublishReceipt> PublishAsync(SourceConnection destination,
         IReadOnlyList<DataRecord> records, IReadOnlyList<string> businessKey,
         string operationKey, string intentFingerprint, CancellationToken cancellationToken = default,
-        Action? beforeCommit = null)
+        Action? beforeCommit = null, bool updateExistingOnly = false)
     {
         if (records.Count == 0) throw new ArgumentException("At least one record is required.", nameof(records));
         if (businessKey.Count == 0 || businessKey.Any(string.IsNullOrWhiteSpace))
@@ -74,7 +74,8 @@ public sealed class SqliteTargetPublisher
         if (records.Any(record => businessKey.Any(key => record.Fields[key].Presence is ValuePresence.Missing or ValuePresence.ExplicitNil
                 || record.Fields[key].Raw is null)))
             throw new AdapterException(DiagnosticCodes.IoDuplicateKey, "SQLite business-key values cannot be missing or null.", DiagnosticStage.Publication);
-        var effectiveIntent = ComputeEffectiveIntentFingerprint(destination, table, records, businessKey, intentFingerprint, columns);
+        var effectiveIntent = ComputeEffectiveIntentFingerprint(destination, table, records, businessKey,
+            intentFingerprint, columns, updateExistingOnly);
 
         await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -132,24 +133,54 @@ public sealed class SqliteTargetPublisher
 
         var updates = columns.Except(businessKey, StringComparer.Ordinal).ToArray();
         if (updates.Length == 0) throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation, "Upsert requires at least one non-key column.");
-        var insert = $"INSERT INTO {Quote(table)} ({string.Join(",", columns.Select(Quote))}) VALUES ({string.Join(",", columns.Select((_, i) => "$v" + i))}) "
+        var upsertSql = $"INSERT INTO {Quote(table)} ({string.Join(",", columns.Select(Quote))}) VALUES ({string.Join(",", columns.Select((_, i) => "$v" + i))}) "
             + $"ON CONFLICT ({conflictTarget}) DO UPDATE SET {string.Join(",", updates.Select(c => $"{Quote(c)}=excluded.{Quote(c)}"))}";
+        var updateSql = $"UPDATE {Quote(table)} SET {string.Join(",", updates.Select((column, index) => $"{Quote(column)}=$u{index}"))} WHERE "
+            + string.Join(" AND ", businessKey.Select((key, index) => $"{Quote(key)} COLLATE BINARY=$k{index}"));
         await using var upsert = connection.CreateCommand();
         upsert.Transaction = transaction;
-        upsert.CommandText = insert;
-        var parameters = columns.Select((_, i) =>
-        {
-            var parameter = upsert.CreateParameter();
-            parameter.ParameterName = "$v" + i;
-            upsert.Parameters.Add(parameter);
-            return parameter;
-        }).ToArray();
+        upsert.CommandText = updateExistingOnly ? updateSql : upsertSql;
+        var parameters = updateExistingOnly
+            ? updates.Select((_, i) =>
+            {
+                var parameter = upsert.CreateParameter();
+                parameter.ParameterName = "$u" + i;
+                upsert.Parameters.Add(parameter);
+                return parameter;
+            }).Concat(businessKey.Select((_, i) =>
+            {
+                var parameter = upsert.CreateParameter();
+                parameter.ParameterName = "$k" + i;
+                upsert.Parameters.Add(parameter);
+                return parameter;
+            })).ToArray()
+            : columns.Select((_, i) =>
+            {
+                var parameter = upsert.CreateParameter();
+                parameter.ParameterName = "$v" + i;
+                upsert.Parameters.Add(parameter);
+                return parameter;
+            }).ToArray();
         var writtenRows = 0;
         foreach (var record in records)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            for (var i = 0; i < columns.Length; i++) parameters[i].Value = ToSql(record.Fields[columns[i]]);
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            if (updateExistingOnly)
+            {
+                for (var i = 0; i < updates.Length; i++)
+                    parameters[i].Value = ToSql(record.Fields[updates[i]]);
+                for (var i = 0; i < businessKey.Count; i++)
+                    parameters[updates.Length + i].Value = ToSql(record.Fields[businessKey[i]]);
+                if (await upsert.ExecuteNonQueryAsync(cancellationToken) != 1)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Selected target row no longer exists; update-only publication refused without inserting a row.",
+                        DiagnosticStage.Publication);
+            }
+            else
+            {
+                for (var i = 0; i < columns.Length; i++) parameters[i].Value = ToSql(record.Fields[columns[i]]);
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
             _afterRecordWritten?.Invoke(++writtenRows);
         }
         var completed = DateTimeOffset.UtcNow;
@@ -253,7 +284,8 @@ public sealed class SqliteTargetPublisher
         IReadOnlyList<string> businessKey,
         int maximumCandidateRows = MaximumPreviewRows,
         int sampleLimit = DefaultPreviewSampleLimit,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool updateExistingOnly = false)
     {
         if (records.Count == 0) throw new ArgumentException("At least one record is required.", nameof(records));
         if (businessKey.Count == 0 || businessKey.Any(string.IsNullOrWhiteSpace))
@@ -401,8 +433,16 @@ public sealed class SqliteTargetPublisher
             {
                 if (!await targetReader.ReadAsync(cancellationToken))
                 {
-                    inserts++;
-                    outcome = "insert";
+                    if (updateExistingOnly)
+                    {
+                        conflicts++;
+                        outcome = "missing-target";
+                    }
+                    else
+                    {
+                        inserts++;
+                        outcome = "insert";
+                    }
                 }
                 else
                 {
@@ -581,12 +621,14 @@ public sealed class SqliteTargetPublisher
 
     public static string ComputeEffectiveIntentFingerprint(SourceConnection destination, string table,
         IReadOnlyList<DataRecord> records,
-        IReadOnlyList<string> keys, string upstreamFingerprint, IReadOnlyList<string> columns)
+        IReadOnlyList<string> keys, string upstreamFingerprint, IReadOnlyList<string> columns,
+        bool updateExistingOnly = false)
     {
         var builder = new StringBuilder();
         AppendPart(builder, Path.GetFullPath(destination.Path!));
         AppendPart(builder, table);
         AppendPart(builder, upstreamFingerprint);
+        AppendPart(builder, updateExistingOnly ? "update-only" : "upsert");
         builder.Append(keys.Count).Append(':');
         foreach (var key in keys.Order(StringComparer.Ordinal)) AppendPart(builder, key);
         builder.Append(records.Count).Append(':').Append(columns.Count).Append(':');

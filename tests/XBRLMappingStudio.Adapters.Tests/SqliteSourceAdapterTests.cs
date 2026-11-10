@@ -496,6 +496,69 @@ public sealed class SqliteSourceAdapterTests
     }
 
     [Fact]
+    public async Task UpdateOnlyTargetChangesOnlyProvenExistingRowsAndRollsBackMissingSelection()
+    {
+        using var ws = new TempWorkspace();
+        var path = ws.PathFor("update-only.db");
+        await using (var db = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "CREATE TABLE facts (fact_key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO facts VALUES ('sha256:known-row','10');";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var destination = new SourceConnection("target", "sqlite", path,
+            new Dictionary<string, string> { ["table"] = "facts" });
+        var publisher = new SqliteTargetPublisher();
+        DataRecord Fact(string key, decimal value) => new()
+        {
+            RowId = key,
+            Fields = new Dictionary<string, DataValue>(StringComparer.Ordinal)
+            {
+                ["fact_key"] = DataValue.StringValue(key),
+                ["value"] = DataValue.DecimalValue(value)
+            },
+            HasStableRowIdentity = true
+        };
+
+        var preview = await publisher.PreviewAsync(destination,
+            new[] { Fact("sha256:known-row", 20m), Fact("sha256:missing-row", 30m) },
+            new[] { "fact_key" }, updateExistingOnly: true);
+        Assert.Equal(0, preview.Inserts);
+        Assert.Equal(1, preview.Updates);
+        Assert.Equal(1, preview.Conflicts);
+        Assert.Contains(preview.Samples, sample => sample.Outcome == "missing-target");
+
+        await Assert.ThrowsAsync<AdapterException>(() => publisher.PublishAsync(destination,
+            new[] { Fact("sha256:known-row", 20m), Fact("sha256:missing-row", 30m) },
+            new[] { "fact_key" }, "missing-selection", "intent", updateExistingOnly: true));
+        await using (var read = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False"))
+        {
+            await read.OpenAsync();
+            await using var query = read.CreateCommand();
+            query.CommandText = "SELECT value FROM facts WHERE fact_key='sha256:known-row'";
+            Assert.Equal("10", query.ExecuteScalar());
+            query.CommandText = "SELECT COUNT(*) FROM facts";
+            Assert.Equal(1L, query.ExecuteScalar());
+            query.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts'";
+            Assert.Equal(0L, query.ExecuteScalar());
+        }
+
+        var receipt = await publisher.PublishAsync(destination,
+            new[] { Fact("sha256:known-row", 20m) }, new[] { "fact_key" },
+            "update-existing", "intent", updateExistingOnly: true);
+        Assert.Equal(1, receipt.WrittenRows);
+        await using var finalRead = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        await finalRead.OpenAsync();
+        await using var finalQuery = finalRead.CreateCommand();
+        finalQuery.CommandText = "SELECT value FROM facts WHERE fact_key='sha256:known-row'";
+        Assert.Equal("20", finalQuery.ExecuteScalar());
+        finalQuery.CommandText = "SELECT COUNT(*) FROM facts";
+        Assert.Equal(1L, finalQuery.ExecuteScalar());
+    }
+
+    [Fact]
     public async Task TargetUpsertsRowIdIntegerPrimaryKeyWithoutCollationConflictTarget()
     {
         using var ws = new TempWorkspace();

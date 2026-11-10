@@ -89,6 +89,82 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task DigestPinnedXbrlOccurrence_UpdatesOnlyItsSelectedExistingTargetRow()
+    {
+        var reportPath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
+        var reportDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
+        var targetRowId = RunManifest.ComputeSha256("reviewed-existing-ledger-row");
+        var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+        var binding = Assert.Single(project.Bindings);
+        project.Bindings[0] = binding with
+        {
+            Kind = "xbrl-report",
+            Configuration = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["occurrenceId"] = "report#f1",
+                ["reportDigest"] = reportDigest,
+                ["targetRowId"] = targetRowId
+            },
+            SchemaFingerprint = null
+        };
+        var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+        var field = project.Nodes[fieldIndex];
+        var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+        {
+            ["column"] = "value"
+        };
+        parameters.Remove("rowFilterColumn");
+        parameters.Remove("rowFilterValue");
+        project.Nodes[fieldIndex] = field with { Parameters = parameters };
+        project.Destination = new DestinationPlan
+        {
+            Kind = DestinationPlanValidator.SupportedKind,
+            Locator = "destination.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "update-only"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = _profile.Digest
+        });
+        await InsertExistingTargetFactAsync(_databasePath, targetRowId);
+
+        var service = NewService();
+        var connections = Connections(project, reportPath);
+        using var result = await service.RunAsync(project, connections,
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.True(result.Manifest.Outcome == RunOutcome.SuccessWithWarnings,
+            $"Outcome was {result.Manifest.Outcome}: {string.Join(" | ", result.Manifest.Diagnostics.Select(item => $"{item.Code}: {item.Message}"))}");
+        var selectedFact = Assert.Single(result.Facts);
+        Assert.Contains(selectedFact.SourceTransformationPaths, path =>
+            path.Source.SourceId == binding.BindingId && path.Source.Locator == "report#f1");
+
+        var preview = await service.PreviewDestinationChangesAsync(project, result, _directory, CancellationToken.None);
+        Assert.Equal(1, preview.Updates);
+        Assert.Equal(0, preview.Inserts);
+        Assert.Equal(0, preview.Conflicts);
+        Assert.Empty(preview.SchemaDiscrepancies);
+
+        var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
+        Assert.Equal(1, receipt.WrittenRows);
+        Assert.Equal(new[] { targetRowId }, await ReadFactsAsync(_databasePath));
+        await using (var read = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly"))
+        {
+            await read.OpenAsync();
+            await using var query = read.CreateCommand();
+            query.CommandText = "SELECT value FROM facts WHERE fact_key=$key";
+            query.Parameters.AddWithValue("$key", targetRowId);
+            Assert.Equal(selectedFact.Value!.Value.ToString(CultureInfo.InvariantCulture), await query.ExecuteScalarAsync());
+        }
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task WorkerFailure_CannotReplaceExistingSqliteFactsOrReceipt()
     {
         var project = ConfiguredProject(_workbookPath);
@@ -1246,6 +1322,21 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         await using var command = database.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts";
         return Convert.ToInt32(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task InsertExistingTargetFactAsync(string path, string factKey)
+    {
+        await using var database = new SqliteConnection($"Data Source={path};Pooling=False");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = """
+            INSERT INTO facts (fact_key,profile_digest,concept,entity_scheme,entity_identifier,period_kind,
+                is_nil,dimensions_json,provenance_json,value)
+            VALUES ($key,'synthetic-profile','existing:fact','https://example.test/entity','ACME-1',
+                'duration',0,'{}','[]','1');
+            """;
+        command.Parameters.AddWithValue("$key", factKey);
+        await command.ExecuteNonQueryAsync();
     }
 
     private static async Task CreateDestinationDatabase(string path)
