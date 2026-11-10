@@ -485,9 +485,19 @@ target-row updates, tuples, and full loss accounting remain open.
 ## DST-04 desktop lock-screen retest (2026-11-10)
 
 After the user reported that Windows was unlocked, a fresh Computer Use screenshot
-still showed the Windows lock screen. No native UI action was taken. DST-04 remains
-blocked pending an actually available desktop session; code-level Release tests do
-not replace the native acceptance journey.
+still showed the Windows lock screen. No native UI action was taken at that time.
+
+## DST-04 native retest readiness update (2026-11-10)
+
+A later desktop inventory confirmed that Windows is now unlocked and the Release
+application windows are available. The current `sample-main` window is dirty and
+reports that its Revenue source-column mapping is missing; the separate
+`Sample Revenue Mapping` window is blocked because its synthetic development
+profile has not been explicitly opted into. No destination is selected. No UI
+actions or publication attempts were made because neither open workspace is a
+ready disposable fixture for the DST-04 acceptance journey. The lock-screen block
+is cleared, but DST-04 native acceptance remains open pending a valid isolated
+fixture and successful full journey.
 
 ## DST-04 native retest availability (2026-11-09)
 
