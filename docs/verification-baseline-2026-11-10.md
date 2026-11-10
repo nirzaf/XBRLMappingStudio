@@ -4,7 +4,7 @@
 
 - Repository: `nirzaf/XBRLMappingStudio`
 - Branch: `main`
-- Exact commit: `925609ff5cac5a93429ead2828db166a108b5d52`
+- Exact commit: `f59f6b7dc9c3eb3775c158ea837267a9b204aad0`
 - `HEAD` and `origin/main` matched when captured.
 - The only untracked repository file was the pre-existing
   `tests/XBRLMappingStudio.Fixtures/AcceptanceFixtures/mapping.xmap`; it was not
@@ -13,7 +13,7 @@
 
 ## Exact-head CI
 
-[GitHub Actions run 42777551773](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42777551773)
+[GitHub Actions run 42787270095](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42787270095)
 completed successfully on the exact commit above. Repository hygiene, Windows,
 Ubuntu and pinned Arelle jobs all passed.
 
@@ -23,13 +23,13 @@ Each Windows and Ubuntu Release matrix ran the eight .NET test projects below:
 |---|---:|---:|---:|
 | Adapters | 310 | 0 | 0 |
 | AI | 72 | 0 | 0 |
-| Desktop | 174 | 0 | 0 |
+| Desktop | 175 | 0 | 0 |
 | Engine | 159 | 0 | 0 |
 | Integration | 522 | 0 | 7 |
 | Ops | 553 | 0 | 0 |
 | Project | 32 | 0 | 0 |
 | XBRL | 225 | 0 | 0 |
-| **Total per OS** | **2,047** | **0** | **7** |
+| **Total per OS** | **2,048** | **0** | **7** |
 
 The seven environment-gated Arelle subprocess tests were reported as
 `NotExecuted` in the ordinary per-OS TRX files. They were exercised by the
@@ -42,13 +42,19 @@ partitioned Join. Windows also passed the Arelle-worker cancellation regression
 five times. CI generated the NuGet vulnerability report and SPDX dependency
 inventory successfully.
 
-## Local verification for the latest desktop selector change
+## Local verification for the latest desktop selector changes
 
 - Focused synthetic xBRL occurrence chooser / digest-pinning regression: 1/1.
-- Full Windows Release `XBRLMappingStudio.Desktop.Tests`: 174/174.
+- Full Windows Release `XBRLMappingStudio.Desktop.Tests`: 175/175.
 - The test uses two synthetic facts, selects the second occurrence from the
   chooser, checks the exact report digest and update-only target key, verifies
   changed report bytes fail closed, then verifies clearing the selector.
+- A second headless desktop journey applies concept, exact period, unit and
+  explicit-dimension filters across four facts; confirms the exact matching
+  occurrence, saves and reopens the project with its report digest and filters,
+  rejects malformed filter JSON without changing the saved configuration, and
+  clears the selectors. The full suite ran with isolated build artifacts because
+  the shared Release output was held open by the desktop process.
 
 The local run did not execute the entire eight-project solution; the exact-head
 CI matrix is the evidence for that scope.

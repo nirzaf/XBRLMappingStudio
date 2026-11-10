@@ -288,13 +288,13 @@ echo $?   # 0 on success, 2 on invalid mapping, ...
 
 ## Testing
 
-Latest completed exact-head CI [42777551773](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42777551773)
-verified `925609ff5cac5a93429ead2828db166a108b5d52`. Repository hygiene, Windows and
+Latest completed exact-head CI [42787270095](https://github.com/nirzaf/XBRLMappingStudio/actions/runs/42787270095)
+verified `f59f6b7dc9c3eb3775c158ea837267a9b204aad0`. Repository hygiene, Windows and
 Ubuntu Release build/test, pinned Arelle integration, dependency inventory, SPDX
 generation, five separate memory qualifications per OS, and five repeated Windows
-worker-cancellation checks passed. Each OS matrix recorded **2,047 passed, 0 failed,
+worker-cancellation checks passed. Each OS matrix recorded **2,048 passed, 0 failed,
 7 not executed**; the seven are environment-gated Arelle subprocess tests. The eight
-suite counts per OS were Adapters 310, AI 72, Desktop 174, Engine 159, Integration
+suite counts per OS were Adapters 310, AI 72, Desktop 175, Engine 159, Integration
 529 (522 passed, 7 not executed), Ops 553, Project 32, and XBRL 225. The dedicated
 worker job passed 82 Python worker tests, 16 .NET Arelle execution tests and 15
 dependency-inventory tests. The full evidence and limits are in the
