@@ -708,6 +708,36 @@ public sealed class FactSerializationTests
     }
 
     [Theory]
+    [InlineData("documentType")]
+    [InlineData("namespace")]
+    [InlineData("unit")]
+    [InlineData("language")]
+    public void OimJson_RejectsNonStringMetadataWithFormatError(string member)
+    {
+        var root = JsonNode.Parse(OimSerializer.Serialize(Profile, new[] { GoldenFacts()[0] }))!.AsObject();
+        var fact = root["facts"]!.AsObject().First().Value!;
+        switch (member)
+        {
+            case "documentType":
+                root["documentInfo"]!["documentType"] = 1;
+                break;
+            case "namespace":
+                root["documentInfo"]!["namespaces"]!["acme"] = 1;
+                break;
+            case "unit":
+                fact["dimensions"]!["unit"] = true;
+                break;
+            case "language":
+                fact["dimensions"]!["language"] = true;
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(member));
+        }
+
+        Assert.Throws<XbrlExportException>(() => OimSerializer.ReadFacts(root.ToJsonString()));
+    }
+
+    [Theory]
     [InlineData(-30)]
     [InlineData(30)]
     public void OimJson_ReadsSupportedDecimalsRangeBoundaries(int decimals)

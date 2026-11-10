@@ -316,6 +316,7 @@ public static class OimSerializer
             || !root.TryGetProperty("documentInfo", out var info)
             || info.ValueKind != JsonValueKind.Object
             || !info.TryGetProperty("documentType", out var documentType)
+            || documentType.ValueKind != JsonValueKind.String
             || documentType.GetString() != DocumentType)
             throw Unsupported("Document is not an xBRL-JSON 1.0 report.");
         RejectUnsupportedMembers(root, SupportedReportMembers, "report");
@@ -328,7 +329,7 @@ public static class OimSerializer
         if (taxonomyNode.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
             throw Unsupported("xBRL-JSON taxonomy references must be strings.");
         var namespaces = namespacesNode.EnumerateObject().ToDictionary(
-            p => p.Name, p => p.Value.GetString() ?? throw Unsupported("Namespace URI must be a string."),
+            p => p.Name, p => RequiredJsonString(p.Value, "Namespace URI"),
             StringComparer.Ordinal);
         if (!root.TryGetProperty("facts", out var factsNode)) return Array.Empty<OimFactEntry>();
         if (factsNode.ValueKind != JsonValueKind.Object)
@@ -372,7 +373,7 @@ public static class OimSerializer
             var periodText = RequiredString(dimensions, "period");
             var period = ParsePeriod(periodText);
             var unit = dimensions.TryGetProperty("unit", out var unitValue)
-                ? ParseUnit(unitValue.GetString() ?? throw Unsupported("Unit must be a string."), namespaces, profile)
+                ? ParseUnit(RequiredJsonString(unitValue, "Unit"), namespaces, profile)
                 : (Unit: (XbrlUnit?)null, CompoundUnit: (CompoundUnit?)null);
             var reportedDimensions = new List<Dimension>();
             var reportedDimensionNames = new HashSet<ExpandedConceptName>();
@@ -382,8 +383,7 @@ public static class OimSerializer
                 if (dimension.Name is "concept" or "entity" or "period" or "unit") continue;
                 if (dimension.Name == "language")
                 {
-                    var languageTag = dimension.Value.GetString()
-                        ?? throw Unsupported("Language dimension must be a string.");
+                    var languageTag = RequiredJsonString(dimension.Value, "Language dimension");
                     if (!Bcp47LanguageTagValidator.IsWellFormed(languageTag))
                         throw Unsupported($"Language '{languageTag}' is not a well-formed BCP 47 language tag.");
                     if (!StringComparer.Ordinal.Equals(languageTag, languageTag.ToLowerInvariant()))
@@ -555,6 +555,11 @@ public static class OimSerializer
         => obj.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()!
             : throw Unsupported($"Required dimension '{name}' must be a string.");
+
+    private static string RequiredJsonString(JsonElement value, string field)
+        => value.ValueKind == JsonValueKind.String
+            ? value.GetString()!
+            : throw Unsupported($"{field} must be a string.");
 
     private static (string Namespace, string LocalName) ExpandQName(
         string value, IReadOnlyDictionary<string, string> namespaces)

@@ -612,6 +612,17 @@ available, so no DST-04 UI actions or assertions were made. Native acceptance
 remains open; the previously recorded bounded synthetic native evidence above
 is unchanged.
 
+## DST-04 unlocked desktop re-observation (2026-11-10)
+
+After the user confirmed the desktop was unlocked and visible, the XBRLMappingStudio
+window became available to accessibility inspection. The active `Sample Revenue
+Mapping` project reported `Operation blocked by filing-profile resolution` and
+`XBR017` for its synthetic profile, and the source pane required a source file
+before inspection. No clicks or project changes were made because this was not a
+valid runnable disposable fixture. The lock-screen availability block is cleared;
+the requested DST-04 native journey remains unverified until a valid isolated
+fixture is available.
+
 ## OPS-09 diagnostic export credential redaction follow-on (2026-11-10)
 
 `SupportBundle.Redact` masks bearer and basic authorization headers, password,
@@ -634,3 +645,12 @@ extension annotations and unsupported document metadata (including standard
 `features` metadata) from disappearing silently during reverse mapping; fact
 links and note IDs continue to fail closed.
 The boundary follows the [XBRL International xBRL-JSON 1.0 extensibility rules](https://www.xbrl.org/Specification/xbrl-json/REC-2021-10-13/xbrl-json-REC-2021-10-13.html#sec-extensibility), while keeping the parser's supported property subset narrower than the full standard. Synthetic extension-property regressions cover all three extension points. The XBRL Release suite passed 217/217 and the isolated-output Windows reverse-mapping integration suite passed 17/17. Full OIM feature/link/note preservation, tuple handling, and target-row update semantics remain unsupported and fail closed.
+
+## XBR-07 malformed JSON scalar type follow-on (2026-11-10)
+
+The xBRL-JSON reader now rejects non-string `documentType`, namespace URI,
+unit, and language values with the standard `XbrlExportException` format error
+instead of leaking `JsonElement.GetString()`'s `InvalidOperationException`.
+The XBRL Release suite passed 221/221, including type-mismatch regressions for
+all four metadata locations. This does not broaden the importer's supported
+OIM subset.
