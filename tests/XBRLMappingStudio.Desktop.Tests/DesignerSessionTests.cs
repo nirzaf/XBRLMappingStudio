@@ -10,6 +10,7 @@ using XBRLMappingStudio.Engine;
 using XBRLMappingStudio.Adapters;
 using XBRLMappingStudio.Adapters.Xbrl;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace XBRLMappingStudio.Desktop.Tests;
@@ -652,6 +653,67 @@ public sealed class DesignerSessionTests
             Assert.DoesNotContain("occurrenceId", cleared.Configuration.Keys);
             Assert.DoesNotContain("reportDigest", cleared.Configuration.Keys);
             Assert.DoesNotContain("targetRowId", cleared.Configuration.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DesktopCanAuthorDigestPinnedMultipleExistingXbrlTargetRows()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xms-desktop-xbrl-target-rows-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var reportPath = Path.Combine(directory, "report.xbrl.json");
+        var profile = SyntheticProfile.Build();
+        var period = XbrlPeriod.OfDuration(new DateOnly(2025, 1, 1), new DateOnly(2026, 1, 1));
+        XbrlFact Revenue(decimal value) => new()
+        {
+            ConceptName = SyntheticProfile.Qualified("Revenue"),
+            EntityScheme = "https://example.test/entity",
+            EntityIdentifier = "ACME-1",
+            Period = period,
+            Unit = new XbrlUnit("QAR"),
+            Value = value
+        };
+
+        try
+        {
+            await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(profile,
+                new[] { Revenue(12m), Revenue(99m) }));
+            var project = ProjectWithSource();
+            project.Bindings[0] = project.Bindings[0] with { Kind = "xbrl-report" };
+            var viewModel = new MainWindowViewModel(project);
+            viewModel.SaveProjectTo(Path.Combine(directory, "mapping.xmap"));
+            await viewModel.LoadSourceAsync(reportPath);
+
+            var firstTarget = "sha256:" + new string('a', 64);
+            var secondTarget = "sha256:" + new string('b', 64);
+            viewModel.XbrlTargetRowsJson = JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["source#f1"] = firstTarget,
+                ["source#f2"] = secondTarget
+            });
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+
+            var binding = Assert.Single(viewModel.Session.Project.Bindings);
+            Assert.Equal(viewModel.XbrlTargetRowsJson, binding.Configuration["targetRows"]?.ToString());
+            Assert.DoesNotContain("occurrenceId", binding.Configuration.Keys);
+            Assert.DoesNotContain("targetRowId", binding.Configuration.Keys);
+            Assert.Contains("Validated 2 occurrence-to-row mappings", viewModel.SourceInspectionSummary,
+                StringComparison.Ordinal);
+
+            var savedConfiguration = binding.Configuration["targetRows"]?.ToString();
+            viewModel.XbrlTargetRowsJson = "{\"source#f1\":\"" + firstTarget + "\",\"source#f9\":\"" + secondTarget + "\"}";
+            await viewModel.ApplyXbrlOccurrenceSelectionAsync();
+            Assert.Equal(savedConfiguration,
+                Assert.Single(viewModel.Session.Project.Bindings).Configuration["targetRows"]?.ToString());
+            Assert.Contains("must match exactly one occurrence", viewModel.StatusText, StringComparison.Ordinal);
+
+            viewModel.ClearXbrlOccurrenceSelection();
+            Assert.DoesNotContain("targetRows", Assert.Single(viewModel.Session.Project.Bindings).Configuration.Keys);
+            Assert.Equal("", viewModel.XbrlTargetRowsJson);
         }
         finally
         {

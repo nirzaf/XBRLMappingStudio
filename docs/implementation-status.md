@@ -602,12 +602,16 @@ one-to-one occurrence-to-fact match and rewrites only the explicit target keys;
 missing, duplicate, or unmatched mapped facts fail closed. The integration
 regression updates two pre-existing rows with distinct periods and verifies
 that no inserts occurred. Adapter and end-to-end tests passed 2/2, and the
-solution build passed with zero warnings or errors. A full integration run
-stalled without further output after environment-gated Arelle skips and was
-stopped; it is not a full-suite pass. The desktop editor still authors only a
-single target row, so multi-row authoring is currently available through saved
-project configuration, not the desktop selector. Tuple mapping, general
-aspect-aware target matching, and complex typed-domain flattening remain open.
+solution build passed with zero warnings or errors. A full local integration
+run stalled without further output after environment-gated Arelle skips and was
+stopped; it is not a full-suite pass. The desktop now exposes a multi-row JSON
+editor, pins its report digest, and verifies that every configured occurrence
+matches the current report before saving; an invalid or missing occurrence
+leaves the saved selection unchanged. The desktop regression covers successful
+authoring, refusal without project mutation, and clearing; the full Desktop
+suite passed 177/177. Native visual acceptance remains open. Tuple mapping,
+general aspect-aware target matching, and complex typed-domain flattening remain
+open.
 
 ## XBR-07 report-source revision-pinned occurrence selection (2026-11-10)
 

@@ -19,6 +19,26 @@ namespace XBRLMappingStudio.Desktop.Tests;
 public sealed class MappingOperationViewModelTests
 {
     [AvaloniaFact]
+    public void MultipleXbrlTargetRowsEditorIsAccessibleAndAcceptsMultilineJson()
+    {
+        var viewModel = new MainWindowViewModel();
+        var window = new MainWindow { DataContext = viewModel };
+        try
+        {
+            window.Show();
+            var editor = Assert.IsType<TextBox>(window.FindControl<TextBox>("XbrlTargetRowsJsonTextBox"));
+            Assert.Equal("Multiple existing SQLite target rows JSON", AutomationProperties.GetName(editor));
+            Assert.True(editor.AcceptsReturn);
+            Assert.Equal("Wrap", editor.TextWrapping.ToString());
+        }
+        finally
+        {
+            window.Close();
+            viewModel.Dispose();
+        }
+    }
+
+    [AvaloniaFact]
     public void FactLanguageInspectorEditsAccessibleTextFieldAndAppliesProfileValidatedValue()
     {
         var project = new MainWindowViewModel().Session.Project;

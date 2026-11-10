@@ -472,6 +472,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private string? _sqliteSourcePath;
     private string _xbrlOccurrenceId = "";
     private string _xbrlTargetRowId = "";
+    private string _xbrlTargetRowsJson = "";
     private string _xbrlConceptFilter = "";
     private string _xbrlEntitySchemeFilter = "";
     private string _xbrlEntityIdentifierFilter = "";
@@ -867,6 +868,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         && StringComparer.Ordinal.Equals(binding.Kind, "xbrl-report"));
     public string XbrlOccurrenceId { get => _xbrlOccurrenceId; set => Set(ref _xbrlOccurrenceId, value); }
     public string XbrlTargetRowId { get => _xbrlTargetRowId; set => Set(ref _xbrlTargetRowId, value); }
+    public string XbrlTargetRowsJson { get => _xbrlTargetRowsJson; set => Set(ref _xbrlTargetRowsJson, value); }
     public string XbrlConceptFilter { get => _xbrlConceptFilter; set => Set(ref _xbrlConceptFilter, value); }
     public string XbrlEntitySchemeFilter { get => _xbrlEntitySchemeFilter; set => Set(ref _xbrlEntitySchemeFilter, value); }
     public string XbrlEntityIdentifierFilter { get => _xbrlEntityIdentifierFilter; set => Set(ref _xbrlEntityIdentifierFilter, value); }
@@ -3907,6 +3909,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             {
                 XbrlOccurrenceId = config.GetValueOrDefault("occurrenceId", "");
                 XbrlTargetRowId = config.GetValueOrDefault("targetRowId", "");
+                XbrlTargetRowsJson = config.GetValueOrDefault("targetRows", "");
                 XbrlConceptFilter = config.GetValueOrDefault("concept", "");
                 XbrlEntitySchemeFilter = config.GetValueOrDefault("entityScheme", "");
                 XbrlEntityIdentifierFilter = config.GetValueOrDefault("entityIdentifier", "");
@@ -4047,6 +4050,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         var occurrenceId = XbrlOccurrenceId.Trim();
+        var targetRowsJson = XbrlTargetRowsJson.Trim();
         var root = WorkspaceRoot();
         var path = Path.IsPathRooted(binding.Locator!)
             ? Path.GetFullPath(binding.Locator!)
@@ -4080,7 +4084,14 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             (pair.Key is "entityScheme" or "entityIdentifier" or "periodKind" or "instantDate"
                 or "periodStart" or "periodEnd" or "lang" or "nil" or "dimensionAxis" or "dimensionMember")
             && !string.IsNullOrWhiteSpace(pair.Value?.ToString()));
-        if (occurrenceId.Length == 0 && targetRowId.Length == 0
+        if (targetRowsJson.Length > 0)
+        {
+            // A multi-row map is a complete selection mode and replaces the
+            // mutually exclusive legacy single-occurrence/target-row fields.
+            occurrenceId = "";
+            targetRowId = "";
+        }
+        if (occurrenceId.Length == 0 && targetRowId.Length == 0 && targetRowsJson.Length == 0
             && !hasExistingAspectFilter && !requestedFilters.Values.Any(value => value.Length > 0))
         {
             StatusText = "Choose an occurrence or enter at least one aspect filter before applying the selection.";
@@ -4099,6 +4110,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             configuration["reportDigest"] = reportDigest;
             if (targetRowId.Length == 0) configuration.Remove("targetRowId");
             else configuration["targetRowId"] = targetRowId;
+            if (targetRowsJson.Length == 0) configuration.Remove("targetRows");
+            else configuration["targetRows"] = targetRowsJson;
             foreach (var (key, value) in requestedFilters)
             {
                 if (value.Length == 0) configuration.Remove(key);
@@ -4108,21 +4121,39 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             var connection = new SourceConnection(binding.BindingId, binding.Kind, path, configuration);
             var adapter = new XbrlReportAdapter();
             var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
-            var sample = _profile is null
-                ? await adapter.ReadSampleAsync(connection, schema, 2, CancellationToken.None)
-                : await adapter.ReadSampleAsync(connection, schema, 2, _profile, CancellationToken.None);
-            if (sample.Rows.Count == 0)
+            if (targetRowsJson.Length > 0)
             {
-                StatusText = occurrenceId.Length > 0
-                    ? "That occurrence and its aspect filters do not match the current report. The saved selection was not changed."
-                    : "The aspect filters matched no occurrences in the current report. The saved selection was not changed.";
-                return;
+                var targetRows = XbrlReportAdapter.ParseTargetRows(binding.BindingId, targetRowsJson);
+                var matched = new HashSet<string>(StringComparer.Ordinal);
+                var rows = _profile is null
+                    ? adapter.ReadFullAsync(connection, schema, CancellationToken.None)
+                    : adapter.ReadFullAsync(connection, schema, _profile, CancellationToken.None);
+                await foreach (var row in rows)
+                    if (targetRows.ContainsKey(row.RowId)) matched.Add(row.RowId);
+                if (matched.Count != targetRows.Count)
+                {
+                    StatusText = "Every mapped target row must match exactly one occurrence in the current report and filters. The saved selection was not changed.";
+                    return;
+                }
             }
-            if (occurrenceId.Length > 0 && (sample.Rows.Count != 1
-                || !StringComparer.Ordinal.Equals(sample.Rows[0]["occurrenceId"].Raw as string, occurrenceId)))
+            else
             {
-                StatusText = "That occurrence is not present in the current report under the supplied aspect filters. The saved selection was not changed.";
-                return;
+                var sample = _profile is null
+                    ? await adapter.ReadSampleAsync(connection, schema, 2, CancellationToken.None)
+                    : await adapter.ReadSampleAsync(connection, schema, 2, _profile, CancellationToken.None);
+                if (sample.Rows.Count == 0)
+                {
+                    StatusText = occurrenceId.Length > 0
+                        ? "That occurrence and its aspect filters do not match the current report. The saved selection was not changed."
+                        : "The aspect filters matched no occurrences in the current report. The saved selection was not changed.";
+                    return;
+                }
+                if (occurrenceId.Length > 0 && (sample.Rows.Count != 1
+                    || !StringComparer.Ordinal.Equals(sample.Rows[0]["occurrenceId"].Raw as string, occurrenceId)))
+                {
+                    StatusText = "That occurrence is not present in the current report under the supplied aspect filters. The saved selection was not changed.";
+                    return;
+                }
             }
 
             Session.SetBinding(binding with
@@ -4133,9 +4164,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             if (occurrenceId.Length == 0) SelectedXbrlOccurrence = null;
             XbrlOccurrenceId = occurrenceId;
             XbrlTargetRowId = targetRowId;
+            XbrlTargetRowsJson = targetRowsJson;
             SourceInspectionSummary = occurrenceId.Length > 0
                 ? $"Pinned {occurrenceId} to the current report bytes ({reportDigest})."
                     + (targetRowId.Length == 0 ? "" : " Existing-row update is enabled for this selected occurrence.")
+                : targetRowsJson.Length > 0
+                    ? $"Validated {XbrlReportAdapter.ParseTargetRows(binding.BindingId, targetRowsJson).Count} occurrence-to-row mappings against the current report bytes ({reportDigest})."
                 : $"Applied xBRL aspect filters to the current report bytes ({reportDigest}); matching occurrences remain subject to full validation.";
             StatusText = "Saved xBRL selection. Save the project to retain this digest-pinned configuration.";
         }
@@ -4156,6 +4190,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         configuration.Remove("occurrenceId");
         configuration.Remove("reportDigest");
         configuration.Remove("targetRowId");
+        configuration.Remove("targetRows");
         configuration.Remove("concept");
         configuration.Remove("period");
         configuration.Remove("unit");
@@ -4179,6 +4214,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         SelectedXbrlOccurrence = null;
         XbrlOccurrenceId = "";
         XbrlTargetRowId = "";
+        XbrlTargetRowsJson = "";
         XbrlConceptFilter = "";
         XbrlEntitySchemeFilter = "";
         XbrlEntityIdentifierFilter = "";

@@ -97,6 +97,13 @@
             <TextBox Text="{Binding XbrlTargetRowId, Mode=TwoWay}"
                      Watermark="Optional sha256 fact_key for update-only target"
                      AutomationProperties.Name="Existing SQLite target fact key digest" />
+            <TextBlock Text="For multiple existing rows, enter a JSON object mapping occurrence IDs to unique sha256 fact_key values. This requires an update-only SQLite destination."
+                       TextWrapping="Wrap" FontSize="10" />
+            <TextBox Text="{Binding XbrlTargetRowsJson, Mode=TwoWay}"
+                     Watermark="JSON occurrence-to-fact_key mappings"
+                     AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
+                     x:Name="XbrlTargetRowsJsonTextBox"
+                     AutomationProperties.Name="Multiple existing SQLite target rows JSON" />
             <Expander Header="Optional fact aspect filters" IsExpanded="False">
               <StackPanel Spacing="3" Margin="0,4,0,0">
                 <TextBox Text="{Binding XbrlConceptFilter, Mode=TwoWay}"
