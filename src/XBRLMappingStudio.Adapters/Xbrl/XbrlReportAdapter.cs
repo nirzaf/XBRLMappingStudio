@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using XBRLMappingStudio.Diagnostics;
@@ -38,8 +39,10 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         "occurrenceId", "reportDigest", "concept", "entityScheme", "entityIdentifier", "period", "periodKind",
         "instantDate", "periodStart", "periodEnd",
         "unit", "lang", "nil", "dimensionAxis", "dimensionMember", "dimensionFilters", "typedDimensionFilters",
-        "maxInputBytes", "targetRowId"
+        "maxInputBytes", "targetRowId", "targetRows"
     };
+    private const int MaximumTargetRowsJsonCharacters = 4_000_000;
+    private const int MaximumTargetRowMappings = 10_000;
 
     public Task<ISourceSchema> InspectSchemaAsync(SourceConnection connection, CancellationToken cancellationToken)
     {
@@ -117,6 +120,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         var matched = facts.Select((fact, index) => (Fact: fact, Index: index))
             .Where(item => selection.ReportDigest is null
                 || StringComparer.Ordinal.Equals(reportDigest, selection.ReportDigest))
+            .Where(item => selection.TargetRows.Count == 0
+                || selection.TargetRows.ContainsKey($"{connection.SourceId}#f{item.Index + 1}"))
             .Where(item => selection.OccurrenceId is null
                 || StringComparer.Ordinal.Equals($"{connection.SourceId}#f{item.Index + 1}", selection.OccurrenceId)
                 || StringComparer.Ordinal.Equals($"report#f{item.Index + 1}", selection.OccurrenceId))
@@ -317,6 +322,21 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
                 "XBRL report selection 'reportDigest' must be a lowercase sha256 digest.");
 
         var targetRowId = Get("targetRowId");
+        IReadOnlyDictionary<string, string> targetRows = new ReadOnlyDictionary<string, string>(
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        if (configuration.TryGetValue("targetRows", out var targetRowsJson))
+        {
+            if (targetRowsJson is null)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL report selection 'targetRows' must be a non-empty JSON object.");
+            targetRows = ParseTargetRows(connection.SourceId, targetRowsJson);
+        }
+        if (targetRowId is not null && targetRows.Count != 0)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection cannot combine 'targetRowId' and 'targetRows'.");
+        if (targetRows.Count != 0 && (reportDigest is null || Get("occurrenceId") is not null))
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                "XBRL report selection 'targetRows' requires one reportDigest and cannot combine a single occurrenceId selector.");
         if (targetRowId is not null)
         {
             if (!IsSha256Digest(targetRowId))
@@ -330,7 +350,64 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         return new ReportSelection(Get("occurrenceId"), reportDigest, Get("concept"), Get("entityScheme"),
             Get("entityIdentifier"), Get("period"), periodKind,
             instantDate, periodStart, periodEnd, Get("unit"), Get("lang"), isNil, dimensions, typedDimensions,
-            targetRowId);
+            targetRowId, targetRows);
+    }
+
+    /// <summary>Parses the explicit occurrence-to-existing-row map used by reverse
+    /// update-only publication. Keys must be stable IDs for this report binding and
+    /// every existing target key must be unique.</summary>
+    public static IReadOnlyDictionary<string, string> ParseTargetRows(string sourceId, string json)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceId);
+        ArgumentNullException.ThrowIfNull(json);
+        if (json.Length is 0 or > MaximumTargetRowsJsonCharacters)
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"XBRL report selection 'targetRows' must be between 1 and {MaximumTargetRowsJsonCharacters} characters.");
+
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 4 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL report selection 'targetRows' must be a JSON object mapping occurrence IDs to fact_key values.");
+
+            var rows = new Dictionary<string, string>(StringComparer.Ordinal);
+            var uniqueTargetRows = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                var occurrenceId = property.Name;
+                var prefix = sourceId + "#f";
+                var suffix = occurrenceId.StartsWith(prefix, StringComparison.Ordinal)
+                    ? occurrenceId[prefix.Length..]
+                    : string.Empty;
+                if (suffix.Length == 0
+                    || !int.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out var ordinal)
+                    || ordinal < 1
+                    || !StringComparer.Ordinal.Equals(suffix, ordinal.ToString(CultureInfo.InvariantCulture)))
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        $"XBRL report selection 'targetRows' keys must be canonical '{sourceId}#fN' occurrence IDs.");
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'targetRows' values must be lowercase sha256 fact_key strings.");
+                var targetRowId = property.Value.GetString();
+                if (string.IsNullOrWhiteSpace(targetRowId) || !IsSha256Digest(targetRowId)
+                    || !uniqueTargetRows.Add(targetRowId) || !rows.TryAdd(occurrenceId, targetRowId))
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL report selection 'targetRows' must contain unique occurrence IDs and unique lowercase sha256 fact_key values.");
+                if (rows.Count > MaximumTargetRowMappings)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        $"XBRL report selection 'targetRows' cannot exceed {MaximumTargetRowMappings} occurrence mappings.");
+            }
+            if (rows.Count == 0)
+                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                    "XBRL report selection 'targetRows' must contain at least one occurrence mapping.");
+            return new ReadOnlyDictionary<string, string>(rows);
+        }
+        catch (JsonException ex)
+        {
+            throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                $"XBRL report selection 'targetRows' is invalid JSON: {ex.Message}");
+        }
     }
 
     private static bool IsSha256Digest(string value)
@@ -494,7 +571,8 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
         bool? IsNil,
         IReadOnlyDictionary<string, string> Dimensions,
         IReadOnlyDictionary<string, string> TypedDimensions,
-        string? TargetRowId)
+        string? TargetRowId,
+        IReadOnlyDictionary<string, string> TargetRows)
     {
         public bool HasAspectFilters
             => OccurrenceId is not null || Concept is not null || EntityScheme is not null
@@ -502,11 +580,12 @@ public sealed class XbrlReportAdapter : IProfileAwareSourceAdapter
                 || EntityIdentifier is not null || Period is not null || PeriodKind is not null
                 || InstantDate is not null || PeriodStart is not null || PeriodEnd is not null
                 || Unit is not null || Language is not null || IsNil is not null
-                || Dimensions.Count != 0 || TypedDimensions.Count != 0;
+                || Dimensions.Count != 0 || TypedDimensions.Count != 0 || TargetRows.Count != 0;
 
         public static ReportSelection Empty { get; }
         = new(null, null, null, null, null, null, null, null, null, null, null, null, null,
                 new Dictionary<string, string>(StringComparer.Ordinal),
-                new Dictionary<string, string>(StringComparer.Ordinal), null);
+                new Dictionary<string, string>(StringComparer.Ordinal), null,
+                new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal)));
     }
 }

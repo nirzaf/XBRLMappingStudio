@@ -165,6 +165,157 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task DigestPinnedXbrlOccurrences_UpdateOnlyTheirExplicitExistingRows()
+    {
+        var templatePath = IndependentAcceptanceFixtures.Materialize(_directory, "revenue-report.json");
+        var templateFact = Assert.Single(OimSerializer.ReadFacts(await File.ReadAllTextAsync(templatePath)));
+        var reportPath = Path.Combine(_directory, "repeated-period-report.json");
+        XbrlFact ForYear(decimal value, int year) => new()
+        {
+            ConceptName = templateFact.ConceptName,
+            EntityScheme = templateFact.EntityScheme,
+            EntityIdentifier = templateFact.EntityIdentifier,
+            Period = XbrlPeriod.OfDuration(new DateOnly(year, 1, 1), new DateOnly(year + 1, 1, 1)),
+            Unit = templateFact.Unit,
+            Value = value,
+            Decimals = templateFact.Decimals,
+            Dimensions = templateFact.Dimensions
+        };
+        var reportFacts = new[] { ForYear(12.5m, 2025), ForYear(99.25m, 2026) };
+        await File.WriteAllTextAsync(reportPath, OimSerializer.Serialize(_profile, reportFacts));
+        var reportDigest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(reportPath));
+        var targetRowIds = new[]
+        {
+            RunManifest.ComputeSha256("reviewed-2025-ledger-row"),
+            RunManifest.ComputeSha256("reviewed-2026-ledger-row")
+        };
+        var project = TestFixtures.BuildRevenueMappingProject(reportPath);
+        var binding = Assert.Single(project.Bindings);
+        var targetRows = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [$"{binding.BindingId}#f1"] = targetRowIds[0],
+            [$"{binding.BindingId}#f2"] = targetRowIds[1]
+        };
+        project.Bindings[0] = binding with
+        {
+            Kind = "xbrl-report",
+            Configuration = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["reportDigest"] = reportDigest,
+                ["targetRows"] = JsonSerializer.Serialize(targetRows)
+            },
+            SchemaFingerprint = null
+        };
+
+        var fieldIndex = project.Nodes.FindIndex(node => node.NodeType == NodeTypeConstants.ExcelField);
+        var field = project.Nodes[fieldIndex];
+        var parameters = new Dictionary<string, object?>(field.Parameters, StringComparer.Ordinal)
+        {
+            ["column"] = "value"
+        };
+        parameters.Remove("rowFilterColumn");
+        parameters.Remove("rowFilterValue");
+        project.Nodes[fieldIndex] = field with { Parameters = parameters };
+
+        var periodStartNode = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Selected report period start",
+            Parameters = new() { ["bindingId"] = binding.BindingId, ["column"] = "periodStart" },
+            OutputPorts = new()
+            {
+                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single),
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, IsRequired: false)
+            }
+        };
+        var periodEndNode = new MappingNode
+        {
+            NodeId = Id.New(),
+            NodeType = NodeTypeConstants.ExcelField,
+            DisplayName = "Selected report period end",
+            Parameters = new() { ["bindingId"] = binding.BindingId, ["column"] = "periodEnd" },
+            OutputPorts = new()
+            {
+                new PortDefinition("value", PortShape.Decimal, PortCardinality.Single),
+                new PortDefinition("textValue", PortShape.String, PortCardinality.Single, IsRequired: false)
+            }
+        };
+        project.Nodes.Add(periodStartNode);
+        project.Nodes.Add(periodEndNode);
+        var durationNode = project.Nodes.Single(node => node.NodeType == NodeTypeConstants.BuildDurationDate);
+        var periodEdges = project.Edges.Where(edge => edge.TargetNodeId == durationNode.NodeId
+            && edge.TargetPortName is "startText" or "endText").ToArray();
+        foreach (var edge in periodEdges) project.Edges.Remove(edge);
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = periodStartNode.NodeId, SourcePortName = "textValue",
+            TargetNodeId = durationNode.NodeId, TargetPortName = "startText"
+        });
+        project.Edges.Add(new MappingEdge
+        {
+            EdgeId = Id.New(), SourceNodeId = periodEndNode.NodeId, SourcePortName = "textValue",
+            TargetNodeId = durationNode.NodeId, TargetPortName = "endText"
+        });
+
+        project.Destination = new DestinationPlan
+        {
+            Kind = DestinationPlanValidator.SupportedKind,
+            Locator = "destination.db",
+            Table = "facts",
+            BusinessKey = new List<string> { "fact_key" },
+            WriteMode = "update-only"
+        };
+        project.Approvals.Add(new ApprovalRecord
+        {
+            SemanticRevision = project.SemanticRevision,
+            SemanticDigest = project.ComputeSemanticDigest(),
+            ApprovedBy = "fixture-reviewer",
+            ApprovedUtc = DateTimeOffset.UtcNow,
+            ProfileDigest = _profile.Digest
+        });
+        foreach (var targetRowId in targetRowIds)
+            await InsertExistingTargetFactAsync(_databasePath, targetRowId);
+
+        var service = NewService();
+        using var result = await service.RunAsync(project, Connections(project, reportPath),
+            new Dictionary<string, string>(), preview: false, CancellationToken.None);
+        Assert.Equal(RunOutcome.SuccessWithWarnings, result.Manifest.Outcome);
+        Assert.Equal(2, result.Facts.Count);
+        Assert.Equal(new[] { "2025-01-01", "2026-01-01" },
+            result.Facts.Select(fact => fact.Period.Start!.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)));
+
+        var preview = await service.PreviewDestinationChangesAsync(project, result, _directory, CancellationToken.None);
+        Assert.Equal(2, preview.Updates);
+        Assert.Equal(0, preview.Inserts);
+        Assert.Equal(0, preview.Conflicts);
+        Assert.Empty(preview.SchemaDiscrepancies);
+
+        var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
+        Assert.Equal(2, receipt.WrittenRows);
+        Assert.Equal(targetRowIds.Order(StringComparer.Ordinal), (await ReadFactsAsync(_databasePath)).Order(StringComparer.Ordinal));
+        await using var database = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly");
+        await database.OpenAsync();
+        await using var command = database.CreateCommand();
+        command.CommandText = "SELECT fact_key,period_start,period_end,value FROM facts WHERE fact_key IN ($first,$second) ORDER BY period_start";
+        command.Parameters.AddWithValue("$first", targetRowIds[0]);
+        command.Parameters.AddWithValue("$second", targetRowIds[1]);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(targetRowIds[0], reader.GetString(0));
+        Assert.Equal("2025-01-01", reader.GetString(1));
+        Assert.Equal("2026-01-01", reader.GetString(2));
+        Assert.Equal("12500.0", reader.GetString(3));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(targetRowIds[1], reader.GetString(0));
+        Assert.Equal("2026-01-01", reader.GetString(1));
+        Assert.Equal("2027-01-01", reader.GetString(2));
+        Assert.Equal("99250.00", reader.GetString(3));
+        Assert.False(await reader.ReadAsync());
+        Assert.Equal(1, await ReadReceiptCountAsync(_databasePath));
+    }
+
+    [Fact]
     public async Task WorkerFailure_CannotReplaceExistingSqliteFactsOrReceipt()
     {
         var project = ConfiguredProject(_workbookPath);

@@ -590,6 +590,25 @@ privilege skip, and the full XBRL Release suite passed 211/211. These remain
 synthetic-profile results; real-taxonomy and full OIM conformance gates remain
 open.
 
+## XBR-07 explicit multi-occurrence target-row updates (2026-11-10)
+
+The xBRL report adapter now accepts a bounded `targetRows` JSON object mapping
+canonical `sourceId#fN` occurrence IDs to unique existing `sha256:` `fact_key`
+values. Selection requires one exact `reportDigest`, and SQLite publication
+requires update-only mode with `fact_key` as its sole business key. Before
+preparation, the service confirms that the configured digest equals the
+replayable report digest recorded in this run manifest. It then requires a
+one-to-one occurrence-to-fact match and rewrites only the explicit target keys;
+missing, duplicate, or unmatched mapped facts fail closed. The integration
+regression updates two pre-existing rows with distinct periods and verifies
+that no inserts occurred. Adapter and end-to-end tests passed 2/2, and the
+solution build passed with zero warnings or errors. A full integration run
+stalled without further output after environment-gated Arelle skips and was
+stopped; it is not a full-suite pass. The desktop editor still authors only a
+single target row, so multi-row authoring is currently available through saved
+project configuration, not the desktop selector. Tuple mapping, general
+aspect-aware target matching, and complex typed-domain flattening remain open.
+
 ## XBR-07 report-source revision-pinned occurrence selection (2026-11-10)
 
 `XbrlReportInputReader.ReadTextWithDigest` computes SHA-256 over the exact input

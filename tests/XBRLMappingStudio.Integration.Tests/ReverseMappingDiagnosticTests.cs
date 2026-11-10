@@ -419,6 +419,81 @@ public sealed class ReverseMappingDiagnosticTests
     }
 
     [Fact]
+    public async Task XbrlReportAdapter_TargetRowsSelectsExplicitDigestPinnedOccurrencesAndRejectsAmbiguousMappings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xbrl-reverse-target-rows-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var profile = SyntheticProfile.Build();
+            var inputPath = Path.Combine(directory, "report.json");
+            var templatePath = IndependentAcceptanceFixtures.Materialize(directory, "revenue-report.json");
+            var template = Assert.Single(OimSerializer.ReadFacts(await File.ReadAllTextAsync(templatePath)));
+            XbrlFact ForYear(decimal value, int year) => new()
+            {
+                ConceptName = template.ConceptName,
+                EntityScheme = template.EntityScheme,
+                EntityIdentifier = template.EntityIdentifier,
+                Period = XbrlPeriod.OfDuration(new DateOnly(year, 1, 1), new DateOnly(year + 1, 1, 1)),
+                Unit = template.Unit,
+                Value = value,
+                Decimals = template.Decimals,
+                Dimensions = template.Dimensions
+            };
+            var facts = new[] { ForYear(12.5m, 2025), ForYear(99.25m, 2026) };
+            await File.WriteAllTextAsync(inputPath, OimSerializer.Serialize(profile, facts));
+            var digest = RunManifest.ComputeSha256(await File.ReadAllBytesAsync(inputPath));
+            var targetRows = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["report#f1"] = RunManifest.ComputeSha256("first-existing-ledger-row"),
+                ["report#f2"] = RunManifest.ComputeSha256("second-existing-ledger-row")
+            };
+            var connection = new SourceConnection("report", "xbrl-report", inputPath,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["reportDigest"] = digest,
+                    ["targetRows"] = JsonSerializer.Serialize(targetRows)
+                });
+            var adapter = new XbrlReportAdapter();
+            var schema = await adapter.InspectSchemaAsync(connection, CancellationToken.None);
+            var sample = await adapter.ReadSampleAsync(connection, schema, 10, profile, CancellationToken.None);
+
+            Assert.Equal(new[] { "report#f1", "report#f2" }, sample.Rows.Select(row => row.RowId));
+            Assert.Equal(new[] { "2025-01-01", "2026-01-01" },
+                sample.Rows.Select(row => row["periodStart"].AsString()));
+            Assert.Equal(new[] { "12.5", "99.25" },
+                sample.Rows.Select(row => row["value"].LexicalSource));
+
+            var missingDigest = new SourceConnection("report", "xbrl-report", inputPath,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["targetRows"] = JsonSerializer.Serialize(targetRows)
+                });
+            var digestError = await Assert.ThrowsAsync<AdapterException>(() =>
+                adapter.InspectSchemaAsync(missingDigest, CancellationToken.None));
+            Assert.Contains("reportDigest", digestError.Message, StringComparison.Ordinal);
+
+            var duplicateTargetRows = new SourceConnection("report", "xbrl-report", inputPath,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["reportDigest"] = digest,
+                    ["targetRows"] = JsonSerializer.Serialize(new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["report#f1"] = targetRows["report#f1"],
+                        ["report#f2"] = targetRows["report#f1"]
+                    })
+                });
+            var duplicateError = await Assert.ThrowsAsync<AdapterException>(() =>
+                adapter.InspectSchemaAsync(duplicateTargetRows, CancellationToken.None));
+            Assert.Contains("unique", duplicateError.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ReportSource_RecordsNonBlockingReconstructionLimitation()
     {
         var diagnostics = new DiagnosticBag();

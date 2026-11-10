@@ -2141,11 +2141,13 @@ public sealed class MappingJobService
                 DiagnosticStage.Validation);
 
         var targetRowBindings = project.Bindings
-            .Where(binding => binding.Configuration?.ContainsKey("targetRowId") == true)
+            .Where(binding => binding.Configuration is not null
+                && (binding.Configuration.ContainsKey("targetRowId")
+                    || binding.Configuration.ContainsKey("targetRows")))
             .ToArray();
         if (targetRowBindings.Length > 1)
             throw new AdapterException(DiagnosticCodes.IoUnsupportedOperation,
-                "A reverse-mapping run may select only one existing target row.", DiagnosticStage.Validation);
+                "A reverse-mapping run may use only one explicit existing-target selection source.", DiagnosticStage.Validation);
         if (targetRowBindings.Length == 1)
         {
             var binding = targetRowBindings[0];
@@ -2156,36 +2158,88 @@ public sealed class MappingJobService
                     "XBRL target-row selection requires one xBRL report source, SQLite update-only mode, and the fact_key business key.",
                     DiagnosticStage.Validation);
             var configuration = binding.Configuration!;
-            var occurrenceId = configuration.GetValueOrDefault("occurrenceId") as string;
-            var targetRowId = configuration.GetValueOrDefault("targetRowId") as string;
-            var reportDigest = configuration.GetValueOrDefault("reportDigest") as string;
-            if (string.IsNullOrWhiteSpace(occurrenceId) || string.IsNullOrWhiteSpace(targetRowId)
-                || string.IsNullOrWhiteSpace(reportDigest))
+            var reportDigest = ConfigurationString(configuration.GetValueOrDefault("reportDigest"));
+            if (string.IsNullOrWhiteSpace(reportDigest))
                 throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
-                    "XBRL target-row selection requires an exact occurrenceId, reportDigest, and targetRowId.",
-                    DiagnosticStage.Validation);
-            var matchingFacts = result.Facts.Where(fact => fact.SourceTransformationPaths.Any(path =>
-                StringComparer.Ordinal.Equals(path.Source.SourceId, binding.BindingId)
-                && StringComparer.Ordinal.Equals(path.Source.Locator,
-                    NormalizeReportOccurrenceLocator(binding.BindingId, occurrenceId)))).ToArray();
-            if (result.Facts.Count != 1 || matchingFacts.Length != 1 || records.Count != 1)
-                throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
-                    "Existing target-row selection must produce exactly one fact from the revision-pinned selected XBRL occurrence.",
-                    DiagnosticStage.Validation);
+                    "XBRL target-row selection requires an exact reportDigest.", DiagnosticStage.Validation);
+            var reportInputIdentity = manifest.Inputs.SingleOrDefault(input =>
+                StringComparer.Ordinal.Equals(input.SourceId, binding.BindingId));
+            if (reportInputIdentity is null
+                || !reportInputIdentity.IsReplayable
+                || !StringComparer.Ordinal.Equals(reportInputIdentity.Digest, reportDigest))
+                throw new PublicationException(DiagnosticCodes.PubDigestMismatch,
+                    "XBRL target-row selection reportDigest does not match the replayable source report recorded for this run.",
+                    manifest.RunId, plan.Locator);
 
-            var fields = records[0].Fields.ToDictionary(field => field.Key, field => field.Value,
-                StringComparer.Ordinal);
-            fields["fact_key"] = DataValue.StringValue(targetRowId);
-            records = new[]
+            if (configuration.ContainsKey("targetRows"))
             {
-                new DataRecord
+                var targetRowsJson = ConfigurationString(configuration.GetValueOrDefault("targetRows"));
+                if (targetRowsJson is null)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "XBRL target-row selection 'targetRows' must be a JSON object.", DiagnosticStage.Validation);
+                var targetRows = XbrlReportAdapter.ParseTargetRows(binding.BindingId, targetRowsJson);
+                if (result.Facts.Count != targetRows.Count || records.Count != targetRows.Count)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Every digest-pinned selected XBRL occurrence must produce exactly one mapped fact before update-only publication.",
+                        DiagnosticStage.Validation);
+
+                var mappedRecords = new List<DataRecord>(records.Count);
+                var consumedOccurrences = new HashSet<string>(StringComparer.Ordinal);
+                for (var index = 0; index < result.Facts.Count; index++)
                 {
-                    RowId = targetRowId,
-                    Fields = fields,
-                    CellSources = records[0].CellSources,
-                    HasStableRowIdentity = true
+                    var occurrenceLocators = result.Facts[index].SourceTransformationPaths
+                        .Where(path => StringComparer.Ordinal.Equals(path.Source.SourceId, binding.BindingId))
+                        .Select(path => path.Source.Locator)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray();
+                    if (occurrenceLocators.Length != 1)
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            "Each reverse-mapped fact must identify exactly one source occurrence from the digest-pinned XBRL report.",
+                            DiagnosticStage.Validation);
+                    var occurrenceId = binding.BindingId + "#f"
+                        + NormalizeReportOccurrenceOrdinal(occurrenceLocators[0]);
+                    if (!targetRows.TryGetValue(occurrenceId, out var targetRowId)
+                        || !consumedOccurrences.Add(occurrenceId))
+                        throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                            "Mapped facts must match each explicit XBRL occurrence-to-target-row entry exactly once.",
+                            DiagnosticStage.Validation);
+
+                    var fields = records[index].Fields.ToDictionary(field => field.Key, field => field.Value,
+                        StringComparer.Ordinal);
+                    fields["fact_key"] = DataValue.StringValue(targetRowId);
+                    mappedRecords.Add(new DataRecord
+                    {
+                        RowId = targetRowId,
+                        Fields = fields,
+                        CellSources = records[index].CellSources,
+                        HasStableRowIdentity = true
+                    });
                 }
-            };
+                if (consumedOccurrences.Count != targetRows.Count)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Some explicit XBRL occurrence-to-target-row entries produced no mapped fact; update-only publication was refused.",
+                        DiagnosticStage.Validation);
+                records = mappedRecords;
+            }
+            else
+            {
+                var occurrenceId = ConfigurationString(configuration.GetValueOrDefault("occurrenceId"));
+                var targetRowId = ConfigurationString(configuration.GetValueOrDefault("targetRowId"));
+                if (string.IsNullOrWhiteSpace(occurrenceId) || string.IsNullOrWhiteSpace(targetRowId))
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Single-row XBRL target selection requires an exact occurrenceId, reportDigest, and targetRowId.",
+                        DiagnosticStage.Validation);
+                var matchingFacts = result.Facts.Where(fact => fact.SourceTransformationPaths.Any(path =>
+                    StringComparer.Ordinal.Equals(path.Source.SourceId, binding.BindingId)
+                    && StringComparer.Ordinal.Equals(path.Source.Locator,
+                        NormalizeReportOccurrenceLocator(binding.BindingId, occurrenceId)))).ToArray();
+                if (result.Facts.Count != 1 || matchingFacts.Length != 1 || records.Count != 1)
+                    throw new AdapterException(DiagnosticCodes.IoSchemaMismatch,
+                        "Existing target-row selection must produce exactly one fact from the revision-pinned selected XBRL occurrence.",
+                        DiagnosticStage.Validation);
+
+                records = new[] { ReplaceFactKey(records[0], targetRowId) };
+            }
         }
 
         return new PreparedSqliteDestination(plan, destinationPath, records, jsonDigest);
@@ -2198,6 +2252,39 @@ public sealed class MappingJobService
             return "report#f" + occurrenceId[bindingPrefix.Length..];
         return occurrenceId;
     }
+
+    private static string NormalizeReportOccurrenceOrdinal(string locator)
+    {
+        const string prefix = "report#f";
+        if (!locator.StartsWith(prefix, StringComparison.Ordinal)) return string.Empty;
+        var ordinal = locator[prefix.Length..];
+        return int.TryParse(ordinal, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            && parsed > 0
+            && StringComparer.Ordinal.Equals(ordinal, parsed.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                ? ordinal
+                : string.Empty;
+    }
+
+    private static DataRecord ReplaceFactKey(DataRecord record, string targetRowId)
+    {
+        var fields = record.Fields.ToDictionary(field => field.Key, field => field.Value, StringComparer.Ordinal);
+        fields["fact_key"] = DataValue.StringValue(targetRowId);
+        return new DataRecord
+        {
+            RowId = targetRowId,
+            Fields = fields,
+            CellSources = record.CellSources,
+            HasStableRowIdentity = true
+        };
+    }
+
+    private static string? ConfigurationString(object? value) => value switch
+    {
+        string text => text,
+        System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } element => element.GetString(),
+        _ => null
+    };
 
     private sealed record PreparedSqliteDestination(
         DestinationPlan Plan,
