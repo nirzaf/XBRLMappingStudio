@@ -504,3 +504,14 @@ qualification and repeated worker-cancellation checks), and pinned Arelle
 integration on `ec9a7beb413dc0f193cdd2dfcbc89bf3fe3fdd05`. This strengthens
 deterministic offline-load evidence but does not qualify OS-level network
 isolation or an owner-authorized production taxonomy package.
+
+## TAX-03 application-state migration rollback follow-on (2026-11-10)
+
+`LocalApplicationDatabaseTests.FailedVersionNineMigrationRollsBackVersionEightSchemaAndHistoricalRows`
+starts from a version-8 database whose historical reconciliation row violates
+the stricter version-9 state contract. Opening the database fails closed, and a
+read-only check confirms the original `user_version`, table and row remain
+unchanged with no partially created migration table. The focused regression
+passed 1/1; the full Windows Release Ops suite passed 546/546. This adds rollback
+evidence for the v8-to-v12 migration chain and does not qualify native desktop
+profile-adoption or production taxonomy rights.
