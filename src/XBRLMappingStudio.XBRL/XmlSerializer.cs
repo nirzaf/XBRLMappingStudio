@@ -452,7 +452,7 @@ public static class XmlSerializer
                 $"XML instance rejected: {ex.Message}");
         }
 
-        var root = doc.Root ?? throw new InvalidOperationException("Missing xbrl root.");
+        var root = doc.Root ?? throw Unsupported("XML instance has no document element.");
         if (root.Name != Xbrli + "xbrl")
             throw Unsupported("XML document root is not xbrli:xbrl.");
         var contexts = new Dictionary<string, XElement>(StringComparer.Ordinal);
@@ -614,7 +614,7 @@ public static class XmlSerializer
             var inst = periodChildren[0];
             EnsureOnlyAttributes(inst);
             if (inst.Elements().Any()) throw Unsupported("Instant values cannot contain nested elements.");
-            period = XbrlPeriod.OfInstant(DateOnly.Parse(inst.Value, CultureInfo.InvariantCulture));
+            period = XbrlPeriod.OfInstant(ParseSupportedDate(inst.Value, "Instant"));
         }
         else if (periodChildren.Length == 2
             && periodChildren.Count(child => child.Name == Xbrli + "startDate") == 1
@@ -626,11 +626,11 @@ public static class XmlSerializer
             EnsureOnlyAttributes(end);
             if (start.Elements().Any() || end.Elements().Any())
                 throw Unsupported("Duration boundaries cannot contain nested elements.");
-            var inclusiveEnd = DateOnly.Parse(end.Value, CultureInfo.InvariantCulture);
+            var inclusiveEnd = ParseSupportedDate(end.Value, "Duration end date");
             if (inclusiveEnd == DateOnly.MaxValue)
                 throw Unsupported("Duration endDate cannot be converted to the supported exclusive date boundary.");
             period = XbrlPeriod.OfDuration(
-                DateOnly.Parse(start.Value, CultureInfo.InvariantCulture),
+                ParseSupportedDate(start.Value, "Duration start date"),
                 inclusiveEnd.AddDays(1));
         }
         else throw Unsupported("Context period has an unsupported structure.");
@@ -913,6 +913,14 @@ public static class XmlSerializer
     {
         if (element.Nodes().OfType<XText>().Any(text => !string.IsNullOrWhiteSpace(text.Value)))
             throw Unsupported($"{label} contains unsupported text content.");
+    }
+
+    private static DateOnly ParseSupportedDate(string value, string label)
+    {
+        if (!DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var parsed))
+            throw Unsupported($"{label} '{value}' is not an ISO date in the supported yyyy-MM-dd form.");
+        return parsed;
     }
 
     private static XbrlExportException Unsupported(string message)

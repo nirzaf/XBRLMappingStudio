@@ -612,16 +612,24 @@ available, so no DST-04 UI actions or assertions were made. Native acceptance
 remains open; the previously recorded bounded synthetic native evidence above
 is unchanged.
 
-## DST-04 unlocked desktop re-observation (2026-11-10)
+## DST-04 desktop lock-screen retest correction (2026-11-10)
 
-After the user confirmed the desktop was unlocked and visible, the XBRLMappingStudio
-window became available to accessibility inspection. The active `Sample Revenue
-Mapping` project reported `Operation blocked by filing-profile resolution` and
-`XBR017` for its synthetic profile, and the source pane required a source file
-before inspection. No clicks or project changes were made because this was not a
-valid runnable disposable fixture. The lock-screen availability block is cleared;
-the requested DST-04 native journey remains unverified until a valid isolated
-fixture is available.
+After the user confirmed the desktop was unlocked and visible, the accessibility
+provider returned the background `Sample Revenue Mapping` window tree, but a fresh
+screenshot showed the Windows lock screen. The tree's `XBR017` and no-source state
+are therefore background-window details, not an observed interactive application
+state. No clicks or project changes were made. DST-04 native acceptance remains
+blocked by desktop availability and still requires a valid isolated fixture.
+
+## XBR-05 malformed XML period lexical follow-on (2026-11-10)
+
+The supported xBRL-XML reader now accepts only exact `yyyy-MM-dd` period
+boundaries and reports unsupported lexical dates as `XbrlExportException` rather
+than leaking `FormatException`. A document with no root element also returns the
+same format error category instead of `InvalidOperationException`. Instant,
+duration start, duration end, and missing-root regressions passed in the XBRL
+Release suite (225/225). This remains a date-only reader subset; XBRL dateTime
+boundaries and timezone-bearing values are not represented by the current model.
 
 ## OPS-09 diagnostic export credential redaction follow-on (2026-11-10)
 

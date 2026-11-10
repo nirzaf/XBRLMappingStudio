@@ -1312,6 +1312,37 @@ public sealed class FactSerializationTests
             XmlSerializer.ReadFacts(document.ToString(SaveOptions.DisableFormatting)));
     }
 
+    [Theory]
+    [InlineData("instant")]
+    [InlineData("durationStart")]
+    [InlineData("durationEnd")]
+    public void XmlReaderRejectsMalformedPeriodDatesWithFormatError(string boundary)
+    {
+        XNamespace xbrli = "http://www.xbrl.org/2003/instance";
+        var document = XDocument.Parse(XmlSerializer.Serialize(Profile, new[] { CreateTextFact("en") }));
+        var period = Assert.Single(document.Root!.Elements(xbrli + "context")).Element(xbrli + "period")!;
+        if (boundary == "instant")
+        {
+            period.RemoveNodes();
+            period.Add(new XElement(xbrli + "instant", "not-a-date"));
+        }
+        else
+        {
+            period.Element(xbrli + (boundary == "durationStart" ? "startDate" : "endDate"))!.Value = "not-a-date";
+        }
+
+        var error = Assert.Throws<XbrlExportException>(() =>
+            XmlSerializer.ReadFacts(document.ToString(SaveOptions.DisableFormatting)));
+
+        Assert.Contains("not an ISO date", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void XmlReaderRejectsDocumentWithoutRootUsingFormatError()
+    {
+        Assert.Throws<XbrlExportException>(() => XmlSerializer.ReadFacts("<!-- no root element -->"));
+    }
+
     [Fact]
     public void XmlReaderRejectsDimensionAliasesForTheSameAxisWithoutProfile()
     {
