@@ -24,16 +24,28 @@ public static partial class SupportBundle
     [GeneratedRegex(@"\b(password|token|secret)\b\s*[=:]\s*\S+", RegexOptions.IgnoreCase)]
     private static partial Regex SecretPattern();
 
+    [GeneratedRegex(@"\b(authorization|proxy-authorization)\b\s*[:=]\s*(?:bearer|basic)\s+[^\s,;&]+", RegexOptions.IgnoreCase)]
+    private static partial Regex AuthorizationCredentialPattern();
+
+    [GeneratedRegex(@"\b(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|secret)\b\s*[:=]\s*(?:""[^""]*""|'[^']*'|[^\s,;&]+)", RegexOptions.IgnoreCase)]
+    private static partial Regex NamedCredentialPattern();
+
+    [GeneratedRegex(@"(?<scheme>https?://)[^/@\s:]+:[^/@\s]+@", RegexOptions.IgnoreCase)]
+    private static partial Regex UrlUserInfoPattern();
+
     [GeneratedRegex(@"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", RegexOptions.IgnoreCase)]
     private static partial Regex EmailPattern();
 
-    [GeneratedRegex(@"(?:[A-Z]:[\\/]|\\\\[^\\/\r\n]+[\\/][^\\/\r\n]+[\\/]|(?<![A-Za-z0-9])/(?:Users|home|tmp|var/tmp|mnt|media)/)[^\r\n]*", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?:(?<![A-Za-z0-9])[A-Z]:[\\/]|\\\\[^\\/\r\n]+[\\/][^\\/\r\n]+[\\/]|(?<![A-Za-z0-9/:])/(?:Users|home|tmp|var/tmp|mnt|media)/)[^\r\n]*", RegexOptions.IgnoreCase)]
     private static partial Regex LocalPathPattern();
 
     /// <summary>Mask credentials, email addresses and common local filesystem paths in text.</summary>
     public static string Redact(string line)
     {
-        var redacted = SecretPattern().Replace(line, "$1=<redacted>");
+        var redacted = AuthorizationCredentialPattern().Replace(line, "$1: <redacted>");
+        redacted = NamedCredentialPattern().Replace(redacted, "$1=<redacted>");
+        redacted = SecretPattern().Replace(redacted, "$1=<redacted>");
+        redacted = UrlUserInfoPattern().Replace(redacted, "${scheme}<redacted>@");
         redacted = EmailPattern().Replace(redacted, "<email>");
         return LocalPathPattern().Replace(redacted, "<local-path>");
     }

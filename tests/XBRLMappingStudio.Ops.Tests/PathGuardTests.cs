@@ -91,6 +91,11 @@ public class PathGuardTests : IDisposable
     [InlineData("conn string: password=hunter2; server=x", "hunter2")]
     [InlineData("Authorization: Bearer token=abc123", "abc123")]
     [InlineData("signing secret=deadbeef rotated", "deadbeef")]
+    [InlineData("Authorization: Bearer eyJhbGciOi-example", "eyJhbGciOi-example")]
+    [InlineData("Proxy-Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz")]
+    [InlineData("GET /validate?access_token=oauth-canary-71&mode=offline", "oauth-canary-71")]
+    [InlineData("X-API-Key: api-canary-84", "api-canary-84")]
+    [InlineData("endpoint https://service-user:url-pass-canary@example.invalid/check", "url-pass-canary")]
     public void Redaction_MasksCredentialAssignments(string line, string secret)
     {
         var redacted = SupportBundle.Redact(line);
@@ -117,6 +122,13 @@ public class PathGuardTests : IDisposable
     {
         const string line = "run run-42 completed with 12 facts";
         Assert.Equal(line, SupportBundle.Redact(line));
+    }
+
+    [Fact]
+    public void Redaction_MasksUrlUserInfoWithoutCorruptingScheme()
+    {
+        const string line = "endpoint https://service-user:url-pass-canary@example.invalid/check";
+        Assert.Equal("endpoint https://<redacted>@example.invalid/check", SupportBundle.Redact(line));
     }
 
     [Fact]
