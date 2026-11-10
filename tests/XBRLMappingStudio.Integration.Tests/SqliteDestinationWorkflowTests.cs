@@ -291,6 +291,32 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         Assert.Equal(0, preview.Conflicts);
         Assert.Empty(preview.SchemaDiscrepancies);
 
+        // A row selected by the digest-pinned map can disappear after preview. Publication must
+        // roll back earlier updates in the same multi-row transaction and add no receipt.
+        await using (var removeSelectedRow = new SqliteConnection($"Data Source={_databasePath};Pooling=False"))
+        {
+            await removeSelectedRow.OpenAsync();
+            await using var remove = removeSelectedRow.CreateCommand();
+            remove.CommandText = "DELETE FROM facts WHERE fact_key=$key";
+            remove.Parameters.AddWithValue("$key", targetRowIds[1]);
+            Assert.Equal(1, await remove.ExecuteNonQueryAsync());
+        }
+        var disappearedRowError = await Assert.ThrowsAsync<AdapterException>(() =>
+            service.PublishDestinationAsync(project, result, _directory, true));
+        Assert.Equal(DiagnosticCodes.IoSchemaMismatch, disappearedRowError.Code);
+        Assert.Equal(new[] { targetRowIds[0] }, await ReadFactsAsync(_databasePath));
+        Assert.Equal(0, await ReadReceiptCountAsync(_databasePath));
+        await using (var verifyRollback = new SqliteConnection($"Data Source={_databasePath};Pooling=False;Mode=ReadOnly"))
+        {
+            await verifyRollback.OpenAsync();
+            await using var verify = verifyRollback.CreateCommand();
+            verify.CommandText = "SELECT value FROM facts WHERE fact_key=$key";
+            verify.Parameters.AddWithValue("$key", targetRowIds[0]);
+            Assert.Equal("1", await verify.ExecuteScalarAsync());
+        }
+
+        await InsertExistingTargetFactAsync(_databasePath, targetRowIds[1]);
+
         var receipt = await service.PublishDestinationAsync(project, result, _directory, true);
         Assert.Equal(2, receipt.WrittenRows);
         Assert.Equal(targetRowIds.Order(StringComparer.Ordinal), (await ReadFactsAsync(_databasePath)).Order(StringComparer.Ordinal));
@@ -1471,6 +1497,9 @@ public sealed class SqliteDestinationWorkflowTests : IAsyncLifetime
         await using var database = new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");
         await database.OpenAsync();
         await using var command = database.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='xms_idempotency_receipts'";
+        var tableExists = Convert.ToInt32(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture) != 0;
+        if (!tableExists) return 0;
         command.CommandText = "SELECT COUNT(*) FROM xms_idempotency_receipts";
         return Convert.ToInt32(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
     }
